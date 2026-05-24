@@ -28,7 +28,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          tritonBaseUrlProvider.overrideWithValue('http://127.0.0.1:1'),
+          tritonBaseUrlProvider.overrideWith((ref) => 'http://127.0.0.1:1'),
           runtimeConfigProvider.overrideWith((_) async => cfg),
         ],
         child: MaterialApp(
@@ -54,7 +54,7 @@ void main() {
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          tritonBaseUrlProvider.overrideWithValue('http://127.0.0.1:1'),
+          tritonBaseUrlProvider.overrideWith((ref) => 'http://127.0.0.1:1'),
           runtimeConfigProvider.overrideWith((_) async => cfg),
         ],
         child: MaterialApp(

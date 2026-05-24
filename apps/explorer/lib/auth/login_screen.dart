@@ -3,22 +3,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/runtime_provider.dart';
 import '../theme/app_theme.dart';
+import 'auth_manager.dart';
 
-/// Stage-1 login screen: reads `/v1/runtime` and either tells the
-/// operator to register a redirect URI (when the explorer isn't yet
-/// operator-enabled) or shows the "Sign in" button that will trigger
-/// PKCE.
-///
-/// The actual `oidc` package wiring lands in PR E2 once the API
-/// client trio is in place — for now this screen renders the
-/// discovered state so the boot path is exercised end-to-end against
-/// a real Triton.
+/// Login screen with three branches:
+///   - explorer not registered in this env → ask the operator to
+///     set TRITON_EXPLORER_CLIENT_ID and register the redirect URI;
+///   - registered, logged out → "Sign in with $issuer" → PKCE flow;
+///   - registered, logged in → AppShell takes over via routing in main().
 class LoginScreen extends ConsumerWidget {
   const LoginScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final runtime = ref.watch(runtimeConfigProvider);
+    final auth = ref.watch(authProvider);
     return Scaffold(
       body: Center(
         child: ConstrainedBox(
@@ -29,60 +27,15 @@ class LoginScreen extends ConsumerWidget {
               child: runtime.when(
                 data: (cfg) {
                   if (!cfg.explorerEnabled) {
-                    return Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Explorer not yet registered',
-                          style: Theme.of(context).textTheme.headlineSmall,
-                        ),
-                        const SizedBox(height: 12),
-                        const Text(
-                          'Triton reports no OIDC client_id for the '
-                          'explorer in this env. Ask an operator to set '
-                          'TRITON_EXPLORER_CLIENT_ID and register this '
-                          "host's /auth/callback as a redirect URI with "
-                          "the substrate's IdP.",
-                        ),
-                        const SizedBox(height: 16),
-                        Text('env: ${cfg.env}',
-                            style: const TextStyle(
-                                color: ExplorerTheme.onSurfaceVariant)),
-                      ],
-                    );
+                    return _NotRegistered(env: cfg.env);
                   }
-                  return Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'Triton Explorer',
-                        style: Theme.of(context).textTheme.headlineMedium,
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        'env ${cfg.env} • ${cfg.packageVersion}',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: ExplorerTheme.onSurfaceVariant,
-                            ),
-                      ),
-                      const SizedBox(height: 24),
-                      FilledButton.icon(
-                        icon: const Icon(Icons.login),
-                        label: Text('Sign in with ${cfg.oidcIssuer}'),
-                        onPressed: () {
-                          // PKCE wiring lands in PR E2; for now we
-                          // route the dev into the dashboard so
-                          // the rest of the shell is exercisable.
-                          Navigator.of(context).pushReplacementNamed('/');
-                        },
-                      ),
-                      const SizedBox(height: 16),
-                      Text(
-                        'PKCE flow lands in PR E2.',
-                        style: Theme.of(context).textTheme.bodySmall,
-                      ),
-                    ],
+                  return _SignInPanel(
+                    issuer: cfg.oidcIssuer!,
+                    env: cfg.env,
+                    version: cfg.packageVersion,
+                    auth: auth,
+                    onSignIn: () =>
+                        ref.read(authProvider.notifier).login(),
                   );
                 },
                 loading: () => const Column(
@@ -107,6 +60,93 @@ class LoginScreen extends ConsumerWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _NotRegistered extends StatelessWidget {
+  const _NotRegistered({required this.env});
+  final String env;
+
+  @override
+  Widget build(BuildContext context) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Explorer not yet registered',
+              style: Theme.of(context).textTheme.headlineSmall),
+          const SizedBox(height: 12),
+          const Text(
+            'Triton reports no OIDC client_id for the explorer in this '
+            'env. Ask an operator to set TRITON_EXPLORER_CLIENT_ID and '
+            "register this host's /redirect.html as a redirect URI "
+            "with the substrate's IdP.",
+          ),
+          const SizedBox(height: 16),
+          Text('env: $env',
+              style: const TextStyle(color: ExplorerTheme.onSurfaceVariant)),
+        ],
+      );
+}
+
+class _SignInPanel extends StatelessWidget {
+  const _SignInPanel({
+    required this.issuer,
+    required this.env,
+    required this.version,
+    required this.auth,
+    required this.onSignIn,
+  });
+
+  final String issuer;
+  final String env;
+  final String version;
+  final AuthState auth;
+  final VoidCallback onSignIn;
+
+  @override
+  Widget build(BuildContext context) {
+    final busy = auth.status == AuthStatus.discovering;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Text('Triton Explorer',
+            style: Theme.of(context).textTheme.headlineMedium),
+        const SizedBox(height: 8),
+        Text('env $env • $version',
+            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                  color: ExplorerTheme.onSurfaceVariant,
+                )),
+        const SizedBox(height: 24),
+        FilledButton.icon(
+          icon: busy
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.login),
+          label: Text('Sign in with $issuer'),
+          onPressed: busy ? null : onSignIn,
+        ),
+        if (auth.error != null) ...[
+          const SizedBox(height: 16),
+          Card(
+            color: Theme.of(context).colorScheme.errorContainer,
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text(auth.error!),
+            ),
+          ),
+        ],
+        const SizedBox(height: 16),
+        Text(
+          'Or skip sign-in and paste a token in Settings — handy in '
+          'nonprod with --features dev-token.',
+          style: Theme.of(context).textTheme.bodySmall,
+          textAlign: TextAlign.center,
+        ),
+      ],
     );
   }
 }

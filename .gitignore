@@ -32,3 +32,4 @@ apps/explorer/build/
 apps/explorer/.idea/
 apps/explorer/*.iml
 apps/explorer/pubspec.lock
+apps/explorer/linux/flutter/ephemeral/

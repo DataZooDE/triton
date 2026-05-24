@@ -4,11 +4,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api/a2a_client.dart';
 import '../api/mcp_client.dart';
 import '../api/rest_client.dart';
+import '../auth/auth_manager.dart';
 import 'runtime_provider.dart';
 
-/// Persisted dev-time bearer token. In nonprod with the dev-token
-/// feature on, the literal value `dev-token` works. Production reads
-/// the token after OIDC PKCE completes (lands in a follow-up PR).
+/// Persisted dev-time bearer token. Used as a manual override on the
+/// Settings page (paste `dev-token` in nonprod, or paste an OIDC JWT
+/// obtained out-of-band). The production path is OIDC PKCE through
+/// `authProvider`; when a PKCE session exists, its access token wins
+/// over the manual paste via [effectiveTokenProvider].
 class TokenNotifier extends StateNotifier<String?> {
   TokenNotifier(super.initial);
 
@@ -36,10 +39,19 @@ final tokenProvider = StateNotifierProvider<TokenNotifier, String?>((ref) {
   return TokenNotifier(null);
 });
 
+/// Resolves the bearer Triton sees on the wire. PKCE access token
+/// wins when present; the manually-pasted token is the dev escape
+/// hatch (and the only path before/while PKCE isn't configured).
+final effectiveTokenProvider = Provider<String?>((ref) {
+  final pkce = ref.watch(authProvider).accessToken;
+  if (pkce != null && pkce.isNotEmpty) return pkce;
+  return ref.watch(tokenProvider);
+});
+
 final restClientProvider = Provider<RestClient>((ref) {
   final dio = ref.watch(dioProvider);
   final base = ref.watch(tritonBaseUrlProvider);
-  final token = ref.watch(tokenProvider);
+  final token = ref.watch(effectiveTokenProvider);
   return RestClient(dio, baseUrl: base, token: token);
 });
 
@@ -54,7 +66,7 @@ String _swapPort(String base, int port) {
 final mcpClientProvider = Provider<McpClient>((ref) {
   final dio = ref.watch(dioProvider);
   final base = ref.watch(tritonBaseUrlProvider);
-  final token = ref.watch(tokenProvider);
+  final token = ref.watch(effectiveTokenProvider);
   // Heuristic for dev: if base ends with :8003 (REST), MCP is :8001.
   final mcpBase = base.contains(':8003') ? _swapPort(base, 8001) : base;
   return McpClient(dio, baseUrl: mcpBase, token: token);
@@ -63,7 +75,7 @@ final mcpClientProvider = Provider<McpClient>((ref) {
 final a2aClientProvider = Provider<A2aClient>((ref) {
   final dio = ref.watch(dioProvider);
   final base = ref.watch(tritonBaseUrlProvider);
-  final token = ref.watch(tokenProvider);
+  final token = ref.watch(effectiveTokenProvider);
   final a2aBase = base.contains(':8003') ? _swapPort(base, 8002) : base;
   return A2aClient(dio, baseUrl: a2aBase, token: token);
 });

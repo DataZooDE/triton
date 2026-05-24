@@ -1,25 +1,48 @@
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../api/runtime_config.dart';
 
-/// Base URL of the Triton REST adapter. The SPA picks this up from
-/// `window.location.origin` when served behind Triton's CORS layer,
-/// or from the settings page in dev. The dev default points at the
-/// out-of-box `triton-bin` listener.
+/// Base URL of the Triton REST adapter — the SPA's source-of-truth
+/// for who to call. Mutable so the Settings page can repoint without
+/// a rebuild; persisted to `shared_preferences` so the override
+/// survives reloads.
 ///
-/// This provider is `Override`-able from `ProviderScope` so tests
-/// and `main()` can inject the value without an env file.
-final tritonBaseUrlProvider = Provider<String>((ref) {
-  throw UnimplementedError('inject from ProviderScope or main()');
+/// Seeded in `main()` via an override against the persisted value
+/// (or the `window.location.origin` / dev-port default when no
+/// persisted value exists). Tests inject a value via
+/// `overrideWith((ref) => '...')`.
+final tritonBaseUrlProvider = StateProvider<String>((ref) {
+  throw UnimplementedError('seed via override in main()');
 });
 
+const _kPrefsBaseUrlKey = 'triton.baseUrl';
+
+/// Persist a new base URL and update the in-memory provider. Returns
+/// the new value so callers can update a controller too.
+Future<void> setTritonBaseUrl(WidgetRef ref, String url) async {
+  ref.read(tritonBaseUrlProvider.notifier).state = url;
+  final prefs = await SharedPreferences.getInstance();
+  if (url.isEmpty) {
+    await prefs.remove(_kPrefsBaseUrlKey);
+  } else {
+    await prefs.setString(_kPrefsBaseUrlKey, url);
+  }
+}
+
+/// Read the persisted base URL, falling back to the supplied default
+/// when nothing has been saved. Called once at app start.
+Future<String> loadInitialBaseUrl(String fallback) async {
+  final prefs = await SharedPreferences.getInstance();
+  return prefs.getString(_kPrefsBaseUrlKey) ?? fallback;
+}
+
 final dioProvider = Provider<Dio>((ref) {
-  final dio = Dio(BaseOptions(
+  return Dio(BaseOptions(
     connectTimeout: const Duration(seconds: 5),
     receiveTimeout: const Duration(seconds: 10),
   ));
-  return dio;
 });
 
 /// Loads `/v1/runtime` once at boot. The whole app blocks on this —
