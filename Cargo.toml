@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/triton-core",
+    "crates/triton-adapters-http",
+    "crates/triton-bin",
+    "crates/triton-tests",
+]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+license = "BUSL-1.1"
+publish = false
+
+[workspace.dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "process", "time", "io-util"] }
+tower = { version = "0.5", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Integration-test crate deps
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
