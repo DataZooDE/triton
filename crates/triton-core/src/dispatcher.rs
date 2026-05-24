@@ -21,6 +21,7 @@ use serde_json::{Value, json};
 
 use crate::audit::{AuditPhase, AuditRecord, emit, now_rfc3339};
 use crate::error::TritonError;
+use crate::metrics::Metrics;
 use crate::principal::Principal;
 use crate::tool::{ToolDescriptor, ToolRegistry};
 
@@ -55,6 +56,7 @@ pub struct Dispatcher {
     registry: Arc<ToolRegistry>,
     env: String,
     upstream: Option<Arc<dyn UpstreamDispatch>>,
+    metrics: Arc<Metrics>,
 }
 
 impl Dispatcher {
@@ -63,7 +65,20 @@ impl Dispatcher {
             registry,
             env: env.into(),
             upstream: None,
+            metrics: Arc::new(Metrics::new()),
         }
+    }
+
+    /// Attach a shared `Metrics` registry. When unset, the
+    /// dispatcher uses its own private metrics (useful for tests
+    /// that don't care about exposition).
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
+
+    pub fn metrics(&self) -> Arc<Metrics> {
+        self.metrics.clone()
     }
 
     /// Attach an upstream-router fallback. Tools not in the registry
@@ -159,6 +174,9 @@ impl Dispatcher {
         error: &TritonError,
     ) {
         let status = status_for(error);
+        let result = format!("error:{}", error.class());
+        self.metrics.record_dispatch(tool_name, protocol, &result);
+        self.metrics.record_audit("rejected");
         emit(&AuditRecord {
             kind: "audit",
             phase: AuditPhase::Rejected,
@@ -166,7 +184,7 @@ impl Dispatcher {
             who: subject,
             what: tool_name,
             env: &self.env,
-            result: format!("error:{}", error.class()),
+            result,
             protocol,
             tool: tool_name,
             subject,
@@ -224,6 +242,9 @@ impl Dispatcher {
         error: &TritonError,
         latency_ms: u64,
     ) -> TritonError {
+        let result = format!("error:{}", error.class());
+        self.metrics.record_dispatch(tool_name, protocol, &result);
+        self.metrics.record_audit("dispatch");
         emit(&AuditRecord {
             kind: "audit",
             phase: AuditPhase::Dispatch,
@@ -231,7 +252,7 @@ impl Dispatcher {
             who: &principal.sub,
             what: tool_name,
             env: &self.env,
-            result: format!("error:{}", error.class()),
+            result,
             protocol,
             tool: tool_name,
             subject: &principal.sub,
@@ -261,6 +282,8 @@ impl Dispatcher {
             Ok(_) => ("ok".to_string(), 200),
             Err(e) => (format!("error:{}", e.class()), status_for(e)),
         };
+        self.metrics.record_dispatch(tool_name, protocol, &result);
+        self.metrics.record_audit("dispatch");
         emit(&AuditRecord {
             kind: "audit",
             phase: AuditPhase::Dispatch,
