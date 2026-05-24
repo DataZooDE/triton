@@ -409,32 +409,112 @@ async fn handle_message_component(
         }
     };
 
-    // PR 25: if `data.values` is present, this is a Selection
-    // callback. The mapper encoded the args as `{args_key: null}`;
-    // substitute the picked value before dispatch. Reject if the
-    // shape doesn't match what we'd have emitted (multi-key args,
-    // non-null value, no null-valued key) — that's a forged or
-    // mismatched payload.
-    if !data.values.is_empty() {
-        let chosen = data.values[0].clone();
-        let mut filled = false;
-        if let Some(obj) = args.as_object_mut() {
-            for (_, v) in obj.iter_mut() {
-                if v.is_null() {
-                    *v = Value::String(chosen.clone());
-                    filled = true;
-                    break;
-                }
+    // PR 25 (Codex review blocker): a select-menu callback MUST
+    // strictly match the shape the mapper emits:
+    //   * `component_type == 3` (STRING_SELECT)
+    //   * `data.values.len() == 1` (single-select only)
+    //   * decoded args is exactly `{ <one_key>: null }`
+    // Anything else is rejected so a forged or future-shaped
+    // payload can't slip through. A Button callback (component_type
+    // == 2) MUST NOT carry `values` either; a hostile platform
+    // sending values on a button payload would otherwise mutate
+    // the args before dispatch.
+    let component_type = data.component_type;
+    let has_values = !data.values.is_empty();
+    match (component_type, has_values) {
+        (Some(3), true) => {
+            if data.values.len() != 1 {
+                record_rejection(
+                    adapter,
+                    &claims.sub,
+                    &claims.tenant,
+                    TritonError::Validation(format!(
+                        "select callback expects exactly 1 value; got {}",
+                        data.values.len()
+                    )),
+                );
+                return (StatusCode::BAD_REQUEST, "wrong values count").into_response();
             }
+            let chosen = data.values.into_iter().next().unwrap();
+            let Some(obj) = args.as_object_mut() else {
+                record_rejection(
+                    adapter,
+                    &claims.sub,
+                    &claims.tenant,
+                    TritonError::Validation("select callback: args is not an object".into()),
+                );
+                return (StatusCode::BAD_REQUEST, "args not object").into_response();
+            };
+            if obj.len() != 1 {
+                record_rejection(
+                    adapter,
+                    &claims.sub,
+                    &claims.tenant,
+                    TritonError::Validation(format!(
+                        "select callback: args must have exactly 1 key; got {}",
+                        obj.len()
+                    )),
+                );
+                return (StatusCode::BAD_REQUEST, "args shape mismatch").into_response();
+            }
+            let (key, val) = obj.iter_mut().next().unwrap();
+            if !val.is_null() {
+                let key = key.clone();
+                record_rejection(
+                    adapter,
+                    &claims.sub,
+                    &claims.tenant,
+                    TritonError::Validation(format!(
+                        "select callback: args[{key}] must be null sentinel"
+                    )),
+                );
+                return (StatusCode::BAD_REQUEST, "args slot not null").into_response();
+            }
+            *val = Value::String(chosen);
         }
-        if !filled {
+        (Some(2), false) => {
+            // Button callback, no values — the normal PR 21 path.
+        }
+        (Some(2), true) => {
             record_rejection(
                 adapter,
                 &claims.sub,
                 &claims.tenant,
-                TritonError::Validation("select-menu callback: no null arg slot to fill".into()),
+                TritonError::Validation("button callback MUST NOT carry `data.values`".into()),
             );
-            return (StatusCode::BAD_REQUEST, "no slot for selection").into_response();
+            return (StatusCode::BAD_REQUEST, "button with values").into_response();
+        }
+        (Some(3), false) => {
+            record_rejection(
+                adapter,
+                &claims.sub,
+                &claims.tenant,
+                TritonError::Validation("select callback missing data.values".into()),
+            );
+            return (StatusCode::BAD_REQUEST, "select missing values").into_response();
+        }
+        (Some(other), _) => {
+            // PR 25 ships Button (2) + StringSelect (3); other
+            // component types (role/user/channel selects, text
+            // inputs) are out of scope and refused.
+            record_rejection(
+                adapter,
+                &claims.sub,
+                &claims.tenant,
+                TritonError::Validation(format!("unsupported component_type {other}")),
+            );
+            return (StatusCode::BAD_REQUEST, "unsupported component_type").into_response();
+        }
+        (None, _) => {
+            // Discord always sends component_type on
+            // MESSAGE_COMPONENT interactions; absence = forged.
+            record_rejection(
+                adapter,
+                &claims.sub,
+                &claims.tenant,
+                TritonError::Validation("missing data.component_type".into()),
+            );
+            return (StatusCode::BAD_REQUEST, "missing component_type").into_response();
         }
     }
 
@@ -631,10 +711,19 @@ struct DiscordInteractionData {
     /// correlation token encodes `(tool, {args_key: null})`; at
     /// callback time we substitute `values[0]` for the null
     /// before dispatching. PR 25 supports single-select only
-    /// (`min_values = max_values = 1`), so we only ever consume
-    /// `values[0]`.
+    /// (`min_values = max_values = 1`); the inbound handler
+    /// rejects `values.len() != 1` so forged multi-select
+    /// payloads can't bypass that contract.
     #[serde(default)]
     values: Vec<String>,
+    /// Discord's component type discriminator: 2 = Button,
+    /// 3 = STRING_SELECT, 5/6/7/8 = role/user/channel/mention
+    /// selects, 4 = TextInput (modal). PR 25 only handles 2 and
+    /// 3; everything else is refused at the inbound boundary so
+    /// a forged payload can't dispatch through a code path the
+    /// mapper would never emit.
+    #[serde(default)]
+    component_type: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]

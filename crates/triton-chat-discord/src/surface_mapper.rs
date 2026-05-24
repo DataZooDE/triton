@@ -65,10 +65,16 @@ pub struct RenderedInteraction {
     /// exhaustion competing with Selection menus).
     pub deferred_buttons: usize,
     /// Count of `Component::Selection` entries we encountered but
-    /// did not render (oversized correlation tokens or row-cap
-    /// exhaustion). PR 25 ships native string-select menus
-    /// otherwise.
+    /// did not render (oversized correlation tokens, empty
+    /// options, options past the 25-cap, or row-cap exhaustion).
+    /// PR 25 ships native string-select menus otherwise.
     pub deferred_selections: usize,
+    /// Count of `Component::Form` entries we encountered. PR 25
+    /// doesn't ship Discord Modal forms yet; the next PR opens
+    /// modals via interaction-response type 9 + interaction-type
+    /// 5 MODAL_SUBMIT (Codex PR 25 nit — previously folded into
+    /// `deferred_buttons`).
+    pub deferred_forms: usize,
     /// Count of `Component::Dashboard` entries we encountered.
     /// Per architecture.md §8.7 dashboards must rasterise (PNG
     /// surface) on text-first adapters; PR 22 doesn't ship the
@@ -100,6 +106,7 @@ pub fn render(
     let mut chunks: Vec<String> = Vec::new();
     let mut deferred_buttons = 0usize;
     let mut deferred_selections = 0usize;
+    let mut deferred_forms = 0usize;
     let mut deferred_dashboards = 0usize;
     let mut buttons: Vec<Value> = Vec::new();
     let mut select_rows: Vec<Value> = Vec::new();
@@ -150,19 +157,25 @@ pub fn render(
                 tool,
                 args_key,
             } => {
-                if options.len() > DISCORD_SELECT_MAX_OPTIONS {
-                    // Beyond Discord's 25-option cap. Architecture
-                    // §8.7 risk table calls out exactly this case
-                    // ("a new envelope exceeds Discord's 25-item
-                    // select cap"); reject at the mapper edge.
+                // Codex PR 25 concern: defer empty option lists.
+                // Discord rejects `options: []` on string-select
+                // menus, so an empty Selection has to surface as
+                // a deferred render, not a malformed component.
+                if options.is_empty() || options.len() > DISCORD_SELECT_MAX_OPTIONS {
                     deferred_selections += 1;
+                    // Defer means we don't ship the prompt either —
+                    // sending the prompt with no control attached
+                    // would be misleading (Codex concern). The
+                    // operator sees the deferral via tracing.
                     continue;
                 }
                 // Args carry a sentinel: the args_key set to null,
                 // signalling the inbound handler should fill it
                 // with `data.values[0]`. No extra wire-format change
                 // to the correlation token (PR 21 stays
-                // compatible).
+                // compatible). The inbound side strictly validates
+                // the `{ <one_key>: null }` shape before
+                // substituting; see `handle_message_component`.
                 let args = json!({ args_key.as_str(): Value::Null });
                 let token = match triton_correlation::encode(tool, &args, correlation_key) {
                     Ok(t) => t,
@@ -192,21 +205,24 @@ pub fn render(
                     "type": 1, // ACTION_ROW (one menu per row)
                     "components": [menu],
                 }));
-                // The prompt also ships as content so users see
-                // what's being asked even when their client
-                // doesn't render the select menu well (mobile
-                // accessibility / screen readers).
+                // The prompt also ships as content for accessibility
+                // (screen readers / non-Discord clients that render
+                // the message but not the component). We only add
+                // it AFTER successfully queueing the row — Codex
+                // PR 25 concern: a deferred select with a visible
+                // prompt-but-no-control is worse than dropping
+                // both.
                 chunks.push(md_escape(prompt));
             }
             Component::Form { title, fields, .. } => {
                 // Form → Modal (interaction response type 9) is
                 // a separate handler shape; PR 25 ships Selection
                 // only. Render the form as a text summary so the
-                // user sees something, and defer (counted) so the
-                // operator can see how often Forms are emitted.
+                // user sees something, and bump `deferred_forms`
+                // (its own counter post-Codex-PR-25-nit).
                 let names: Vec<String> = fields.iter().map(|f| md_escape(&f.label)).collect();
                 chunks.push(format!("**{}**\n{}", md_escape(title), names.join(", ")));
-                deferred_buttons += 1; // reuse the action-defer counter
+                deferred_forms += 1;
             }
             Component::Dashboard { title, .. } => {
                 // Manifest declares `dashboard: rasterised_png`.
@@ -281,6 +297,7 @@ pub fn render(
         components,
         deferred_buttons,
         deferred_selections,
+        deferred_forms,
         deferred_dashboards,
         truncated,
     })
