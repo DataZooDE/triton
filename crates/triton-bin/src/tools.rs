@@ -262,3 +262,36 @@ impl Tool for DemoPanel {
         Ok(serde_json::json!({ "surface": surface }))
     }
 }
+
+/// Dev-only A2UI tool emitting an *empty* Surface so the PR 20
+/// integration test can drive the L6'-edge empty-surface fallback
+/// end-to-end. Without this, the only path to an empty Surface
+/// would be a misbehaving production tool — which the
+/// `dev-token`-gated registry entry below makes impossible to
+/// register in a production build (ADR-10 / FR-I-5 parallel).
+#[cfg(feature = "dev-token")]
+pub struct EmptySurface;
+
+#[cfg(feature = "dev-token")]
+#[async_trait]
+impl Tool for EmptySurface {
+    fn name(&self) -> &'static str {
+        "empty_surface"
+    }
+
+    fn returns_a2ui(&self) -> bool {
+        true
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false
+        })
+    }
+
+    async fn invoke(&self, _args: Value, _principal: &ToolPrincipal) -> Result<Value, TritonError> {
+        let surface = Surface { components: vec![] };
+        Ok(serde_json::json!({ "surface": surface }))
+    }
+}

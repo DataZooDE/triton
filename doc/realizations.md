@@ -633,3 +633,64 @@ a trap the next developer should not have to step in.
   `unsupported_components_are_logged_not_silently_dropped`
   asserts the warning text. Same pattern for every later
   component (selection, form, dashboard) until its mapping ships.
+  Wording note: this is *logged*, not *audited* (no audit-record
+  field carries the deferral count). If we ever need the count in
+  the audit pivot, add it to `AuditRecord` rather than overloading
+  the log channel.
+
+- **Cap enforcement belongs at the mapper, not at the courier.**
+  Codex PR 19 review caught this: PR 19 let oversized text and
+  empty surfaces reach Telegram, then leaned on the courier's
+  HTTP-400 path to classify them as `dropped`. That's a worse
+  shape — it wastes an API call per violation, attributes the
+  failure to the wrong layer, and breaks the L6′ contract
+  (architecture.md §8.7: `Surface mapper rejects with
+  UnsupportedSurface at the mapper edge before the courier sees
+  the envelope`). PR 20 moves both checks to the mapper:
+  - Empty surface → `RenderError::EmptyAfterRender`; caller
+    records `phase: post, status_label: dropped` and skips the
+    courier call entirely.
+  - Text > 4096 bytes → truncate at a UTF-8 boundary, append a
+    visible sentinel, set `truncated: true` on `RenderedMessage`
+    so the caller can `tracing::warn`. Truncation is preferable
+    to outright rejection here because the upstream tool might
+    have produced something useful in the first 4 KB.
+  Locked in by `empty_surface_is_dropped_at_mapper_edge_no_courier_call`
+  (which also asserts the FakeTelegramApi captures zero requests)
+  and the unit tests on `enforce_text_cap`.
+
+- **UTF-8 boundary discipline when truncating user-supplied text.**
+  Telegram's 4096-char cap is bytes-of-UTF-8 in practice. A naive
+  `text.truncate(4096)` panics on a multi-byte char boundary; a
+  naive `&text[..4096]` panics with `byte index 4096 is not a
+  char boundary`. The right shape is a walk-back loop: try
+  `end = budget`, decrement until `text.is_char_boundary(end)`.
+  Test `truncation_preserves_utf8_boundaries` uses a 4-byte
+  codepoint (`𝄞`) to verify the cut never lands mid-sequence.
+
+- **Truncating rendered HTML can break it; truncate raw text
+  instead.** Codex PR 20 review caught this: PR 20's first pass
+  truncated the *rendered* string (`<i>...</i>` with `&lt;`
+  entities already inlined), so a cut could land mid-tag or
+  mid-entity and produce HTML Telegram rejects. The replacement
+  approach:
+  1. Render each component to its own complete HTML chunk.
+  2. Truncation cuts only between chunks (always on the `\n\n`
+     separator), so no chunk is ever split mid-tag or mid-entity.
+  3. If even the first chunk exceeds the cap, truncate its
+     *raw* text before HTML-escape and re-render. Use per-char
+     escape-cost accounting (`&` → 5 bytes, `<`/`>` → 4 bytes,
+     others → UTF-8 byte length) so a string of `&` chars
+     doesn't blow up unpredictably when escaped.
+  Tests `truncation_never_splits_html_entities`,
+  `truncation_keeps_italic_tags_balanced`, and
+  `truncation_drops_tail_components_when_head_fits` lock in
+  every branch.
+
+- **`text.strip_prefix('/').and_then(split_once)` silently drops
+  no-arg commands.** PR 19's `/narrate` without a space fell
+  through to echo because `split_once(' ')` returned None. Use
+  `.unwrap_or((rest, ""))` so the entire remainder is treated as
+  the command and the args default to empty. Then a match on the
+  command routes to the right tool (with empty subject for the
+  narrate case) instead of leaking to a different tool entirely.

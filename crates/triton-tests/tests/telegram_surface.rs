@@ -195,6 +195,95 @@ async fn echo_response_stays_plain_text_no_parse_mode() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_surface_is_dropped_at_mapper_edge_no_courier_call() {
+    // Codex PR 19 blocker 1: an empty Surface used to ship
+    // `text: ""` to Telegram, which 400s. Per L6' spec the mapper
+    // refuses at its edge. PR 20 audits this as
+    // `phase: post, status_label: dropped` and skips the courier
+    // call entirely (so the fake never sees a request).
+    let vault = start_kv_vault().await;
+    let telegram = FakeTelegramApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+        .json(&telegram_update("/empty"))
+        .send()
+        .await
+        .expect("POST");
+    assert!(
+        resp.status().is_success(),
+        "inbound must still ack 200: got {}",
+        resp.status()
+    );
+
+    // No courier call should have happened.
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        telegram.captured().is_empty(),
+        "mapper must not call the Telegram API for an empty surface; captured: {:?}",
+        telegram.captured()
+    );
+
+    // But the post-phase audit MUST land — operators need to see
+    // every dispatch's outbound outcome.
+    let mut audits: Vec<serde_json::Value> = proc
+        .stdout_snapshot()
+        .iter()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    audits.retain(|v| v["kind"] == "audit" && v["phase"] == "post");
+    assert!(
+        !audits.is_empty(),
+        "expected at least one phase:post audit line"
+    );
+    let post = &audits[0];
+    assert_eq!(post["status_label"], "dropped");
+    assert_eq!(post["result"], "error:provider");
+    assert_eq!(post["tool"], "empty_surface");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn narrate_with_no_arg_routes_to_narrate_not_echo() {
+    // Codex PR 19 concern: `/narrate` without a space silently
+    // routed to echo (surprising). PR 20 fixes the parser so it
+    // routes to narrate with an empty subject — narrate just
+    // produces "Hello, ." which is harmless and visibly handled
+    // instead of vanishing.
+    let vault = start_kv_vault().await;
+    let telegram = FakeTelegramApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
+
+    let _ = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+        .json(&telegram_update("/narrate"))
+        .send()
+        .await
+        .expect("POST");
+
+    let captured = wait_for(Duration::from_secs(2), || {
+        let v = telegram.captured();
+        (!v.is_empty()).then_some(v)
+    });
+    let text = captured[0].body["text"]
+        .as_str()
+        .expect("text is a string")
+        .to_string();
+    assert!(
+        text.contains("Hello, ."),
+        "expected narrate's `Hello, .` (empty subject) shape, got: {text}",
+    );
+    // narrate emits a Narration component → HTML parse_mode set.
+    assert_eq!(captured[0].body["parse_mode"], "HTML");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsupported_components_are_logged_not_silently_dropped() {
     // `narrate` includes a Button component. PR 19 doesn't render
     // buttons (the HMAC correlation-token PR lands next), but it

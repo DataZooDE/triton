@@ -15,7 +15,10 @@ path = "src/main.rs"
 # any non-OIDC bearer at the identity boundary (ADR-10, FR-I-5).
 # Default-on for dev.
 default = ["dev-token"]
-dev-token = ["triton-adapters-http/dev-token"]
+dev-token = [
+    "triton-adapters-http/dev-token",
+    "triton-chat-telegram/dev-token",
+]
 
 [dependencies]
 triton-core = { path = "../triton-core" }
