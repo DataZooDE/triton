@@ -11,15 +11,17 @@
 use std::sync::Arc;
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::http::header::ACCEPT;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Deserialize;
 use serde_json::{Value, json};
 use triton_core::a2ui::{build_envelope, extract_surface};
+use triton_core::audit::AuditBuffer;
 use triton_core::{A2uiVersion, Dispatcher, RuntimeInfo, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
@@ -61,7 +63,58 @@ pub fn router(state: RestState) -> Router {
         .route("/v1/runtime", get(runtime_discovery))
         .route("/v1/tools", get(list_tools))
         .route("/v1/tools/{name}", post(invoke_tool))
+        .route("/v1/audit", get(audit_tail))
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+struct AuditQuery {
+    /// Number of recent entries to return. Capped server-side at 500
+    /// so an unbounded `?limit=...` can't allocate the whole buffer
+    /// into one response.
+    #[serde(default = "default_limit")]
+    limit: usize,
+    /// Optional trace_id filter — returns only entries whose stored
+    /// trace_id matches exactly. Empty == no filter.
+    #[serde(default)]
+    trace_id: Option<String>,
+}
+
+const AUDIT_LIMIT_DEFAULT: usize = 50;
+const AUDIT_LIMIT_MAX: usize = 500;
+const fn default_limit() -> usize {
+    AUDIT_LIMIT_DEFAULT
+}
+
+/// `GET /v1/audit?limit=N&trace_id=X` — newest-first slice of the
+/// in-process audit ring buffer. Authenticated; this is operational
+/// metadata about every request the gateway has processed since
+/// boot, so it sees the same OIDC bearer as `/v1/tools`.
+async fn audit_tail(
+    State(state): State<RestState>,
+    Query(q): Query<AuditQuery>,
+    parts: Parts,
+) -> Response {
+    if let Err(e) = state.identity.verify(&parts).await {
+        state.dispatcher.record_rejection(
+            "v1/audit",
+            "rest",
+            "-",
+            "-",
+            &uuid::Uuid::new_v4().to_string(),
+            &e,
+        );
+        return error_response(&e, None);
+    }
+    let limit = q.limit.clamp(1, AUDIT_LIMIT_MAX);
+    let trace_id = q.trace_id.as_deref().filter(|s| !s.is_empty());
+    let entries = AuditBuffer::recent(limit, trace_id);
+    Json(json!({
+        "entries": entries,
+        "limit": limit,
+        "trace_id": trace_id,
+    }))
+    .into_response()
 }
 
 async fn healthz() -> Json<Value> {

@@ -87,3 +87,24 @@ final toolsProvider = FutureProvider((ref) async {
   final client = ref.watch(restClientProvider);
   return client.listTools();
 });
+
+/// Family provider for the audit endpoint: cache key is
+/// `(limit, traceIdFilter)` so the Audit page can swap filters
+/// without losing the most recent fetch for the other key.
+final auditTailProvider = FutureProvider.family<List<Map<String, dynamic>>,
+    AuditQuery>((ref, q) async {
+  final client = ref.watch(restClientProvider);
+  return client.auditTail(limit: q.limit, traceId: q.traceId);
+});
+
+class AuditQuery {
+  const AuditQuery({required this.limit, this.traceId});
+  final int limit;
+  final String? traceId;
+
+  @override
+  bool operator ==(Object other) =>
+      other is AuditQuery && other.limit == limit && other.traceId == traceId;
+  @override
+  int get hashCode => Object.hash(limit, traceId);
+}
