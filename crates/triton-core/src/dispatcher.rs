@@ -191,6 +191,7 @@ impl Dispatcher {
             tenant,
             latency_ms: 0,
             status,
+            status_label: None,
             trace_id,
         });
     }
@@ -213,11 +214,16 @@ impl Dispatcher {
         protocol: &str,
         principal: &Principal,
         latency_ms: u64,
-        outcome: Result<u16, &TritonError>,
+        outcome: Result<(u16, &'static str), (&TritonError, u16, &'static str)>,
     ) {
-        let (result, status) = match outcome {
-            Ok(s) => ("ok".to_string(), s),
-            Err(e) => (format!("error:{}", e.class()), status_for(e)),
+        // FR-AU-1 v0.2: chat post audit MUST carry a `status_label`
+        // from the closed set `{posted, retry, dropped}`. We keep
+        // `status` as the underlying HTTP status (`u16`, 0 for
+        // transport-level failures) for diagnosis, and add a new
+        // `status_label` field for the spec's closed-set discriminator.
+        let (result, status, status_label) = match outcome {
+            Ok((s, label)) => ("ok".to_string(), s, Some(label)),
+            Err((e, s, label)) => (format!("error:{}", e.class()), s, Some(label)),
         };
         self.metrics.record_dispatch(tool_name, protocol, &result);
         self.metrics.record_audit("post");
@@ -235,6 +241,7 @@ impl Dispatcher {
             tenant: &principal.tenant,
             latency_ms,
             status,
+            status_label,
             trace_id: &principal.trace_id,
         });
     }
@@ -303,6 +310,7 @@ impl Dispatcher {
             tenant: &principal.tenant,
             latency_ms,
             status: status_for(error),
+            status_label: None,
             trace_id: &principal.trace_id,
         });
         // Reconstruct a parallel error so we can both audit and return.
@@ -342,6 +350,7 @@ impl Dispatcher {
             tenant: &principal.tenant,
             latency_ms,
             status,
+            status_label: None,
             trace_id: &principal.trace_id,
         });
     }

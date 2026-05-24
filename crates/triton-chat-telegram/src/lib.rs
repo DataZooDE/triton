@@ -192,10 +192,28 @@ impl CourierClient {
     }
 
     /// POST `<base>/bot{token}/sendMessage` with `{chat_id, text}`.
-    /// Returns the HTTP status on success; on transport/non-2xx
-    /// errors returns a short descriptor string the adapter wraps
-    /// into a `TritonError::Provider` for the audit pivot.
-    async fn send_message(&self, bot_token: &str, chat_id: i64, text: &str) -> Result<u16, String> {
+    ///
+    /// **Token-leak guard (FR-AU-3 / Codex PR 18 blocker).** The
+    /// bot token appears in the URL path. `reqwest::Error::Display`
+    /// often includes the request URL, so the raw error MUST NOT
+    /// flow into the audit/log pipeline. We sanitise every error
+    /// string through [`redact_url`] before returning so the
+    /// caller's `tracing::warn!(error = %e)` cannot leak the token
+    /// even by accident.
+    ///
+    /// **Body-shape guard (Codex PR 18 blocker).** Telegram's Bot
+    /// API returns `200 OK` with `{ok: false, error_code,
+    /// description, parameters: {retry_after}}` on a successful
+    /// HTTP roundtrip that nonetheless failed at the application
+    /// layer (rate limit, bad chat_id, blocked-by-user, ...).
+    /// Treating any 2xx as success would silently lose those
+    /// failures. We parse the envelope and require `ok: true`.
+    async fn send_message(
+        &self,
+        bot_token: &str,
+        chat_id: i64,
+        text: &str,
+    ) -> Result<SendOutcome, CourierError> {
         let url = format!("{}/bot{}/sendMessage", self.base, bot_token);
         let resp = self
             .http
@@ -203,13 +221,125 @@ impl CourierClient {
             .json(&json!({ "chat_id": chat_id, "text": text }))
             .send()
             .await
-            .map_err(|e| format!("telegram sendMessage transport: {e}"))?;
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(format!("telegram sendMessage status {}", status.as_u16()));
+            .map_err(|e| CourierError::Transport(redact_url(&e.to_string(), bot_token)))?;
+        let http_status = resp.status().as_u16();
+        let body: BotApiEnvelope = resp
+            .json()
+            .await
+            .map_err(|e| CourierError::Decode(redact_url(&e.to_string(), bot_token)))?;
+        if body.ok {
+            return Ok(SendOutcome {
+                http_status,
+                label: PostLabel::Posted,
+            });
         }
-        Ok(status.as_u16())
+        // ok:false. Classify by error_code: 429 (or 4xx with a
+        // retry_after) is a retry-eligible class; other 4xx are
+        // permanent drops; >= 500 is retry (transient upstream).
+        let retry_after = body.parameters.and_then(|p| p.retry_after);
+        let code = body.error_code.unwrap_or(0);
+        let label = if code == 429 || retry_after.is_some() || code >= 500 {
+            PostLabel::Retry
+        } else {
+            PostLabel::Dropped
+        };
+        Err(CourierError::Application {
+            http_status,
+            label,
+            error_code: code,
+        })
     }
+}
+
+#[derive(Debug)]
+struct SendOutcome {
+    http_status: u16,
+    label: PostLabel,
+}
+
+/// FR-AU-1 v0.2 closed set for the chat post audit's `status_label`.
+#[derive(Debug, Clone, Copy)]
+pub enum PostLabel {
+    /// Bot API accepted the message (`{ok: true}` on the response).
+    Posted,
+    /// Bot API said retry-eligible (429, 5xx, explicit retry_after).
+    Retry,
+    /// Bot API said permanent failure (e.g. 400 invalid chat_id,
+    /// 403 blocked by user). Not retried; surfaced to operator.
+    Dropped,
+}
+
+impl PostLabel {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Posted => "posted",
+            Self::Retry => "retry",
+            Self::Dropped => "dropped",
+        }
+    }
+}
+
+#[derive(Debug)]
+enum CourierError {
+    Transport(String),
+    Decode(String),
+    Application {
+        http_status: u16,
+        label: PostLabel,
+        error_code: i64,
+    },
+}
+
+impl CourierError {
+    fn label(&self) -> PostLabel {
+        match self {
+            Self::Transport(_) | Self::Decode(_) => PostLabel::Retry,
+            Self::Application { label, .. } => *label,
+        }
+    }
+    fn http_status(&self) -> u16 {
+        match self {
+            Self::Transport(_) | Self::Decode(_) => 0,
+            Self::Application { http_status, .. } => *http_status,
+        }
+    }
+    fn message(&self) -> String {
+        match self {
+            Self::Transport(m) => format!("telegram courier transport: {m}"),
+            Self::Decode(m) => format!("telegram courier decode: {m}"),
+            Self::Application {
+                error_code, label, ..
+            } => format!(
+                "telegram courier application: error_code={error_code}, label={}",
+                label.as_str()
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct BotApiEnvelope {
+    ok: bool,
+    #[serde(default)]
+    error_code: Option<i64>,
+    #[serde(default)]
+    parameters: Option<BotApiResponseParameters>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BotApiResponseParameters {
+    #[serde(default)]
+    retry_after: Option<u64>,
+}
+
+/// Strip every occurrence of `/bot{token}` from an error/log string.
+/// Belt-and-braces: even if `reqwest` ever includes the URL in its
+/// own error Display, the bot token never reaches the audit pivot.
+fn redact_url(s: &str, bot_token: &str) -> String {
+    if bot_token.is_empty() {
+        return s.to_string();
+    }
+    s.replace(bot_token, "<redacted>")
 }
 
 /// Errors building the adapter from a manifest entry. Every
@@ -396,21 +526,34 @@ async fn post_back(adapter: &TelegramAdapter, principal: &Principal, chat_id: i6
         .await;
     let latency_ms = start.elapsed().as_millis() as u64;
     match outcome {
-        Ok(status) => {
-            adapter
-                .dispatcher
-                .record_post("echo", PROTOCOL, principal, latency_ms, Ok(status));
+        Ok(send) => {
+            adapter.dispatcher.record_post(
+                "echo",
+                PROTOCOL,
+                principal,
+                latency_ms,
+                Ok((send.http_status, send.label.as_str())),
+            );
         }
         Err(e) => {
-            // Courier failures are infra-level (transport, non-2xx
-            // from api.telegram.org). Classify as Provider so the
-            // audit pivot uses the right status mapping; the
-            // dispatcher already audits this as phase=post.
-            let err = TritonError::Provider(e);
-            tracing::warn!(error = %err, "telegram courier failed");
-            adapter
-                .dispatcher
-                .record_post("echo", PROTOCOL, principal, latency_ms, Err(&err));
+            // `e.message()` is already sanitized (bot token stripped
+            // by `redact_url`) before it reaches this branch, so
+            // logging + auditing it cannot leak the token per FR-AU-3.
+            let label = e.label();
+            let http_status = e.http_status();
+            let msg = e.message();
+            tracing::warn!(
+                courier_label = label.as_str(),
+                "telegram courier failed: {msg}"
+            );
+            let provider = TritonError::Provider(msg);
+            adapter.dispatcher.record_post(
+                "echo",
+                PROTOCOL,
+                principal,
+                latency_ms,
+                Err((&provider, http_status, label.as_str())),
+            );
         }
     }
 }

@@ -264,6 +264,22 @@ async fn main() -> std::io::Result<()> {
             }
             match adapter.kind {
                 AdapterKind::Telegram => {
+                    // NFR-S-4 v0.2: only `api.telegram.org` is on the
+                    // substrate ACL allowlist. Outside `local` env we
+                    // refuse any `TRITON_TELEGRAM_API_BASE` override
+                    // so a misconfigured deploy (or compromised env
+                    // var) cannot exfiltrate user content + the bot
+                    // token to an arbitrary host. Codex flagged this
+                    // in PR 18 review.
+                    const CANONICAL: &str = "https://api.telegram.org";
+                    if settings.env != "local" && settings.telegram_api_base != CANONICAL {
+                        tracing::error!(
+                            env = %settings.env,
+                            telegram_api_base = %settings.telegram_api_base,
+                            "non-`local` env MUST use TRITON_TELEGRAM_API_BASE={CANONICAL} (NFR-S-4 egress allowlist)",
+                        );
+                        std::process::exit(2);
+                    }
                     let courier_config = CourierConfig {
                         api_base: settings.telegram_api_base.clone(),
                         timeout: settings.courier_timeout,

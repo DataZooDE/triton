@@ -111,6 +111,7 @@ impl UpstreamRouter {
             tenant: &principal.tenant,
             latency_ms,
             status,
+            status_label: None,
             trace_id: &principal.trace_id,
         });
         outcome

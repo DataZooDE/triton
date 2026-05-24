@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
-use triton_tests::chat_courier_fixture::FakeTelegramApi;
+use triton_tests::chat_courier_fixture::{FakeTelegramApi, Profile};
 use triton_tests::upstream_fixture::FakeVault;
 
 const VAULT_TOKEN: &str = "triton-vault-token";
@@ -123,7 +123,8 @@ async fn tool_result_is_posted_back_to_telegram_and_audited() {
         "post-back text should embed the tool result, got: {text}"
     );
 
-    // 3. Post-back audit fires with phase=post and result=ok.
+    // 3. Post-back audit fires with phase=post, result=ok,
+    //    status_label=posted (FR-AU-1 v0.2 closed set).
     let post_audit = wait_for_audit(&proc, Duration::from_secs(2), |v| {
         v["kind"] == "audit" && v["phase"] == "post" && v["protocol"] == "messenger:telegram"
     });
@@ -131,6 +132,7 @@ async fn tool_result_is_posted_back_to_telegram_and_audited() {
     assert_eq!(post_audit["who"], "alice");
     assert_eq!(post_audit["result"], "ok");
     assert_eq!(post_audit["status"], 200);
+    assert_eq!(post_audit["status_label"], "posted");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -177,6 +179,181 @@ async fn post_failure_audits_provider_error_does_not_fail_inbound_ack() {
         v["kind"] == "audit" && v["phase"] == "post" && v["protocol"] == "messenger:telegram"
     });
     assert_eq!(post_audit["result"], "error:provider");
+    // Transport failure → retry-eligible per FR-AU-1 v0.2 closed set.
+    assert_eq!(post_audit["status_label"], "retry");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bot_api_200_with_ok_false_429_is_audited_retry() {
+    // Codex PR 18 blocker 2: Telegram returns `200 OK
+    // {ok: false, error_code: 429, parameters: {retry_after: N}}`
+    // for rate-limit failures. Treating any 2xx as success would
+    // emit `result=ok status_label=posted` and silently lose the
+    // failure. The courier must parse the envelope.
+    let vault = start_kv_vault().await;
+    let telegram = FakeTelegramApi::with_profile(Profile::Application {
+        error_code: 429,
+        retry_after: Some(15),
+    })
+    .await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+        .json(&telegram_update(42, "rate limited please"))
+        .send()
+        .await
+        .expect("POST");
+    assert!(resp.status().is_success(), "inbound must still ack 200");
+
+    let post_audit = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "post"
+    });
+    assert_eq!(post_audit["result"], "error:provider");
+    assert_eq!(post_audit["status_label"], "retry");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bot_api_200_with_ok_false_403_is_audited_dropped() {
+    // Same shape as the 429 case but with a permanent-failure
+    // error_code: bot blocked by user. Should be a `dropped`
+    // status_label so the operator can distinguish "tried-but-no"
+    // from "try-again-later".
+    let vault = start_kv_vault().await;
+    let telegram = FakeTelegramApi::with_profile(Profile::Application {
+        error_code: 403,
+        retry_after: None,
+    })
+    .await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+        .json(&telegram_update(42, "blocked-by-user case"))
+        .send()
+        .await
+        .expect("POST");
+    assert!(resp.status().is_success(), "inbound must still ack 200");
+
+    let post_audit = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "post"
+    });
+    assert_eq!(post_audit["result"], "error:provider");
+    assert_eq!(post_audit["status_label"], "dropped");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bot_token_never_leaks_into_courier_failure_logs() {
+    // Codex PR 18 blocker 1 (FR-AU-3): the bot token is part of the
+    // sendMessage URL path. `reqwest::Error::Display` often
+    // includes the request URL; an unsanitised tracing/audit
+    // pipeline would leak the token at the first transport failure.
+    // Drive the courier against an unreachable port, scrape the
+    // child's full stdout+stderr, assert the marker is absent.
+    let marker = "leak-canary-bot-token-aaa";
+    let vault = FakeVault::start_kv_v2(
+        VAULT_TOKEN,
+        &[(
+            "kv/data/triton-test/telegram",
+            &[
+                ("webhook_secret", RESOLVED_SECRET),
+                ("bot_token", marker),
+                (
+                    "senders",
+                    r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
+                ),
+                ("correlation_key", "ck"),
+            ],
+        )],
+    )
+    .await;
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
+        ("TRITON_VAULT_URL".to_string(), vault.url()),
+        ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
+        (
+            "TRITON_TELEGRAM_API_BASE".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        ),
+        ("TRITON_COURIER_TIMEOUT_MS".to_string(), "300".to_string()),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
+
+    let _ = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+        .json(&telegram_update(42, "leak test"))
+        .send()
+        .await;
+
+    // Give the courier time to time out and the audit/log line
+    // to be emitted before we scrape.
+    std::thread::sleep(Duration::from_millis(700));
+    let stdout = proc.stdout_snapshot().join("\n");
+    let stderr = proc.stderr_snapshot().join("\n");
+    assert!(
+        !stdout.contains(marker),
+        "bot token leaked to stdout:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains(marker),
+        "bot token leaked to stderr:\n{stderr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nonlocal_env_refuses_non_canonical_telegram_api_base() {
+    // NFR-S-4 v0.2: only `api.telegram.org` is on the substrate
+    // ACL allowlist. A `TRITON_TELEGRAM_API_BASE` override outside
+    // `local` env would be an SSRF/exfil channel. PR 16/18 boot
+    // wiring must refuse it.
+    let bin = locate_triton_binary();
+    let out = std::process::Command::new(&bin)
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        // env=nonprod tightens the rule (only canonical base).
+        .env("TRITON_ENV", "nonprod")
+        .env("TRITON_MANIFEST_PATH", manifest_path())
+        // Provide *some* Vault wiring so the binary doesn't refuse
+        // before it gets to the telegram-api-base check — we just
+        // need it past the earlier guards.
+        .env("TRITON_VAULT_URL", "http://127.0.0.1:1")
+        .env("TRITON_VAULT_TOKEN", "irrelevant")
+        // The SSRF-tempting override.
+        .env("TRITON_TELEGRAM_API_BASE", "http://attacker.example.com")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("spawn triton");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "non-local env with overridden TRITON_TELEGRAM_API_BASE MUST exit 2",
+    );
+}
+
+fn locate_triton_binary() -> PathBuf {
+    let mut here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while here.parent().is_some() {
+        let cand = here.join("target/debug/triton");
+        if cand.exists() {
+            return cand;
+        }
+        here.pop();
+    }
+    panic!("triton binary not found");
 }
 
 fn wait_for_audit<F>(proc: &TritonProcess, deadline: Duration, mut matches: F) -> Value

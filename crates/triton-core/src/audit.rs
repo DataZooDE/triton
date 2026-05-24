@@ -52,6 +52,12 @@ pub struct AuditRecord<'a> {
     pub tenant: &'a str,
     pub latency_ms: u64,
     pub status: u16,
+    /// FR-AU-1 v0.2 closed-set discriminator for chat post audits:
+    /// `{"posted", "retry", "dropped"}`. Omitted on non-chat-post
+    /// phases (dispatch/rejected/upstream) so the schema stays
+    /// uniform across the substrate audit collector.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_label: Option<&'static str>,
     pub trace_id: &'a str,
 }
 

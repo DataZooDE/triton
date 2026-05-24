@@ -565,3 +565,47 @@ a trap the next developer should not have to step in.
   (`record_post`), adapter passes outcome + latency + principal,
   dispatcher does the construction + emit. Cheap; keeps the
   schema invariant intact.
+
+- **`reqwest::Error::Display` includes the request URL.** This
+  is a latent FR-AU-3 violation any time a secret lives in the
+  URL path — and the Telegram Bot API puts the bot token there
+  (`/bot{token}/sendMessage`). A naive
+  `tracing::warn!(error = %reqwest_error)` will print the URL,
+  including the token, on every transport failure. Always wrap
+  the error in a local enum whose `Display` only carries
+  redacted text, and run a final `s.replace(secret, "<redacted>")`
+  belt-and-braces before the error reaches the audit/log
+  pipeline. Codex flagged this in PR 18 review; lock-in test is
+  `bot_token_never_leaks_into_courier_failure_logs`.
+
+- **2xx HTTP doesn't mean "success" for Bot-API-style RPCs.**
+  Telegram's Bot API (and Discord's, and Slack's) returns
+  `200 OK` with a body envelope `{ok: bool, ...}`. A response
+  saying `{ok: false, error_code: 429, parameters: {retry_after: N}}`
+  arrives as HTTP 200 and would be classified as "posted" by any
+  courier that only checks `status.is_success()`. Always parse
+  the application envelope and require the `ok` field. Codex
+  PR 18 blocker 2; locked in by `bot_api_200_with_ok_false_*` tests.
+
+- **Configurable external endpoints need an env-gated allowlist.**
+  `TRITON_TELEGRAM_API_BASE` exists for tests to point the
+  courier at a `FakeTelegramApi`. In a non-`local` environment
+  the same env var would be a free SSRF/exfil channel: every
+  tool reply and the bot token's URL path get POSTed to wherever
+  the operator (or attacker who controls the env) names. The
+  fix is one comparison: outside `local`, refuse any
+  api_base ≠ `https://api.telegram.org`. NFR-S-4 v0.2 spells out
+  the egress allowlist; mirror it as a boot guard. Codex PR 18
+  blocker 3.
+
+- **FR-AU-1 v0.2 closed sets need their own audit field.** The
+  spec says chat post audits carry a `status` from
+  `{posted, retry, dropped}`, but the existing schema's `status`
+  is `u16` HTTP. Don't overload — add a sibling `status_label:
+  Option<&str>` field with `skip_serializing_if = "Option::is_none"`
+  so non-chat-post phases stay the same on the wire, and chat
+  post phases get the closed-set discriminator. The map is
+  `posted` for `{ok: true}`, `retry` for transport/decode
+  failures + `error_code == 429` + `error_code >= 500` +
+  explicit `retry_after`, `dropped` for the rest. Cemented in
+  PR 18 from Codex's nit.
