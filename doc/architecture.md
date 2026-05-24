@@ -530,10 +530,35 @@ principal)` triple where the principal always comes from the
 inbound sender (`from.id` → `sender_table`), never from the
 token body.
 
-Replay protection is not in scope for v0.2's first iteration; a
-stolen token can be replayed until a (timestamp, nonce) envelope
-is added. The trust boundary still holds — replay can't
-impersonate a different user — but the action will fire again.
+Replay protection ships in two layers, with the adapter layer
+doing all the v0.2 work (PR 23):
+
+1. **Platform-authenticated message timestamp** — Telegram's
+   `callback_query.message.date` and Discord's
+   `interaction.message.timestamp` are stamped by the platform
+   when the BOT sent the original button-bearing message. Both
+   inbound webhooks are signature-verified (FR-I-8), so those
+   timestamps are trusted and ride into the adapter alongside
+   the correlation token. The adapter MUST refuse:
+   - missing or zero timestamp (fail-closed; absence is not a
+     green light);
+   - timestamp older than `CALLBACK_TTL_SECS` (5 min);
+   - timestamp more than `CALLBACK_FUTURE_SKEW_SECS` (60 s)
+     ahead of local time, so a platform clock running fast
+     cannot extend a button's validity.
+   Each refusal lands as `phase: rejected, result: error:auth`
+   so audit pipelines treat stale and forged clicks identically.
+
+2. **Token body still carries no timestamp.** The 4-byte BE
+   timestamp envelope was considered and rejected: it pushes
+   `narrate + {"subject":"bob"}` past Telegram's 64-byte
+   `callback_data` cap. Since both adapters already have a
+   trusted timestamp from the signed inbound, the cap budget is
+   better spent on tool/args than on a redundant ts field.
+
+Nonce-based first-use-wins dedup is deferred — it needs a
+"seen" cache (per-tenant in-memory or substrate-side KV) and is
+a separate PR.
 
 ## 9. Architecture decisions (ADRs, condensed)
 

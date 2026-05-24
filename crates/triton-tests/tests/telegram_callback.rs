@@ -304,6 +304,67 @@ async fn stale_callback_rejected_with_phase_rejected() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn callback_without_message_date_fails_closed() {
+    // Codex PR 23 review blocker: absence of the freshness anchor
+    // must not bypass replay protection. A callback_query without
+    // an embedded `message.date` gets 401 + a rejected audit.
+    let vault = start_kv_vault().await;
+    let telegram = FakeTelegramApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
+
+    let valid_token = triton_correlation::encode(
+        "narrate",
+        &json!({ "s": "alice" }),
+        CORRELATION_KEY.as_bytes(),
+    )
+    .expect("token fits");
+    // No `message` field on the callback_query at all.
+    let payload = json!({
+        "update_id": 300,
+        "callback_query": {
+            "id": "cb-no-msg",
+            "from": { "id": 42, "is_bot": false, "first_name": "Alice" },
+            "data": valid_token,
+            "chat_instance": "abc"
+        }
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+        .json(&payload)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 401);
+    let start = Instant::now();
+    loop {
+        let found = proc
+            .stdout_snapshot()
+            .iter()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| {
+                v["kind"] == "audit"
+                    && v["phase"] == "rejected"
+                    && v["result"] == "error:auth"
+                    && v["protocol"] == "messenger:telegram"
+            });
+        if found.is_some() {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(2) {
+            panic!(
+                "no rejected audit within 2s\nstdout:\n{}",
+                proc.stdout_snapshot().join("\n")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(telegram.captured().is_empty());
+}
+
 fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {
