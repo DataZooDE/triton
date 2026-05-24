@@ -21,6 +21,7 @@ dev-token = ["triton-adapters-http/dev-token"]
 triton-core = { path = "../triton-core" }
 triton-identity = { path = "../triton-identity" }
 triton-upstream = { path = "../triton-upstream" }
+triton-manifest = { path = "../triton-manifest" }
 triton-adapters-http = { path = "../triton-adapters-http", default-features = false }
 async-trait = "0.1"
 axum = { workspace = true }

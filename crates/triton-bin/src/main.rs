@@ -33,6 +33,42 @@ async fn main() -> std::io::Result<()> {
     init_tracing();
     let settings = Arc::new(Settings::from_args());
 
+    // v0.2 manifest, if configured. Loaded BEFORE we bind any
+    // listeners — a malformed `adapter.yaml` must cause a clean
+    // non-zero exit so Nomad reschedules rather than serving with
+    // a broken config (FR-L-4..6, M-MANIFEST-1 / M-COVERAGE-1 /
+    // M-SECRETS-1).
+    if let Some(path) = &settings.manifest_path {
+        let manifest_env = match settings.env.as_str() {
+            "local" | "" => triton_manifest::Env::Dev,
+            _ => triton_manifest::Env::Production,
+        };
+        match triton_manifest::Manifest::load(path) {
+            Ok(m) => match m.validate(manifest_env) {
+                Ok(warnings) => {
+                    tracing::info!(
+                        path = %path.display(),
+                        adapters = m.adapters.len(),
+                        tools = m.tools.len(),
+                        warnings = warnings.len(),
+                        "adapter.yaml loaded",
+                    );
+                    for w in warnings {
+                        tracing::warn!("manifest: {w}");
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(path = %path.display(), error = %e, "manifest validation failed");
+                    std::process::exit(2);
+                }
+            },
+            Err(e) => {
+                tracing::error!(path = %path.display(), error = %e, "manifest load failed");
+                std::process::exit(2);
+            }
+        }
+    }
+
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
