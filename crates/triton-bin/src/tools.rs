@@ -158,8 +158,15 @@ impl Tool for Narrate {
 /// variant (Text, Narration, Button, Selection, Form, Dashboard) so
 /// the explorer's A2UI diff page can render the full v0.8 vs v0.9
 /// vocabulary side-by-side. Pure stub data, no upstream call.
+///
+/// Codex PR 26 review concern: gated on `dev-token` so production
+/// builds don't ship a reference/demo tool that users can poke.
+/// The explorer is itself a dev/internal surface; promoting the
+/// demo to prod would be a separate ADR.
+#[cfg(feature = "dev-token")]
 pub struct DemoPanel;
 
+#[cfg(feature = "dev-token")]
 #[async_trait]
 impl Tool for DemoPanel {
     fn name(&self) -> &'static str {

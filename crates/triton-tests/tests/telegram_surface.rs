@@ -20,6 +20,7 @@ use triton_tests::upstream_fixture::FakeVault;
 const VAULT_TOKEN: &str = "triton-vault-token";
 const RESOLVED_SECRET: &str = "secret-resolved-from-vault";
 const BOT_TOKEN: &str = "12345:resolved-bot-token";
+const CORRELATION_KEY: &str = "correlation-key-from-vault";
 
 fn manifest_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -53,7 +54,7 @@ async fn start_kv_vault() -> FakeVault {
                     "senders",
                     r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
                 ),
-                ("correlation_key", "correlation-key-from-vault"),
+                ("correlation_key", CORRELATION_KEY),
             ],
         )],
     )
@@ -281,6 +282,80 @@ async fn narrate_with_no_arg_routes_to_narrate_not_echo() {
     );
     // narrate emits a Narration component → HTML parse_mode set.
     assert_eq!(captured[0].body["parse_mode"], "HTML");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn demo_selection_defers_when_any_option_overflows_cap() {
+    // PR 26 + Codex pass: defer-all-or-render-all. demo_panel's
+    // Selection includes "Friendly" (8 chars), which pushes
+    // `narrate + {"subject":"friendly"}` past Telegram's 64-byte
+    // callback_data cap. Per the spec direction ("reject oversize
+    // selection sets rather than present a subset"), the whole
+    // Selection defers — only the standalone Refresh Button
+    // ships, and the Selection prompt is dropped too (no
+    // prompt-without-control).
+    let vault = start_kv_vault().await;
+    let telegram = FakeTelegramApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
+
+    let _ = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+        .json(&telegram_update("/demo"))
+        .send()
+        .await
+        .expect("POST");
+
+    let captured = wait_for(Duration::from_secs(2), || {
+        let v = telegram.captured();
+        v.first().cloned()
+    });
+    let rows = captured.body["reply_markup"]["inline_keyboard"]
+        .as_array()
+        .expect("inline_keyboard present");
+    let all_buttons: Vec<&Value> = rows.iter().flat_map(|r| r.as_array().unwrap()).collect();
+
+    // Refresh button (Component::Button, fits) ships.
+    let refresh = all_buttons
+        .iter()
+        .find(|b| b["text"] == "Refresh")
+        .expect("Refresh button present");
+    let (refresh_tool, _) = triton_correlation::decode(
+        refresh["callback_data"].as_str().unwrap(),
+        CORRELATION_KEY.as_bytes(),
+    )
+    .expect("Refresh token verifies");
+    assert_eq!(refresh_tool, "demo_panel");
+
+    // None of the three Selection option labels ship as buttons —
+    // the whole Selection deferred because Friendly overflows.
+    for label in ["Friendly", "Formal", "Terse"] {
+        let present = all_buttons.iter().any(|b| b["text"] == label);
+        assert!(
+            !present,
+            "expected the whole Selection to defer; {label} unexpectedly rendered"
+        );
+    }
+
+    // Selection prompt MUST NOT ship as text either — Codex PR 25
+    // discipline applied to PR 26: prompt-without-control is a
+    // misleading UX. The "Pick a sample tone" prompt is dropped.
+    let text = captured.body["text"].as_str().unwrap_or("");
+    assert!(
+        !text.contains("Pick a sample tone"),
+        "deferred Selection prompt MUST NOT ship as text; got: {text}"
+    );
+
+    // And the deferral surfaces in the audit/log stream so the
+    // operator can see what happened.
+    std::thread::sleep(Duration::from_millis(120));
+    let logs = proc.stdout_snapshot().join("\n");
+    assert!(
+        logs.contains("deferred_selections"),
+        "expected a tracing line naming deferred_selections; got logs:\n{logs}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
