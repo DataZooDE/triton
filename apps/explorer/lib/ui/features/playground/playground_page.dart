@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../api/models.dart';
 import '../../../providers/api_provider.dart';
+import '../../../widgets/a2ui/a2ui_renderer.dart';
 import '../../../widgets/json_schema_form.dart';
 import '../../../widgets/json_viewer.dart';
 
@@ -26,6 +27,8 @@ class _PlaygroundPageState extends ConsumerState<PlaygroundPage> {
   InvocationResult? _lastResult;
   bool _invoking = false;
 
+  String? _a2uiVersion;
+
   Future<void> _invoke() async {
     final tool = _selected;
     if (tool == null) return;
@@ -34,12 +37,20 @@ class _PlaygroundPageState extends ConsumerState<PlaygroundPage> {
       _lastResult = null;
     });
     final client = ref.read(restClientProvider);
-    final r = await client.invoke(tool.name, _args);
+    final r = await client.invoke(
+      tool.name,
+      _args,
+      a2uiVersion: tool.returnsA2ui ? _a2uiVersion : null,
+    );
     if (!mounted) return;
     setState(() {
       _lastResult = r;
       _invoking = false;
     });
+  }
+
+  void _onAcceptChanged(String? v) {
+    setState(() => _a2uiVersion = v);
   }
 
   @override
@@ -69,6 +80,8 @@ class _PlaygroundPageState extends ConsumerState<PlaygroundPage> {
           onInvoke: _invoke,
           invoking: _invoking,
           result: _lastResult,
+          a2uiVersion: _a2uiVersion,
+          onAcceptChanged: _onAcceptChanged,
         ),
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Padding(
@@ -95,6 +108,8 @@ class _PlaygroundBody extends StatelessWidget {
     required this.onInvoke,
     required this.invoking,
     required this.result,
+    required this.a2uiVersion,
+    required this.onAcceptChanged,
   });
 
   final List<ToolDescriptor> tools;
@@ -104,6 +119,8 @@ class _PlaygroundBody extends StatelessWidget {
   final VoidCallback onInvoke;
   final bool invoking;
   final InvocationResult? result;
+  final String? a2uiVersion;
+  final ValueChanged<String?> onAcceptChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -149,6 +166,8 @@ class _PlaygroundBody extends StatelessWidget {
                   onInvoke: onInvoke,
                   invoking: invoking,
                   result: result,
+                  a2uiVersion: a2uiVersion,
+                  onAcceptChanged: onAcceptChanged,
                 ),
         ),
       ],
@@ -163,6 +182,8 @@ class _ToolDetail extends StatelessWidget {
     required this.onInvoke,
     required this.invoking,
     required this.result,
+    required this.a2uiVersion,
+    required this.onAcceptChanged,
   });
 
   final ToolDescriptor tool;
@@ -170,68 +191,99 @@ class _ToolDetail extends StatelessWidget {
   final VoidCallback onInvoke;
   final bool invoking;
   final InvocationResult? result;
+  final String? a2uiVersion;
+  final ValueChanged<String?> onAcceptChanged;
 
   @override
-  Widget build(BuildContext context) => SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(tool.name,
-                style: Theme.of(context).textTheme.headlineSmall),
-            const SizedBox(height: 4),
-            if (tool.returnsA2ui)
-              Chip(
-                label: const Text('returns A2UI'),
-                visualDensity: VisualDensity.compact,
-                avatar: const Icon(Icons.brush, size: 16),
-              ),
-            const SizedBox(height: 16),
-            Text('Arguments', style: Theme.of(context).textTheme.titleMedium),
-            const SizedBox(height: 8),
-            JsonSchemaForm(
-              schema: tool.inputSchema,
-              onChanged: onArgsChanged,
+  Widget build(BuildContext context) {
+    final showA2uiTab =
+        tool.returnsA2ui && result != null && a2uiVersion != null;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(tool.name, style: Theme.of(context).textTheme.headlineSmall),
+          const SizedBox(height: 4),
+          if (tool.returnsA2ui)
+            Chip(
+              label: const Text('returns A2UI'),
+              visualDensity: VisualDensity.compact,
+              avatar: const Icon(Icons.brush, size: 16),
             ),
-            const SizedBox(height: 16),
+          const SizedBox(height: 16),
+          Text('Arguments', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 8),
+          JsonSchemaForm(
+            schema: tool.inputSchema,
+            onChanged: onArgsChanged,
+          ),
+          if (tool.returnsA2ui) ...[
+            const SizedBox(height: 12),
             Row(
               children: [
-                FilledButton.icon(
-                  icon: invoking
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.send),
-                  label: const Text('Invoke'),
-                  onPressed: invoking ? null : onInvoke,
+                const Text('Accept:'),
+                const SizedBox(width: 12),
+                SegmentedButton<String?>(
+                  segments: const [
+                    ButtonSegment(value: null, label: Text('JSON')),
+                    ButtonSegment(value: '0.8', label: Text('A2UI v0.8')),
+                    ButtonSegment(value: '0.9', label: Text('A2UI v0.9')),
+                  ],
+                  selected: {a2uiVersion},
+                  onSelectionChanged: (s) => onAcceptChanged(s.first),
                 ),
-                const Spacer(),
-                if (result?.traceId != null)
-                  SelectableText('trace ${result!.traceId}',
-                      style: Theme.of(context).textTheme.bodySmall),
               ],
             ),
-            const SizedBox(height: 24),
-            if (result != null) ...[
-              Text(
-                'Response (${result!.statusCode} • '
-                '${result!.elapsed.inMilliseconds}ms)',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 8),
-              if (result!.error != null)
-                Card(
-                  color: Theme.of(context).colorScheme.errorContainer,
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Text(result!.error!),
-                  ),
-                ),
-              JsonViewer(result!.raw),
-            ],
           ],
-        ),
-      );
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              FilledButton.icon(
+                icon: invoking
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.send),
+                label: const Text('Invoke'),
+                onPressed: invoking ? null : onInvoke,
+              ),
+              const Spacer(),
+              if (result?.traceId != null)
+                SelectableText('trace ${result!.traceId}',
+                    style: Theme.of(context).textTheme.bodySmall),
+            ],
+          ),
+          const SizedBox(height: 24),
+          if (result != null) ...[
+            Text(
+              'Response (${result!.statusCode} • '
+              '${result!.elapsed.inMilliseconds}ms)',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            if (result!.error != null)
+              Card(
+                color: Theme.of(context).colorScheme.errorContainer,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Text(result!.error!),
+                ),
+              ),
+            if (showA2uiTab)
+              Card(
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: A2UIRenderer(envelope: result!.raw),
+                ),
+              ),
+            const SizedBox(height: 8),
+            JsonViewer(result!.raw),
+          ],
+        ],
+      ),
+    );
+  }
 }
