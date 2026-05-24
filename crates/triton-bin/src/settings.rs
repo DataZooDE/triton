@@ -43,6 +43,8 @@ pub struct Settings {
     pub manifest_path: Option<std::path::PathBuf>,
     pub chat_webhook_host: IpAddr,
     pub chat_webhook_port: u16,
+    pub telegram_api_base: String,
+    pub courier_timeout: Duration,
 }
 
 impl Settings {
@@ -167,6 +169,21 @@ struct Cli {
     /// Shared chat-channel webhook port. `0` disables the listener.
     #[arg(long, env = "TRITON_CHAT_WEBHOOK_PORT", default_value_t = 8004)]
     chat_webhook_port: u16,
+
+    /// Base URL the Telegram outbound courier POSTs to. Production
+    /// stays at `https://api.telegram.org`; integration tests
+    /// override this to point at an in-repo `FakeTelegramApi`.
+    #[arg(
+        long,
+        env = "TRITON_TELEGRAM_API_BASE",
+        default_value = "https://api.telegram.org"
+    )]
+    telegram_api_base: String,
+
+    /// Per-call timeout for outbound chat couriers
+    /// (sendMessage and friends), in milliseconds.
+    #[arg(long, env = "TRITON_COURIER_TIMEOUT_MS", default_value_t = 10_000)]
+    courier_timeout_ms: u64,
 }
 
 impl From<Cli> for Settings {
@@ -193,6 +210,8 @@ impl From<Cli> for Settings {
             manifest_path: c.manifest_path,
             chat_webhook_host: c.chat_webhook_host,
             chat_webhook_port: c.chat_webhook_port,
+            telegram_api_base: c.telegram_api_base,
+            courier_timeout: Duration::from_millis(c.courier_timeout_ms),
         }
     }
 }

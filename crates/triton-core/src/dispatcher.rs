@@ -195,6 +195,50 @@ impl Dispatcher {
         });
     }
 
+    /// Emit a `phase: post` audit line for the chat-channel
+    /// outbound courier (PR 18). The adapter has already attempted
+    /// to ship the tool result back to the platform (Telegram,
+    /// Discord, ...); call this with `Ok(http_status)` on success
+    /// or `Err(&TritonError)` on failure. Schema construction stays
+    /// in the dispatcher so the courier crate doesn't grow its own
+    /// audit emitter (ADR-6 single pivot).
+    ///
+    /// `tool_name` is whatever tool the original inbound triggered;
+    /// `latency_ms` covers ONLY the post-back HTTP roundtrip, not
+    /// the inbound dispatch (that's the previous `phase: dispatch`
+    /// line).
+    pub fn record_post(
+        &self,
+        tool_name: &str,
+        protocol: &str,
+        principal: &Principal,
+        latency_ms: u64,
+        outcome: Result<u16, &TritonError>,
+    ) {
+        let (result, status) = match outcome {
+            Ok(s) => ("ok".to_string(), s),
+            Err(e) => (format!("error:{}", e.class()), status_for(e)),
+        };
+        self.metrics.record_dispatch(tool_name, protocol, &result);
+        self.metrics.record_audit("post");
+        emit(&AuditRecord {
+            kind: "audit",
+            phase: AuditPhase::Post,
+            when: now_rfc3339(),
+            who: &principal.sub,
+            what: tool_name,
+            env: &self.env,
+            result,
+            protocol,
+            tool: tool_name,
+            subject: &principal.sub,
+            tenant: &principal.tenant,
+            latency_ms,
+            status,
+            trace_id: &principal.trace_id,
+        });
+    }
+
     async fn run(
         &self,
         tool_name: &str,

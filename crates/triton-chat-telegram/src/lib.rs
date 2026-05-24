@@ -49,13 +49,38 @@ pub struct SenderClaims {
     pub tenant: String,
 }
 
+/// Configuration for the outbound courier half. Default base is
+/// `https://api.telegram.org`; tests override it via
+/// `TRITON_TELEGRAM_API_BASE` to point at a local fake.
+#[derive(Debug, Clone)]
+pub struct CourierConfig {
+    pub api_base: String,
+    pub timeout: std::time::Duration,
+}
+
+impl Default for CourierConfig {
+    fn default() -> Self {
+        Self {
+            api_base: "https://api.telegram.org".to_string(),
+            timeout: std::time::Duration::from_secs(10),
+        }
+    }
+}
+
 /// Build artefacts the adapter holds. Constructed once at boot
 /// from the manifest entry; immutable after that.
 pub struct TelegramAdapter {
     name: String,
     secret_token: String,
+    bot_token: String,
     sender_table: HashMap<String, SenderClaims>,
     dispatcher: Arc<Dispatcher>,
+    courier: CourierClient,
+}
+
+struct CourierClient {
+    base: String,
+    http: reqwest::Client,
 }
 
 impl TelegramAdapter {
@@ -68,6 +93,7 @@ impl TelegramAdapter {
         adapter: &Adapter,
         resolver: &dyn SecretResolver,
         dispatcher: Arc<Dispatcher>,
+        courier_config: CourierConfig,
     ) -> Result<Self, BuildError> {
         if adapter.kind != AdapterKind::Telegram {
             return Err(BuildError::WrongKind);
@@ -114,29 +140,32 @@ impl TelegramAdapter {
             serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
 
         // FR-L-6 / NFR-S-5: every credential field MUST resolve at
-        // boot or the binary refuses to start. `outbound.token` and
-        // `correlation_key` aren't functionally consumed yet (PR 17
-        // wires the courier; PR 18 wires HMAC correlation tokens),
-        // but a misconfigured Vault ref in either field would
-        // silently survive boot otherwise — and then surface as a
-        // mid-traffic failure when the dependent PR ships.
-        // Codex caught this gap in PR 16 review.
-        if let Some(field) = adapter.outbound.credentials.get("token") {
-            resolver
+        // boot or the binary refuses to start. `outbound.token` is
+        // consumed by PR 18's courier (the bot's API path token —
+        // see `https://api.telegram.org/bot{token}/sendMessage`).
+        // `correlation_key` isn't functionally consumed yet (PR
+        // 18+: HMAC correlation tokens), but it still resolves at
+        // boot so a bad Vault ref fails closed.
+        let bot_token = match adapter.outbound.credentials.get("token") {
+            Some(field) => resolver
                 .resolve(field)
                 .await
-                .map_err(|e| BuildError::Resolve("outbound.token", e))?;
-        }
+                .map_err(|e| BuildError::Resolve("outbound.token", e))?,
+            None => return Err(BuildError::MissingCredential("outbound.token")),
+        };
         resolver
             .resolve(&adapter.correlation_key)
             .await
             .map_err(|e| BuildError::Resolve("correlation_key", e))?;
 
+        let courier = CourierClient::new(courier_config)?;
         Ok(Self {
             name: name.to_string(),
             secret_token,
+            bot_token,
             sender_table,
             dispatcher,
+            courier,
         })
     }
 
@@ -147,6 +176,39 @@ impl TelegramAdapter {
         Router::new()
             .route(&path, post(handle_webhook))
             .with_state(self)
+    }
+}
+
+impl CourierClient {
+    fn new(cfg: CourierConfig) -> Result<Self, BuildError> {
+        let http = reqwest::Client::builder()
+            .timeout(cfg.timeout)
+            .build()
+            .map_err(|e| BuildError::Unsupported(format!("courier http client: {e}")))?;
+        Ok(Self {
+            base: cfg.api_base.trim_end_matches('/').to_string(),
+            http,
+        })
+    }
+
+    /// POST `<base>/bot{token}/sendMessage` with `{chat_id, text}`.
+    /// Returns the HTTP status on success; on transport/non-2xx
+    /// errors returns a short descriptor string the adapter wraps
+    /// into a `TritonError::Provider` for the audit pivot.
+    async fn send_message(&self, bot_token: &str, chat_id: i64, text: &str) -> Result<u16, String> {
+        let url = format!("{}/bot{}/sendMessage", self.base, bot_token);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&json!({ "chat_id": chat_id, "text": text }))
+            .send()
+            .await
+            .map_err(|e| format!("telegram sendMessage transport: {e}"))?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("telegram sendMessage status {}", status.as_u16()));
+        }
+        Ok(status.as_u16())
     }
 }
 
@@ -178,6 +240,7 @@ struct TelegramUpdate {
 #[derive(Debug, Deserialize)]
 struct TelegramMessage {
     from: TelegramUser,
+    chat: TelegramChat,
     #[serde(default)]
     text: Option<String>,
 }
@@ -185,6 +248,15 @@ struct TelegramMessage {
 #[derive(Debug, Deserialize)]
 struct TelegramUser {
     id: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramChat {
+    /// Telegram `chat.id` is the post-back target. For private
+    /// chats this equals `from.id`; for group chats it's the group
+    /// id (negative integer). Always-i64 because Telegram uses
+    /// negative values for groups.
+    id: i64,
 }
 
 async fn handle_webhook(
@@ -270,12 +342,22 @@ async fn handle_webhook(
     // command parser (e.g. `/echo`, `/stats`) lands in a later PR
     // with the surface mapper, where it gets shared with Discord.
     let args = json!({ "message": text });
-    match adapter
+    let chat_id = message.chat.id;
+    let principal_for_post = principal.clone();
+    let result = adapter
         .dispatcher
         .invoke("echo", args, principal, PROTOCOL)
-        .await
-    {
-        Ok(_) => StatusCode::OK.into_response(),
+        .await;
+    match result {
+        Ok(dispatch) => {
+            // PR 18 bare-text courier: serialise the result as
+            // JSON and post it back. PR 19 (surface mapper) turns
+            // A2UI envelopes into native Telegram messages with
+            // inline keyboards.
+            let text = render_post_text(&dispatch.result);
+            post_back(&adapter, &principal_for_post, chat_id, text).await;
+            StatusCode::OK.into_response()
+        }
         Err(e) => {
             // Dispatcher already audited the failure. Map to a
             // status that won't trigger Telegram retry storms for
@@ -285,6 +367,50 @@ async fn handle_webhook(
             // circuits earn a retryable 5xx.
             tracing::warn!(error = %e, class = %e.class(), "telegram tool dispatch failed");
             telegram_status_for(&e).into_response()
+        }
+    }
+}
+
+fn render_post_text(result: &serde_json::Value) -> String {
+    // Echo's contract is `{ "echo": "..." }`. Detect the common
+    // string-payload shape and unwrap it; anything else falls back
+    // to the JSON-string view. PR 19 will replace this with a real
+    // surface mapper that understands A2UI components.
+    if let Some(obj) = result.as_object()
+        && obj.len() == 1
+        && let Some(s) = obj.values().next().and_then(|v| v.as_str())
+    {
+        return s.to_string();
+    }
+    if let Some(s) = result.as_str() {
+        return s.to_string();
+    }
+    serde_json::to_string(result).unwrap_or_else(|_| "<unrenderable>".to_string())
+}
+
+async fn post_back(adapter: &TelegramAdapter, principal: &Principal, chat_id: i64, text: String) {
+    let start = std::time::Instant::now();
+    let outcome = adapter
+        .courier
+        .send_message(&adapter.bot_token, chat_id, &text)
+        .await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+    match outcome {
+        Ok(status) => {
+            adapter
+                .dispatcher
+                .record_post("echo", PROTOCOL, principal, latency_ms, Ok(status));
+        }
+        Err(e) => {
+            // Courier failures are infra-level (transport, non-2xx
+            // from api.telegram.org). Classify as Provider so the
+            // audit pivot uses the right status mapping; the
+            // dispatcher already audits this as phase=post.
+            let err = TritonError::Provider(e);
+            tracing::warn!(error = %err, "telegram courier failed");
+            adapter
+                .dispatcher
+                .record_post("echo", PROTOCOL, principal, latency_ms, Err(&err));
         }
     }
 }

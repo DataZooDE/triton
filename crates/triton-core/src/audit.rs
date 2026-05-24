@@ -28,6 +28,10 @@ pub enum AuditPhase {
     Rejected,
     /// Outbound dispatch to an upstream agent.
     Upstream,
+    /// Chat-channel outbound post-back (PR 18). The dispatcher's
+    /// `record_post` emits this after the adapter ships the tool
+    /// result back to the platform (Telegram, Discord, ...).
+    Post,
 }
 
 #[derive(Debug, Clone, Serialize)]

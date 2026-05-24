@@ -1814,6 +1814,7 @@ name = "triton-chat-telegram"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "reqwest",
  "serde",
  "serde_json",
  "subtle",

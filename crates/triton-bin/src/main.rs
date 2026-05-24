@@ -18,7 +18,7 @@ use triton_adapters_http::a2a::{A2aState, InMemoryTaskStore};
 use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{McpSessions, McpState};
 use triton_adapters_http::rest::RestState;
-use triton_chat_telegram::TelegramAdapter;
+use triton_chat_telegram::{CourierConfig, TelegramAdapter};
 use triton_core::{Dispatcher, Metrics, RuntimeInfo, ToolRegistry, UpstreamDispatch};
 use triton_identity::{OidcConfig, OidcVerifier};
 use triton_manifest::{AdapterKind, InboundKind};
@@ -264,11 +264,16 @@ async fn main() -> std::io::Result<()> {
             }
             match adapter.kind {
                 AdapterKind::Telegram => {
+                    let courier_config = CourierConfig {
+                        api_base: settings.telegram_api_base.clone(),
+                        timeout: settings.courier_timeout,
+                    };
                     match TelegramAdapter::from_manifest(
                         name,
                         adapter,
                         resolver.as_ref(),
                         dispatcher.clone(),
+                        courier_config,
                     )
                     .await
                     {

@@ -536,3 +536,32 @@ a trap the next developer should not have to step in.
   Discovered in PR 16 when `binary_refuses_boot_when_vault_unreachable`
   passed on the no-consul path but `webhook_authenticates_with_vault_resolved_secret`
   failed because the binary refused to boot for "missing consul".
+
+- **A chat-channel post-back failure MUST NOT fail the inbound
+  ack.** The inbound webhook contract with Telegram is "did you
+  receive the message and decide what to do with it" — that's
+  already true the moment the dispatcher returns. Whether the
+  reply made it back to the user is a separate, independent
+  question, and a failure there ("api.telegram.org returned 500"
+  or "DNS dead") is *not* something the platform should retry the
+  inbound for. If the courier failure bubbled into the inbound
+  status, Telegram would replay the same update for ~24 h and we'd
+  dispatch the same tool again on every retry — double-charged
+  side effects, more audit lines than there were messages. The
+  right shape: dispatcher → 200 OK to the webhook → courier fires
+  → `phase: post` audits the outcome (success OR failure). The
+  inbound ack and the post-back live on separate axes. Codex
+  flagged this in PR 13's concern about retry storms; PR 18
+  locks it in with the `post_failure_audits_provider_error_does_not_fail_inbound_ack`
+  test.
+
+- **The dispatcher stays the single audit pivot even for
+  side-effect-only phases.** When PR 18 added the outbound
+  courier, the temptation was to let the adapter emit its own
+  `phase: post` line — the dispatcher isn't involved in the HTTP
+  POST. Don't. ADR-6's contract is "all audit lines are
+  constructed by the dispatcher" so the schema can never drift
+  between phases. New phase → new dispatcher method
+  (`record_post`), adapter passes outcome + latency + principal,
+  dispatcher does the construction + emit. Cheap; keeps the
+  schema invariant intact.

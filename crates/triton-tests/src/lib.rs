@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+pub mod chat_courier_fixture;
 mod oidc_fixture;
 pub mod upstream_fixture;
 pub use oidc_fixture::TestIssuer;
