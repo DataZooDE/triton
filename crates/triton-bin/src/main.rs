@@ -15,9 +15,11 @@ use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
 use triton_adapters_http::a2a::{A2aState, InMemoryTaskStore};
+use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{McpSessions, McpState};
 use triton_adapters_http::rest::RestState;
 use triton_core::{Dispatcher, RuntimeInfo, ToolRegistry};
+use triton_identity::{OidcConfig, OidcVerifier};
 
 mod settings;
 mod tools;
@@ -73,17 +75,50 @@ async fn main() -> std::io::Result<()> {
     let registry = Arc::new(build_registry());
     let dispatcher = Arc::new(Dispatcher::new(registry, settings.env.clone()));
 
+    // Build the OIDC verifier if the substrate injected an issuer.
+    // When unset we fall back to the cfg-gated dev-token path.
+    let identity = Arc::new(IdentityProvider::new(
+        match (&settings.oidc_issuer, &settings.oidc_audience) {
+            (Some(issuer), Some(aud)) => {
+                tracing::info!(issuer, aud, "OIDC verifier enabled");
+                Some(Arc::new(OidcVerifier::new(OidcConfig::new(
+                    issuer.clone(),
+                    aud.clone(),
+                ))))
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                tracing::error!("TRITON_OIDC_ISSUER and TRITON_OIDC_AUDIENCE must be set together");
+                std::process::exit(2);
+            }
+            (None, None) => {
+                #[cfg(feature = "dev-token")]
+                tracing::warn!(
+                    "no OIDC issuer configured; dev-token fallback in effect (dev builds only)"
+                );
+                #[cfg(not(feature = "dev-token"))]
+                tracing::error!(
+                    "no OIDC issuer configured and dev-token disabled at build time; \
+                     every bearer will be rejected"
+                );
+                None
+            }
+        },
+    ));
+
     let rest_state = RestState {
         runtime: runtime.clone(),
         dispatcher: dispatcher.clone(),
+        identity: identity.clone(),
     };
     let a2a_state = A2aState {
         dispatcher: dispatcher.clone(),
         tasks: InMemoryTaskStore::new(),
+        identity: identity.clone(),
     };
     let mcp_state = McpState {
         dispatcher: dispatcher.clone(),
         sessions: McpSessions::new(),
+        identity: identity.clone(),
     };
 
     let serve_mcp = axum::serve(mcp_listener, triton_adapters_http::mcp::router(mcp_state))

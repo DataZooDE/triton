@@ -31,6 +31,8 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use triton_core::{Dispatcher, TritonError, envelope};
 
+use crate::identity::IdentityProvider;
+
 /// JSON-RPC 2.0 error codes per architecture.md §8.3.
 const CODE_PARSE_ERROR: i32 = -32700;
 const CODE_INVALID_REQUEST: i32 = -32600;
@@ -64,6 +66,7 @@ impl McpSessions {
 pub struct McpState {
     pub dispatcher: Arc<Dispatcher>,
     pub sessions: McpSessions,
+    pub identity: Arc<IdentityProvider>,
 }
 
 pub fn router(state: McpState) -> Router {
@@ -149,7 +152,7 @@ async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes) -> Respon
     // principle be unauthenticated, but the substrate ACL already
     // protects the MCP port (architecture §7) so we keep the same
     // identity check across all methods for symmetry with REST/A2A.
-    let principal = match crate::identity::principal_from_request(&parts) {
+    let principal = match state.identity.verify(&parts).await {
         Ok(p) => p,
         Err(e) => {
             state.dispatcher.record_rejection(

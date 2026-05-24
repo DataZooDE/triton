@@ -11,6 +11,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+mod oidc_fixture;
+pub use oidc_fixture::TestIssuer;
+
 /// Captured failure context from a spawn attempt that didn't reach
 /// `/healthz` (typically because the child exited early on a port
 /// race).

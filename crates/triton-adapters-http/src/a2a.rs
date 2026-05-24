@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use triton_core::{A2uiVersion, Dispatcher, TritonError, envelope};
 
+use crate::identity::IdentityProvider;
+
 /// FR-A-7 task store. In-process memory; restart-clean by
 /// construction (G-8). The echo tool finishes synchronously, so
 /// every recorded task is immediately `Completed` or `Failed`.
@@ -61,6 +63,7 @@ impl InMemoryTaskStore {
 pub struct A2aState {
     pub dispatcher: Arc<Dispatcher>,
     pub tasks: InMemoryTaskStore,
+    pub identity: Arc<IdentityProvider>,
 }
 
 pub fn router(state: A2aState) -> Router {
@@ -117,7 +120,7 @@ async fn message_send(State(state): State<A2aState>, parts: Parts, body: Bytes) 
     // audit, but auth failures take precedence so an attacker
     // probing for body-shape errors doesn't get a 4xx ahead of the
     // credential check.
-    let principal = match crate::identity::principal_from_request(&parts) {
+    let principal = match state.identity.verify(&parts).await {
         Ok(p) => p,
         Err(e) => {
             state.dispatcher.record_rejection(
