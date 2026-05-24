@@ -110,33 +110,68 @@ pub fn try_render_surface(result: &Value) -> Option<Result<RenderedMessage, Rend
 ///    is bounded correctly). The result is then escaped + wrapped
 ///    fresh, so the output stays syntactically valid.
 pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
-    let mut renderable: Vec<(ComponentKind, String)> = Vec::new();
+    // Each renderable component contributes one PreRender; deferred
+    // action components (Button / Selection / Form) bump the counter
+    // and may also contribute a text fragment that names the surface
+    // so the user sees what was offered even when the action surface
+    // itself ships later.
+    let mut chunks: Vec<PreRender> = Vec::new();
     let mut deferred_buttons = 0usize;
     for c in &surface.components {
         match c {
             Component::Text { value } => {
-                renderable.push((ComponentKind::Text, value.clone()));
+                chunks.push(PreRender::text(value));
             }
             Component::Narration { text } => {
-                renderable.push((ComponentKind::Narration, text.clone()));
+                chunks.push(PreRender::narration(text));
             }
             Component::Button { .. } => {
                 deferred_buttons += 1;
             }
+            // Selection / Form: render the prompt or title so the
+            // user sees what's being asked, then count the action
+            // surface as deferred. Full inline-keyboard / numbered-
+            // prompt degradation lands in a later v0.2 PR.
+            Component::Selection {
+                prompt, options, ..
+            } => {
+                let opts: Vec<String> = options.iter().map(|o| html_escape(&o.label)).collect();
+                let body = format!("{}\n{}", html_escape(prompt), opts.join(" | "));
+                chunks.push(PreRender::pre_rendered(body, false));
+                deferred_buttons += 1;
+            }
+            Component::Form { title, fields, .. } => {
+                let names: Vec<String> = fields.iter().map(|f| html_escape(&f.label)).collect();
+                let body = format!("<b>{}</b>\n{}", html_escape(title), names.join(", "));
+                chunks.push(PreRender::pre_rendered(body, true));
+                deferred_buttons += 1;
+            }
+            Component::Dashboard { title, tiles } => {
+                let mut lines = vec![format!("<b>{}</b>", html_escape(title))];
+                for t in tiles {
+                    let trend = t
+                        .trend
+                        .as_deref()
+                        .map(|x| format!(" ({})", html_escape(x)))
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "• {}: {}{}",
+                        html_escape(&t.label),
+                        html_escape(&t.value),
+                        trend,
+                    ));
+                }
+                chunks.push(PreRender::pre_rendered(lines.join("\n"), true));
+            }
         }
     }
-    if renderable.is_empty() {
+    if chunks.is_empty() {
         return Err(RenderError::EmptyAfterRender);
     }
-    let has_html_markers = renderable
-        .iter()
-        .any(|(k, _)| matches!(k, ComponentKind::Narration));
+    let has_html_markers = chunks.iter().any(|p| p.has_html);
 
-    let chunks: Vec<String> = renderable
-        .iter()
-        .map(|(k, raw)| render_one(*k, raw))
-        .collect();
-    let joined = chunks.join("\n\n");
+    let chunk_strings: Vec<String> = chunks.iter().map(|p| p.chunk.clone()).collect();
+    let joined = chunk_strings.join("\n\n");
     if joined.len() <= TELEGRAM_TEXT_MAX_BYTES {
         return Ok(RenderedMessage {
             text: joined,
@@ -152,7 +187,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     let budget = TELEGRAM_TEXT_MAX_BYTES - TRUNCATION_SENTINEL.len();
     let mut accepted: Vec<&str> = Vec::new();
     let mut total = 0usize;
-    for chunk in &chunks {
+    for chunk in &chunk_strings {
         let sep_cost = if accepted.is_empty() { 0 } else { 2 }; // "\n\n"
         if total + sep_cost + chunk.len() > budget {
             break;
@@ -172,17 +207,31 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
         });
     }
 
-    // Even the first component is too large. Truncate its raw
-    // text (before HTML escape/wrap) so the output stays valid.
-    let (kind, raw) = &renderable[0];
-    let wrapper = match kind {
-        ComponentKind::Text => 0,
-        ComponentKind::Narration => "<i></i>".len(),
+    // Even the first chunk is too large. For Text/Narration we
+    // can truncate the raw source with escape-cost accounting and
+    // re-render to a syntactically valid chunk. For everything
+    // else (Selection/Form/Dashboard) HTML structure is too
+    // entangled with the body — fall back to a bare sentinel so
+    // we never ship malformed HTML.
+    let first = &chunks[0];
+    let wrapper = match first.raw_kind {
+        Some(RawKind::Text) => 0,
+        Some(RawKind::Narration) => "<i></i>".len(),
+        None => 0,
     };
     let inner_budget = budget.saturating_sub(wrapper);
-    let trimmed_raw = budget_raw_for_html_escape(raw, inner_budget);
-    let mut out = render_one(*kind, trimmed_raw);
-    out.push_str(TRUNCATION_SENTINEL);
+    let out = match (&first.raw_kind, &first.raw_source) {
+        (Some(kind), Some(raw)) => {
+            let trimmed_raw = budget_raw_for_html_escape(raw, inner_budget);
+            let mut s = match kind {
+                RawKind::Text => html_escape(trimmed_raw),
+                RawKind::Narration => format!("<i>{}</i>", html_escape(trimmed_raw)),
+            };
+            s.push_str(TRUNCATION_SENTINEL);
+            s
+        }
+        _ => TRUNCATION_SENTINEL.trim_start().to_string(),
+    };
     Ok(RenderedMessage {
         text: out,
         parse_mode: if has_html_markers { Some("HTML") } else { None },
@@ -191,17 +240,47 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     })
 }
 
+/// A renderable chunk plus the metadata the truncation logic needs.
+/// `raw_kind` + `raw_source` are only populated for Text/Narration
+/// chunks, where the raw-text fallback path can re-render at a
+/// smaller budget without breaking HTML structure.
+struct PreRender {
+    chunk: String,
+    has_html: bool,
+    raw_kind: Option<RawKind>,
+    raw_source: Option<String>,
+}
+
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum ComponentKind {
+enum RawKind {
     Text,
     Narration,
 }
 
-fn render_one(kind: ComponentKind, raw: &str) -> String {
-    let escaped = html_escape(raw);
-    match kind {
-        ComponentKind::Text => escaped,
-        ComponentKind::Narration => format!("<i>{escaped}</i>"),
+impl PreRender {
+    fn text(raw: &str) -> Self {
+        Self {
+            chunk: html_escape(raw),
+            has_html: false,
+            raw_kind: Some(RawKind::Text),
+            raw_source: Some(raw.to_string()),
+        }
+    }
+    fn narration(raw: &str) -> Self {
+        Self {
+            chunk: format!("<i>{}</i>", html_escape(raw)),
+            has_html: true,
+            raw_kind: Some(RawKind::Narration),
+            raw_source: Some(raw.to_string()),
+        }
+    }
+    fn pre_rendered(chunk: String, has_html: bool) -> Self {
+        Self {
+            chunk,
+            has_html,
+            raw_kind: None,
+            raw_source: None,
+        }
     }
 }
 

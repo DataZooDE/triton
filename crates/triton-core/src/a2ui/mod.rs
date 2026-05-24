@@ -25,10 +25,10 @@ pub struct Surface {
     pub components: Vec<Component>,
 }
 
-/// Subset of the spec's component vocabulary needed for the
-/// integration tests. Adding richer components (selection, form,
-/// dashboard) means appending variants here AND extending both
-/// builders to handle them.
+/// Component vocabulary. Both v0.8 and v0.9 builders must handle
+/// every variant; appending a new variant means touching both
+/// `v08::component_to_json` and `v09::component_to_json` (the
+/// compiler enforces this via the non-exhaustive `match`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Component {
@@ -43,6 +43,65 @@ pub enum Component {
     Narration {
         text: String,
     },
+    /// Pick one option from a list and re-invoke a tool with the
+    /// chosen value bound to `args_key`. This is the "buttons with
+    /// state" rung of the L6′ degradation ladder (FR-D-3): cheaper
+    /// surfaces (Telegram inline keyboards) flatten to numbered
+    /// prompts, richer surfaces (web) render a SegmentedButton.
+    Selection {
+        prompt: String,
+        options: Vec<SelectionOption>,
+        tool: String,
+        args_key: String,
+    },
+    /// Multi-field structured input that submits as one tool call.
+    /// Used by surfaces that can host real forms (web, Adaptive
+    /// Cards); flattens to a sequence of numbered prompts on
+    /// text-only surfaces.
+    Form {
+        title: String,
+        fields: Vec<FormField>,
+        submit_label: String,
+        tool: String,
+    },
+    /// Read-only grid of summary tiles. The rasteriser turns this
+    /// into a PNG for surfaces that can't render tables (Telegram);
+    /// web renders it as native Material cards.
+    Dashboard {
+        title: String,
+        tiles: Vec<DashboardTile>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectionOption {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormField {
+    pub name: String,
+    pub label: String,
+    pub kind: FormFieldKind,
+    #[serde(default)]
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FormFieldKind {
+    String,
+    Integer,
+    Boolean,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardTile {
+    pub label: String,
+    pub value: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trend: Option<String>,
 }
 
 /// A2UI versions Triton speaks (mirrors [`crate::A2uiVersion`] but
