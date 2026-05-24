@@ -327,15 +327,38 @@ async fn main() -> std::io::Result<()> {
         None
     };
 
-    let serve_mcp = axum::serve(mcp_listener, triton_adapters_http::mcp::router(mcp_state))
+    // Opt-in CORS layer for internal browser frontends (e.g. the
+    // Flutter explorer at `apps/explorer/`). Mounted only when the
+    // operator sets TRITON_CORS_ALLOWED_ORIGINS — empty list means
+    // no layer is attached and headers stay identical to v0.1.
+    let cors_layer = triton_adapters_http::cors::build_layer(&settings.cors_allowed_origins);
+    if cors_layer.is_some() {
+        tracing::info!(
+            origins = ?settings.cors_allowed_origins,
+            "CORS layer mounted on REST/MCP/A2A"
+        );
+    }
+    let mcp_router = triton_adapters_http::mcp::router(mcp_state);
+    let a2a_router = triton_adapters_http::a2a::router(a2a_state);
+    let rest_router = triton_adapters_http::rest::router(rest_state);
+    let mcp_router = match &cors_layer {
+        Some(l) => mcp_router.layer(l.clone()),
+        None => mcp_router,
+    };
+    let a2a_router = match &cors_layer {
+        Some(l) => a2a_router.layer(l.clone()),
+        None => a2a_router,
+    };
+    let rest_router = match &cors_layer {
+        Some(l) => rest_router.layer(l.clone()),
+        None => rest_router,
+    };
+    let serve_mcp = axum::serve(mcp_listener, mcp_router)
         .with_graceful_shutdown(shutdown.clone().cancelled_owned());
-    let serve_a2a = axum::serve(a2a_listener, triton_adapters_http::a2a::router(a2a_state))
+    let serve_a2a = axum::serve(a2a_listener, a2a_router)
         .with_graceful_shutdown(shutdown.clone().cancelled_owned());
-    let serve_rest = axum::serve(
-        rest_listener,
-        triton_adapters_http::rest::router(rest_state),
-    )
-    .with_graceful_shutdown(shutdown.clone().cancelled_owned());
+    let serve_rest = axum::serve(rest_listener, rest_router)
+        .with_graceful_shutdown(shutdown.clone().cancelled_owned());
 
     // Optional fourth listener for tailnet-only `/metrics`. Lives
     // outside the public-routed listeners so Fabio cannot leak it

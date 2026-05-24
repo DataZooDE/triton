@@ -45,6 +45,12 @@ pub struct Settings {
     pub chat_webhook_port: u16,
     pub telegram_api_base: String,
     pub courier_timeout: Duration,
+    /// Comma-separated allow-list of origins that may make
+    /// cross-origin requests to the HTTP trio. Empty by default —
+    /// in that case no CORS layer is mounted at all (production
+    /// parity for substrate deployments that don't need a browser
+    /// frontend). Set in nonprod to enable the Flutter explorer.
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl Settings {
@@ -184,6 +190,14 @@ struct Cli {
     /// (sendMessage and friends), in milliseconds.
     #[arg(long, env = "TRITON_COURIER_TIMEOUT_MS", default_value_t = 10_000)]
     courier_timeout_ms: u64,
+
+    /// Comma-separated CORS allow-list (e.g.
+    /// `https://explorer-nonprod.tailnet.ts.net`). Default empty:
+    /// no CORS layer mounted, response headers identical to v0.1.
+    /// Set this to enable browser frontends like the Flutter
+    /// explorer at `apps/explorer/`.
+    #[arg(long, env = "TRITON_CORS_ALLOWED_ORIGINS", default_value = "")]
+    cors_allowed_origins: String,
 }
 
 impl From<Cli> for Settings {
@@ -212,6 +226,9 @@ impl From<Cli> for Settings {
             chat_webhook_port: c.chat_webhook_port,
             telegram_api_base: c.telegram_api_base,
             courier_timeout: Duration::from_millis(c.courier_timeout_ms),
+            cors_allowed_origins: triton_adapters_http::cors::parse_origins(
+                &c.cors_allowed_origins,
+            ),
         }
     }
 }

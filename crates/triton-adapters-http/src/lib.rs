@@ -14,6 +14,7 @@
 //!   backed by an in-memory task store (FR-A-7).
 
 pub mod a2a;
+pub mod cors;
 pub mod identity;
 pub mod mcp;
 pub mod metrics;
