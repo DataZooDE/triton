@@ -27,6 +27,17 @@ impl Tool for Echo {
         "echo"
     }
 
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+                "message": { "type": "string" }
+            },
+            "additionalProperties": false
+        })
+    }
+
     async fn invoke(&self, args: Value, _principal: &ToolPrincipal) -> Result<Value, TritonError> {
         let parsed: EchoArgs = serde_json::from_value(args)
             .map_err(|e| TritonError::Validation(format!("echo args: {e}")))?;

@@ -22,7 +22,27 @@ pub mod tool;
 pub use dispatcher::{Dispatch, Dispatcher, envelope};
 pub use error::TritonError;
 pub use principal::{Principal, ToolPrincipal};
-pub use tool::{Tool, ToolRegistry};
+pub use tool::{Tool, ToolDescriptor, ToolRegistry};
+
+/// A2UI envelope version requested by the caller (FR-A-3). Per ADR-4
+/// the dispatcher and tools never branch on this; only the
+/// envelope-builder layer (PR 10) consumes it. PR 5 just parses
+/// and stores the requested version on the dispatcher response so
+/// PR 10's builder can route to the right module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum A2uiVersion {
+    V08,
+    V09,
+}
+
+impl Default for A2uiVersion {
+    /// Per FR-A-3: `Accept: application/json+a2ui` (no `version`
+    /// parameter) negotiates v0.8.
+    fn default() -> Self {
+        A2uiVersion::V08
+    }
+}
 
 /// Runtime metadata reported by `GET /version` (FR-O-2).
 ///
