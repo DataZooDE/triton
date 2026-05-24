@@ -56,6 +56,19 @@ const HEADER_TIMESTAMP: &str = "X-Signature-Timestamp";
 /// rejecting requests older than ~5 minutes to prevent replay.
 const MAX_TIMESTAMP_SKEW_SECS: u64 = 300;
 
+/// PR 23: how stale a button click can be before we refuse it.
+/// Calibrated from `interaction.message.timestamp` (when the bot
+/// rendered the message), not the click timestamp. Matches
+/// `MAX_TIMESTAMP_SKEW_SECS` so operators see one consistent
+/// number across both checks.
+const CALLBACK_TTL_SECS: u32 = 300;
+
+/// PR 23: small allowance for a platform clock running ahead of
+/// ours. Mirrors the Telegram adapter's value. 60 s covers normal
+/// NTP drift while bounding any clock-skew-extends-TTL attack
+/// (Codex PR 23 concern).
+const CALLBACK_FUTURE_SKEW_SECS: u32 = 60;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SenderClaims {
     pub sub: String,
@@ -285,6 +298,77 @@ async fn handle_message_component(
         return (StatusCode::BAD_REQUEST, "missing custom_id").into_response();
     };
 
+    // PR 23 replay protection. `interaction.message.timestamp` is
+    // when Discord persisted the original message carrying the
+    // button. The Ed25519 signature already authenticated the
+    // inbound, so the timestamp is platform-asserted and trusted.
+    //
+    // FAIL-CLOSED: missing message, missing timestamp, or
+    // unparseable timestamp are all rejected. Codex PR 23 review
+    // caught the opt-in shape; a hostile platform (or future
+    // Discord payload variant we don't yet model) could omit
+    // `message` to bypass the freshness gate otherwise.
+    let ts_iso = interaction
+        .message
+        .as_ref()
+        .and_then(|m| m.timestamp.as_deref());
+    let ts_iso = match ts_iso {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            record_rejection(
+                adapter,
+                &claims.sub,
+                &claims.tenant,
+                TritonError::Auth(
+                    "interaction missing message.timestamp (freshness anchor)".into(),
+                ),
+            );
+            return (StatusCode::UNAUTHORIZED, "missing message.timestamp").into_response();
+        }
+    };
+    let msg_secs = match chrono::DateTime::parse_from_rfc3339(ts_iso) {
+        Ok(dt) => dt.timestamp(),
+        Err(e) => {
+            // Unparseable timestamp from an authenticated source:
+            // fail closed rather than admit a click whose age we
+            // can't verify.
+            record_rejection(
+                adapter,
+                &claims.sub,
+                &claims.tenant,
+                TritonError::Validation(format!("unparseable message.timestamp: {e}")),
+            );
+            return (StatusCode::BAD_REQUEST, "bad message timestamp").into_response();
+        }
+    };
+    let now_secs = chrono::Utc::now().timestamp();
+    if msg_secs > 0 && now_secs - msg_secs > CALLBACK_TTL_SECS as i64 {
+        let age = now_secs - msg_secs;
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Auth(format!(
+                "stale callback: message age {age}s exceeds TTL {CALLBACK_TTL_SECS}s"
+            )),
+        );
+        return (StatusCode::UNAUTHORIZED, "stale callback").into_response();
+    }
+    if msg_secs - now_secs > CALLBACK_FUTURE_SKEW_SECS as i64 {
+        // Future-dated beyond the allowed skew (Codex PR 23
+        // concern). Matches the Telegram adapter's policy.
+        let skew = msg_secs - now_secs;
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Auth(format!(
+                "future-dated callback: message {skew}s ahead of now"
+            )),
+        );
+        return (StatusCode::UNAUTHORIZED, "future-dated callback").into_response();
+    }
+
     let (tool_name, args) = match triton_correlation::decode(token, &adapter.correlation_key) {
         Ok(v) => v,
         Err(e) => {
@@ -465,6 +549,21 @@ struct DiscordInteraction {
     user: Option<DiscordUser>,
     #[serde(default)]
     member: Option<DiscordMember>,
+    /// Component interactions carry the originating message; its
+    /// `timestamp` (ISO 8601) is when the bot rendered the button.
+    /// PR 23 uses this as the freshness anchor for replay
+    /// protection.
+    #[serde(default)]
+    message: Option<DiscordInteractionMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordInteractionMessage {
+    /// ISO 8601 UTC timestamp Discord assigns at message creation.
+    /// We parse just enough to extract Unix seconds — no
+    /// dependency on a full date crate.
+    #[serde(default)]
+    timestamp: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

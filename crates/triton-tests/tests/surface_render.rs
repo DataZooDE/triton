@@ -48,7 +48,15 @@ async fn telegram_render_returns_text_and_parse_mode() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn telegram_render_counts_deferred_buttons() {
+async fn telegram_render_emits_buttons_as_inline_keyboard() {
+    // Contract update: PR 21 added HMAC correlation tokens so
+    // buttons now ship as inline_keyboard, not deferred. The
+    // mapper signs with the route-internal PREVIEW_KEY (zero
+    // bytes) — tokens are NOT replayable against a live adapter
+    // because every manifest entry uses a distinct vault-resolved
+    // key. PR 19's assertion that the button "label MUST NOT
+    // leak" is inverted post-PR 21: the button label DOES appear
+    // in reply_markup.inline_keyboard.
     let proc = TritonProcess::spawn_with(Duration::from_secs(5)).await;
     let body: serde_json::Value = reqwest::Client::new()
         .post(proc.rest_url("/v1/surface/render"))
@@ -76,27 +84,24 @@ async fn telegram_render_counts_deferred_buttons() {
         .await
         .expect("decode JSON");
     assert_eq!(body["rendered"], true);
-    assert_eq!(body["deferred_buttons"], 1);
+    assert_eq!(body["deferred_buttons"], 0);
     let text = body["text"].as_str().expect("text str");
     assert!(text.contains("label"));
-    // Buttons defer — their label MUST NOT leak into the text body
-    // (correlation-token PR will eventually emit them as inline
-    // keyboard buttons; for now they're invisible).
-    assert!(
-        !text.contains("Refresh"),
-        "deferred button label should not appear in text: `{text}`"
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn telegram_render_reports_empty_after_render() {
+async fn telegram_render_synthesises_text_for_button_only_surface() {
+    // Contract update: PR 22 added a "Choose an option:"
+    // placeholder so a button-only Surface still ships its
+    // (now interactive, PR 21) buttons. Used to be
+    // EmptyAfterRender — locking it in here as a regression
+    // guard.
     let proc = TritonProcess::spawn_with(Duration::from_secs(5)).await;
     let body: serde_json::Value = reqwest::Client::new()
         .post(proc.rest_url("/v1/surface/render"))
         .bearer_auth("dev-token")
         .json(&serde_json::json!({
             "adapter": "telegram",
-            // Button-only surface → no usable text → EmptyAfterRender.
             "result": {
                 "surface": {
                     "components": [
@@ -116,8 +121,12 @@ async fn telegram_render_reports_empty_after_render() {
         .json()
         .await
         .expect("decode JSON");
-    assert_eq!(body["rendered"], false);
-    assert_eq!(body["reason"], "empty_after_render");
+    assert_eq!(body["rendered"], true);
+    let text = body["text"].as_str().expect("text");
+    assert!(
+        text.contains("Choose"),
+        "expected button-only placeholder text; got: {text}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

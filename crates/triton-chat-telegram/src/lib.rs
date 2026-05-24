@@ -43,6 +43,25 @@ const HEADER_SECRET: &str = "X-Telegram-Bot-Api-Secret-Token";
 /// configured length nor the presented length is observable from
 /// handler latency (FR-I-8).
 const MAX_SECRET_TOKEN: usize = 256;
+/// PR 23: how stale a `callback_query.message.date` is allowed to
+/// be before we reject the click as a replayed/stale button.
+/// 5 minutes matches Discord's PR 22 timestamp-skew window and
+/// the platform pattern most chat bots adopt for button TTLs.
+const CALLBACK_TTL_SECS: u32 = 300;
+
+/// PR 23: small allowance for a platform clock running ahead of
+/// ours. Anything beyond this is treated as an attempt to extend
+/// the TTL by pre-dating the button. 60 s covers normal NTP drift
+/// while still bounding any clock-skew attack to one minute of
+/// forward staleness (Codex PR 23 concern).
+const CALLBACK_FUTURE_SKEW_SECS: u32 = 60;
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
 
 /// Per-Telegram-user claims resolved from the `sender_table`. The
 /// table is a JSON object keyed by Telegram user id (as a string)
@@ -385,6 +404,14 @@ struct TelegramUpdate {
 struct TelegramMessage {
     from: TelegramUser,
     chat: TelegramChat,
+    /// Unix seconds when the message was sent. For
+    /// `callback_query.message`, this is the time the bot SENT
+    /// the original message carrying the button — i.e. the
+    /// rendering moment. PR 23 uses this as the freshness anchor
+    /// for replay protection (architecture.md §8.7's
+    /// out-of-scope-in-PR-21 lift).
+    #[serde(default)]
+    date: u64,
     #[serde(default)]
     text: Option<String>,
 }
@@ -619,6 +646,57 @@ async fn handle_callback_query(
         );
         return (StatusCode::BAD_REQUEST, "callback_query missing data").into_response();
     };
+
+    // PR 23 replay protection (architecture.md §8.7 lift).
+    //
+    // FAIL-CLOSED: Telegram's `callback_query.message.date` is the
+    // Unix second the BOT sent the original message carrying the
+    // button. The inbound webhook is secret_token-authenticated,
+    // so `message.date` is platform-asserted and trusted. But
+    // ABSENCE of a date is NOT a green light: a hostile platform
+    // (or future Telegram payload shape we don't yet model) could
+    // omit `message`/`date` to bypass the freshness gate. Codex
+    // PR 23 review flagged this — we now reject every callback
+    // whose freshness anchor is missing or zero.
+    let message_date = cq.message.as_ref().map(|m| m.date).unwrap_or(0);
+    if message_date == 0 {
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Auth("callback_query missing message.date (freshness anchor)".into()),
+        );
+        return (StatusCode::UNAUTHORIZED, "missing message.date").into_response();
+    }
+    let now = unix_now_secs();
+    let ttl = CALLBACK_TTL_SECS as u64;
+    if message_date < now.saturating_sub(ttl) {
+        let age = now.saturating_sub(message_date);
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Auth(format!(
+                "stale callback: message age {age}s exceeds TTL {CALLBACK_TTL_SECS}s"
+            )),
+        );
+        return (StatusCode::UNAUTHORIZED, "stale callback").into_response();
+    }
+    if message_date > now.saturating_add(CALLBACK_FUTURE_SKEW_SECS as u64) {
+        // Future-dated beyond the small allowed skew: reject so a
+        // platform that pre-stamps a button far in the future
+        // can't extend its TTL window (Codex PR 23 concern).
+        let skew = message_date.saturating_sub(now);
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Auth(format!(
+                "future-dated callback: message {skew}s ahead of now"
+            )),
+        );
+        return (StatusCode::UNAUTHORIZED, "future-dated callback").into_response();
+    }
 
     let (tool_name, args) = match triton_correlation::decode(token, &adapter.correlation_key) {
         Ok(v) => v,

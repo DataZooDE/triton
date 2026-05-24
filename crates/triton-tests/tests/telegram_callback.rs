@@ -80,6 +80,10 @@ fn telegram_update(text: &str) -> Value {
 }
 
 fn callback_query(token: &str) -> Value {
+    callback_query_at(token, now_secs())
+}
+
+fn callback_query_at(token: &str, message_date: u64) -> Value {
     json!({
         "update_id": 200,
         "callback_query": {
@@ -89,12 +93,19 @@ fn callback_query(token: &str) -> Value {
                 "message_id": 1,
                 "from": { "id": 0, "is_bot": true, "first_name": "Bot" },
                 "chat": { "id": 42, "type": "private" },
-                "date": 1_700_000_000,
+                "date": message_date,
             },
             "data": token,
             "chat_instance": "abc"
         }
     })
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -226,6 +237,132 @@ async fn forged_callback_token_is_rejected_with_phase_rejected() {
         "forged callback must not trigger a post-back; captured: {:?}",
         telegram.captured()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_callback_rejected_with_phase_rejected() {
+    // PR 23 replay protection: a click on a message older than
+    // CALLBACK_TTL_SECS (5 min) is treated as auth-class rejected.
+    // We sign a VALID token under the right key, then attach it
+    // to a callback_query whose `message.date` is 1 hour in the
+    // past. The adapter must refuse before reaching the dispatcher.
+    let vault = start_kv_vault().await;
+    let telegram = FakeTelegramApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
+
+    let valid_token = triton_correlation::encode(
+        "narrate",
+        &json!({ "s": "alice" }),
+        CORRELATION_KEY.as_bytes(),
+    )
+    .expect("token fits");
+
+    let stale_date = now_secs() - 60 * 60; // 1 hour ago
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+        .json(&callback_query_at(&valid_token, stale_date))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 401, "stale callback MUST 401");
+
+    // Audit fires with phase: rejected and result: error:auth —
+    // distinct from BadSignature only in the message text.
+    let start = Instant::now();
+    let rejected = loop {
+        let found = proc
+            .stdout_snapshot()
+            .iter()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| {
+                v["kind"] == "audit"
+                    && v["phase"] == "rejected"
+                    && v["result"] == "error:auth"
+                    && v["protocol"] == "messenger:telegram"
+            });
+        if let Some(v) = found {
+            break v;
+        }
+        if start.elapsed() > Duration::from_secs(2) {
+            panic!(
+                "no rejected audit within 2s\nstdout:\n{}",
+                proc.stdout_snapshot().join("\n")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let _ = rejected; // surface kept for debugging if needed
+
+    // No post-back triggered.
+    assert!(
+        telegram.captured().is_empty(),
+        "stale callback must not trigger a post-back; captured: {:?}",
+        telegram.captured()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn callback_without_message_date_fails_closed() {
+    // Codex PR 23 review blocker: absence of the freshness anchor
+    // must not bypass replay protection. A callback_query without
+    // an embedded `message.date` gets 401 + a rejected audit.
+    let vault = start_kv_vault().await;
+    let telegram = FakeTelegramApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
+
+    let valid_token = triton_correlation::encode(
+        "narrate",
+        &json!({ "s": "alice" }),
+        CORRELATION_KEY.as_bytes(),
+    )
+    .expect("token fits");
+    // No `message` field on the callback_query at all.
+    let payload = json!({
+        "update_id": 300,
+        "callback_query": {
+            "id": "cb-no-msg",
+            "from": { "id": 42, "is_bot": false, "first_name": "Alice" },
+            "data": valid_token,
+            "chat_instance": "abc"
+        }
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+        .json(&payload)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 401);
+    let start = Instant::now();
+    loop {
+        let found = proc
+            .stdout_snapshot()
+            .iter()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .find(|v| {
+                v["kind"] == "audit"
+                    && v["phase"] == "rejected"
+                    && v["result"] == "error:auth"
+                    && v["protocol"] == "messenger:telegram"
+            });
+        if found.is_some() {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(2) {
+            panic!(
+                "no rejected audit within 2s\nstdout:\n{}",
+                proc.stdout_snapshot().join("\n")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(telegram.captured().is_empty());
 }
 
 fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
