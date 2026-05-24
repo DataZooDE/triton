@@ -18,6 +18,7 @@ dev-token = []
 triton-core = { path = "../triton-core" }
 triton-identity = { path = "../triton-identity" }
 triton-manifest = { path = "../triton-manifest" }
+triton-chat-telegram = { path = "../triton-chat-telegram" }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -68,7 +68,72 @@ pub fn router(state: RestState) -> Router {
         .route("/v1/tools/{name}", post(invoke_tool))
         .route("/v1/audit", get(audit_tail))
         .route("/v1/manifest", get(manifest_view))
+        .route("/v1/surface/render", post(surface_render))
         .with_state(state)
+}
+
+#[derive(Debug, Deserialize)]
+struct SurfaceRenderRequest {
+    /// Which chat-channel adapter to ask. Only `telegram` is wired
+    /// today; future adapters get their own arm in the match below.
+    adapter: String,
+    /// Raw A2UI `result` envelope `{ "surface": {...} }` as a tool
+    /// would return — the same shape `extract_surface` parses.
+    result: serde_json::Value,
+}
+
+/// `POST /v1/surface/render` — runs the supplied A2UI Surface
+/// through a chat-channel surface mapper and returns what the
+/// adapter would post. Lets the explorer's A2UI diff page show
+/// the L6′ degradation alongside the v0.8 / v0.9 envelopes
+/// without the operator actually wiring Telegram for tests.
+async fn surface_render(
+    State(state): State<RestState>,
+    parts: Parts,
+    Json(req): Json<SurfaceRenderRequest>,
+) -> Response {
+    if let Err(e) = state.identity.verify(&parts).await {
+        state.dispatcher.record_rejection(
+            "v1/surface/render",
+            "rest",
+            "-",
+            "-",
+            &uuid::Uuid::new_v4().to_string(),
+            &e,
+        );
+        return error_response(&e, None);
+    }
+    match req.adapter.as_str() {
+        "telegram" => match triton_chat_telegram::surface_mapper::try_render_surface(&req.result) {
+            None => error_response(
+                &TritonError::Validation(
+                    "result is not an A2UI surface (missing `surface` field)".into(),
+                ),
+                None,
+            ),
+            Some(Err(_)) => Json(json!({
+                "adapter": "telegram",
+                "rendered": false,
+                "reason": "empty_after_render",
+            }))
+            .into_response(),
+            Some(Ok(msg)) => Json(json!({
+                "adapter": "telegram",
+                "rendered": true,
+                "text": msg.text,
+                "parse_mode": msg.parse_mode,
+                "deferred_buttons": msg.deferred_buttons,
+                "truncated": msg.truncated,
+            }))
+            .into_response(),
+        },
+        other => error_response(
+            &TritonError::Validation(format!(
+                "unknown adapter `{other}`: only `telegram` is wired today"
+            )),
+            None,
+        ),
+    }
 }
 
 /// `GET /v1/manifest` — returns the loaded `adapter.yaml` as JSON,

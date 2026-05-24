@@ -21,6 +21,21 @@ class RestClient {
     return Options(headers: headers);
   }
 
+  /// `POST /v1/surface/render` — runs an A2UI Surface through the
+  /// named chat-channel surface mapper and returns what that
+  /// adapter would post. Only `telegram` wired today.
+  Future<Map<String, dynamic>> renderSurface({
+    required String adapter,
+    required Map<String, dynamic> result,
+  }) async {
+    final r = await _dio.post<Map<String, dynamic>>(
+      '$baseUrl/v1/surface/render',
+      data: {'adapter': adapter, 'result': result},
+      options: _opts().copyWith(responseType: ResponseType.json),
+    );
+    return r.data!;
+  }
+
   /// `GET /v1/manifest` — current adapter.yaml as JSON, with
   /// credentials redacted by the server. Returns
   /// `{loaded: false}` when no manifest is configured.
