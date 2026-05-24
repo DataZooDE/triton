@@ -1,0 +1,32 @@
+version: "0.2"
+
+adapters:
+  discord:
+    kind: discord
+    inbound:
+      kind: webhook
+      signature: ed25519
+      public_key: vault://kv/data/triton-test/discord#public_key
+    outbound:
+      kind: rest_api
+      token: vault://kv/data/triton-test/discord#bot_token
+    identity:
+      kind: sender_table
+      table: vault://kv/data/triton-test/discord#senders
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: components_v2
+      selections: components_v2
+      forms: components_v2
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 50
+      burst: 100
+    correlation_key: vault://kv/data/triton-test/discord#correlation_key
+
+tools:
+  echo:
+    surface_components: []
+  narrate:
+    surface_components: [text, narration, buttons]

@@ -739,3 +739,41 @@ a trap the next developer should not have to step in.
   `forged_callback_token_is_rejected_with_phase_rejected` and the
   always-from-sender principal construction in
   `handle_callback_query`.
+
+- **Discord's synchronous interaction-response model collapses
+  outbound into inbound.** Unlike Telegram (webhook → ack → POST
+  back to api.telegram.org for the reply), Discord's webhook
+  expects the channel-message body inline in the HTTP response:
+  `{type: 4, data: {content, components}}`. The audit shape stays
+  the same — `phase: dispatch` for the tool invocation, `phase:
+  post` for the response body we returned — but `record_post`
+  fires synchronously with `status_label: "posted"` once the body
+  is built (no separate API call to wait on). Future-note for the
+  next adapter: check the platform's reply semantics before
+  copying Telegram's outbound courier pattern. Discord, Slack
+  slash commands, and Discord modal-submits all use the
+  inline-response model; Telegram/Signal/WhatsApp use the
+  callback-API model.
+
+- **Ed25519 signature verification needs a timestamp-skew guard
+  alongside the constant-time signature check.** Discord docs say
+  every interaction carries `X-Signature-Timestamp`; verifying
+  the signature alone admits replays of stale requests captured
+  by a network attacker. PR 22 adds a 5-minute skew window
+  (`MAX_TIMESTAMP_SKEW_SECS = 300`), the same number Discord's
+  own webhook docs recommend. The skew computation must use
+  `saturating_sub` both directions so a clock-drifted future
+  timestamp doesn't underflow into "fine" silently.
+
+- **A canonical `manifest-valid.yaml` fixture means every newly
+  wired adapter MUST get realistic test data in that fixture's
+  KV table.** PR 22's Discord wiring broke
+  `binary_boots_with_valid_manifest` because the fixture's
+  `public_key: "discord-public-key"` had been a free-form string
+  placeholder ever since PR 16 — when only Telegram actually
+  parsed its credentials, Discord's stayed unread. Lesson: when
+  shipping a new adapter, audit the canonical-fixture KV data
+  against the adapter's parse rules and update placeholder
+  values that would now fail. The RFC 8032 Test 1 Ed25519
+  public key is a useful canonical value here because it's
+  traceable to a public spec.

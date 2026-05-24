@@ -319,6 +319,29 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                 }
+                AdapterKind::Discord => {
+                    match triton_chat_discord::DiscordAdapter::from_manifest(
+                        name,
+                        adapter,
+                        resolver.as_ref(),
+                        dispatcher.clone(),
+                    )
+                    .await
+                    {
+                        Ok(built) => {
+                            tracing::info!(adapter = %name, "discord interactions adapter wired");
+                            let r = Arc::new(built).router();
+                            chat_router = Some(match chat_router.take() {
+                                Some(acc) => acc.merge(r),
+                                None => r,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!(adapter = %name, error = %e, "discord adapter build failed");
+                            std::process::exit(2);
+                        }
+                    }
+                }
                 _ => {
                     tracing::warn!(
                         adapter = %name,
