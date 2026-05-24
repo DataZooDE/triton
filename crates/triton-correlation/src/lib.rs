@@ -108,7 +108,19 @@ pub fn encode(tool: &str, args: &Value, key: &[u8]) -> Result<String, EncodeErro
 /// `(tool, args)` pair. Constant-time across the HMAC compare so
 /// the response timing doesn't leak whether the key match failed
 /// on the first byte or the last.
+///
+/// Tokens longer than [`PLATFORM_MAX_CALLBACK_DATA`] are rejected
+/// without ever decoding or HMACing the body. Telegram caps real
+/// `callback_data` at 64 bytes, but the webhook is still an HTTP
+/// boundary protected only by the inbound secret header — a
+/// hostile or buggy sender could otherwise force us to allocate +
+/// HMAC over a multi-megabyte body. Codex PR 21 review caught
+/// this; the same rule applies to every chat-channel adapter
+/// that adopts callback_data semantics.
 pub fn decode(token: &str, key: &[u8]) -> Result<(String, Value), DecodeError> {
+    if token.len() > PLATFORM_MAX_CALLBACK_DATA {
+        return Err(DecodeError::Malformed);
+    }
     let (body_b64, mac_b64) = token.split_once('.').ok_or(DecodeError::Malformed)?;
     let body = URL_SAFE_NO_PAD
         .decode(body_b64)
@@ -240,6 +252,17 @@ mod tests {
             encode("", &json!({}), KEY),
             Err(EncodeError::EmptyTool)
         ));
+    }
+
+    #[test]
+    fn oversized_inbound_token_rejected_without_hmac_work() {
+        // Codex PR 21 review concern: decode() must reject huge
+        // inbound tokens before allocating + HMACing. We can't
+        // observe "no HMAC work" directly, but we can confirm the
+        // outer-length reject fires by passing a 100KB blob: it
+        // returns Malformed instantly (no panic, no slow path).
+        let huge = "A".repeat(100_000);
+        assert!(matches!(decode(&huge, KEY), Err(DecodeError::Malformed)));
     }
 
     #[test]

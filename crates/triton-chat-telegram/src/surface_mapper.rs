@@ -43,6 +43,13 @@ pub const TELEGRAM_TEXT_MAX_BYTES: usize = 4096;
 /// adapter artefact, not the tool's output.
 const TRUNCATION_SENTINEL: &str = "\n\n[truncated — content exceeded Telegram's 4096-byte limit]";
 
+/// Stand-in body for a Surface that has buttons but no Text /
+/// Narration. Telegram's `sendMessage` requires non-empty text
+/// even when `reply_markup` is set; without this synthetic line
+/// the mapper would have to drop signed buttons (the worst of
+/// both worlds — Codex PR 21 review caught this).
+const BUTTON_ONLY_PLACEHOLDER: &str = "Choose an option:";
+
 /// Rendered Telegram body. `parse_mode` is set when the rendering
 /// uses HTML markers (narration as italics); plain-text-only
 /// renders leave it `None` so we don't gratuitously parse.
@@ -190,8 +197,21 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
             }
         }
     }
-    if chunks.is_empty() {
+    // Codex PR 21 review concern: a button-only Surface (no Text
+    // or Narration) used to fail EmptyAfterRender, which dropped
+    // the valid signed buttons. Telegram's `sendMessage` requires
+    // non-empty `text` even with `reply_markup`, so we synthesise
+    // a stable placeholder ("Choose an option:") when buttons
+    // exist but no text chunks do. The buttons still ship; the
+    // user still sees a meaningful message.
+    if chunks.is_empty() && keyboard_rows.is_empty() {
         return Err(RenderError::EmptyAfterRender);
+    }
+    if chunks.is_empty() {
+        chunks.push(PreRender::pre_rendered(
+            BUTTON_ONLY_PLACEHOLDER.into(),
+            false,
+        ));
     }
     let has_html_markers = chunks.iter().any(|p| p.has_html);
     let reply_markup = if keyboard_rows.is_empty() {
@@ -491,10 +511,12 @@ mod tests {
     }
 
     #[test]
-    fn button_only_surface_is_a_render_error() {
-        // Same reasoning: a Surface that's all-Button has no
-        // renderable text under PR 19's passthrough mapping, so
-        // the mapper refuses rather than ship empty text.
+    fn button_only_surface_synthesises_placeholder_text() {
+        // Codex PR 21 review concern: a Surface with valid buttons
+        // but no Text/Narration used to fail EmptyAfterRender. PR
+        // 21 fixes this by synthesising a stable placeholder body
+        // so Telegram's non-empty-text requirement is satisfied
+        // and the signed buttons still ship.
         let s = Surface {
             components: vec![Component::Button {
                 label: "Click".into(),
@@ -502,10 +524,10 @@ mod tests {
                 args: json!({}),
             }],
         };
-        assert!(matches!(
-            render(&s, TEST_KEY),
-            Err(RenderError::EmptyAfterRender)
-        ));
+        let r = render(&s, TEST_KEY).expect("renders");
+        assert_eq!(r.text, BUTTON_ONLY_PLACEHOLDER);
+        let markup = r.reply_markup.expect("inline_keyboard set");
+        assert_eq!(markup["inline_keyboard"][0][0]["text"], "Click");
     }
 
     #[test]
