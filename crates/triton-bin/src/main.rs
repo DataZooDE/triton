@@ -444,6 +444,8 @@ fn build_registry() -> ToolRegistry {
     #[cfg(feature = "dev-token")]
     registry.register(Arc::new(tools::Delay));
     registry.register(Arc::new(tools::Narrate));
+    #[cfg(feature = "dev-token")]
+    registry.register(Arc::new(tools::EmptySurface));
     registry
 }
 

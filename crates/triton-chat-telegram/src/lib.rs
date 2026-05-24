@@ -485,21 +485,56 @@ async fn handle_webhook(
         .await;
     match result {
         Ok(dispatch) => {
-            let rendered = render_dispatch_result(&dispatch.result);
-            if rendered.deferred_buttons > 0 {
-                // PR 19 doesn't render buttons (need HMAC
-                // correlation tokens in the next PR). Emit a
-                // tracing line — counted, but not silent — so the
-                // operator sees how often the case fires until the
-                // courier can carry it through.
-                tracing::warn!(
-                    tool = tool_name,
-                    deferred_buttons = rendered.deferred_buttons,
-                    "telegram surface mapper: button components deferred until correlation-token PR",
-                );
+            match render_dispatch_result(&dispatch.result) {
+                Ok(rendered) => {
+                    if rendered.deferred_buttons > 0 {
+                        // PR 19 doesn't render buttons (need HMAC
+                        // correlation tokens in the next PR).
+                        // Logged — counted, not silent — so the
+                        // operator sees the gap until couriers can
+                        // carry buttons through.
+                        tracing::warn!(
+                            tool = tool_name,
+                            deferred_buttons = rendered.deferred_buttons,
+                            "telegram surface mapper: button components deferred until correlation-token PR",
+                        );
+                    }
+                    if rendered.truncated {
+                        // Codex PR 19 blocker 2 follow-up: log
+                        // every truncation event so operators can
+                        // tune tool outputs before users complain.
+                        tracing::warn!(
+                            tool = tool_name,
+                            cap_bytes = surface_mapper::TELEGRAM_TEXT_MAX_BYTES,
+                            "telegram surface mapper: rendered text exceeded cap; truncated",
+                        );
+                    }
+                    post_back(&adapter, &principal_for_post, tool_name, chat_id, rendered).await;
+                    StatusCode::OK.into_response()
+                }
+                Err(surface_mapper::RenderError::EmptyAfterRender) => {
+                    // Codex PR 19 blocker 1: empty / button-only
+                    // surface used to ship `text: ""` and let
+                    // Telegram 400. Now we refuse at the mapper
+                    // edge and audit the courier as `dropped` so
+                    // the trace is visible to the substrate audit
+                    // collector — no wasted API call, no retry.
+                    tracing::warn!(
+                        tool = tool_name,
+                        "telegram surface mapper: empty surface (no renderable components); skipping post-back",
+                    );
+                    let provider =
+                        TritonError::Provider("telegram surface mapper: empty surface".into());
+                    adapter.dispatcher.record_post(
+                        tool_name,
+                        PROTOCOL,
+                        &principal_for_post,
+                        0,
+                        Err((&provider, 0, "dropped")),
+                    );
+                    StatusCode::OK.into_response()
+                }
             }
-            post_back(&adapter, &principal_for_post, tool_name, chat_id, rendered).await;
-            StatusCode::OK.into_response()
         }
         Err(e) => {
             // Dispatcher already audited the failure. Map to a
@@ -515,19 +550,34 @@ async fn handle_webhook(
 }
 
 fn route_command(text: &str) -> (&'static str, Value) {
-    if let Some(rest) = text.strip_prefix('/')
-        && let Some((tool, subject)) = rest.split_once(' ')
-        && tool == "narrate"
-    {
-        // Add more tool routes here as new tools ship. Unknown
-        // commands fall through to echo so the user sees their raw
-        // text and knows the command wasn't recognised.
-        return ("narrate", json!({ "subject": subject }));
+    if let Some(rest) = text.strip_prefix('/') {
+        // Split on the first space; if there's no space the whole
+        // remainder is the command, with empty args. PR 19's
+        // original `split_once.is_some()` made `/narrate` (no
+        // space) silently fall through to echo — Codex flagged
+        // that as surprising. Now `/narrate` with no args routes
+        // to narrate with an empty subject; the tool decides what
+        // to do with it (echoes back "Hello, .").
+        let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
+        match tool {
+            "narrate" => return ("narrate", json!({ "subject": subject })),
+            // Dev-only tool used by the PR 20 integration test for
+            // the empty-Surface fallback (production builds reject
+            // the `empty_surface` tool name at the registry).
+            "empty" => return ("empty_surface", json!({})),
+            _ => {
+                // Unknown commands fall through to echo so the
+                // user sees their raw text and knows the command
+                // wasn't recognised.
+            }
+        }
     }
     ("echo", json!({ "message": text }))
 }
 
-fn render_dispatch_result(result: &serde_json::Value) -> RenderedMessage {
+fn render_dispatch_result(
+    result: &serde_json::Value,
+) -> Result<RenderedMessage, surface_mapper::RenderError> {
     // Tools that emit an A2UI surface route through the mapper.
     // Everything else falls back to PR 18's bare-text path so the
     // echo-shaped `{ "echo": "..." }` reply still works without
@@ -545,11 +595,15 @@ fn render_dispatch_result(result: &serde_json::Value) -> RenderedMessage {
     } else {
         serde_json::to_string(result).unwrap_or_else(|_| "<unrenderable>".to_string())
     };
-    RenderedMessage {
+    if text.is_empty() {
+        return Err(surface_mapper::RenderError::EmptyAfterRender);
+    }
+    Ok(RenderedMessage {
         text,
         parse_mode: None,
         deferred_buttons: 0,
-    }
+        truncated: false,
+    })
 }
 
 async fn post_back(
