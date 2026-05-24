@@ -13,6 +13,9 @@
 //! the rendered surface) lands in PR 14 alongside the L6′ surface
 //! mapper.
 
+mod surface_mapper;
+pub use surface_mapper::RenderedMessage;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -23,7 +26,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use triton_core::{Dispatcher, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
@@ -208,17 +211,16 @@ impl CourierClient {
     /// layer (rate limit, bad chat_id, blocked-by-user, ...).
     /// Treating any 2xx as success would silently lose those
     /// failures. We parse the envelope and require `ok: true`.
-    async fn send_message(
+    async fn send_message_body(
         &self,
         bot_token: &str,
-        chat_id: i64,
-        text: &str,
+        body: &Value,
     ) -> Result<SendOutcome, CourierError> {
         let url = format!("{}/bot{}/sendMessage", self.base, bot_token);
         let resp = self
             .http
             .post(&url)
-            .json(&json!({ "chat_id": chat_id, "text": text }))
+            .json(body)
             .send()
             .await
             .map_err(|e| CourierError::Transport(redact_url(&e.to_string(), bot_token)))?;
@@ -467,25 +469,36 @@ async fn handle_webhook(
         trace_id: uuid::Uuid::new_v4().to_string(),
     };
 
-    // PR 13 hardcoded routing: every text message goes to `echo`
-    // with the body as the `message` arg. The real Telegram
-    // command parser (e.g. `/echo`, `/stats`) lands in a later PR
-    // with the surface mapper, where it gets shared with Discord.
-    let args = json!({ "message": text });
+    // PR 19 minimal command parser: `/<tool> <rest>` routes to
+    // `tool` with `{ subject: rest }` (matches `narrate`'s arg
+    // shape); anything else falls through to `echo` with the
+    // whole text as `{ message: text }`. The real shared command
+    // parser ships when the second adapter (Discord) needs it; for
+    // now this lets PR 19 exercise both tool shapes through the
+    // surface mapper.
+    let (tool_name, args) = route_command(text);
     let chat_id = message.chat.id;
     let principal_for_post = principal.clone();
     let result = adapter
         .dispatcher
-        .invoke("echo", args, principal, PROTOCOL)
+        .invoke(tool_name, args, principal, PROTOCOL)
         .await;
     match result {
         Ok(dispatch) => {
-            // PR 18 bare-text courier: serialise the result as
-            // JSON and post it back. PR 19 (surface mapper) turns
-            // A2UI envelopes into native Telegram messages with
-            // inline keyboards.
-            let text = render_post_text(&dispatch.result);
-            post_back(&adapter, &principal_for_post, chat_id, text).await;
+            let rendered = render_dispatch_result(&dispatch.result);
+            if rendered.deferred_buttons > 0 {
+                // PR 19 doesn't render buttons (need HMAC
+                // correlation tokens in the next PR). Emit a
+                // tracing line — counted, but not silent — so the
+                // operator sees how often the case fires until the
+                // courier can carry it through.
+                tracing::warn!(
+                    tool = tool_name,
+                    deferred_buttons = rendered.deferred_buttons,
+                    "telegram surface mapper: button components deferred until correlation-token PR",
+                );
+            }
+            post_back(&adapter, &principal_for_post, tool_name, chat_id, rendered).await;
             StatusCode::OK.into_response()
         }
         Err(e) => {
@@ -501,34 +514,62 @@ async fn handle_webhook(
     }
 }
 
-fn render_post_text(result: &serde_json::Value) -> String {
-    // Echo's contract is `{ "echo": "..." }`. Detect the common
-    // string-payload shape and unwrap it; anything else falls back
-    // to the JSON-string view. PR 19 will replace this with a real
-    // surface mapper that understands A2UI components.
-    if let Some(obj) = result.as_object()
+fn route_command(text: &str) -> (&'static str, Value) {
+    if let Some(rest) = text.strip_prefix('/')
+        && let Some((tool, subject)) = rest.split_once(' ')
+        && tool == "narrate"
+    {
+        // Add more tool routes here as new tools ship. Unknown
+        // commands fall through to echo so the user sees their raw
+        // text and knows the command wasn't recognised.
+        return ("narrate", json!({ "subject": subject }));
+    }
+    ("echo", json!({ "message": text }))
+}
+
+fn render_dispatch_result(result: &serde_json::Value) -> RenderedMessage {
+    // Tools that emit an A2UI surface route through the mapper.
+    // Everything else falls back to PR 18's bare-text path so the
+    // echo-shaped `{ "echo": "..." }` reply still works without
+    // forcing every tool into the A2UI envelope.
+    if let Some(r) = surface_mapper::try_render_surface(result) {
+        return r;
+    }
+    let text = if let Some(obj) = result.as_object()
         && obj.len() == 1
         && let Some(s) = obj.values().next().and_then(|v| v.as_str())
     {
-        return s.to_string();
+        s.to_string()
+    } else if let Some(s) = result.as_str() {
+        s.to_string()
+    } else {
+        serde_json::to_string(result).unwrap_or_else(|_| "<unrenderable>".to_string())
+    };
+    RenderedMessage {
+        text,
+        parse_mode: None,
+        deferred_buttons: 0,
     }
-    if let Some(s) = result.as_str() {
-        return s.to_string();
-    }
-    serde_json::to_string(result).unwrap_or_else(|_| "<unrenderable>".to_string())
 }
 
-async fn post_back(adapter: &TelegramAdapter, principal: &Principal, chat_id: i64, text: String) {
+async fn post_back(
+    adapter: &TelegramAdapter,
+    principal: &Principal,
+    tool_name: &str,
+    chat_id: i64,
+    msg: RenderedMessage,
+) {
+    let body = surface_mapper::build_send_message_body(chat_id, &msg);
     let start = std::time::Instant::now();
     let outcome = adapter
         .courier
-        .send_message(&adapter.bot_token, chat_id, &text)
+        .send_message_body(&adapter.bot_token, &body)
         .await;
     let latency_ms = start.elapsed().as_millis() as u64;
     match outcome {
         Ok(send) => {
             adapter.dispatcher.record_post(
-                "echo",
+                tool_name,
                 PROTOCOL,
                 principal,
                 latency_ms,
@@ -548,7 +589,7 @@ async fn post_back(adapter: &TelegramAdapter, principal: &Principal, chat_id: i6
             );
             let provider = TritonError::Provider(msg);
             adapter.dispatcher.record_post(
-                "echo",
+                tool_name,
                 PROTOCOL,
                 principal,
                 latency_ms,
