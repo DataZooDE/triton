@@ -10,11 +10,21 @@ publish = false
 name = "triton"
 path = "src/main.rs"
 
+[features]
+# `--no-default-features` builds a production binary that rejects
+# any non-OIDC bearer at the identity boundary (ADR-10, FR-I-5).
+# Default-on for dev.
+default = ["dev-token"]
+dev-token = ["triton-adapters-http/dev-token"]
+
 [dependencies]
 triton-core = { path = "../triton-core" }
-triton-adapters-http = { path = "../triton-adapters-http" }
+triton-adapters-http = { path = "../triton-adapters-http", default-features = false }
+async-trait = "0.1"
 axum = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

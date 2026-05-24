@@ -6,6 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Accept a hardcoded `Bearer dev-token` and construct a synthetic
+# Principal. Default-on for dev builds; production builds turn this
+# off (--no-default-features) so the OIDC path (PR 8) is the only
+# accepted identity — ADR-10, FR-I-5.
+default = ["dev-token"]
+dev-token = []
+
 [dependencies]
 triton-core = { path = "../triton-core" }
 axum = { workspace = true }
@@ -13,3 +21,4 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+uuid = { version = "1", features = ["v4"] }

@@ -1,12 +1,28 @@
 //! `triton-core` — types and primitives shared across adapters,
 //! dispatcher, identity, and audit.
 //!
-//! Walking scope so far: [`RuntimeInfo`], the JSON-able struct
-//! that backs `GET /version` (FR-O-2). Subsequent PRs add
-//! `Principal`, `ToolRegistry`, audit emitter, error variants, and
-//! the upstream-router traits.
+//! Scope so far:
+//! * `RuntimeInfo` — the JSON-able struct backing `GET /version`
+//!   (FR-O-2). [PR 3]
+//! * `Principal`, `TritonError`, `Tool`, `ToolRegistry`, `Dispatcher`,
+//!   `audit::*` — the dispatcher and audit story per ADR-6, FR-D-1..5,
+//!   FR-AU-1..4. [PR 4]
+//!
+//! Subsequent PRs add the upstream-router trait (PR 9), the A2UI
+//! builder seam (PR 10), and v0.2 surface-mapper types.
 
 use serde::Serialize;
+
+pub mod audit;
+pub mod dispatcher;
+pub mod error;
+pub mod principal;
+pub mod tool;
+
+pub use dispatcher::{Dispatch, Dispatcher, envelope};
+pub use error::TritonError;
+pub use principal::{Principal, ToolPrincipal};
+pub use tool::{Tool, ToolRegistry};
 
 /// Runtime metadata reported by `GET /version` (FR-O-2).
 ///

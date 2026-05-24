@@ -3,8 +3,9 @@
 //! Scope so far:
 //! * PR 1 — workspace skeleton, REST `/healthz`.
 //! * PR 2 — three listeners + graceful SIGTERM/SIGINT drain.
-//! * PR 3 — 12-factor `Settings` parsed from CLI + env, `Arc<Settings>`
-//!   shared into the REST router, `GET /version` (FR-O-2, NFR-O-1).
+//! * PR 3 — 12-factor `Settings` + `GET /version`.
+//! * PR 4 — dispatcher + audit emitter + in-process `echo` tool,
+//!   driven through `POST /v1/tools/:name`.
 
 use std::io::Write;
 use std::net::SocketAddr;
@@ -13,12 +14,13 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
-use triton_core::RuntimeInfo;
+use triton_adapters_http::rest::RestState;
+use triton_core::{Dispatcher, RuntimeInfo, ToolRegistry};
 
 mod settings;
+mod tools;
 use settings::Settings;
 
-/// Compile-time SHA stamped by `build.rs` (see `architecture.md` §7).
 const BINARY_SHA: &str = env!("TRITON_BUILD_SHA");
 
 #[tokio::main]
@@ -26,11 +28,6 @@ async fn main() -> std::io::Result<()> {
     init_tracing();
     let settings = Arc::new(Settings::from_args());
 
-    // Install signal handlers BEFORE any await on serve, so a
-    // SIGTERM that arrives during startup is captured rather than
-    // taking the default termination action. `signal(...)` registers
-    // the handler at construction; `.recv().await` happens later in
-    // the spawned task.
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
@@ -38,8 +35,6 @@ async fn main() -> std::io::Result<()> {
     let a2a_addr: SocketAddr = (settings.host, settings.a2a_port).into();
     let rest_addr: SocketAddr = (settings.host, settings.rest_port).into();
 
-    // Bind all three listeners up front. Any failure is fatal:
-    // process exits non-zero, Nomad reschedules (FR-L-1, ADR-1).
     let mcp_listener = TcpListener::bind(mcp_addr).await?;
     let a2a_listener = TcpListener::bind(a2a_addr).await?;
     let rest_listener = TcpListener::bind(rest_addr).await?;
@@ -53,9 +48,6 @@ async fn main() -> std::io::Result<()> {
         "triton: listeners bound",
     );
 
-    // Single shutdown token; cloned into each serve and into the
-    // signal-handler task. Cancelling it triggers
-    // `with_graceful_shutdown` on every serve simultaneously.
     let shutdown = CancellationToken::new();
     let signal_task = {
         let token = shutdown.clone();
@@ -76,22 +68,24 @@ async fn main() -> std::io::Result<()> {
         package_version: env!("CARGO_PKG_VERSION").to_string(),
     });
 
+    let registry = Arc::new(build_registry());
+    let dispatcher = Arc::new(Dispatcher::new(registry, settings.env.clone()));
+
+    let rest_state = RestState {
+        runtime: runtime.clone(),
+        dispatcher: dispatcher.clone(),
+    };
+
     let serve_mcp = axum::serve(mcp_listener, triton_adapters_http::mcp::router())
         .with_graceful_shutdown(shutdown.clone().cancelled_owned());
     let serve_a2a = axum::serve(a2a_listener, triton_adapters_http::a2a::router())
         .with_graceful_shutdown(shutdown.clone().cancelled_owned());
     let serve_rest = axum::serve(
         rest_listener,
-        triton_adapters_http::rest::router(runtime.clone()),
+        triton_adapters_http::rest::router(rest_state),
     )
     .with_graceful_shutdown(shutdown.clone().cancelled_owned());
 
-    // `tokio::join!` (not `try_join!`) so a failure in one serve
-    // does not drop the siblings before they have a chance to drain.
-    // The whole join is bounded by `drain_deadline` — FR-L-2
-    // explicitly caps in-flight requests at a per-request deadline
-    // so a stuck connection cannot keep the alloc alive past
-    // Nomad's stop window.
     let drain = async {
         let (a, b, c) = tokio::join!(serve_mcp, serve_a2a, serve_rest);
         a.and(b).and(c)
@@ -108,17 +102,19 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
-    // Make sure the signal task is reaped even if it never fired
-    // (e.g. drain was triggered by a serve failure).
     shutdown.cancel();
     let _ = signal_task.await;
 
-    // FR-L-2: flush stdout before exit so the substrate audit
-    // collector sees every line we emitted during drain.
     let _ = std::io::stdout().flush();
 
     tracing::info!("triton: exit");
     serve_result
+}
+
+fn build_registry() -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(tools::Echo));
+    registry
 }
 
 fn init_tracing() {
