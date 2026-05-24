@@ -191,7 +191,58 @@ impl Dispatcher {
             tenant,
             latency_ms: 0,
             status,
+            status_label: None,
             trace_id,
+        });
+    }
+
+    /// Emit a `phase: post` audit line for the chat-channel
+    /// outbound courier (PR 18). The adapter has already attempted
+    /// to ship the tool result back to the platform (Telegram,
+    /// Discord, ...); call this with `Ok(http_status)` on success
+    /// or `Err(&TritonError)` on failure. Schema construction stays
+    /// in the dispatcher so the courier crate doesn't grow its own
+    /// audit emitter (ADR-6 single pivot).
+    ///
+    /// `tool_name` is whatever tool the original inbound triggered;
+    /// `latency_ms` covers ONLY the post-back HTTP roundtrip, not
+    /// the inbound dispatch (that's the previous `phase: dispatch`
+    /// line).
+    pub fn record_post(
+        &self,
+        tool_name: &str,
+        protocol: &str,
+        principal: &Principal,
+        latency_ms: u64,
+        outcome: Result<(u16, &'static str), (&TritonError, u16, &'static str)>,
+    ) {
+        // FR-AU-1 v0.2: chat post audit MUST carry a `status_label`
+        // from the closed set `{posted, retry, dropped}`. We keep
+        // `status` as the underlying HTTP status (`u16`, 0 for
+        // transport-level failures) for diagnosis, and add a new
+        // `status_label` field for the spec's closed-set discriminator.
+        let (result, status, status_label) = match outcome {
+            Ok((s, label)) => ("ok".to_string(), s, Some(label)),
+            Err((e, s, label)) => (format!("error:{}", e.class()), s, Some(label)),
+        };
+        self.metrics.record_dispatch(tool_name, protocol, &result);
+        self.metrics.record_audit("post");
+        emit(&AuditRecord {
+            kind: "audit",
+            phase: AuditPhase::Post,
+            when: now_rfc3339(),
+            who: &principal.sub,
+            what: tool_name,
+            env: &self.env,
+            result,
+            protocol,
+            tool: tool_name,
+            subject: &principal.sub,
+            tenant: &principal.tenant,
+            latency_ms,
+            status,
+            status_label,
+            trace_id: &principal.trace_id,
         });
     }
 
@@ -259,6 +310,7 @@ impl Dispatcher {
             tenant: &principal.tenant,
             latency_ms,
             status: status_for(error),
+            status_label: None,
             trace_id: &principal.trace_id,
         });
         // Reconstruct a parallel error so we can both audit and return.
@@ -298,6 +350,7 @@ impl Dispatcher {
             tenant: &principal.tenant,
             latency_ms,
             status,
+            status_label: None,
             trace_id: &principal.trace_id,
         });
     }
