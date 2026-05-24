@@ -411,3 +411,34 @@ production deployment can avoid by knowing about it.
   Chat). Putting the projection rule on the tool would break the
   cross-channel parity property (M-MAP-1). Source: messenger
   paper §6; ADR-12.
+
+---
+
+## 7. Production-implementation gotchas
+
+Items discovered while building the production Rust port; each is
+a trap the next developer should not have to step in.
+
+- **`cargo test -p triton-tests --test <name>` does not necessarily
+  rebuild `target/debug/triton`.** The integration-test crate doesn't
+  declare `triton-bin` as a Rust dependency (it discovers the binary
+  at runtime via path lookup), so cargo's dirty-tracking can leave a
+  stale binary in place when only `triton-core` or `triton-bin`
+  source changed. Symptom: a red test hits `404` (or worse, an old
+  bug appears to come back). Mitigation: run `cargo build` (or
+  `cargo test --workspace`) before iterating on a single integration
+  test. (A `build.rs` in `triton-tests` that runs
+  `cargo build --bin triton` recursively hits a target-lock deadlock
+  inside cargo — not worth doing.) Discovered in PR 4.
+
+- **Integration-test harness MUST prefer `target/debug/triton` over
+  `target/release/triton`.** `cargo test` rebuilds the debug binary;
+  the release binary is whatever was last produced by
+  `cargo build --release` (often weeks/months out of date from a
+  manual smoke test). A harness that picks release first will run
+  silently stale code while the developer thinks they're testing the
+  latest changes — the resulting failure modes look like cosmic-ray
+  bugs ("but the binary clearly has X!"). Fix in
+  `crates/triton-tests/src/lib.rs::triton_binary_path` is to swap the
+  order: try debug first, fall back to release. Discovered in PR 4
+  after ~45 minutes of confused debugging.

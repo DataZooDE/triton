@@ -283,9 +283,20 @@ where
     thread::Builder::new()
         .name(name)
         .spawn(move || {
-            let reader = BufReader::new(stream);
-            for line in reader.lines().map_while(Result::ok) {
-                sink.lock().unwrap().push(line);
+            let mut reader = BufReader::new(stream);
+            // Manual `read_line` loop (rather than `lines().map_while`)
+            // so a transient read error doesn't silently kill the
+            // collector — we keep going on errors, only exit on EOF.
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => return, // EOF
+                    Ok(_) => {
+                        let trimmed = line.trim_end_matches('\n').to_string();
+                        sink.lock().unwrap().push(trimmed);
+                    }
+                    Err(_) => return,
+                }
             }
         })
         .expect("spawn line collector")
@@ -319,19 +330,28 @@ async fn tcp_connect_ok(addr: SocketAddr) -> bool {
     .is_some()
 }
 
+/// Locate the `triton` binary built by cargo. Prefers `CARGO_BIN_EXE_triton`
+/// when set (the canonical cargo path), then falls back to walking up to
+/// the workspace root.
+///
+/// **Order matters.** `cargo test` rebuilds the **debug** binary; the
+/// release binary is whatever was last produced by `cargo build --release`
+/// (often months out of date). Prefer debug first so the harness never
+/// silently runs stale code. Discovered while debugging PR 4 — see
+/// `doc/realizations.md` §7.
 fn triton_binary_path() -> PathBuf {
     if let Some(p) = std::env::var_os("CARGO_BIN_EXE_triton") {
         return PathBuf::from(p);
     }
     let mut here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     while here.parent().is_some() {
-        let candidate_release = here.join("target/release/triton");
         let candidate_debug = here.join("target/debug/triton");
-        if candidate_release.exists() {
-            return candidate_release;
-        }
+        let candidate_release = here.join("target/release/triton");
         if candidate_debug.exists() {
             return candidate_debug;
+        }
+        if candidate_release.exists() {
+            return candidate_release;
         }
         here.pop();
     }
