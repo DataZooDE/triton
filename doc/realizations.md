@@ -516,4 +516,23 @@ a trap the next developer should not have to step in.
   adapter, continue. PR 14 will resolve the Vault ref and lift the
   carve-out. Discovered in PR 13 — the failing test was the existing
   `binary_boots_with_valid_manifest`, which I had to keep green
-  while the new wiring was added.
+  while the new wiring was added. **Status: lifted in PR 16** —
+  `BuildError::VaultUnsupported` was removed when the resolver
+  landed; any unresolved Vault ref now exits the binary non-zero,
+  closing Codex's "fail-closed" concern.
+
+- **When a piece of substrate config gets a second consumer,
+  partial-wiring rules need re-examining.** PR 9 wired Vault for
+  the upstream router's OIDC swap and treated
+  `TRITON_VAULT_URL` + `_TOKEN` as inseparable from
+  `TRITON_CONSUL_URL` — all three or none. PR 16 added a second
+  consumer (the secret resolver) that needs only Vault. Without
+  loosening the rule, every chat-only deploy would have had to set
+  a `TRITON_CONSUL_URL` it never uses. Specifically: keep
+  `consul without vault` and `vault_url without vault_token`
+  fatal; allow `vault_url + vault_token` alone (resolver-only
+  mode, no upstream router). Document the matrix in a comment
+  next to the match so the next consumer doesn't reset it.
+  Discovered in PR 16 when `binary_refuses_boot_when_vault_unreachable`
+  passed on the no-consul path but `webhook_authenticates_with_vault_resolved_secret`
+  failed because the binary refused to boot for "missing consul".

@@ -78,42 +78,93 @@ fn parse_host_port(host_port: &str) -> (String, u16) {
     (h.to_string(), p.parse().expect("port"))
 }
 
-/// Fake Vault speaking `/v1/identity/oidc/token/<role>` for the
-/// `agent-oidc-swap` role. Returns the configured opaque token
-/// regardless of the inbound Vault token (we don't model auth in
-/// the fake — just the wire shape).
+/// Fake Vault speaking either the OIDC swap endpoint
+/// (`/v1/identity/oidc/token/<role>`, used by the PR 9 upstream
+/// router) or the KV v2 read endpoint (`GET /v1/<path>`, used by
+/// the PR 16 secret resolver). CLAUDE.md §1 admits "tiny in-repo
+/// HTTP fakes that speak the actual wire protocol" as not-mocks.
 pub struct FakeVault {
     addr: SocketAddr,
 }
 
 impl FakeVault {
+    /// OIDC-swap-only fake. Returns `token` on every
+    /// `/v1/identity/oidc/token/{role}` request (auth not modelled).
     pub async fn start_minting(token: &'static str) -> Self {
+        Self::start(VaultConfig {
+            oidc_token: Some(token.to_string()),
+            kv_v2: Vec::new(),
+            expected_token: None,
+        })
+        .await
+    }
+
+    /// KV-v2-only fake. Serves the listed `(path, fields)` pairs at
+    /// `GET /v1/<path>` and requires the right `X-Vault-Token`
+    /// header on every request so the resolver's auth wiring is
+    /// exercised. `path` must include the KV v2 `data/` segment
+    /// (e.g. `kv/data/apps/dz/triton/test/telegram`) because the
+    /// manifest's `vault://<path>#<field>` refs include it verbatim.
+    pub async fn start_kv_v2(expected_token: &str, entries: &[(&str, &[(&str, &str)])]) -> Self {
+        let kv_v2 = entries
+            .iter()
+            .map(|(path, fields)| {
+                let map = fields
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<Vec<_>>();
+                (path.to_string(), map)
+            })
+            .collect();
+        Self::start(VaultConfig {
+            oidc_token: None,
+            kv_v2,
+            expected_token: Some(expected_token.to_string()),
+        })
+        .await
+    }
+
+    async fn start(cfg: VaultConfig) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
         let addr = listener.local_addr().unwrap();
+        let state = Arc::new(cfg);
 
-        let token = token.to_string();
-        let router = Router::new().route(
-            "/v1/identity/oidc/token/{role}",
-            get(move |_: HeaderMap, Path(_role): Path<String>| {
-                let token = token.clone();
-                async move {
-                    Json(json!({
-                        "request_id": "00000000-0000-0000-0000-000000000000",
-                        "lease_id": "",
-                        "renewable": false,
-                        "lease_duration": 0,
-                        "data": {
-                            "client_id": "agents",
-                            "token": token,
-                            "ttl": 300,
-                        },
-                        "wrap_info": null,
-                        "warnings": null,
-                        "auth": null,
-                    }))
-                }
-            }),
-        );
+        let mut router: Router = Router::new();
+        if state.oidc_token.is_some() {
+            let oidc_state = state.clone();
+            router = router.route(
+                "/v1/identity/oidc/token/{role}",
+                get(move |_: HeaderMap, Path(_role): Path<String>| {
+                    let token = oidc_state.oidc_token.clone().unwrap();
+                    async move {
+                        Json(json!({
+                            "request_id": "00000000-0000-0000-0000-000000000000",
+                            "lease_id": "",
+                            "renewable": false,
+                            "lease_duration": 0,
+                            "data": {
+                                "client_id": "agents",
+                                "token": token,
+                                "ttl": 300,
+                            },
+                            "wrap_info": null,
+                            "warnings": null,
+                            "auth": null,
+                        }))
+                    }
+                }),
+            );
+        }
+        if !state.kv_v2.is_empty() {
+            let kv_state = state.clone();
+            router = router.route(
+                "/v1/{*path}",
+                get(move |headers: HeaderMap, Path(path): Path<String>| {
+                    let kv_state = kv_state.clone();
+                    async move { kv_v2_handler(kv_state, headers, path).await }
+                }),
+            );
+        }
 
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
@@ -124,6 +175,54 @@ impl FakeVault {
     pub fn url(&self) -> String {
         format!("http://{}", self.addr)
     }
+}
+
+struct VaultConfig {
+    oidc_token: Option<String>,
+    kv_v2: Vec<(String, Vec<(String, String)>)>,
+    expected_token: Option<String>,
+}
+
+async fn kv_v2_handler(
+    state: Arc<VaultConfig>,
+    headers: HeaderMap,
+    requested_path: String,
+) -> axum::response::Response {
+    if let Some(expected) = &state.expected_token {
+        let presented = headers
+            .get("x-vault-token")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if presented != expected {
+            return (StatusCode::FORBIDDEN, "wrong vault token").into_response();
+        }
+    }
+    let Some((_, fields)) = state.kv_v2.iter().find(|(p, _)| p == &requested_path) else {
+        return (StatusCode::NOT_FOUND, "no such secret").into_response();
+    };
+    let mut data = serde_json::Map::new();
+    for (k, v) in fields {
+        data.insert(k.clone(), Value::String(v.clone()));
+    }
+    Json(json!({
+        "request_id": "00000000-0000-0000-0000-000000000000",
+        "lease_id": "",
+        "renewable": false,
+        "lease_duration": 0,
+        "data": {
+            "data": Value::Object(data),
+            "metadata": {
+                "created_time": "2026-05-24T00:00:00Z",
+                "destroyed": false,
+                "version": 1,
+            }
+        },
+        "wrap_info": null,
+        "warnings": null,
+        "auth": null,
+        "mount_type": "kv",
+    }))
+    .into_response()
 }
 
 /// Fake upstream agent. Several profiles:

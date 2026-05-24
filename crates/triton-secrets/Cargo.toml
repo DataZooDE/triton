@@ -1,5 +1,5 @@
 [package]
-name = "triton-chat-telegram"
+name = "triton-secrets"
 version = "0.0.1"
 edition.workspace = true
 rust-version.workspace = true
@@ -7,14 +7,11 @@ license.workspace = true
 publish = false
 
 [dependencies]
-triton-core = { path = "../triton-core" }
 triton-manifest = { path = "../triton-manifest" }
-triton-secrets = { path = "../triton-secrets" }
-axum = { workspace = true }
+async-trait = "0.1"
+reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-subtle = "2"
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-uuid = { version = "1", features = ["v4"] }
