@@ -609,3 +609,27 @@ a trap the next developer should not have to step in.
   failures + `error_code == 429` + `error_code >= 500` +
   explicit `retry_after`, `dropped` for the rest. Cemented in
   PR 18 from Codex's nit.
+
+- **HTML parse_mode means every user-controlled string must be
+  HTML-escaped, full stop.** Telegram's `sendMessage` with
+  `parse_mode: "HTML"` will 400 the whole request on any stray
+  `<`, `>`, or `&` — and worse, a tool that emitted something
+  like `<a href=...>` would inject markup the operator never
+  authored. The surface mapper escapes EVERY text fragment
+  (Text *and* Narration's interior) before wrapping with `<i>`.
+  Order matters: `&` first, then `<` and `>`, or you'd
+  double-escape entities you just produced. Locked in by
+  `html_special_chars_in_tool_output_are_escaped`. The same
+  rule applies to Discord's Markdown parse_mode (PR shipping
+  Discord must do the equivalent escape; copy this approach).
+
+- **Surface mapper components that can't ship yet must be
+  audibly deferred, not silently dropped.** Button components
+  need HMAC correlation tokens (Telegram's `callback_data` is
+  ≤64 bytes; arbitrary `(tool, args)` won't fit). PR 19 doesn't
+  ship them, but it counts them and emits a `tracing::warn` line
+  with `deferred_buttons = N` per dispatch so the operator sees
+  how often the gap matters in practice. The test
+  `unsupported_components_are_logged_not_silently_dropped`
+  asserts the warning text. Same pattern for every later
+  component (selection, form, dashboard) until its mapping ships.
