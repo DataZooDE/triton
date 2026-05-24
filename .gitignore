@@ -23,3 +23,12 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 .claude/
+
+# Flutter explorer (apps/explorer/) build artifacts
+apps/explorer/.dart_tool/
+apps/explorer/.flutter-plugins
+apps/explorer/.flutter-plugins-dependencies
+apps/explorer/build/
+apps/explorer/.idea/
+apps/explorer/*.iml
+apps/explorer/pubspec.lock
