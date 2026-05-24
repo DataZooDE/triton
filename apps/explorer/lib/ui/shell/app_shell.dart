@@ -4,6 +4,7 @@ import '../features/a2ui_diff/a2ui_diff_page.dart';
 import '../features/adapters/adapters_page.dart';
 import '../features/audit/audit_page.dart';
 import '../features/dashboard/dashboard_page.dart';
+import '../features/manifest/manifest_page.dart';
 import '../features/playground/playground_page.dart';
 import '../features/settings/settings_page.dart';
 
@@ -20,7 +21,15 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-enum _Pane { dashboard, playground, adapters, a2uiDiff, audit, settings }
+enum _Pane {
+  dashboard,
+  playground,
+  adapters,
+  a2uiDiff,
+  manifest,
+  audit,
+  settings,
+}
 
 class _AppShellState extends State<AppShell> {
   _Pane _pane = _Pane.dashboard;
@@ -32,6 +41,8 @@ class _AppShellState extends State<AppShell> {
     _NavItem(_Pane.adapters, Icons.hub_outlined, Icons.hub, 'Adapters'),
     _NavItem(_Pane.a2uiDiff, Icons.compare_outlined, Icons.compare,
         'A2UI diff'),
+    _NavItem(_Pane.manifest, Icons.description_outlined, Icons.description,
+        'Manifest'),
     _NavItem(_Pane.audit, Icons.list_alt_outlined, Icons.list_alt, 'Audit'),
     _NavItem(_Pane.settings, Icons.settings_outlined, Icons.settings,
         'Settings'),
@@ -47,6 +58,7 @@ class _AppShellState extends State<AppShell> {
         PlaygroundPage(),
         AdaptersPage(),
         A2uiDiffPage(),
+        ManifestPage(),
         AuditPage(),
         SettingsPage(),
       ],

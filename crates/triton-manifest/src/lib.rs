@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize, Serializer};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,7 +29,7 @@ pub enum Env {
 }
 
 /// Root manifest. Loaded from disk at boot, never mutated at runtime.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Manifest {
     pub version: String,
     pub adapters: BTreeMap<String, Adapter>,
@@ -37,7 +37,7 @@ pub struct Manifest {
     pub tools: BTreeMap<String, ToolDecl>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Adapter {
     pub kind: AdapterKind,
     pub inbound: Inbound,
@@ -49,7 +49,7 @@ pub struct Adapter {
     pub correlation_key: SecretField,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Inbound {
     pub kind: InboundKind,
     pub signature: SignatureScheme,
@@ -63,27 +63,27 @@ pub struct Inbound {
     pub credentials: BTreeMap<String, SecretField>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Outbound {
     pub kind: OutboundKind,
     #[serde(flatten)]
     pub credentials: BTreeMap<String, SecretField>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Identity {
     pub kind: IdentityKind,
     #[serde(flatten)]
     pub credentials: BTreeMap<String, SecretField>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RateLimit {
     pub messages_per_sec: u32,
     pub burst: u32,
 }
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ToolDecl {
     #[serde(default)]
     pub surface_components: Vec<ComponentKind>,
@@ -91,7 +91,7 @@ pub struct ToolDecl {
 
 // ---------- closed sets ----------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AdapterKind {
@@ -103,7 +103,7 @@ pub enum AdapterKind {
     GoogleChat,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum InboundKind {
@@ -112,7 +112,7 @@ pub enum InboundKind {
     LongPoll,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum OutboundKind {
@@ -121,7 +121,7 @@ pub enum OutboundKind {
     BotConnector,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum SignatureScheme {
@@ -132,7 +132,7 @@ pub enum SignatureScheme {
     GoogleOidcJwt,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum IdentityKind {
@@ -146,7 +146,7 @@ pub enum IdentityKind {
 /// `surface_components`. Every chat-channel adapter's `degrade`
 /// table MUST carry a rule for each category any tool uses
 /// (M-COVERAGE-1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum ComponentKind {
@@ -176,7 +176,7 @@ impl std::fmt::Display for ComponentKind {
 
 /// How a `ComponentKind` is rendered on a given chat platform.
 /// Closed set per architecture §8.7.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum DegradeRule {
@@ -203,6 +203,25 @@ pub enum SecretField {
         field: String,
     },
     Literal(String),
+}
+
+impl Serialize for SecretField {
+    /// Redacting JSON form for the operator-visible `/v1/manifest`
+    /// endpoint. Vault refs are reproduced verbatim — the path is
+    /// not secret, only the resolved value is. Literal values are
+    /// masked so a curious operator with /v1/manifest access never
+    /// sees the in-band credential (NFR-S-5 spirit even though dev
+    /// mode admits literals).
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            SecretField::Vault { path, field } => {
+                s.serialize_str(&format!("vault://{path}#{field}"))
+            }
+            SecretField::Literal(v) => {
+                s.serialize_str(&format!("<literal:{} chars>", v.chars().count()))
+            }
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for SecretField {

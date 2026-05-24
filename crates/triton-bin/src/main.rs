@@ -226,11 +226,13 @@ async fn main() -> std::io::Result<()> {
         },
     ));
 
+    let manifest_arc = manifest.as_ref().map(|m| Arc::new(m.clone()));
     let rest_state = RestState {
         runtime: runtime.clone(),
         discovery: discovery.clone(),
         dispatcher: dispatcher.clone(),
         identity: identity.clone(),
+        manifest: manifest_arc,
     };
     let a2a_state = A2aState {
         dispatcher: dispatcher.clone(),
