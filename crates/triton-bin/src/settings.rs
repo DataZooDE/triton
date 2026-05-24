@@ -29,6 +29,8 @@ pub struct Settings {
     /// `nomad job run` time by the substrate Packer step
     /// (architecture.md §7). `None` if not set (e.g. local dev).
     pub image_sha: Option<String>,
+    pub oidc_issuer: Option<String>,
+    pub oidc_audience: Option<String>,
 }
 
 impl Settings {
@@ -76,6 +78,19 @@ struct Cli {
     /// when unset.
     #[arg(long, env = "TRITON_IMAGE_SHA")]
     image_sha: Option<String>,
+
+    /// Substrate OIDC issuer URL. When set, every inbound bearer
+    /// is verified against this issuer's JWKS (FR-I-1). When unset,
+    /// the dev-token fallback is the only accepted identity (and
+    /// only if the binary was built with `--features dev-token`).
+    #[arg(long, env = "TRITON_OIDC_ISSUER")]
+    oidc_issuer: Option<String>,
+
+    /// Required `aud` claim. The substrate issues per-env audiences
+    /// (e.g. `agents-nonprod`, `agents-prod`). Tokens carrying any
+    /// other audience are rejected.
+    #[arg(long, env = "TRITON_OIDC_AUDIENCE")]
+    oidc_audience: Option<String>,
 }
 
 impl From<Cli> for Settings {
@@ -88,6 +103,8 @@ impl From<Cli> for Settings {
             drain_deadline: Duration::from_secs(c.drain_deadline_secs),
             env: c.env,
             image_sha: c.image_sha,
+            oidc_issuer: c.oidc_issuer,
+            oidc_audience: c.oidc_audience,
         }
     }
 }

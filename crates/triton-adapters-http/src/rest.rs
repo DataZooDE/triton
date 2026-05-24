@@ -21,6 +21,8 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 use triton_core::{A2uiVersion, Dispatcher, RuntimeInfo, TritonError, envelope};
 
+use crate::identity::IdentityProvider;
+
 /// Shared state owned by the binary, cloned into every handler via
 /// axum `State`. `Arc` everywhere so handler signatures stay cheap
 /// and the realization "wrap settings in Arc from the start" holds
@@ -29,6 +31,7 @@ use triton_core::{A2uiVersion, Dispatcher, RuntimeInfo, TritonError, envelope};
 pub struct RestState {
     pub runtime: Arc<RuntimeInfo>,
     pub dispatcher: Arc<Dispatcher>,
+    pub identity: Arc<IdentityProvider>,
 }
 
 pub fn router(state: RestState) -> Router {
@@ -55,7 +58,7 @@ async fn version(State(state): State<RestState>) -> Json<RuntimeInfo> {
 async fn list_tools(State(state): State<RestState>, parts: Parts) -> Response {
     // Auth check first; even the listing leaks tool inventory which
     // could be useful to an attacker on a multi-tenant gateway.
-    if let Err(e) = crate::identity::principal_from_request(&parts) {
+    if let Err(e) = state.identity.verify(&parts).await {
         state.dispatcher.record_rejection(
             "v1/tools",
             "rest",
@@ -98,7 +101,7 @@ async fn invoke_tool(
     // one in the audit line (it'd be misleading to omit). The
     // dispatcher generates its own when a Principal is built; this
     // path is only used when there's no Principal yet.
-    let principal = match crate::identity::principal_from_request(&parts) {
+    let principal = match state.identity.verify(&parts).await {
         Ok(p) => p,
         Err(e) => {
             state.dispatcher.record_rejection(

@@ -1,34 +1,58 @@
-//! Identity boundary for the HTTP trio. PR 4 ships the dev-token
-//! path only (ADR-10, FR-I-5); PR 8 adds the OIDC verifier and turns
-//! the dev-token path into a compile-time-gated fallback. Production
-//! builds (`--no-default-features`) reject any non-OIDC bearer at
-//! compile time.
+//! Identity boundary for the HTTP trio. Holds the optional
+//! [`OidcVerifier`] (FR-I-1..3) and the cfg-gated dev-token fallback
+//! (ADR-10, FR-I-5). Production builds (`--no-default-features`)
+//! reject any non-OIDC bearer at compile time.
+//!
+//! Verification policy:
+//!   * If an OIDC verifier is configured, it is the **only** accepted
+//!     identity — even a build with `dev-token` compiled in MUST
+//!     reject the dev token when OIDC is live, so an accidental
+//!     env-var omission doesn't open a backdoor.
+//!   * If no OIDC verifier is configured **and** `dev-token` is
+//!     compiled in, the dev token is accepted (local dev only).
+//!   * If neither, every bearer is rejected.
+
+use std::sync::Arc;
 
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use triton_core::{Principal, TritonError};
+use triton_identity::OidcVerifier;
 
-/// Build a [`Principal`] from the inbound request's `Authorization`
-/// header. Returns `Auth` for missing/malformed bearer; later PRs
-/// will surface `Auth` for invalid OIDC signatures too.
-pub fn principal_from_request(parts: &Parts) -> Result<Principal, TritonError> {
-    let header = parts
-        .headers
-        .get(AUTHORIZATION)
-        .ok_or_else(|| TritonError::Auth("missing Authorization header".into()))?
-        .to_str()
-        .map_err(|_| TritonError::Auth("non-ASCII Authorization header".into()))?;
+#[derive(Clone)]
+pub struct IdentityProvider {
+    oidc: Option<Arc<OidcVerifier>>,
+}
 
-    let token = header
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| TritonError::Auth("expected `Bearer <token>`".into()))?
-        .trim();
+impl IdentityProvider {
+    pub fn new(oidc: Option<Arc<OidcVerifier>>) -> Self {
+        Self { oidc }
+    }
 
-    verify_token(token)
+    pub async fn verify(&self, parts: &Parts) -> Result<Principal, TritonError> {
+        let header = parts
+            .headers
+            .get(AUTHORIZATION)
+            .ok_or_else(|| TritonError::Auth("missing Authorization header".into()))?
+            .to_str()
+            .map_err(|_| TritonError::Auth("non-ASCII Authorization header".into()))?;
+
+        let token = header
+            .strip_prefix("Bearer ")
+            .ok_or_else(|| TritonError::Auth("expected `Bearer <token>`".into()))?
+            .trim();
+
+        if let Some(verifier) = &self.oidc {
+            // OIDC live → only OIDC. Dev token is rejected by the
+            // verifier (signature/issuer/audience won't match).
+            return verifier.verify(token).await;
+        }
+        verify_dev_or_reject(token)
+    }
 }
 
 #[cfg(feature = "dev-token")]
-fn verify_token(token: &str) -> Result<Principal, TritonError> {
+fn verify_dev_or_reject(token: &str) -> Result<Principal, TritonError> {
     if token != "dev-token" {
         return Err(TritonError::Auth("unknown token".into()));
     }
@@ -36,17 +60,14 @@ fn verify_token(token: &str) -> Result<Principal, TritonError> {
         sub: "dev-user".into(),
         scopes: vec!["dev".into()],
         tenant: "dev".into(),
-        // Never logged or audited — the raw token sticks around
-        // only so the upstream router (PR 9) can mint a Vault-swap
-        // OIDC token from it.
         raw_token: token.into(),
         trace_id: uuid::Uuid::new_v4().to_string(),
     })
 }
 
 #[cfg(not(feature = "dev-token"))]
-fn verify_token(_token: &str) -> Result<Principal, TritonError> {
+fn verify_dev_or_reject(_token: &str) -> Result<Principal, TritonError> {
     Err(TritonError::Auth(
-        "OIDC verifier not yet wired; rebuild with `--features dev-token` or wait for PR 8".into(),
+        "no OIDC verifier configured and dev-token disabled at build time (ADR-10)".into(),
     ))
 }

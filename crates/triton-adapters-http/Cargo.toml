@@ -16,6 +16,7 @@ dev-token = []
 
 [dependencies]
 triton-core = { path = "../triton-core" }
+triton-identity = { path = "../triton-identity" }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

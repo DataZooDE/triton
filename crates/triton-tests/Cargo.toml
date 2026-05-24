@@ -11,3 +11,12 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 libc = "0.2"
+
+# Real OIDC fixture: Ed25519 keypair + JWT sign + tiny axum issuer
+# serving discovery + JWKS. No mocks per CLAUDE.md §1.
+axum = { workspace = true }
+base64 = "0.22"
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+getrandom = "0.2"
+jsonwebtoken = "9"
+serde = { workspace = true }

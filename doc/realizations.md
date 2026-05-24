@@ -443,6 +443,19 @@ a trap the next developer should not have to step in.
   order: try debug first, fall back to release. Discovered in PR 4
   after ~45 minutes of confused debugging.
 
+- **`jsonwebtoken::Validation::algorithms` MUST be a single-element
+  list matching the JWT's `header.alg`.** A multi-family allowlist
+  (e.g. `[RS256, RS384, RS512, ES256, ES384, EdDSA]`) causes
+  `decode` to return `InvalidAlgorithm` for EdDSA tokens even though
+  EdDSA is in the list — confirmed against jsonwebtoken 9.3.1. The
+  algorithm allowlist (FR-I-3) MUST be enforced as a separate
+  `ALLOWED_ALGS.contains(&header.alg)` check BEFORE constructing
+  `Validation`; then `Validation::new(header.alg)` keeps its default
+  one-element `algorithms` and `decode` succeeds. Do not widen
+  `validation.algorithms` for "defence in depth" — the up-front
+  allowlist check is the defence. Discovered in PR 8 after ~30
+  minutes of confused debugging.
+
 - **Ephemeral-port probe + spawn races under heavy `cargo test`
   parallelism.** `free_tcp_port()` opens a listener on `127.0.0.1:0`,
   reads `local_addr()`, then closes the socket — so the port is
