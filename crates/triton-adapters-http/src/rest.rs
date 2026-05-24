@@ -19,6 +19,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{Value, json};
+use triton_core::a2ui::{build_envelope, extract_surface};
 use triton_core::{A2uiVersion, Dispatcher, RuntimeInfo, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
@@ -80,9 +81,8 @@ async fn invoke_tool(
 ) -> Response {
     // Parse the Accept header before any auth check so a malformed
     // A2UI version surfaces as Validation (400) before we even
-    // touch identity. The parsed version isn't actually used by
-    // the dispatcher yet — PR 10 wires the envelope-builder.
-    let _requested = match parse_a2ui_accept(&parts) {
+    // touch identity.
+    let requested = match parse_a2ui_accept(&parts) {
         Ok(v) => v,
         Err(e) => {
             state.dispatcher.record_rejection(
@@ -121,18 +121,46 @@ async fn invoke_tool(
         .invoke_with_bytes(&name, &body, principal, "rest")
         .await
     {
-        Ok(d) => (StatusCode::OK, Json(envelope(&d))).into_response(),
+        Ok(mut d) => match wrap_a2ui_if_requested(&mut d, requested) {
+            Ok(()) => (StatusCode::OK, Json(envelope(&d))).into_response(),
+            Err(e) => error_response(&e, Some(trace_id.as_str())),
+        },
         Err(e) => error_response(&e, Some(trace_id.as_str())),
     }
 }
 
+/// Wrap a dispatch result into an A2UI envelope when the tool opted
+/// in via `returns_a2ui` AND the caller negotiated A2UI. Otherwise
+/// the raw result is returned untouched (FR-A-5).
+///
+/// A tool that advertises `returns_a2ui` but emits an unparseable
+/// `surface` is a bug — we surface it as `TritonError::Tool` so the
+/// client sees 502 instead of being silently handed raw JSON.
+fn wrap_a2ui_if_requested(
+    d: &mut triton_core::Dispatch,
+    requested: Option<A2uiVersion>,
+) -> Result<(), TritonError> {
+    let Some(version) = requested else {
+        return Ok(());
+    };
+    if !d.returns_a2ui {
+        return Ok(());
+    }
+    let surface = extract_surface(&d.result).map_err(|e| {
+        tracing::warn!(tool_advertised_a2ui = true, error = %e, "tool returned non-A2UI shape");
+        TritonError::Tool(format!("tool advertised A2UI but {e}"))
+    })?;
+    d.result = build_envelope(&surface, version.into());
+    Ok(())
+}
+
 /// FR-A-3: parse `Accept: application/json+a2ui[; version=0.9]` into
-/// an [`A2uiVersion`]. Returns `None` (caller treats as "plain JSON,
-/// no A2UI envelope wanted") when the header is absent or asks for
-/// `application/json`. Returns `Some(version)` for the documented
-/// A2UI media types. Returns `Validation` for any other concrete
-/// A2UI request — unknown versions are an explicit error so the
-/// caller learns about the drift instead of silently downgrading.
+/// an [`A2uiVersion`]. Returns `Some(version)` if **any** Accept
+/// range names `application/json+a2ui`, regardless of its position
+/// in the comma-separated list. Returns `None` only when no A2UI
+/// range is present (caller is happy with plain JSON). Unknown
+/// versions inside an A2UI range are an explicit error — never
+/// silently downgrade.
 fn parse_a2ui_accept(parts: &Parts) -> Result<Option<A2uiVersion>, TritonError> {
     let Some(raw) = parts.headers.get(ACCEPT) else {
         return Ok(None);
@@ -141,34 +169,34 @@ fn parse_a2ui_accept(parts: &Parts) -> Result<Option<A2uiVersion>, TritonError> 
         .to_str()
         .map_err(|_| TritonError::Validation("non-ASCII Accept header".into()))?;
 
-    // Find the first media-range matching application/json+a2ui or
-    // application/json. We don't implement RFC 9110 q-value sorting
-    // — Triton sees one caller at a time and the spec only enumerates
-    // the two documented values.
+    // Walk every comma-separated media range — an A2UI offer
+    // anywhere in the list wins over a leading `application/json`
+    // (Codex PR 10 finding). We don't implement RFC 9110 q-value
+    // sorting; the spec only enumerates two A2UI values.
+    let mut found = None;
     for entry in s.split(',') {
         let mut parts = entry.split(';').map(str::trim);
         let Some(media) = parts.next() else { continue };
-        match media {
-            "application/json+a2ui" => {
-                for param in parts {
-                    if let Some(version) = param.strip_prefix("version=") {
-                        return match version.trim_matches('"') {
-                            "0.8" => Ok(Some(A2uiVersion::V08)),
-                            "0.9" => Ok(Some(A2uiVersion::V09)),
-                            other => Err(TritonError::Validation(format!(
-                                "unknown A2UI version: {other}"
-                            ))),
-                        };
-                    }
-                }
-                return Ok(Some(A2uiVersion::default()));
-            }
-            // No A2UI envelope requested; plain JSON response.
-            "application/json" | "*/*" => return Ok(None),
-            _ => continue,
+        if media != "application/json+a2ui" {
+            continue;
         }
+        for param in parts {
+            if let Some(version) = param.strip_prefix("version=") {
+                let v = match version.trim_matches('"') {
+                    "0.8" => A2uiVersion::V08,
+                    "0.9" => A2uiVersion::V09,
+                    other => {
+                        return Err(TritonError::Validation(format!(
+                            "unknown A2UI version: {other}"
+                        )));
+                    }
+                };
+                return Ok(Some(v));
+            }
+        }
+        found = Some(A2uiVersion::default());
     }
-    Ok(None)
+    Ok(found)
 }
 
 fn error_response(e: &TritonError, trace_id: Option<&str>) -> Response {
