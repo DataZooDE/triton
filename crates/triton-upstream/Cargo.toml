@@ -1,0 +1,17 @@
+[package]
+name = "triton-upstream"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+triton-core = { path = "../triton-core" }
+async-trait = "0.1"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v4"] }

@@ -19,7 +19,7 @@ pub mod error;
 pub mod principal;
 pub mod tool;
 
-pub use dispatcher::{Dispatch, Dispatcher, envelope};
+pub use dispatcher::{Dispatch, Dispatcher, UpstreamDispatch, envelope};
 pub use error::TritonError;
 pub use principal::{Principal, ToolPrincipal};
 pub use tool::{Tool, ToolDescriptor, ToolRegistry};

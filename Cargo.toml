@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/triton-core",
     "crates/triton-identity",
+    "crates/triton-upstream",
     "crates/triton-adapters-http",
     "crates/triton-bin",
     "crates/triton-tests",

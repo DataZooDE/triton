@@ -1790,6 +1790,7 @@ dependencies = [
  "triton-adapters-http",
  "triton-core",
  "triton-identity",
+ "triton-upstream",
 ]
 
 [[package]]
@@ -1834,6 +1835,20 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "triton-upstream"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "triton-core",
+ "uuid",
 ]
 
 [[package]]
