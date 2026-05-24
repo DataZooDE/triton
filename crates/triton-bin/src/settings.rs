@@ -51,6 +51,12 @@ pub struct Settings {
     /// parity for substrate deployments that don't need a browser
     /// frontend). Set in nonprod to enable the Flutter explorer.
     pub cors_allowed_origins: Vec<String>,
+    /// OIDC `client_id` the Flutter explorer should use for its PKCE
+    /// login. Reported at `GET /v1/runtime` so the SPA doesn't bake
+    /// it in. `None` ⇒ the operator hasn't enabled the explorer in
+    /// this env; the discovery endpoint returns null and the SPA
+    /// shows an "ask an operator" message.
+    pub explorer_client_id: Option<String>,
 }
 
 impl Settings {
@@ -198,6 +204,13 @@ struct Cli {
     /// explorer at `apps/explorer/`.
     #[arg(long, env = "TRITON_CORS_ALLOWED_ORIGINS", default_value = "")]
     cors_allowed_origins: String,
+
+    /// OIDC `client_id` for the Flutter explorer SPA. Reported at
+    /// `/v1/runtime` so the SPA can self-bootstrap PKCE without
+    /// baked-in config. Unset ⇒ the explorer isn't operator-enabled
+    /// in this env.
+    #[arg(long, env = "TRITON_EXPLORER_CLIENT_ID")]
+    explorer_client_id: Option<String>,
 }
 
 impl From<Cli> for Settings {
@@ -229,6 +242,7 @@ impl From<Cli> for Settings {
             cors_allowed_origins: triton_adapters_http::cors::parse_origins(
                 &c.cors_allowed_origins,
             ),
+            explorer_client_id: c.explorer_client_id,
         }
     }
 }

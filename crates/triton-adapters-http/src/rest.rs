@@ -24,6 +24,24 @@ use triton_core::{A2uiVersion, Dispatcher, RuntimeInfo, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
 
+/// Anonymous discovery payload served at `GET /v1/runtime`. Read by
+/// the Flutter explorer SPA at boot to learn which OIDC issuer to
+/// redirect to for PKCE login and which env/image it's looking at.
+/// `oidc_*` fields are `null` when the operator hasn't configured
+/// the explorer for this env — the SPA renders a clear "ask an
+/// operator to register me" message instead of failing PKCE
+/// opaquely.
+#[derive(Clone, serde::Serialize)]
+pub struct RuntimeDiscovery {
+    pub env: String,
+    pub image_sha: Option<String>,
+    pub package_version: String,
+    pub binary_sha: String,
+    pub oidc_issuer: Option<String>,
+    pub oidc_audience: Option<String>,
+    pub oidc_client_id: Option<String>,
+}
+
 /// Shared state owned by the binary, cloned into every handler via
 /// axum `State`. `Arc` everywhere so handler signatures stay cheap
 /// and the realization "wrap settings in Arc from the start" holds
@@ -31,6 +49,7 @@ use crate::identity::IdentityProvider;
 #[derive(Clone)]
 pub struct RestState {
     pub runtime: Arc<RuntimeInfo>,
+    pub discovery: Arc<RuntimeDiscovery>,
     pub dispatcher: Arc<Dispatcher>,
     pub identity: Arc<IdentityProvider>,
 }
@@ -39,6 +58,7 @@ pub fn router(state: RestState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/version", get(version))
+        .route("/v1/runtime", get(runtime_discovery))
         .route("/v1/tools", get(list_tools))
         .route("/v1/tools/{name}", post(invoke_tool))
         .with_state(state)
@@ -46,6 +66,11 @@ pub fn router(state: RestState) -> Router {
 
 async fn healthz() -> Json<Value> {
     Json(json!({ "status": "ok" }))
+}
+
+/// `GET /v1/runtime` — anonymous SPA bootstrap. See [`RuntimeDiscovery`].
+async fn runtime_discovery(State(state): State<RestState>) -> Json<RuntimeDiscovery> {
+    Json((*state.discovery).clone())
 }
 
 async fn version(State(state): State<RestState>) -> Json<RuntimeInfo> {

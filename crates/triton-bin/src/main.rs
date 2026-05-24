@@ -124,6 +124,15 @@ async fn main() -> std::io::Result<()> {
         env: settings.env.clone(),
         package_version: env!("CARGO_PKG_VERSION").to_string(),
     });
+    let discovery = Arc::new(triton_adapters_http::rest::RuntimeDiscovery {
+        env: settings.env.clone(),
+        image_sha: settings.image_sha.clone(),
+        package_version: env!("CARGO_PKG_VERSION").to_string(),
+        binary_sha: BINARY_SHA.to_string(),
+        oidc_issuer: settings.oidc_issuer.clone(),
+        oidc_audience: settings.oidc_audience.clone(),
+        oidc_client_id: settings.explorer_client_id.clone(),
+    });
 
     let metrics = Arc::new(Metrics::new());
     let registry = Arc::new(build_registry());
@@ -219,6 +228,7 @@ async fn main() -> std::io::Result<()> {
 
     let rest_state = RestState {
         runtime: runtime.clone(),
+        discovery: discovery.clone(),
         dispatcher: dispatcher.clone(),
         identity: identity.clone(),
     };
