@@ -225,7 +225,13 @@ async fn handle_interaction(
                 adapter.name, retry_after
             )),
         );
-        return (StatusCode::TOO_MANY_REQUESTS, "rate limited").into_response();
+        let secs = retry_after.ceil().max(1.0) as u64;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", secs.to_string())],
+            "rate limited",
+        )
+            .into_response();
     }
 
     let interaction: DiscordInteraction = match serde_json::from_slice(&body) {

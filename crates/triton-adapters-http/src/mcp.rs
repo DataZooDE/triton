@@ -41,6 +41,12 @@ const CODE_METHOD_NOT_FOUND: i32 = -32601;
 const CODE_INVALID_PARAMS: i32 = -32602;
 const CODE_AUTH: i32 = -32001;
 const CODE_TOOL_PROVIDER: i32 = -32000;
+/// PR 24: dedicated MCP code for rate-limit refusals so clients
+/// can distinguish backoff-worthy throttling from a tool/provider
+/// failure (Codex PR 24 concern). JSON-RPC reserves -32768..-32000
+/// for implementation-defined server errors; we pick -32002 to
+/// neighbour CODE_AUTH and stay outside the reserved set.
+const CODE_RATE_LIMITED: i32 = -32002;
 
 /// MCP protocol versions Triton speaks. Echoing a client-provided
 /// version we don't actually support would be a quiet lie; reject
@@ -388,10 +394,7 @@ fn code_for(e: &TritonError) -> i32 {
         TritonError::Auth(_) => CODE_AUTH,
         TritonError::Validation(_) => CODE_INVALID_PARAMS,
         TritonError::Tool(_) | TritonError::Provider(_) => CODE_TOOL_PROVIDER,
-        // Rate-limit mirrors the tool/provider class on the JSON-RPC
-        // wire (MCP has no dedicated 429); the audit class still
-        // says `ratelimit` so dashboards can distinguish.
-        TritonError::RateLimited(_) => CODE_TOOL_PROVIDER,
+        TritonError::RateLimited(_) => CODE_RATE_LIMITED,
     }
 }
 

@@ -329,6 +329,109 @@ async fn stale_message_timestamp_rejects_button_click() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn burst_succeeds_then_excess_is_ratelimited() {
+    // PR 24: NFR-P-3 per-adapter rate limit. Mirror of the
+    // Telegram rate_limit.rs integration test for the Discord
+    // path, since signature/route shape diverges (Codex PR 24
+    // concern — single-adapter coverage hides regressions).
+    let (vault, signing) = {
+        // Reuse the start_kv_vault_with_keypair vault layout but
+        // point the manifest at a fixture with a tiny rate limit
+        // (rate=1/sec, burst=2). The vault payload itself is
+        // identical to manifest-discord-test.yaml.
+        let signing = SigningKey::generate(&mut OsRng);
+        let pk_hex = hex::encode(signing.verifying_key().as_bytes());
+        let vault = FakeVault::start_kv_v2(
+            VAULT_TOKEN,
+            &[(
+                "kv/data/triton-test/discord",
+                &[
+                    ("public_key", pk_hex.as_str()),
+                    ("bot_token", "stub-bot-token"),
+                    (
+                        "senders",
+                        r#"{"99":{"sub":"bob","scopes":["chat"],"tenant":"acme"}}"#,
+                    ),
+                    ("correlation_key", CORRELATION_KEY),
+                ],
+            )],
+        )
+        .await;
+        (vault, signing)
+    };
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-discord-rate-limit.yaml")
+        .display()
+        .to_string();
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), manifest),
+        ("TRITON_VAULT_URL".to_string(), vault.url()),
+        ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    // Each Discord interaction is independently signed → bake a
+    // closure that signs+POSTs and returns the status code +
+    // Retry-After (if any). Burst=2: first two pass, next two
+    // 429 + Retry-After.
+    let valid_token = triton_correlation::encode(
+        "narrate",
+        &json!({ "subject": "bob" }),
+        CORRELATION_KEY.as_bytes(),
+    )
+    .expect("token fits");
+    let send = |i: u32| {
+        let signing = &signing;
+        let interaction = json!({
+            "type": 3,
+            "id": format!("i-{i}"),
+            "user": { "id": "99" },
+            "data": { "custom_id": valid_token, "component_type": 2 },
+            "message": { "timestamp": now_rfc3339() }
+        });
+        let body = interaction.to_string();
+        let (ts, sig) = sign(signing, body.as_bytes());
+        let url = format!("http://{webhook}/discord/interactions");
+        async move {
+            let resp = reqwest::Client::new()
+                .post(&url)
+                .header("X-Signature-Ed25519", sig)
+                .header("X-Signature-Timestamp", ts)
+                .header("content-type", "application/json")
+                .body(body)
+                .send()
+                .await
+                .expect("POST");
+            (
+                resp.status().as_u16(),
+                resp.headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .map(|s| s.to_string()),
+            )
+        }
+    };
+
+    assert_eq!(send(1).await.0, 200);
+    assert_eq!(send(2).await.0, 200);
+    let (s3, retry3) = send(3).await;
+    assert_eq!(s3, 429);
+    assert!(retry3.is_some(), "expected Retry-After header on 429");
+    let (s4, _) = send(4).await;
+    assert_eq!(s4, 429);
+
+    let _ = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "rejected"
+            && v["result"] == "error:ratelimit"
+            && v["protocol"] == "messenger:discord"
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_message_timestamp_fails_closed() {
     // Codex PR 23 review blocker: absence of the freshness anchor
     // MUST NOT bypass replay protection. A type=3 interaction
