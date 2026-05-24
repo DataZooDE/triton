@@ -8,7 +8,9 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use triton_core::a2ui::{Component, Surface};
+use triton_core::a2ui::{
+    Component, DashboardTile, FormField, FormFieldKind, SelectionOption, Surface,
+};
 use triton_core::{Tool, ToolPrincipal, TritonError};
 
 pub struct Echo;
@@ -149,5 +151,114 @@ impl Tool for Narrate {
         Ok(serde_json::json!({
             "surface": surface,
         }))
+    }
+}
+
+/// `demo_panel` — emits an A2UI Surface that uses every component
+/// variant (Text, Narration, Button, Selection, Form, Dashboard) so
+/// the explorer's A2UI diff page can render the full v0.8 vs v0.9
+/// vocabulary side-by-side. Pure stub data, no upstream call.
+pub struct DemoPanel;
+
+#[async_trait]
+impl Tool for DemoPanel {
+    fn name(&self) -> &'static str {
+        "demo_panel"
+    }
+
+    fn returns_a2ui(&self) -> bool {
+        true
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {}
+        })
+    }
+
+    async fn invoke(&self, _args: Value, _principal: &ToolPrincipal) -> Result<Value, TritonError> {
+        let surface = Surface {
+            components: vec![
+                Component::Text {
+                    value: "Triton demo panel".into(),
+                },
+                Component::Narration {
+                    text: "Every A2UI component, rendered through both v0.8 and v0.9 builders."
+                        .into(),
+                },
+                Component::Dashboard {
+                    title: "Last hour".into(),
+                    tiles: vec![
+                        DashboardTile {
+                            label: "invocations".into(),
+                            value: "1,284".into(),
+                            trend: Some("+12% vs prior".into()),
+                        },
+                        DashboardTile {
+                            label: "p95 latency".into(),
+                            value: "84 ms".into(),
+                            trend: None,
+                        },
+                        DashboardTile {
+                            label: "errors".into(),
+                            value: "3".into(),
+                            trend: Some("-2 vs prior".into()),
+                        },
+                    ],
+                },
+                Component::Selection {
+                    prompt: "Pick a sample tone".into(),
+                    options: vec![
+                        SelectionOption {
+                            label: "Friendly".into(),
+                            value: "friendly".into(),
+                        },
+                        SelectionOption {
+                            label: "Formal".into(),
+                            value: "formal".into(),
+                        },
+                        SelectionOption {
+                            label: "Terse".into(),
+                            value: "terse".into(),
+                        },
+                    ],
+                    tool: "narrate".into(),
+                    args_key: "subject".into(),
+                },
+                Component::Form {
+                    title: "Customer feedback".into(),
+                    fields: vec![
+                        FormField {
+                            name: "name".into(),
+                            label: "Your name".into(),
+                            kind: FormFieldKind::String,
+                            required: true,
+                        },
+                        FormField {
+                            name: "rating".into(),
+                            label: "Rating (1-5)".into(),
+                            kind: FormFieldKind::Integer,
+                            required: true,
+                        },
+                        FormField {
+                            name: "contact_ok".into(),
+                            label: "OK to follow up?".into(),
+                            kind: FormFieldKind::Boolean,
+                            required: false,
+                        },
+                    ],
+                    submit_label: "Send feedback".into(),
+                    tool: "echo".into(),
+                },
+                Component::Button {
+                    label: "Refresh".into(),
+                    tool: "demo_panel".into(),
+                    args: serde_json::json!({}),
+                },
+            ],
+        };
+        Ok(serde_json::json!({ "surface": surface }))
     }
 }
