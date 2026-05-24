@@ -66,6 +66,45 @@ pub fn render(surface: &Surface) -> RenderedMessage {
             Component::Button { .. } => {
                 deferred_buttons += 1;
             }
+            // Selection / Form: render the prompt or title so the
+            // user sees what's being asked, then count the action
+            // surface as deferred. Full inline-keyboard / numbered-
+            // prompt degradation lands in a later v0.2 PR.
+            Component::Selection {
+                prompt, options, ..
+            } => {
+                let opts: Vec<String> = options.iter().map(|o| html_escape(&o.label)).collect();
+                parts.push(format!("{}\n{}", html_escape(prompt), opts.join(" | "),));
+                deferred_buttons += 1;
+            }
+            Component::Form { title, fields, .. } => {
+                let names: Vec<String> = fields.iter().map(|f| html_escape(&f.label)).collect();
+                parts.push(format!(
+                    "<b>{}</b>\n{}",
+                    html_escape(title),
+                    names.join(", "),
+                ));
+                has_html_markers = true;
+                deferred_buttons += 1;
+            }
+            Component::Dashboard { title, tiles } => {
+                let mut lines = vec![format!("<b>{}</b>", html_escape(title))];
+                for t in tiles {
+                    let trend = t
+                        .trend
+                        .as_deref()
+                        .map(|x| format!(" ({})", html_escape(x)))
+                        .unwrap_or_default();
+                    lines.push(format!(
+                        "• {}: {}{}",
+                        html_escape(&t.label),
+                        html_escape(&t.value),
+                        trend,
+                    ));
+                }
+                parts.push(lines.join("\n"));
+                has_html_markers = true;
+            }
         }
     }
     RenderedMessage {
