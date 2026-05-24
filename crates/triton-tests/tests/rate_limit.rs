@@ -93,6 +93,98 @@ async fn burst_succeeds_then_excess_is_ratelimited() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_tenant_buckets_do_not_starve_each_other() {
+    // PR 28 (NFR-P-3 second tier): two tenants sharing one
+    // adapter MUST NOT block each other. Manifest: rate=1/sec,
+    // burst=2 per tenant; adapter-wide bucket headroomed 10x so
+    // it stays out of the way. Send 4 messages from each tenant
+    // back-to-back; expect 200/200/429/429 PER TENANT.
+    let telegram = FakeTelegramApi::start().await;
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        (
+            "TRITON_MANIFEST_PATH".to_string(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/manifest-per-tenant-rate-limit.yaml")
+                .display()
+                .to_string(),
+        ),
+        ("TRITON_TELEGRAM_API_BASE".to_string(), telegram.url()),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
+
+    let client = reqwest::Client::new();
+    let send = |sender_id: u64, text: &str| {
+        let text = text.to_string();
+        let url = format!("http://{webhook_addr}/telegram/webhook");
+        let client = client.clone();
+        async move {
+            let update = json!({
+                "update_id": 100,
+                "message": {
+                    "message_id": 1,
+                    "from": { "id": sender_id, "is_bot": false, "first_name": "X" },
+                    "chat": { "id": sender_id, "type": "private" },
+                    "date": 1_700_000_000,
+                    "text": text
+                }
+            });
+            client
+                .post(&url)
+                .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+                .json(&update)
+                .send()
+                .await
+                .expect("POST")
+                .status()
+                .as_u16()
+        }
+    };
+
+    // Tenant alpha (user 42) — first 2 admit, next 2 rate-limited.
+    assert_eq!(send(42, "a1").await, 200);
+    assert_eq!(send(42, "a2").await, 200);
+    assert_eq!(send(42, "a3").await, 429);
+    assert_eq!(send(42, "a4").await, 429);
+
+    // Tenant beta (user 43) — separate bucket, still gets 2.
+    // If per-tenant wasn't a thing, the adapter-wide bucket would
+    // have been depleted (or would gate this one); the 10x
+    // headroom on the adapter-wide bucket guarantees beta's
+    // capacity is independent.
+    assert_eq!(send(43, "b1").await, 200);
+    assert_eq!(send(43, "b2").await, 200);
+    assert_eq!(send(43, "b3").await, 429);
+
+    // Audit emits one rate-limit line per tenant.
+    let lines: Vec<Value> = proc
+        .stdout_snapshot()
+        .iter()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| {
+            v["kind"] == "audit"
+                && v["phase"] == "rejected"
+                && v["result"] == "error:ratelimit"
+                && v["protocol"] == "messenger:telegram"
+        })
+        .collect();
+    // Alpha bumped twice (a3, a4); beta once (b3).
+    assert!(
+        lines.len() >= 3,
+        "expected at least 3 rate-limit audit lines; got {}: {:?}",
+        lines.len(),
+        lines
+    );
+    let alpha_rejected = lines.iter().filter(|v| v["tenant"] == "alpha").count();
+    let beta_rejected = lines.iter().filter(|v| v["tenant"] == "beta").count();
+    assert!(
+        alpha_rejected >= 2 && beta_rejected >= 1,
+        "expected per-tenant audit attribution; got alpha={alpha_rejected} beta={beta_rejected}"
+    );
+}
+
 fn wait_for_audit<F>(proc: &TritonProcess, deadline: Duration, mut matches: F) -> Value
 where
     F: FnMut(&Value) -> bool,

@@ -84,6 +84,9 @@ pub struct DiscordAdapter {
     sender_table: HashMap<String, SenderClaims>,
     dispatcher: Arc<Dispatcher>,
     rate_limit: triton_core::ratelimit::TokenBucket,
+    /// PR 28: per-tenant rate limit (NFR-P-3 second tier).
+    /// Consumed AFTER sender resolution.
+    per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
 }
 
 impl DiscordAdapter {
@@ -157,7 +160,18 @@ impl DiscordAdapter {
             .map_err(|e| BuildError::Resolve("correlation_key", e))?
             .into_bytes();
 
+        // PR 28: see triton-chat-telegram for the 10x headroom
+        // rationale (adapter-wide is DoS-floor, per-tenant is
+        // fair-share; same shape on both adapters).
+        const ADAPTER_HEADROOM: u32 = 10;
         let rate_limit = triton_core::ratelimit::TokenBucket::new(
+            adapter
+                .rate_limit
+                .messages_per_sec
+                .saturating_mul(ADAPTER_HEADROOM),
+            adapter.rate_limit.burst.saturating_mul(ADAPTER_HEADROOM),
+        );
+        let per_tenant_limit = triton_core::ratelimit::PerTenantBuckets::new(
             adapter.rate_limit.messages_per_sec,
             adapter.rate_limit.burst,
         );
@@ -168,6 +182,7 @@ impl DiscordAdapter {
             sender_table,
             dispatcher,
             rate_limit,
+            per_tenant_limit,
         })
     }
 
@@ -305,6 +320,28 @@ async fn handle_message_component(
         );
         return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
     };
+
+    // PR 28: per-tenant fair-share (NFR-P-3 second tier).
+    // Discord adapter-wide bucket already consumed in
+    // `handle_interaction`; here we add the per-tenant gate.
+    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&claims.tenant) {
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::RateLimited(format!(
+                "tenant `{}` rate limit hit on adapter `{}`; retry in {:.2}s",
+                claims.tenant, adapter.name, retry_after
+            )),
+        );
+        let secs = retry_after.ceil().max(1.0) as u64;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", secs.to_string())],
+            "tenant rate limited",
+        )
+            .into_response();
+    }
 
     let Some(data) = interaction.data else {
         record_rejection(

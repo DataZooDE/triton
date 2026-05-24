@@ -102,10 +102,16 @@ pub struct TelegramAdapter {
     sender_table: HashMap<String, SenderClaims>,
     dispatcher: Arc<Dispatcher>,
     courier: CourierClient,
-    /// PR 24: per-adapter rate limit (NFR-P-3), sized from the
-    /// manifest's `rate_limit` block. Consumed BEFORE body parse
-    /// or sender lookup so a noisy bot can't saturate the dispatcher.
+    /// PR 24: per-adapter rate limit (NFR-P-3 first tier).
+    /// Consumed BEFORE body parse or sender lookup so a noisy
+    /// bot — or attacker who has the secret token — can't
+    /// saturate the dispatcher.
     rate_limit: triton_core::ratelimit::TokenBucket,
+    /// PR 28: per-tenant rate limit (NFR-P-3 second tier).
+    /// Consumed AFTER sender resolution; sized from the same
+    /// manifest `rate_limit` values so one tenant can't starve
+    /// others sharing the same adapter quota.
+    per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
 }
 
 struct CourierClient {
@@ -190,7 +196,26 @@ impl TelegramAdapter {
             .into_bytes();
 
         let courier = CourierClient::new(courier_config)?;
+        // PR 28: the adapter-wide bucket is the DoS-floor guard
+        // (consumed before sender resolution); the per-tenant
+        // bucket is the fair-share gate (consumed after). For the
+        // per-tenant gate to add value over the adapter-wide one,
+        // the adapter-wide bucket needs headroom — otherwise it
+        // fires first on every burst and the per-tenant logic
+        // never gets to differentiate. Multiplying by 10 gives
+        // enough room for ~10 active tenants at the manifest's
+        // per-tenant cap before the adapter-wide DoS ceiling
+        // engages. Operators tune the manifest values per-tenant;
+        // the 10x multiplier is the implicit headroom budget.
+        const ADAPTER_HEADROOM: u32 = 10;
         let rate_limit = triton_core::ratelimit::TokenBucket::new(
+            adapter
+                .rate_limit
+                .messages_per_sec
+                .saturating_mul(ADAPTER_HEADROOM),
+            adapter.rate_limit.burst.saturating_mul(ADAPTER_HEADROOM),
+        );
+        let per_tenant_limit = triton_core::ratelimit::PerTenantBuckets::new(
             adapter.rate_limit.messages_per_sec,
             adapter.rate_limit.burst,
         );
@@ -203,6 +228,7 @@ impl TelegramAdapter {
             dispatcher,
             courier,
             rate_limit,
+            per_tenant_limit,
         })
     }
 
@@ -551,6 +577,28 @@ async fn handle_webhook(
         return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
     };
 
+    // PR 28: per-tenant fair-share rate limit (NFR-P-3 second
+    // tier). Consumed AFTER sender resolution so the bucket key
+    // is the verified tenant id, not the platform user id.
+    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&claims.tenant) {
+        record_rejection(
+            &adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::RateLimited(format!(
+                "tenant `{}` rate limit hit on adapter `{}`; retry in {:.2}s",
+                claims.tenant, adapter.name, retry_after
+            )),
+        );
+        let secs = retry_after.ceil().max(1.0) as u64;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", secs.to_string())],
+            "tenant rate limited",
+        )
+            .into_response();
+    }
+
     // FR-I-6 / M-IDENT-1: structurally identical Principal to the
     // OIDC-derived one (`raw_token` is empty here — chat platforms
     // don't carry a JWT we forward; the upstream router won't
@@ -690,6 +738,27 @@ async fn handle_callback_query(
         );
         return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
     };
+
+    // PR 28: per-tenant fair-share. Same shape as the message
+    // path above — bucket keyed by verified tenant id.
+    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&claims.tenant) {
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::RateLimited(format!(
+                "tenant `{}` rate limit hit on adapter `{}`; retry in {:.2}s",
+                claims.tenant, adapter.name, retry_after
+            )),
+        );
+        let secs = retry_after.ceil().max(1.0) as u64;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", secs.to_string())],
+            "tenant rate limited",
+        )
+            .into_response();
+    }
 
     let Some(token) = cq.data.as_deref().filter(|s| !s.is_empty()) else {
         record_rejection(

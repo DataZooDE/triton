@@ -79,6 +79,49 @@ impl TokenBucket {
     }
 }
 
+/// Fair-share rate limit *within* an adapter (NFR-P-3 second
+/// tier). PR 24 shipped the adapter-wide bucket as the DoS guard
+/// (consumed before sender resolution); PR 28 layers a
+/// per-tenant bucket on top so one noisy tenant can't starve
+/// others sharing the same adapter quota.
+///
+/// Memory: one `TokenBucket` per distinct tenant that's been
+/// seen, created lazily. The sender_table is fixed at boot so
+/// the cardinality is bounded by the manifest, not by inbound
+/// traffic — there's no per-request allocation pressure past
+/// the first message from each tenant.
+#[derive(Debug)]
+pub struct PerTenantBuckets {
+    rate: u32,
+    burst: u32,
+    buckets: std::sync::Mutex<std::collections::HashMap<String, TokenBucket>>,
+}
+
+impl PerTenantBuckets {
+    pub fn new(messages_per_sec: u32, burst: u32) -> Self {
+        Self {
+            rate: messages_per_sec,
+            burst,
+            buckets: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Try to consume one token from the bucket dedicated to
+    /// `tenant`. Same return shape as `TokenBucket::try_take`:
+    /// `Ok(())` on admission, `Err(retry_after_secs)` on refusal.
+    /// The bucket for `tenant` is created on first use.
+    pub fn try_take(&self, tenant: &str) -> Result<(), f64> {
+        let mut buckets = self
+            .buckets
+            .lock()
+            .expect("per-tenant rate-limit mutex poisoned");
+        let bucket = buckets
+            .entry(tenant.to_string())
+            .or_insert_with(|| TokenBucket::new(self.rate, self.burst));
+        bucket.try_take()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,5 +175,36 @@ mod tests {
         let b = TokenBucket::new(1, 0);
         assert!(b.try_take().is_ok());
         assert!(b.try_take().is_err());
+    }
+
+    #[test]
+    fn per_tenant_buckets_are_independent() {
+        // PR 28: NFR-P-3 second-tier fair share. Two tenants
+        // hitting the same adapter shouldn't starve each other.
+        let b = PerTenantBuckets::new(0, 2); // rate=0 so no refill
+        assert!(b.try_take("alpha").is_ok());
+        assert!(b.try_take("alpha").is_ok());
+        // alpha is empty.
+        assert!(b.try_take("alpha").is_err());
+        // beta has a fresh bucket.
+        assert!(b.try_take("beta").is_ok());
+        assert!(b.try_take("beta").is_ok());
+        assert!(b.try_take("beta").is_err());
+        // alpha hasn't been refilled in the meantime.
+        assert!(b.try_take("alpha").is_err());
+    }
+
+    #[test]
+    fn per_tenant_buckets_lazy_init_each_tenant() {
+        // First call for a new tenant MUST admit (we shouldn't
+        // accidentally pre-deplete a fresh bucket).
+        let b = PerTenantBuckets::new(0, 1);
+        assert!(b.try_take("first").is_ok());
+        assert!(b.try_take("second").is_ok());
+        assert!(b.try_take("third").is_ok());
+        // Each of those buckets is now empty.
+        assert!(b.try_take("first").is_err());
+        assert!(b.try_take("second").is_err());
+        assert!(b.try_take("third").is_err());
     }
 }
