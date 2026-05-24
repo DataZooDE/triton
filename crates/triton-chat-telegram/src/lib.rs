@@ -13,7 +13,10 @@
 //! the rendered surface) lands in PR 14 alongside the L6′ surface
 //! mapper.
 
-mod surface_mapper;
+// Exposed (pub) so `triton-adapters-http`'s `/v1/surface/render`
+// route can ask the same mapper the Telegram courier uses. The
+// adapter binary doesn't change — only the visibility widens.
+pub mod surface_mapper;
 pub use surface_mapper::RenderedMessage;
 
 use std::collections::HashMap;
