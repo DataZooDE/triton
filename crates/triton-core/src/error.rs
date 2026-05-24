@@ -41,4 +41,20 @@ impl TritonError {
             Self::Provider(_) => "provider",
         }
     }
+
+    /// True when this is a `Tool` error whose reason is the
+    /// per-tool circuit breaker being open. Architecture §8.3:
+    /// REST 503 / A2A `metadata.error: "tool"` / MCP -32000. The
+    /// upstream router signals this by formatting the message
+    /// with the literal prefix `circuit_open`.
+    pub fn is_circuit_open(&self) -> bool {
+        matches!(self, Self::Tool(m) if m.starts_with("circuit_open"))
+    }
+
+    /// True when this is a `Tool` error caused by an upstream
+    /// timeout (architecture §8.3: REST 504). The upstream router
+    /// formats these messages with the literal suffix `timed out`.
+    pub fn is_tool_timeout(&self) -> bool {
+        matches!(self, Self::Tool(m) if m.contains("timed out"))
+    }
 }

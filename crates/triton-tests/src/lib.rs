@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 mod oidc_fixture;
+pub mod upstream_fixture;
 pub use oidc_fixture::TestIssuer;
 
 /// Captured failure context from a spawn attempt that didn't reach

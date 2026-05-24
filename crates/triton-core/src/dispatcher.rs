@@ -16,12 +16,28 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::audit::{AuditPhase, AuditRecord, emit, now_rfc3339};
 use crate::error::TritonError;
 use crate::principal::Principal;
 use crate::tool::{ToolDescriptor, ToolRegistry};
+
+/// Hook the dispatcher calls when the in-process registry doesn't
+/// know a tool. PR 9's `triton-upstream::UpstreamRouter` implements
+/// this; tests can plug in their own implementations. The trait is
+/// the dependency-inversion seam between the core dispatcher and
+/// the per-substrate router (Consul + Vault + breaker).
+#[async_trait]
+pub trait UpstreamDispatch: Send + Sync {
+    async fn invoke(
+        &self,
+        tool: &str,
+        args: Value,
+        principal: &Principal,
+    ) -> Result<Value, TritonError>;
+}
 
 #[derive(Debug)]
 pub struct Dispatch {
@@ -33,6 +49,7 @@ pub struct Dispatch {
 pub struct Dispatcher {
     registry: Arc<ToolRegistry>,
     env: String,
+    upstream: Option<Arc<dyn UpstreamDispatch>>,
 }
 
 impl Dispatcher {
@@ -40,7 +57,16 @@ impl Dispatcher {
         Self {
             registry,
             env: env.into(),
+            upstream: None,
         }
+    }
+
+    /// Attach an upstream-router fallback. Tools not in the registry
+    /// are routed through this. Returns `self` for builder-style
+    /// composition in `main`.
+    pub fn with_upstream(mut self, upstream: Arc<dyn UpstreamDispatch>) -> Self {
+        self.upstream = Some(upstream);
+        self
     }
 
     pub fn env(&self) -> &str {
@@ -146,32 +172,37 @@ impl Dispatcher {
         args: Value,
         principal: &Principal,
     ) -> Result<Value, TritonError> {
-        let tool = self
-            .registry
-            .get(tool_name)
-            .ok_or_else(|| TritonError::Validation(format!("unknown tool: {tool_name}")))?;
-
-        // Spawn so a panic inside the tool becomes a JoinError we
-        // can translate to TritonError::Tool — that keeps the
-        // "one audit line per invocation" guarantee even when a
-        // tool implementer screws up. The cost is one extra task
-        // hop per dispatch (μs scale) and a clone of the redacted
-        // principal; both acceptable.
-        let tp = principal.to_tool_principal();
-        let join = tokio::spawn(async move { tool.invoke(args, &tp).await });
-        match join.await {
-            Ok(result) => result,
-            Err(join_err) => {
-                let what = if join_err.is_panic() {
-                    "panic"
-                } else if join_err.is_cancelled() {
-                    "cancelled"
-                } else {
-                    "join_error"
-                };
-                Err(TritonError::Tool(format!("tool {what}: {join_err}")))
-            }
+        // In-process tool wins. Falls back to the upstream router
+        // for tools not present in the registry (PR 9). When no
+        // upstream is configured AND the tool is unknown, surface
+        // Validation so the caller learns the dispatcher couldn't
+        // route the call.
+        if let Some(tool) = self.registry.get(tool_name) {
+            // Spawn so a panic inside the tool becomes a JoinError
+            // we can translate to TritonError::Tool — keeps the
+            // "one audit line per invocation" guarantee.
+            let tp = principal.to_tool_principal();
+            let join = tokio::spawn(async move { tool.invoke(args, &tp).await });
+            return match join.await {
+                Ok(result) => result,
+                Err(join_err) => {
+                    let what = if join_err.is_panic() {
+                        "panic"
+                    } else if join_err.is_cancelled() {
+                        "cancelled"
+                    } else {
+                        "join_error"
+                    };
+                    Err(TritonError::Tool(format!("tool {what}: {join_err}")))
+                }
+            };
         }
+        if let Some(upstream) = &self.upstream {
+            return upstream.invoke(tool_name, args, principal).await;
+        }
+        Err(TritonError::Validation(format!(
+            "unknown tool: {tool_name}"
+        )))
     }
 
     fn fail(

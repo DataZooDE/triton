@@ -18,8 +18,9 @@ use triton_adapters_http::a2a::{A2aState, InMemoryTaskStore};
 use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{McpSessions, McpState};
 use triton_adapters_http::rest::RestState;
-use triton_core::{Dispatcher, RuntimeInfo, ToolRegistry};
+use triton_core::{Dispatcher, RuntimeInfo, ToolRegistry, UpstreamDispatch};
 use triton_identity::{OidcConfig, OidcVerifier};
+use triton_upstream::{ConsulClient, UpstreamConfig, UpstreamRouter, VaultClient};
 
 mod settings;
 mod tools;
@@ -73,7 +74,45 @@ async fn main() -> std::io::Result<()> {
     });
 
     let registry = Arc::new(build_registry());
-    let dispatcher = Arc::new(Dispatcher::new(registry, settings.env.clone()));
+    let mut dispatcher = Dispatcher::new(registry, settings.env.clone());
+
+    // Wire the upstream router if Consul + Vault are configured.
+    // When only one is set we refuse to start — partial wiring is
+    // never what the operator meant, and would silently degrade to
+    // the in-process-only path.
+    match (
+        &settings.consul_url,
+        &settings.vault_url,
+        &settings.vault_token,
+    ) {
+        (Some(consul), Some(vault), Some(token)) => {
+            let router = UpstreamRouter::new(
+                ConsulClient::new(consul.clone()),
+                VaultClient::new(vault.clone(), token.clone()),
+                UpstreamConfig {
+                    circuit_open_after: settings.circuit_open_after,
+                    circuit_cooldown: settings.circuit_cooldown,
+                    upstream_timeout: settings.upstream_timeout,
+                    vault_role: settings.vault_oidc_role.clone(),
+                    env_label: settings.env.clone(),
+                },
+            );
+            tracing::info!(consul, vault, "upstream router enabled");
+            dispatcher = dispatcher.with_upstream(Arc::new(router) as Arc<dyn UpstreamDispatch>);
+        }
+        (None, None, None) => {
+            tracing::warn!(
+                "no upstream router configured; dispatcher serves in-process tools only"
+            );
+        }
+        _ => {
+            tracing::error!(
+                "TRITON_CONSUL_URL, TRITON_VAULT_URL, and TRITON_VAULT_TOKEN must all be set together"
+            );
+            std::process::exit(2);
+        }
+    }
+    let dispatcher = Arc::new(dispatcher);
 
     // Build the OIDC verifier if the substrate injected an issuer.
     // When unset we fall back to the cfg-gated dev-token path.

@@ -184,6 +184,12 @@ fn error_response(e: &TritonError, trace_id: Option<&str>) -> Response {
 }
 
 fn http_status_for(e: &TritonError) -> StatusCode {
+    if e.is_circuit_open() {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
+    if e.is_tool_timeout() {
+        return StatusCode::GATEWAY_TIMEOUT;
+    }
     match e {
         TritonError::Auth(_) => StatusCode::UNAUTHORIZED,
         TritonError::Validation(_) => StatusCode::BAD_REQUEST,
