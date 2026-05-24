@@ -319,6 +319,7 @@ impl Dispatcher {
             TritonError::Validation(m) => TritonError::Validation(m.clone()),
             TritonError::Tool(m) => TritonError::Tool(m.clone()),
             TritonError::Provider(m) => TritonError::Provider(m.clone()),
+            TritonError::RateLimited(m) => TritonError::RateLimited(m.clone()),
         }
     }
 
@@ -362,6 +363,7 @@ fn status_for(e: &TritonError) -> u16 {
         TritonError::Validation(_) => 400,
         TritonError::Tool(_) => 502,
         TritonError::Provider(_) => 502,
+        TritonError::RateLimited(_) => 429,
     }
 }
 

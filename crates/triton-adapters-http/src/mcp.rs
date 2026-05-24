@@ -388,6 +388,10 @@ fn code_for(e: &TritonError) -> i32 {
         TritonError::Auth(_) => CODE_AUTH,
         TritonError::Validation(_) => CODE_INVALID_PARAMS,
         TritonError::Tool(_) | TritonError::Provider(_) => CODE_TOOL_PROVIDER,
+        // Rate-limit mirrors the tool/provider class on the JSON-RPC
+        // wire (MCP has no dedicated 429); the audit class still
+        // says `ratelimit` so dashboards can distinguish.
+        TritonError::RateLimited(_) => CODE_TOOL_PROVIDER,
     }
 }
 

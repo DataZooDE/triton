@@ -19,6 +19,7 @@ pub mod dispatcher;
 pub mod error;
 pub mod metrics;
 pub mod principal;
+pub mod ratelimit;
 pub mod tool;
 
 pub use dispatcher::{Dispatch, Dispatcher, UpstreamDispatch, envelope};

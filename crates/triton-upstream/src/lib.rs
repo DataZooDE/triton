@@ -341,6 +341,7 @@ fn status_for(e: &TritonError) -> u16 {
         TritonError::Validation(_) => 400,
         TritonError::Tool(_) => 502,
         TritonError::Provider(_) => 502,
+        TritonError::RateLimited(_) => 429,
     }
 }
 
