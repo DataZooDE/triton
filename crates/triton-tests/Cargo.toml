@@ -20,5 +20,7 @@ axum = { workspace = true }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 getrandom = "0.2"
+hex = "0.4"
+rand_core = { version = "0.6", features = ["getrandom"] }
 jsonwebtoken = "9"
 serde = { workspace = true }

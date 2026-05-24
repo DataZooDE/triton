@@ -7,6 +7,7 @@ members = [
     "crates/triton-secrets",
     "crates/triton-correlation",
     "crates/triton-chat-telegram",
+    "crates/triton-chat-discord",
     "crates/triton-upstream",
     "crates/triton-adapters-http",
     "crates/triton-bin",

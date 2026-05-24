@@ -88,8 +88,15 @@ async fn binary_boots_with_valid_manifest() {
             ),
             (
                 "kv/data/apps/dz/triton/nonprod/discord",
+                // PR 22 wired the Discord adapter, so the
+                // public_key MUST decode as a valid Ed25519 key
+                // (32 bytes hex, on-curve). Using RFC 8032 Test 1's
+                // canonical example so it's traceable.
                 &[
-                    ("public_key", "discord-public-key"),
+                    (
+                        "public_key",
+                        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
+                    ),
                     ("bot_token", "discord-bot-token"),
                     (
                         "senders",
