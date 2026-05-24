@@ -217,13 +217,27 @@ async fn handle_interaction(
         other => {
             // Other interaction types (2 = APPLICATION_COMMAND for
             // slash commands, 5 = MODAL_SUBMIT) are documented but
-            // not in PR 22's scope. We ack so Discord doesn't
-            // retry, and audit a clear deferred-shape rejection.
+            // not in PR 22's scope. Discord requires a valid
+            // interaction-response shape; PONG (`type: 1`) is the
+            // PING callback only. Codex PR 22 review caught this:
+            // return a CHANNEL_MESSAGE_WITH_SOURCE with ephemeral
+            // content explaining the gap. The flags=64 hides the
+            // message from other chat members so the apology is
+            // operator-visible without spamming the channel.
             tracing::warn!(
                 interaction_type = other,
-                "discord interaction type not yet supported; acking",
+                "discord interaction type not yet supported",
             );
-            (StatusCode::OK, axum::Json(json!({ "type": 1 }))).into_response()
+            let body = json!({
+                "type": 4,
+                "data": {
+                    "content": format!(
+                        "_(Interaction type {other} not implemented yet — slash commands and modal submits land in a later PR.)_"
+                    ),
+                    "flags": 64
+                }
+            });
+            (StatusCode::OK, axum::Json(body)).into_response()
         }
     }
 }
@@ -339,10 +353,12 @@ async fn handle_message_component(
                 }
                 None => {
                     // Tool didn't emit a Surface; render the raw
-                    // result as plain content. Same fallback shape
-                    // the Telegram adapter uses for echo-style
-                    // tools.
-                    let content = bare_text(&dispatch.result);
+                    // result as plain content. The result goes
+                    // through Markdown escape + the same 2000-byte
+                    // cap so non-A2UI tools can't bypass either
+                    // guarantee (Codex PR 22 blocker 1).
+                    let raw = bare_text(&dispatch.result);
+                    let content = surface_mapper::clamp_plain_text(&raw);
                     adapter.dispatcher.record_post(
                         &tool_name,
                         PROTOCOL,
