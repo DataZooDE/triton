@@ -50,10 +50,15 @@ const TRUNCATION_SENTINEL: &str = "\n\n[truncated — content exceeded Telegram'
 pub struct RenderedMessage {
     pub text: String,
     pub parse_mode: Option<&'static str>,
+    /// `reply_markup` JSON for inline keyboards built from Button
+    /// components (PR 21). `None` when there were no buttons or
+    /// every button's token exceeded the platform's callback_data
+    /// cap and got deferred.
+    pub reply_markup: Option<Value>,
     /// Number of `Component::Button` entries we encountered but
-    /// did not render. The caller logs this so deferred buttons
-    /// don't silently vanish; the count is also useful for
-    /// metrics when the next PR ships correlation tokens.
+    /// could not render — either because correlation tokens weren't
+    /// available (no key) or because the token would have exceeded
+    /// the platform's callback_data cap.
     pub deferred_buttons: usize,
     /// True when text was truncated to fit
     /// [`TELEGRAM_TEXT_MAX_BYTES`]. Used by the caller for a
@@ -81,9 +86,12 @@ pub enum RenderError {
 /// when the result isn't an A2UI surface — caller falls back to
 /// the bare-text path. Returns `Some(Err(...))` when the result
 /// IS an A2UI surface but renders to nothing usable.
-pub fn try_render_surface(result: &Value) -> Option<Result<RenderedMessage, RenderError>> {
+pub fn try_render_surface(
+    result: &Value,
+    correlation_key: &[u8],
+) -> Option<Result<RenderedMessage, RenderError>> {
     let surface = extract_surface(result).ok()?;
-    Some(render(&surface))
+    Some(render(&surface, correlation_key))
 }
 
 /// Render a [`Surface`] into a `RenderedMessage` or a
@@ -109,14 +117,16 @@ pub fn try_render_surface(result: &Value) -> Option<Result<RenderedMessage, Rend
 ///    a string of `&` chars, which inflate 1→5 bytes when escaped,
 ///    is bounded correctly). The result is then escaped + wrapped
 ///    fresh, so the output stays syntactically valid.
-pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
-    // Each renderable component contributes one PreRender; deferred
-    // action components (Button / Selection / Form) bump the counter
-    // and may also contribute a text fragment that names the surface
-    // so the user sees what was offered even when the action surface
-    // itself ships later.
+pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessage, RenderError> {
+    // Each renderable component contributes one PreRender; action
+    // components (Selection / Form) bump the deferred counter and
+    // also contribute a text fragment that names the surface so
+    // the user sees what was offered even when the action surface
+    // itself ships later. Button components produce inline-keyboard
+    // rows via PR 21's HMAC correlation tokens.
     let mut chunks: Vec<PreRender> = Vec::new();
     let mut deferred_buttons = 0usize;
+    let mut keyboard_rows: Vec<Vec<Value>> = Vec::new();
     for c in &surface.components {
         match c {
             Component::Text { value } => {
@@ -125,8 +135,23 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             Component::Narration { text } => {
                 chunks.push(PreRender::narration(text));
             }
-            Component::Button { .. } => {
-                deferred_buttons += 1;
+            Component::Button { label, tool, args } => {
+                match triton_correlation::encode(tool, args, correlation_key) {
+                    Ok(token) => {
+                        keyboard_rows.push(vec![json!({
+                            "text": label,
+                            "callback_data": token,
+                        })]);
+                    }
+                    Err(_) => {
+                        // Encode failed (tool+args wouldn't fit in
+                        // the 64-byte callback_data cap). Defer the
+                        // button so the user still sees text and
+                        // the operator sees a `deferred_buttons`
+                        // tracing line.
+                        deferred_buttons += 1;
+                    }
+                }
             }
             // Selection / Form: render the prompt or title so the
             // user sees what's being asked, then count the action
@@ -169,6 +194,11 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
         return Err(RenderError::EmptyAfterRender);
     }
     let has_html_markers = chunks.iter().any(|p| p.has_html);
+    let reply_markup = if keyboard_rows.is_empty() {
+        None
+    } else {
+        Some(json!({ "inline_keyboard": keyboard_rows }))
+    };
 
     let chunk_strings: Vec<String> = chunks.iter().map(|p| p.chunk.clone()).collect();
     let joined = chunk_strings.join("\n\n");
@@ -176,6 +206,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
         return Ok(RenderedMessage {
             text: joined,
             parse_mode: if has_html_markers { Some("HTML") } else { None },
+            reply_markup,
             deferred_buttons,
             truncated: false,
         });
@@ -202,6 +233,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
         return Ok(RenderedMessage {
             text: out,
             parse_mode: if has_html_markers { Some("HTML") } else { None },
+            reply_markup: reply_markup.clone(),
             deferred_buttons,
             truncated: true,
         });
@@ -235,6 +267,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     Ok(RenderedMessage {
         text: out,
         parse_mode: if has_html_markers { Some("HTML") } else { None },
+        reply_markup,
         deferred_buttons,
         truncated: true,
     })
@@ -327,10 +360,12 @@ pub fn build_send_message_body(chat_id: i64, msg: &RenderedMessage) -> Value {
         "chat_id": chat_id,
         "text": msg.text,
     });
+    let obj = body.as_object_mut().unwrap();
     if let Some(pm) = msg.parse_mode {
-        body.as_object_mut()
-            .unwrap()
-            .insert("parse_mode".into(), Value::String(pm.to_string()));
+        obj.insert("parse_mode".into(), Value::String(pm.to_string()));
+    }
+    if let Some(markup) = &msg.reply_markup {
+        obj.insert("reply_markup".into(), markup.clone());
     }
     body
 }
@@ -339,6 +374,8 @@ pub fn build_send_message_body(chat_id: i64, msg: &RenderedMessage) -> Value {
 mod tests {
     use super::*;
     use triton_core::a2ui::{Component, Surface};
+
+    const TEST_KEY: &[u8] = b"test-correlation-key-32-bytes!!!";
 
     #[test]
     fn passthrough_text_and_narration() {
@@ -352,7 +389,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, TEST_KEY).expect("renders");
         assert_eq!(r.text, "hello\n\n<i>a footnote</i>");
         assert_eq!(r.parse_mode, Some("HTML"));
         assert_eq!(r.deferred_buttons, 0);
@@ -366,13 +403,13 @@ mod tests {
                 value: "plain".into(),
             }],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, TEST_KEY).expect("renders");
         assert_eq!(r.text, "plain");
         assert_eq!(r.parse_mode, None);
     }
 
     #[test]
-    fn buttons_are_counted_not_rendered() {
+    fn buttons_become_inline_keyboard_with_correlation_tokens() {
         let s = Surface {
             components: vec![
                 Component::Text {
@@ -385,10 +422,43 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s).expect("renders");
-        assert_eq!(r.deferred_buttons, 1);
+        let r = render(&s, TEST_KEY).expect("renders");
+        assert_eq!(r.deferred_buttons, 0);
         assert!(r.text.contains("label"));
-        assert!(!r.text.contains("Refresh"));
+        let markup = r.reply_markup.expect("inline_keyboard set");
+        let rows = markup["inline_keyboard"].as_array().expect("rows");
+        assert_eq!(rows.len(), 1);
+        let cell = &rows[0][0];
+        assert_eq!(cell["text"], "Refresh");
+        let token = cell["callback_data"].as_str().expect("token is a string");
+        // Token round-trips back to (narrate, {}) under the same key.
+        let (tool, args) = triton_correlation::decode(token, TEST_KEY).expect("token verifies");
+        assert_eq!(tool, "narrate");
+        assert_eq!(args, json!({}));
+    }
+
+    #[test]
+    fn oversized_button_args_are_deferred_not_emitted() {
+        // A button whose (tool, args) wouldn't fit in Telegram's
+        // 64-byte callback_data is dropped from the keyboard and
+        // bumps `deferred_buttons` so the operator sees it via the
+        // usual tracing::warn channel.
+        let big_args = json!({ "s": "x".repeat(200) });
+        let s = Surface {
+            components: vec![
+                Component::Text {
+                    value: "still rendered".into(),
+                },
+                Component::Button {
+                    label: "Refresh".into(),
+                    tool: "narrate".into(),
+                    args: big_args,
+                },
+            ],
+        };
+        let r = render(&s, TEST_KEY).expect("renders");
+        assert_eq!(r.deferred_buttons, 1);
+        assert!(r.reply_markup.is_none());
     }
 
     #[test]
@@ -403,7 +473,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, TEST_KEY).expect("renders");
         assert!(r.text.contains("a &lt; b &amp; c &gt; d"));
         assert!(r.text.contains("<i>x&lt;i&gt;y&lt;/i&gt;z</i>"));
     }
@@ -414,7 +484,10 @@ mod tests {
         // `text: ""`, and the courier shipped that — Telegram 400s
         // on empty text. The mapper now refuses at its edge.
         let s = Surface { components: vec![] };
-        assert!(matches!(render(&s), Err(RenderError::EmptyAfterRender)));
+        assert!(matches!(
+            render(&s, TEST_KEY),
+            Err(RenderError::EmptyAfterRender)
+        ));
     }
 
     #[test]
@@ -429,7 +502,10 @@ mod tests {
                 args: json!({}),
             }],
         };
-        assert!(matches!(render(&s), Err(RenderError::EmptyAfterRender)));
+        assert!(matches!(
+            render(&s, TEST_KEY),
+            Err(RenderError::EmptyAfterRender)
+        ));
     }
 
     #[test]
@@ -438,7 +514,7 @@ mod tests {
         let s = Surface {
             components: vec![Component::Text { value: big }],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, TEST_KEY).expect("renders");
         assert!(r.truncated);
         assert!(r.text.len() <= TELEGRAM_TEXT_MAX_BYTES);
         assert!(r.text.ends_with(TRUNCATION_SENTINEL));
@@ -454,7 +530,7 @@ mod tests {
                 value: fourbyte.repeat(2000),
             }],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, TEST_KEY).expect("renders");
         assert!(r.truncated);
         // The String type already guarantees valid UTF-8 globally;
         // the per-byte loop confirms the cut wasn't mid-sequence.
@@ -474,7 +550,7 @@ mod tests {
         let s = Surface {
             components: vec![Component::Text { value: big }],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, TEST_KEY).expect("renders");
         assert!(r.truncated);
         let before_sentinel = &r.text[..r.text.len() - TRUNCATION_SENTINEL.len()];
         // Stripping every `&lt;` should leave nothing — i.e. the
@@ -496,7 +572,7 @@ mod tests {
         let s = Surface {
             components: vec![Component::Narration { text: big }],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, TEST_KEY).expect("renders");
         assert!(r.truncated);
         assert_eq!(r.parse_mode, Some("HTML"));
         let opens = r.text.matches("<i>").count();
@@ -520,7 +596,7 @@ mod tests {
         let s = Surface {
             components: (0..50).map(|_| small.clone()).collect(),
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, TEST_KEY).expect("renders");
         assert!(r.truncated);
         assert!(r.text.ends_with(TRUNCATION_SENTINEL));
         let body = r.text.trim_end_matches(TRUNCATION_SENTINEL);
@@ -545,7 +621,7 @@ mod tests {
                 Component::Narration { text: "4".into() },
             ],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, TEST_KEY).expect("renders");
         assert_eq!(r.text, "1\n\n<i>2</i>\n\n3\n\n<i>4</i>");
     }
 }
