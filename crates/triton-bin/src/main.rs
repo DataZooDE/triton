@@ -18,7 +18,7 @@ use triton_adapters_http::a2a::{A2aState, InMemoryTaskStore};
 use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{McpSessions, McpState};
 use triton_adapters_http::rest::RestState;
-use triton_core::{Dispatcher, RuntimeInfo, ToolRegistry, UpstreamDispatch};
+use triton_core::{Dispatcher, Metrics, RuntimeInfo, ToolRegistry, UpstreamDispatch};
 use triton_identity::{OidcConfig, OidcVerifier};
 use triton_upstream::{ConsulClient, UpstreamConfig, UpstreamRouter, VaultClient};
 
@@ -43,10 +43,20 @@ async fn main() -> std::io::Result<()> {
     let mcp_listener = TcpListener::bind(mcp_addr).await?;
     let a2a_listener = TcpListener::bind(a2a_addr).await?;
     let rest_listener = TcpListener::bind(rest_addr).await?;
+    // FR-O-3 / G-7: /metrics binds on the tailnet interface,
+    // never on the public REST port. `port = 0` disables it.
+    let metrics_listener = if settings.metrics_port != 0 {
+        let addr: SocketAddr = (settings.metrics_host, settings.metrics_port).into();
+        let l = TcpListener::bind(addr).await?;
+        Some((addr, l))
+    } else {
+        None
+    };
     tracing::info!(
         mcp = %mcp_addr,
         a2a = %a2a_addr,
         rest = %rest_addr,
+        metrics = ?metrics_listener.as_ref().map(|(a, _)| a),
         env = %settings.env,
         binary_sha = BINARY_SHA,
         drain_deadline_secs = settings.drain_deadline.as_secs(),
@@ -73,8 +83,10 @@ async fn main() -> std::io::Result<()> {
         package_version: env!("CARGO_PKG_VERSION").to_string(),
     });
 
+    let metrics = Arc::new(Metrics::new());
     let registry = Arc::new(build_registry());
-    let mut dispatcher = Dispatcher::new(registry, settings.env.clone());
+    let mut dispatcher =
+        Dispatcher::new(registry, settings.env.clone()).with_metrics(metrics.clone());
 
     // Wire the upstream router if Consul + Vault are configured.
     // When only one is set we refuse to start — partial wiring is
@@ -170,9 +182,32 @@ async fn main() -> std::io::Result<()> {
     )
     .with_graceful_shutdown(shutdown.clone().cancelled_owned());
 
+    // Optional fourth listener for tailnet-only `/metrics`. Lives
+    // outside the public-routed listeners so Fabio cannot leak it
+    // (G-7, NFR-S-2). When disabled, the future is a no-op that
+    // returns Ok immediately on shutdown so the join shape is the
+    // same regardless.
+    let metrics_token = shutdown.clone();
+    let metrics_fut: std::pin::Pin<
+        Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>,
+    > = match metrics_listener {
+        Some((_, l)) => {
+            use std::future::IntoFuture;
+            Box::pin(
+                axum::serve(l, triton_adapters_http::metrics::router(metrics.clone()))
+                    .with_graceful_shutdown(metrics_token.cancelled_owned())
+                    .into_future(),
+            )
+        }
+        None => Box::pin(async move {
+            metrics_token.cancelled().await;
+            Ok(())
+        }),
+    };
+
     let drain = async {
-        let (a, b, c) = tokio::join!(serve_mcp, serve_a2a, serve_rest);
-        a.and(b).and(c)
+        let (a, b, c, m) = tokio::join!(serve_mcp, serve_a2a, serve_rest, metrics_fut);
+        a.and(b).and(c).and(m)
     };
     let outcome = tokio::time::timeout(settings.drain_deadline, drain).await;
     let serve_result = match outcome {
@@ -198,6 +233,8 @@ async fn main() -> std::io::Result<()> {
 fn build_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(tools::Echo));
+    #[cfg(feature = "dev-token")]
+    registry.register(Arc::new(tools::Delay));
     registry.register(Arc::new(tools::Narrate));
     registry
 }

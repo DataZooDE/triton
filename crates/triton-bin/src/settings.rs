@@ -38,6 +38,8 @@ pub struct Settings {
     pub circuit_open_after: u32,
     pub circuit_cooldown: Duration,
     pub upstream_timeout: Duration,
+    pub metrics_host: IpAddr,
+    pub metrics_port: u16,
 }
 
 impl Settings {
@@ -133,6 +135,18 @@ struct Cli {
     /// Per-upstream-call timeout in milliseconds.
     #[arg(long, env = "TRITON_UPSTREAM_TIMEOUT_MS", default_value_t = 10_000)]
     upstream_timeout_ms: u64,
+
+    /// Bind host for the tailnet-only `/metrics` listener. Set to
+    /// the Tailscale interface in production. Defaults to
+    /// `127.0.0.1` for local-dev safety.
+    #[arg(long, env = "TRITON_METRICS_HOST", default_value = "127.0.0.1")]
+    metrics_host: IpAddr,
+
+    /// Tailnet metrics port. When `0` the metrics listener is
+    /// disabled entirely (useful when you don't want a `/metrics`
+    /// surface at all).
+    #[arg(long, env = "TRITON_METRICS_PORT", default_value_t = 9090)]
+    metrics_port: u16,
 }
 
 impl From<Cli> for Settings {
@@ -154,6 +168,8 @@ impl From<Cli> for Settings {
             circuit_open_after: c.circuit_open_after,
             circuit_cooldown: Duration::from_millis(c.circuit_cooldown_ms),
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
+            metrics_host: c.metrics_host,
+            metrics_port: c.metrics_port,
         }
     }
 }

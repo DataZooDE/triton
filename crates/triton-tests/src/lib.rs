@@ -50,6 +50,7 @@ pub struct TritonProcess {
     pub mcp_addr: SocketAddr,
     pub a2a_addr: SocketAddr,
     pub rest_addr: SocketAddr,
+    pub metrics_addr: Option<SocketAddr>,
 }
 
 impl TritonProcess {
@@ -126,6 +127,7 @@ impl TritonProcess {
         let mcp_port = free_tcp_port();
         let a2a_port = free_tcp_port();
         let rest_port = free_tcp_port();
+        let metrics_port = free_tcp_port();
         let bin = triton_binary_path();
 
         let mut cmd = Command::new(&bin);
@@ -138,6 +140,8 @@ impl TritonProcess {
             .env("TRITON_MCP_PORT", mcp_port.to_string())
             .env("TRITON_A2A_PORT", a2a_port.to_string())
             .env("TRITON_REST_PORT", rest_port.to_string())
+            .env("TRITON_METRICS_HOST", "127.0.0.1")
+            .env("TRITON_METRICS_PORT", metrics_port.to_string())
             // Keep the drain deadline short in tests so a hang fails
             // fast instead of waiting the production default of 30 s.
             .env("TRITON_DRAIN_DEADLINE_SECS", "3")
@@ -173,6 +177,7 @@ impl TritonProcess {
             mcp_addr: format!("127.0.0.1:{mcp_port}").parse().unwrap(),
             a2a_addr: format!("127.0.0.1:{a2a_port}").parse().unwrap(),
             rest_addr: format!("127.0.0.1:{rest_port}").parse().unwrap(),
+            metrics_addr: Some(format!("127.0.0.1:{metrics_port}").parse().unwrap()),
         };
         if proc.wait_for_ready_or_early_exit(boot_deadline).await {
             Ok(proc)

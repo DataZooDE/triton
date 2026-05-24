@@ -48,6 +48,57 @@ impl Tool for Echo {
     }
 }
 
+/// Synchronously sleep for the requested number of milliseconds.
+/// Used by ACC-2's mid-flight-SIGTERM test. **Dev-only**: gated by
+/// the `dev-token` cargo feature so production builds
+/// (`--no-default-features`) don't ship a tool that lets any
+/// authenticated caller park a request task for `u64::MAX` ms.
+#[cfg(feature = "dev-token")]
+pub struct Delay;
+
+/// Cap on `delay.ms` even in dev. The test uses 1500 ms; raising
+/// the cap doesn't help anyone and a runaway value (`u64::MAX`)
+/// would tie up a tokio task essentially forever.
+#[cfg(feature = "dev-token")]
+const DELAY_MAX_MS: u64 = 5_000;
+
+#[cfg(feature = "dev-token")]
+#[derive(Debug, Deserialize)]
+struct DelayArgs {
+    ms: u64,
+}
+
+#[cfg(feature = "dev-token")]
+#[async_trait]
+impl Tool for Delay {
+    fn name(&self) -> &'static str {
+        "delay"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["ms"],
+            "properties": {
+                "ms": { "type": "integer", "minimum": 0, "maximum": DELAY_MAX_MS }
+            },
+            "additionalProperties": false
+        })
+    }
+
+    async fn invoke(&self, args: Value, _principal: &ToolPrincipal) -> Result<Value, TritonError> {
+        let parsed: DelayArgs = serde_json::from_value(args)
+            .map_err(|e| TritonError::Validation(format!("delay args: {e}")))?;
+        if parsed.ms > DELAY_MAX_MS {
+            return Err(TritonError::Validation(format!(
+                "delay.ms must be <= {DELAY_MAX_MS}"
+            )));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(parsed.ms)).await;
+        Ok(serde_json::json!({ "delayed_ms": parsed.ms }))
+    }
+}
+
 pub struct Narrate;
 
 #[derive(Debug, Deserialize)]

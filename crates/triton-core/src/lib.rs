@@ -17,11 +17,13 @@ pub mod a2ui;
 pub mod audit;
 pub mod dispatcher;
 pub mod error;
+pub mod metrics;
 pub mod principal;
 pub mod tool;
 
 pub use dispatcher::{Dispatch, Dispatcher, UpstreamDispatch, envelope};
 pub use error::TritonError;
+pub use metrics::Metrics;
 pub use principal::{Principal, ToolPrincipal};
 pub use tool::{Tool, ToolDescriptor, ToolRegistry};
 
