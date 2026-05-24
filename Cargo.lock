@@ -1801,10 +1801,27 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "triton-adapters-http",
+ "triton-chat-telegram",
  "triton-core",
  "triton-identity",
  "triton-manifest",
  "triton-upstream",
+]
+
+[[package]]
+name = "triton-chat-telegram"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "serde",
+ "serde_json",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "triton-core",
+ "triton-manifest",
+ "uuid",
 ]
 
 [[package]]

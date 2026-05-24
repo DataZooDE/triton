@@ -1,0 +1,34 @@
+# PR 13 integration manifest. Single Telegram adapter with literal
+# credentials (dev mode only). The sender_table is JSON-encoded
+# inline so tests don't need a Vault server.
+version: "0.2"
+
+adapters:
+  telegram:
+    kind: telegram
+    inbound:
+      kind: webhook
+      signature: secret_token
+      secret: webhook-secret-for-test
+    outbound:
+      kind: rest_api
+      token: bot-token-for-test
+    identity:
+      kind: sender_table
+      # JSON: maps Telegram user id (string) to Principal claims.
+      table: '{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

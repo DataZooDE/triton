@@ -471,3 +471,21 @@ a trap the next developer should not have to step in.
   bind `127.0.0.1:0` and report the bound ports on stdout — deferred
   until we have a use case (PR 9 upstream router stubs may need it).
   Discovered in PR 5.
+
+- **An adapter that needs Vault before the Vault resolver exists must
+  warn-and-skip, not exit non-zero.** PR 13 wires the Telegram
+  webhook against literal manifest secrets; the production
+  `manifest-valid.yaml` fixture (and any realistic substrate
+  manifest) carries `vault://...` refs. If the boot wiring treats
+  "credential is a Vault ref" as a fatal `BuildError`, the binary
+  refuses to boot the moment a single Vault-ref adapter appears,
+  blocking every test that uses the canonical fixture even though
+  the *other* adapters in the manifest are perfectly serviceable.
+  Encode the carve-out in the adapter's `BuildError` enum
+  (`VaultUnsupported(&'static str)` distinct from
+  `MissingCredential` / `Unsupported`) so main.rs can match on it
+  explicitly: log a warning naming the field, skip wiring that
+  adapter, continue. PR 14 will resolve the Vault ref and lift the
+  carve-out. Discovered in PR 13 — the failing test was the existing
+  `binary_boots_with_valid_manifest`, which I had to keep green
+  while the new wiring was added.
