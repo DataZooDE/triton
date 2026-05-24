@@ -88,6 +88,13 @@ final toolsProvider = FutureProvider((ref) async {
   return client.listTools();
 });
 
+/// `/v1/manifest` envelope. Either `{loaded: false}` or
+/// `{loaded: true, manifest: {...}}`.
+final manifestProvider = FutureProvider<Map<String, dynamic>>((ref) async {
+  final client = ref.watch(restClientProvider);
+  return client.manifest();
+});
+
 /// Family provider for the audit endpoint: cache key is
 /// `(limit, traceIdFilter)` so the Audit page can swap filters
 /// without losing the most recent fetch for the other key.

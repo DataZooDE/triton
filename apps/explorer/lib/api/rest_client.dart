@@ -21,6 +21,17 @@ class RestClient {
     return Options(headers: headers);
   }
 
+  /// `GET /v1/manifest` — current adapter.yaml as JSON, with
+  /// credentials redacted by the server. Returns
+  /// `{loaded: false}` when no manifest is configured.
+  Future<Map<String, dynamic>> manifest() async {
+    final r = await _dio.get<Map<String, dynamic>>(
+      '$baseUrl/v1/manifest',
+      options: _opts().copyWith(responseType: ResponseType.json),
+    );
+    return r.data!;
+  }
+
   /// `GET /v1/audit` — newest-first slice of the in-process audit
   /// ring buffer. Authenticated like /v1/tools.
   Future<List<Map<String, dynamic>>> auditTail({

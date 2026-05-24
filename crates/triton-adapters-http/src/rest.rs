@@ -54,6 +54,9 @@ pub struct RestState {
     pub discovery: Arc<RuntimeDiscovery>,
     pub dispatcher: Arc<Dispatcher>,
     pub identity: Arc<IdentityProvider>,
+    /// Loaded v0.2 `adapter.yaml`, if any. None when the binary
+    /// boots without TRITON_MANIFEST_PATH (v0.1 mode).
+    pub manifest: Option<Arc<triton_manifest::Manifest>>,
 }
 
 pub fn router(state: RestState) -> Router {
@@ -64,7 +67,35 @@ pub fn router(state: RestState) -> Router {
         .route("/v1/tools", get(list_tools))
         .route("/v1/tools/{name}", post(invoke_tool))
         .route("/v1/audit", get(audit_tail))
+        .route("/v1/manifest", get(manifest_view))
         .with_state(state)
+}
+
+/// `GET /v1/manifest` — returns the loaded `adapter.yaml` as JSON,
+/// with credentials redacted by the `SecretField` serializer. Auth-
+/// gated; same Bearer as `/v1/tools`. Returns `{ loaded: false }`
+/// when no manifest is configured (v0.1 mode) so the SPA can render
+/// a clear "no manifest" hint.
+async fn manifest_view(State(state): State<RestState>, parts: Parts) -> Response {
+    if let Err(e) = state.identity.verify(&parts).await {
+        state.dispatcher.record_rejection(
+            "v1/manifest",
+            "rest",
+            "-",
+            "-",
+            &uuid::Uuid::new_v4().to_string(),
+            &e,
+        );
+        return error_response(&e, None);
+    }
+    match &state.manifest {
+        Some(m) => Json(json!({
+            "loaded": true,
+            "manifest": &**m,
+        }))
+        .into_response(),
+        None => Json(json!({ "loaded": false })).into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
