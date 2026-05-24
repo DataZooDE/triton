@@ -14,6 +14,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
+use triton_adapters_http::a2a::{A2aState, InMemoryTaskStore};
 use triton_adapters_http::rest::RestState;
 use triton_core::{Dispatcher, RuntimeInfo, ToolRegistry};
 
@@ -75,10 +76,14 @@ async fn main() -> std::io::Result<()> {
         runtime: runtime.clone(),
         dispatcher: dispatcher.clone(),
     };
+    let a2a_state = A2aState {
+        dispatcher: dispatcher.clone(),
+        tasks: InMemoryTaskStore::new(),
+    };
 
     let serve_mcp = axum::serve(mcp_listener, triton_adapters_http::mcp::router())
         .with_graceful_shutdown(shutdown.clone().cancelled_owned());
-    let serve_a2a = axum::serve(a2a_listener, triton_adapters_http::a2a::router())
+    let serve_a2a = axum::serve(a2a_listener, triton_adapters_http::a2a::router(a2a_state))
         .with_graceful_shutdown(shutdown.clone().cancelled_owned());
     let serve_rest = axum::serve(
         rest_listener,
