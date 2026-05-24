@@ -11,6 +11,13 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+/// Captured failure context from a spawn attempt that didn't reach
+/// `/healthz` (typically because the child exited early on a port
+/// race).
+struct SpawnFail {
+    stderr: Vec<String>,
+}
+
 /// Signal that can be delivered to the child by [`TritonProcess::signal`].
 #[derive(Clone, Copy, Debug)]
 pub enum Signal {
@@ -67,11 +74,51 @@ impl TritonProcess {
     /// Any inherited `TRITON_*` env var from the parent shell is
     /// scrubbed first so a test running with `TRITON_IMAGE_SHA` set
     /// externally gets the same view as one without.
+    ///
+    /// Retries up to a few times on `AddrInUse` — under heavy test
+    /// parallelism the ephemeral-port probe in `free_tcp_port` can
+    /// race with another harness picking the same port. See
+    /// `doc/realizations.md` §7.
     pub async fn spawn_with_args(
         boot_deadline: Duration,
         extra_env: HashMap<String, String>,
         extra_args: Vec<String>,
     ) -> Self {
+        const ATTEMPTS: u32 = 5;
+        let mut last_stderr: Vec<String> = Vec::new();
+        for attempt in 0..ATTEMPTS {
+            match Self::try_spawn(boot_deadline, &extra_env, &extra_args).await {
+                Ok(p) => return p,
+                Err(SpawnFail { stderr }) => {
+                    // Only retry the specific port-collision failure
+                    // mode that motivated this loop. Any other early
+                    // exit (bad CLI flag, missing JWKS endpoint,
+                    // tokio runtime panic, ...) is a real bug — fail
+                    // fast so the test surfaces the root cause.
+                    if !stderr_indicates_addr_in_use(&stderr) {
+                        panic!(
+                            "triton exited early (not AddrInUse); stderr:\n{}",
+                            stderr.join("\n")
+                        );
+                    }
+                    last_stderr = stderr;
+                    // Brief backoff lets the OS recycle ephemeral
+                    // ports before we probe again.
+                    tokio::time::sleep(Duration::from_millis(50 * (attempt + 1) as u64)).await;
+                }
+            }
+        }
+        panic!(
+            "triton AddrInUse after {ATTEMPTS} attempts; last stderr:\n{}",
+            last_stderr.join("\n")
+        );
+    }
+
+    async fn try_spawn(
+        boot_deadline: Duration,
+        extra_env: &HashMap<String, String>,
+        extra_args: &[String],
+    ) -> Result<Self, SpawnFail> {
         let mcp_port = free_tcp_port();
         let a2a_port = free_tcp_port();
         let rest_port = free_tcp_port();
@@ -113,7 +160,7 @@ impl TritonProcess {
         let stderr_join =
             spawn_line_collector("triton-stderr", child.stderr.take(), stderr.clone());
 
-        let proc = Self {
+        let mut proc = Self {
             child: Some(child),
             stdout,
             stderr,
@@ -123,8 +170,15 @@ impl TritonProcess {
             a2a_addr: format!("127.0.0.1:{a2a_port}").parse().unwrap(),
             rest_addr: format!("127.0.0.1:{rest_port}").parse().unwrap(),
         };
-        proc.wait_for_ready(boot_deadline).await;
-        proc
+        if proc.wait_for_ready_or_early_exit(boot_deadline).await {
+            Ok(proc)
+        } else {
+            let stderr_lines = proc.stderr_snapshot();
+            // `child` is None because wait_for_exit reaped it.
+            Err(SpawnFail {
+                stderr: stderr_lines,
+            })
+        }
     }
 
     /// Wait until the REST listener answers `/healthz` AND TCP
@@ -132,7 +186,11 @@ impl TritonProcess {
     /// §5.2 `/healthz` lives on REST only; the bind sequence in
     /// `main.rs` makes a successful `/healthz` imply all three
     /// listeners are accepting.
-    async fn wait_for_ready(&self, deadline: Duration) {
+    ///
+    /// Returns `true` on ready, `false` if the child exited early
+    /// (e.g. bind failure under a port-collision race). Reaps the
+    /// child on early-exit so the harness can retry.
+    async fn wait_for_ready_or_early_exit(&mut self, deadline: Duration) -> bool {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
             .build()
@@ -140,6 +198,21 @@ impl TritonProcess {
         let healthz = format!("http://{}/healthz", self.rest_addr);
         let start = Instant::now();
         loop {
+            // Check first whether the child already exited — saves
+            // us 5s of polling on a bind failure.
+            if let Some(child) = self.child.as_mut()
+                && let Ok(Some(_)) = child.try_wait()
+            {
+                self.child = None;
+                if let Some(j) = self.stdout_join.take() {
+                    let _ = j.join();
+                }
+                if let Some(j) = self.stderr_join.take() {
+                    let _ = j.join();
+                }
+                return false;
+            }
+
             let rest_ok = client
                 .get(&healthz)
                 .send()
@@ -149,7 +222,7 @@ impl TritonProcess {
             let mcp_ok = tcp_connect_ok(self.mcp_addr).await;
             let a2a_ok = tcp_connect_ok(self.a2a_addr).await;
             if rest_ok && mcp_ok && a2a_ok {
-                return;
+                return true;
             }
             if start.elapsed() > deadline {
                 panic!(
@@ -317,6 +390,17 @@ fn _assert_pipe_types() {
 fn free_tcp_port() -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     l.local_addr().unwrap().port()
+}
+
+/// Heuristic match for "child exited because TCP bind raced with a
+/// concurrent test". The error string comes from
+/// `io::Error::last_os_error()` formatted via tokio/std — on linux
+/// it surfaces as `kind: AddrInUse`. Match conservatively so we
+/// never retry on an unrelated failure.
+fn stderr_indicates_addr_in_use(stderr: &[String]) -> bool {
+    stderr
+        .iter()
+        .any(|line| line.contains("AddrInUse") || line.contains("Address already in use"))
 }
 
 async fn tcp_connect_ok(addr: SocketAddr) -> bool {

@@ -442,3 +442,19 @@ a trap the next developer should not have to step in.
   `crates/triton-tests/src/lib.rs::triton_binary_path` is to swap the
   order: try debug first, fall back to release. Discovered in PR 4
   after ~45 minutes of confused debugging.
+
+- **Ephemeral-port probe + spawn races under heavy `cargo test`
+  parallelism.** `free_tcp_port()` opens a listener on `127.0.0.1:0`,
+  reads `local_addr()`, then closes the socket — so the port is
+  released back to the kernel before the child gets a chance to
+  bind. With N test threads × 3 ports each, two harnesses can pick
+  the same port; whichever child binds second exits with
+  `AddrInUse`. Symptom: a previously-green test fails sporadically
+  with `Error: Os { code: 98, kind: AddrInUse, ... }` on stderr and
+  `triton not ready within 5s` on the assertion side. Mitigation in
+  `TritonProcess::spawn_with_args`: detect early-exit via
+  `try_wait` during the readiness loop and retry up to 5 times with
+  fresh ports + brief backoff. A proper fix would have the binary
+  bind `127.0.0.1:0` and report the bound ports on stdout — deferred
+  until we have a use case (PR 9 upstream router stubs may need it).
+  Discovered in PR 5.

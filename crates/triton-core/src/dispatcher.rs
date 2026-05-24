@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use crate::audit::{AuditPhase, AuditRecord, emit, now_rfc3339};
 use crate::error::TritonError;
 use crate::principal::Principal;
-use crate::tool::ToolRegistry;
+use crate::tool::{ToolDescriptor, ToolRegistry};
 
 #[derive(Debug)]
 pub struct Dispatch {
@@ -45,6 +45,14 @@ impl Dispatcher {
 
     pub fn env(&self) -> &str {
         &self.env
+    }
+
+    /// Public descriptors for the `GET /v1/tools` listing (FR-A-5).
+    /// Adapters never reach into the registry directly — they go
+    /// through this method so the dispatcher stays the single seam
+    /// between adapters and tool-state.
+    pub fn descriptors(&self) -> Vec<ToolDescriptor> {
+        self.registry.descriptors()
     }
 
     /// Top-level entry point for adapters that receive a raw body
