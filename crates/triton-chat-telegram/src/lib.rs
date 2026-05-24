@@ -604,6 +604,18 @@ async fn handle_webhook(
                             "telegram surface mapper: Selection components deferred (empty options or token-cap overflow)",
                         );
                     }
+                    if rendered.deferred_dashboards > 0 {
+                        // PR 27: dashboards on text-first adapters
+                        // need a rasterizer (architecture §8.7).
+                        // Until that ships, we never leak the raw
+                        // tile content — operators see the count
+                        // here.
+                        tracing::warn!(
+                            tool = tool_name,
+                            deferred_dashboards = rendered.deferred_dashboards,
+                            "telegram surface mapper: Dashboard components deferred until rasterizer wires in",
+                        );
+                    }
                     if rendered.truncated {
                         // Codex PR 19 blocker 2 follow-up: log
                         // every truncation event so operators can
@@ -875,6 +887,7 @@ fn render_dispatch_result(
         reply_markup: None,
         deferred_buttons: 0,
         deferred_selections: 0,
+        deferred_dashboards: 0,
         truncated: false,
     })
 }

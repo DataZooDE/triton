@@ -78,6 +78,14 @@ pub struct RenderedMessage {
     /// would exceed the 64-byte callback_data cap, or when zero
     /// options were provided.
     pub deferred_selections: usize,
+    /// Number of `Component::Dashboard` entries we encountered
+    /// (PR 27). Per architecture.md §8.7 dashboards on text-first
+    /// adapters need a rasterizer (out-of-process). We never ship
+    /// the raw tile content (would silently violate the
+    /// `dashboard: rasterised_png` degrade rule); the count
+    /// surfaces in tracing so the operator sees how often the gap
+    /// matters.
+    pub deferred_dashboards: usize,
     /// True when text was truncated to fit
     /// [`TELEGRAM_TEXT_MAX_BYTES`]. Used by the caller for a
     /// `tracing::warn` line so operators can spot oversized tool
@@ -145,6 +153,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
     let mut chunks: Vec<PreRender> = Vec::new();
     let mut deferred_buttons = 0usize;
     let mut deferred_selections = 0usize;
+    let mut deferred_dashboards = 0usize;
     let mut keyboard_rows: Vec<Vec<Value>> = Vec::new();
     for c in &surface.components {
         match c {
@@ -241,22 +250,26 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
                 chunks.push(PreRender::pre_rendered(body, true));
                 deferred_buttons += 1;
             }
-            Component::Dashboard { title, tiles } => {
-                let mut lines = vec![format!("<b>{}</b>", html_escape(title))];
-                for t in tiles {
-                    let trend = t
-                        .trend
-                        .as_deref()
-                        .map(|x| format!(" ({})", html_escape(x)))
-                        .unwrap_or_default();
-                    lines.push(format!(
-                        "• {}: {}{}",
-                        html_escape(&t.label),
-                        html_escape(&t.value),
-                        trend,
-                    ));
-                }
-                chunks.push(PreRender::pre_rendered(lines.join("\n"), true));
+            Component::Dashboard { title, .. } => {
+                // Manifest declares `dashboard: rasterised_png`.
+                // PR 27 brings Telegram in line with Discord PR 22:
+                // we MUST NOT render the raw tile text because
+                // dashboards are non-negotiably visual (architecture
+                // §8.7) and emitting `• label: value` silently
+                // violates the manifest's `rasterised_png` degrade
+                // rule. Render a one-line deferred placeholder and
+                // bump `deferred_dashboards`; the rasterizer wires
+                // in a follow-up PR.
+                chunks.push(PreRender::pre_rendered(
+                    format!(
+                        "<i>{}</i>",
+                        html_escape(&format!(
+                            "dashboard '{title}' deferred — rasterizer not yet wired"
+                        ))
+                    ),
+                    true,
+                ));
+                deferred_dashboards += 1;
             }
         }
     }
@@ -292,6 +305,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
             reply_markup,
             deferred_buttons,
             deferred_selections,
+            deferred_dashboards,
             truncated: false,
         });
     }
@@ -320,6 +334,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
             reply_markup: reply_markup.clone(),
             deferred_buttons,
             deferred_selections,
+            deferred_dashboards,
             truncated: true,
         });
     }
@@ -355,6 +370,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
         reply_markup,
         deferred_buttons,
         deferred_selections,
+        deferred_dashboards,
         truncated: true,
     })
 }
@@ -540,6 +556,44 @@ mod tests {
                 .expect("verifies");
         assert_eq!(a2["s"], "b");
         assert_eq!(r.deferred_selections, 0);
+    }
+
+    #[test]
+    fn dashboard_is_deferred_not_rendered_as_tile_text() {
+        // PR 27: Telegram aligns with Discord (PR 22) on the
+        // architecture.md §8.7 rule that dashboards on text-first
+        // adapters need a rasterizer. The raw tile content
+        // (label, value, trend) must NEVER reach the post-back —
+        // emitting it would silently violate the manifest's
+        // `dashboard: rasterised_png` degrade rule.
+        use triton_core::a2ui::DashboardTile;
+        let s = Surface {
+            components: vec![
+                Component::Text {
+                    value: "header".into(),
+                },
+                Component::Dashboard {
+                    title: "Secrets".into(),
+                    tiles: vec![DashboardTile {
+                        label: "invocations".into(),
+                        value: "1234".into(),
+                        trend: Some("+5%".into()),
+                    }],
+                },
+            ],
+        };
+        let r = render(&s, TEST_KEY).expect("renders");
+        assert!(!r.text.contains("invocations"));
+        assert!(!r.text.contains("1234"));
+        assert!(!r.text.contains("+5%"));
+        assert_eq!(r.deferred_dashboards, 1);
+        // Title also doesn't leak directly — only the deferred
+        // placeholder mentions it inside `dashboard '<title>' …`.
+        assert!(
+            r.text.contains("rasterizer not yet wired"),
+            "expected the placeholder line; got: {}",
+            r.text
+        );
     }
 
     #[test]
