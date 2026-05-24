@@ -1,24 +1,30 @@
 //! `triton` — multi-protocol agent-ingress gateway. See `doc/`.
 //!
-//! PR 2 scope: bind the MCP, A2A, REST listeners (ADR-1, FR-A-1) and
-//! drive a graceful drain on SIGTERM/SIGINT (G-4, FR-L-2, FR-L-3).
-//! Drain semantics: stop accepting new connections, let in-flight
-//! complete or hit `drain_deadline`, flush stdout, exit 0.
+//! Scope so far:
+//! * PR 1 — workspace skeleton, REST `/healthz`.
+//! * PR 2 — three listeners + graceful SIGTERM/SIGINT drain.
+//! * PR 3 — 12-factor `Settings` parsed from CLI + env, `Arc<Settings>`
+//!   shared into the REST router, `GET /version` (FR-O-2, NFR-O-1).
 
 use std::io::Write;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
+use triton_core::RuntimeInfo;
 
 mod settings;
 use settings::Settings;
 
+/// Compile-time SHA stamped by `build.rs` (see `architecture.md` §7).
+const BINARY_SHA: &str = env!("TRITON_BUILD_SHA");
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     init_tracing();
-    let settings = Settings::from_env();
+    let settings = Arc::new(Settings::from_args());
 
     // Install signal handlers BEFORE any await on serve, so a
     // SIGTERM that arrives during startup is captured rather than
@@ -41,6 +47,8 @@ async fn main() -> std::io::Result<()> {
         mcp = %mcp_addr,
         a2a = %a2a_addr,
         rest = %rest_addr,
+        env = %settings.env,
+        binary_sha = BINARY_SHA,
         drain_deadline_secs = settings.drain_deadline.as_secs(),
         "triton: listeners bound",
     );
@@ -61,12 +69,22 @@ async fn main() -> std::io::Result<()> {
         })
     };
 
+    let runtime = Arc::new(RuntimeInfo {
+        binary_sha: BINARY_SHA.to_string(),
+        image_sha: settings.image_sha.clone(),
+        env: settings.env.clone(),
+        package_version: env!("CARGO_PKG_VERSION").to_string(),
+    });
+
     let serve_mcp = axum::serve(mcp_listener, triton_adapters_http::mcp::router())
         .with_graceful_shutdown(shutdown.clone().cancelled_owned());
     let serve_a2a = axum::serve(a2a_listener, triton_adapters_http::a2a::router())
         .with_graceful_shutdown(shutdown.clone().cancelled_owned());
-    let serve_rest = axum::serve(rest_listener, triton_adapters_http::rest::router())
-        .with_graceful_shutdown(shutdown.clone().cancelled_owned());
+    let serve_rest = axum::serve(
+        rest_listener,
+        triton_adapters_http::rest::router(runtime.clone()),
+    )
+    .with_graceful_shutdown(shutdown.clone().cancelled_owned());
 
     // `tokio::join!` (not `try_join!`) so a failure in one serve
     // does not drop the siblings before they have a chance to drain.

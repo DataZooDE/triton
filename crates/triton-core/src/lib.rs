@@ -1,26 +1,27 @@
 //! `triton-core` — types and primitives shared across adapters,
 //! dispatcher, identity, and audit.
 //!
-//! Walking-skeleton scope (PR 1): only the [`BuildInfo`] struct and
-//! re-exports the binary uses to compose the `/healthz` handler.
-//! Subsequent PRs add `Principal`, `ToolRegistry`, audit emitter,
-//! error variants, and the upstream-router traits.
+//! Walking scope so far: [`RuntimeInfo`], the JSON-able struct
+//! that backs `GET /version` (FR-O-2). Subsequent PRs add
+//! `Principal`, `ToolRegistry`, audit emitter, error variants, and
+//! the upstream-router traits.
 
-/// Static build information stamped into the binary at compile time.
+use serde::Serialize;
+
+/// Runtime metadata reported by `GET /version` (FR-O-2).
 ///
-/// `image_sha` is read from the `TRITON_IMAGE_SHA` env var at runtime;
-/// the substrate's Packer step bakes the value into the Nomad job env
-/// (see `architecture.md` §7).
-#[derive(Debug, Clone)]
-pub struct BuildInfo {
-    pub binary_sha: &'static str,
-    pub package_version: &'static str,
-}
-
-impl BuildInfo {
-    pub const CURRENT: BuildInfo = BuildInfo {
-        // Populated by build.rs in PR 3; placeholder for the skeleton.
-        binary_sha: env!("CARGO_PKG_VERSION"),
-        package_version: env!("CARGO_PKG_VERSION"),
-    };
+/// The spec MUSTs `binary_sha` + `image_sha` (architecture.md §7).
+/// We additionally expose `env` and `package_version` because
+/// operators reading `/version` at 3am want a single, at-a-glance
+/// answer to "what is this process and which env does it think it's
+/// in?" — neither field is secret. The two extras are *additive*
+/// over the spec, not in place of it; if a client asks for stricter
+/// contract conformance later, a follow-up PR can carve them into a
+/// separate `/version/full` route.
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeInfo {
+    pub binary_sha: String,
+    pub image_sha: Option<String>,
+    pub env: String,
+    pub package_version: String,
 }
