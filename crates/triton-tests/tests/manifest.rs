@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use triton_manifest::{Env, Manifest, ManifestError};
 use triton_tests::TritonProcess;
+use triton_tests::upstream_fixture::FakeVault;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -63,10 +64,54 @@ fn missing_degrade_coverage_refuses_validate() {
 async fn binary_boots_with_valid_manifest() {
     // End-to-end: spawn the real `triton` binary with
     // TRITON_MANIFEST_PATH=<valid>, confirm it serves /healthz.
-    let env = HashMap::from([(
-        "TRITON_MANIFEST_PATH".to_string(),
-        fixture("manifest-valid.yaml").display().to_string(),
-    )]);
+    //
+    // The canonical fixture uses Vault refs for every credential
+    // (production-shaped). PR 16's resolver makes that mandatory:
+    // a Vault ref without a configured Vault is a hard boot
+    // failure. So this test stands up a KV-v2 fake serving all the
+    // fields the fixture references for both `telegram` and
+    // `discord` adapter blocks.
+    let vault = FakeVault::start_kv_v2(
+        "test-vault-token",
+        &[
+            (
+                "kv/data/apps/dz/triton/nonprod/telegram",
+                &[
+                    ("webhook_secret", "telegram-webhook-secret"),
+                    ("bot_token", "telegram-bot-token"),
+                    (
+                        "senders",
+                        r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
+                    ),
+                    ("correlation_key", "telegram-correlation-key"),
+                ],
+            ),
+            (
+                "kv/data/apps/dz/triton/nonprod/discord",
+                &[
+                    ("public_key", "discord-public-key"),
+                    ("bot_token", "discord-bot-token"),
+                    (
+                        "senders",
+                        r#"{"99":{"sub":"bob","scopes":["chat"],"tenant":"acme"}}"#,
+                    ),
+                    ("correlation_key", "discord-correlation-key"),
+                ],
+            ),
+        ],
+    )
+    .await;
+    let env = HashMap::from([
+        (
+            "TRITON_MANIFEST_PATH".to_string(),
+            fixture("manifest-valid.yaml").display().to_string(),
+        ),
+        ("TRITON_VAULT_URL".to_string(), vault.url()),
+        (
+            "TRITON_VAULT_TOKEN".to_string(),
+            "test-vault-token".to_string(),
+        ),
+    ]);
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
     let resp = reqwest::Client::new()
         .get(proc.rest_url("/healthz"))

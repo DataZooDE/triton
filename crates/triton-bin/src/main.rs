@@ -22,6 +22,7 @@ use triton_chat_telegram::TelegramAdapter;
 use triton_core::{Dispatcher, Metrics, RuntimeInfo, ToolRegistry, UpstreamDispatch};
 use triton_identity::{OidcConfig, OidcVerifier};
 use triton_manifest::{AdapterKind, InboundKind};
+use triton_secrets::{LiteralResolver, SecretResolver, VaultKvResolver};
 use triton_upstream::{ConsulClient, UpstreamConfig, UpstreamRouter, VaultClient};
 
 mod settings;
@@ -130,9 +131,18 @@ async fn main() -> std::io::Result<()> {
         Dispatcher::new(registry, settings.env.clone()).with_metrics(metrics.clone());
 
     // Wire the upstream router if Consul + Vault are configured.
-    // When only one is set we refuse to start — partial wiring is
-    // never what the operator meant, and would silently degrade to
-    // the in-process-only path.
+    //
+    // Partial-wiring rules (PR 16 widened the original PR 9 rule to
+    // let Vault be configured without Consul, so the secret
+    // resolver can boot in deploys that don't need upstream
+    // routing — e.g. a chat-only Telegram gateway):
+    //   * consul + vault_url + vault_token  → upstream router on
+    //   * vault_url + vault_token, no consul → resolver only, no router
+    //   * vault_url without vault_token, or vault_token without
+    //     vault_url → fatal (auth gap)
+    //   * consul without vault_url+vault_token → fatal (router
+    //     can't mint per-call OIDC tokens without Vault)
+    //   * none → in-process tools only
     match (
         &settings.consul_url,
         &settings.vault_url,
@@ -153,15 +163,25 @@ async fn main() -> std::io::Result<()> {
             tracing::info!(consul, vault, "upstream router enabled");
             dispatcher = dispatcher.with_upstream(Arc::new(router) as Arc<dyn UpstreamDispatch>);
         }
+        (None, Some(vault), Some(_)) => {
+            tracing::info!(
+                vault,
+                "vault configured without consul; secret resolver enabled, upstream router off",
+            );
+        }
         (None, None, None) => {
             tracing::warn!(
                 "no upstream router configured; dispatcher serves in-process tools only"
             );
         }
-        _ => {
+        (Some(_), None, _) | (Some(_), _, None) => {
             tracing::error!(
-                "TRITON_CONSUL_URL, TRITON_VAULT_URL, and TRITON_VAULT_TOKEN must all be set together"
+                "TRITON_CONSUL_URL requires TRITON_VAULT_URL and TRITON_VAULT_TOKEN (upstream router needs Vault for per-call OIDC swap)"
             );
+            std::process::exit(2);
+        }
+        (None, Some(_), None) | (None, None, Some(_)) => {
+            tracing::error!("TRITON_VAULT_URL and TRITON_VAULT_TOKEN must be set together");
             std::process::exit(2);
         }
     }
@@ -217,7 +237,25 @@ async fn main() -> std::io::Result<()> {
     // whose `inbound.kind == webhook` mounts its router on the
     // shared chat-webhook listener at `/<name>/webhook`. Boot fails
     // hard on any build error so misconfigured secrets never serve
-    // traffic.
+    // traffic (M-SECRETS-1 / FR-L-4).
+    //
+    // The secret resolver is picked once for all adapters: Vault
+    // KV v2 when the substrate injected `TRITON_VAULT_URL` +
+    // `_TOKEN`, literal-only otherwise. PR 13's warn-and-skip on
+    // Vault refs is gone — a Vault ref without a configured Vault
+    // is now a fatal misconfiguration (Codex called this out as a
+    // PR 13 concern).
+    let resolver: Arc<dyn SecretResolver> = match (&settings.vault_url, &settings.vault_token) {
+        (Some(url), Some(token)) => {
+            tracing::info!(vault = %url, "secret resolver: vault kv v2");
+            Arc::new(VaultKvResolver::new(url.clone(), token.clone()))
+        }
+        _ => {
+            tracing::info!("secret resolver: literal-only (no TRITON_VAULT_URL configured)");
+            Arc::new(LiteralResolver)
+        }
+    };
+
     let mut chat_router: Option<axum::Router> = None;
     if let Some(m) = &manifest {
         for (name, adapter) in &m.adapters {
@@ -226,7 +264,14 @@ async fn main() -> std::io::Result<()> {
             }
             match adapter.kind {
                 AdapterKind::Telegram => {
-                    match TelegramAdapter::from_manifest(name, adapter, dispatcher.clone()) {
+                    match TelegramAdapter::from_manifest(
+                        name,
+                        adapter,
+                        resolver.as_ref(),
+                        dispatcher.clone(),
+                    )
+                    .await
+                    {
                         Ok(built) => {
                             tracing::info!(adapter = %name, "telegram webhook adapter wired");
                             let r = Arc::new(built).router();
@@ -234,17 +279,6 @@ async fn main() -> std::io::Result<()> {
                                 Some(acc) => acc.merge(r),
                                 None => r,
                             });
-                        }
-                        Err(triton_chat_telegram::BuildError::VaultUnsupported(field)) => {
-                            // PR 13 ships with literal-secret support
-                            // only; the Vault resolver lands in PR 14.
-                            // Warn and skip so the binary still boots
-                            // for the other adapters in this manifest.
-                            tracing::warn!(
-                                adapter = %name,
-                                field,
-                                "telegram adapter uses Vault refs; skipped until PR 14 wires the resolver",
-                            );
                         }
                         Err(e) => {
                             tracing::error!(adapter = %name, error = %e, "telegram adapter build failed");

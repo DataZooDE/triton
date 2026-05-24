@@ -26,7 +26,8 @@ use serde::Deserialize;
 use serde_json::json;
 use subtle::ConstantTimeEq;
 use triton_core::{Dispatcher, Principal, TritonError};
-use triton_manifest::{Adapter, AdapterKind, IdentityKind, SecretField, SignatureScheme};
+use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
+use triton_secrets::{ResolveError, SecretResolver};
 
 const PROTOCOL: &str = "messenger:telegram";
 const HEADER_SECRET: &str = "X-Telegram-Bot-Api-Secret-Token";
@@ -58,13 +59,14 @@ pub struct TelegramAdapter {
 }
 
 impl TelegramAdapter {
-    /// Read a manifest [`Adapter`] of `kind: telegram`, pull every
-    /// secret it needs out of the manifest's literal/Vault refs,
-    /// and produce a runnable adapter. PR 13 only handles literal
-    /// credentials; PR 14 wires a Vault resolver.
-    pub fn from_manifest(
+    /// Read a manifest [`Adapter`] of `kind: telegram`, resolve
+    /// every declared credential through the supplied
+    /// [`SecretResolver`] (literal or Vault KV v2), and produce a
+    /// runnable adapter. Called once at boot per declared adapter.
+    pub async fn from_manifest(
         name: &str,
         adapter: &Adapter,
+        resolver: &dyn SecretResolver,
         dispatcher: Arc<Dispatcher>,
     ) -> Result<Self, BuildError> {
         if adapter.kind != AdapterKind::Telegram {
@@ -83,8 +85,15 @@ impl TelegramAdapter {
             )));
         }
 
-        let secret_token =
-            literal(adapter.inbound.credentials.get("secret"), "inbound.secret")?.to_string();
+        let secret_field = adapter
+            .inbound
+            .credentials
+            .get("secret")
+            .ok_or(BuildError::MissingCredential("inbound.secret"))?;
+        let secret_token = resolver
+            .resolve(secret_field)
+            .await
+            .map_err(|e| BuildError::Resolve("inbound.secret", e))?;
         if secret_token.is_empty() || secret_token.len() > MAX_SECRET_TOKEN {
             return Err(BuildError::Unsupported(format!(
                 "inbound.secret length must be 1..={MAX_SECRET_TOKEN} bytes, got {}",
@@ -92,9 +101,17 @@ impl TelegramAdapter {
             )));
         }
 
-        let table_json = literal(adapter.identity.credentials.get("table"), "identity.table")?;
+        let table_field = adapter
+            .identity
+            .credentials
+            .get("table")
+            .ok_or(BuildError::MissingCredential("identity.table"))?;
+        let table_json = resolver
+            .resolve(table_field)
+            .await
+            .map_err(|e| BuildError::Resolve("identity.table", e))?;
         let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
 
         Ok(Self {
             name: name.to_string(),
@@ -114,19 +131,11 @@ impl TelegramAdapter {
     }
 }
 
-fn literal<'a>(field: Option<&'a SecretField>, label: &'static str) -> Result<&'a str, BuildError> {
-    match field {
-        Some(SecretField::Literal(s)) => Ok(s.as_str()),
-        Some(SecretField::Vault { .. }) => Err(BuildError::VaultUnsupported(label)),
-        None => Err(BuildError::MissingCredential(label)),
-    }
-}
-
-/// Errors building the adapter from a manifest entry. Surfaced to
-/// the operator at boot. `VaultUnsupported` is recoverable — the
-/// caller should warn-and-skip; PR 14 wires the Vault resolver. All
-/// other variants exit non-zero so misconfiguration cannot serve
-/// traffic with degraded security.
+/// Errors building the adapter from a manifest entry. Every
+/// variant is fatal at boot — a misconfigured deploy exits the
+/// binary non-zero so the substrate sees the failure clearly
+/// (M-SECRETS-1 / FR-L-4). PR 13's `VaultUnsupported` warn-and-skip
+/// carve-out was lifted in PR 16 once the resolver landed.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
     #[error("adapter is not declared `kind: telegram`")]
@@ -135,8 +144,8 @@ pub enum BuildError {
     Unsupported(String),
     #[error("missing credential field `{0}`")]
     MissingCredential(&'static str),
-    #[error("credential field `{0}` is a Vault reference; PR 14 will resolve these")]
-    VaultUnsupported(&'static str),
+    #[error("could not resolve credential field `{0}`: {1}")]
+    Resolve(&'static str, ResolveError),
     #[error("identity.table failed to parse as sender JSON: {0}")]
     TableParse(String),
 }

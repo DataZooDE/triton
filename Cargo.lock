@@ -1805,6 +1805,7 @@ dependencies = [
  "triton-core",
  "triton-identity",
  "triton-manifest",
+ "triton-secrets",
  "triton-upstream",
 ]
 
@@ -1821,6 +1822,7 @@ dependencies = [
  "tracing",
  "triton-core",
  "triton-manifest",
+ "triton-secrets",
  "uuid",
 ]
 
@@ -1859,6 +1861,20 @@ dependencies = [
  "serde",
  "serde_yaml_ng",
  "thiserror",
+]
+
+[[package]]
+name = "triton-secrets"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "triton-manifest",
 ]
 
 [[package]]
