@@ -57,6 +57,11 @@ pub struct RestState {
     /// Loaded v0.2 `adapter.yaml`, if any. None when the binary
     /// boots without TRITON_MANIFEST_PATH (v0.1 mode).
     pub manifest: Option<Arc<triton_manifest::Manifest>>,
+    /// Shared Prometheus metrics registry. Same instance backs the
+    /// unauthenticated tailnet-only `/metrics` listener on
+    /// `TRITON_METRICS_PORT`; the REST route here is the
+    /// authenticated CORS-friendly path the explorer uses.
+    pub metrics: Arc<triton_core::Metrics>,
 }
 
 pub fn router(state: RestState) -> Router {
@@ -68,8 +73,42 @@ pub fn router(state: RestState) -> Router {
         .route("/v1/tools/{name}", post(invoke_tool))
         .route("/v1/audit", get(audit_tail))
         .route("/v1/manifest", get(manifest_view))
+        .route("/v1/metrics", get(metrics_view))
         .route("/v1/surface/render", post(surface_render))
         .with_state(state)
+}
+
+/// `GET /v1/metrics` — returns the same Prometheus text exposition
+/// the tailnet-only `/metrics` listener serves, but authenticated
+/// and reachable through Triton's REST adapter so the Flutter
+/// explorer (cross-origin, behind CORS) can render it without
+/// punching through the substrate's tag-based ACL on `:9090`.
+///
+/// G-7 still holds: the tailnet-only listener stays the canonical
+/// scrape target for the substrate's Prometheus. This route is
+/// purely for operators inspecting metrics through the browser.
+async fn metrics_view(State(state): State<RestState>, parts: Parts) -> Response {
+    if let Err(e) = state.identity.verify(&parts).await {
+        state.dispatcher.record_rejection(
+            "v1/metrics",
+            "rest",
+            "-",
+            "-",
+            &uuid::Uuid::new_v4().to_string(),
+            &e,
+        );
+        return error_response(&e, None);
+    }
+    let body = state.metrics.render();
+    (
+        StatusCode::OK,
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4",
+        )],
+        body,
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,8 +142,20 @@ async fn surface_render(
         );
         return error_response(&e, None);
     }
+    // The mapper signs button callback_data with this key. The
+    // explorer's preview endpoint is read-only — the rendered
+    // buttons are never actually posted to Telegram — so a fixed
+    // sentinel key is fine. Tokens carrying it could not be
+    // accepted by any real adapter (every manifest entry uses a
+    // distinct key resolved through Vault), which is the right
+    // failure mode: a curious operator copying a callback id out
+    // of the preview cannot replay it against the live adapter.
+    const PREVIEW_KEY: [u8; 32] = [0u8; 32];
     match req.adapter.as_str() {
-        "telegram" => match triton_chat_telegram::surface_mapper::try_render_surface(&req.result) {
+        "telegram" => match triton_chat_telegram::surface_mapper::try_render_surface(
+            &req.result,
+            &PREVIEW_KEY,
+        ) {
             None => error_response(
                 &TritonError::Validation(
                     "result is not an A2UI surface (missing `surface` field)".into(),
