@@ -21,6 +21,25 @@ class RestClient {
     return Options(headers: headers);
   }
 
+  /// `GET /v1/audit` — newest-first slice of the in-process audit
+  /// ring buffer. Authenticated like /v1/tools.
+  Future<List<Map<String, dynamic>>> auditTail({
+    int limit = 50,
+    String? traceId,
+  }) async {
+    final qp = <String, dynamic>{'limit': limit.toString()};
+    if (traceId != null && traceId.isNotEmpty) {
+      qp['trace_id'] = traceId;
+    }
+    final r = await _dio.get<Map<String, dynamic>>(
+      '$baseUrl/v1/audit',
+      queryParameters: qp,
+      options: _opts().copyWith(responseType: ResponseType.json),
+    );
+    return ((r.data!['entries'] as List?) ?? const [])
+        .cast<Map<String, dynamic>>();
+  }
+
   Future<Map<String, dynamic>> healthz() async {
     final r = await _dio.get<Map<String, dynamic>>(
       '$baseUrl/healthz',

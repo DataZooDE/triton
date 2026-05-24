@@ -1,85 +1,237 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../providers/api_provider.dart';
 import '../../../widgets/json_viewer.dart';
 
-/// Audit explainer. Triton emits two JSON-lines records per
-/// invocation to stdout — the substrate ships them; there's no
-/// retrieval endpoint to call yet. This page documents the shape
-/// the operator should expect to see in the log shipper, and gets
-/// a live data wire once Triton exposes audit retrieval (post-v0.2).
-class AuditPage extends StatelessWidget {
+/// Live audit tail. Reads the dispatcher's in-process ring buffer
+/// over `GET /v1/audit`. Filter by trace_id; tap any row to expand
+/// the full JSON record. Refreshes manually so the operator stays
+/// in control of when the data shifts.
+class AuditPage extends ConsumerStatefulWidget {
   const AuditPage({super.key});
 
-  static const _acceptedSample = {
-    'kind': 'audit',
-    'phase': 'accepted',
-    'tool': 'echo',
-    'adapter': 'rest',
-    'env': 'nonprod',
-    'sub': 'agent-frontdesk',
-    'tenant': 't-1',
-    'trace_id': '01HXYZ...',
-    'ts': '2026-05-24T18:32:11Z',
-  };
+  @override
+  ConsumerState<AuditPage> createState() => _AuditPageState();
+}
 
-  static const _completedSample = {
-    'kind': 'audit',
-    'phase': 'completed',
-    'tool': 'echo',
-    'adapter': 'rest',
-    'env': 'nonprod',
-    'sub': 'agent-frontdesk',
-    'tenant': 't-1',
-    'trace_id': '01HXYZ...',
-    'status': 'ok',
-    'latency_ms': 17,
-    'ts': '2026-05-24T18:32:11Z',
-  };
+class _AuditPageState extends ConsumerState<AuditPage> {
+  final _filterCtrl = TextEditingController();
+  String? _traceFilter;
+  int _limit = 50;
+  int? _expandedIndex;
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(title: const Text('Audit')),
-        body: ListView(
-          padding: const EdgeInsets.all(24),
-          children: [
-            Text('Two records per invocation',
-                style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 8),
-            const Text(
-              "Triton's dispatcher emits a JSON-lines record at "
-              '`accepted` (boundary cleared, identity verified) and a '
-              'second at `completed` (tool returned). They share a '
-              '`trace_id` so a log shipper can stitch the two ends '
-              'of an invocation together — including failures, '
-              'circuit-breaker rejections, and upstream timeouts.',
-            ),
-            const SizedBox(height: 24),
-            _section(context, 'accepted (phase=accepted)', _acceptedSample),
-            const SizedBox(height: 16),
-            _section(context, 'completed (phase=completed)', _completedSample),
-            const SizedBox(height: 24),
-            Card(
-              color: Theme.of(context).colorScheme.surfaceContainerHigh,
-              child: const Padding(
-                padding: EdgeInsets.all(16),
-                child: Text(
-                  'Once Triton exposes a tailnet-only audit retrieval '
-                  'endpoint, this page renders live records here. Until '
-                  'then, look in the substrate log shipper for the '
-                  '`kind=audit` JSON-lines stream.',
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
+  void dispose() {
+    _filterCtrl.dispose();
+    super.dispose();
+  }
 
-  Widget _section(BuildContext context, String label, Object sample) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label, style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 6),
-          JsonViewer(sample),
+  @override
+  Widget build(BuildContext context) {
+    final q = AuditQuery(limit: _limit, traceId: _traceFilter);
+    final entries = ref.watch(auditTailProvider(q));
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Audit'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Refresh',
+            onPressed: () => ref.invalidate(auditTailProvider(q)),
+          ),
         ],
-      );
+      ),
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: TextField(
+                    controller: _filterCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Filter by trace_id (exact match)',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onSubmitted: (v) {
+                      setState(() {
+                        _traceFilter = v.isEmpty ? null : v;
+                        _expandedIndex = null;
+                      });
+                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+                DropdownButton<int>(
+                  value: _limit,
+                  onChanged: (v) => setState(() => _limit = v ?? 50),
+                  items: const [
+                    DropdownMenuItem(value: 20, child: Text('Last 20')),
+                    DropdownMenuItem(value: 50, child: Text('Last 50')),
+                    DropdownMenuItem(value: 200, child: Text('Last 200')),
+                    DropdownMenuItem(value: 500, child: Text('Last 500')),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: entries.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (e, _) => Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text('Could not load /v1/audit: $e'),
+              ),
+              data: (rows) {
+                if (rows.isEmpty) {
+                  return const Center(
+                    child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Text(
+                        'No audit entries match this filter.\n\n'
+                        'The ring buffer is in-process — entries clear on '
+                        'restart. The substrate log shipper holds the full '
+                        'history.',
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  );
+                }
+                return ListView.separated(
+                  itemCount: rows.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, i) {
+                    final e = rows[i];
+                    return _AuditTile(
+                      entry: e,
+                      expanded: _expandedIndex == i,
+                      onTap: () => setState(
+                        () => _expandedIndex = _expandedIndex == i ? null : i,
+                      ),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AuditTile extends StatelessWidget {
+  const _AuditTile({
+    required this.entry,
+    required this.expanded,
+    required this.onTap,
+  });
+
+  final Map<String, dynamic> entry;
+  final bool expanded;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final phase = (entry['phase'] as String?) ?? '?';
+    final tool = (entry['tool'] as String?) ?? '-';
+    final protocol = (entry['protocol'] as String?) ?? '-';
+    final result = (entry['result'] as String?) ?? '?';
+    final latency = entry['latency_ms'] ?? '-';
+    final traceId = (entry['trace_id'] as String?) ?? '-';
+    final when = (entry['when'] as String?) ?? '-';
+    final color = _phaseColor(context, phase);
+    return InkWell(
+      onTap: onTap,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            child: Row(
+              children: [
+                Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                      color: color, shape: BoxShape.circle),
+                ),
+                const SizedBox(width: 12),
+                SizedBox(
+                  width: 72,
+                  child: Text(phase,
+                      style: Theme.of(context).textTheme.bodySmall),
+                ),
+                SizedBox(
+                  width: 100,
+                  child: Text('$protocol → $tool',
+                      style: Theme.of(context).textTheme.bodyMedium,
+                      overflow: TextOverflow.ellipsis),
+                ),
+                Expanded(
+                  child: Text(
+                    traceId,
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 12,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 70,
+                  child: Text('${latency}ms',
+                      textAlign: TextAlign.right,
+                      style: Theme.of(context).textTheme.bodySmall),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 70,
+                  child: Text(result,
+                      textAlign: TextAlign.right,
+                      style: Theme.of(context).textTheme.bodySmall),
+                ),
+                const SizedBox(width: 8),
+                SizedBox(
+                  width: 180,
+                  child: Text(when,
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(
+                          fontFamily: 'monospace', fontSize: 11),
+                      overflow: TextOverflow.ellipsis),
+                ),
+              ],
+            ),
+          ),
+          if (expanded)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+              child: JsonViewer(entry),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Color _phaseColor(BuildContext context, String phase) {
+    final cs = Theme.of(context).colorScheme;
+    switch (phase) {
+      case 'dispatch':
+        return cs.secondary;
+      case 'rejected':
+        return cs.error;
+      case 'post':
+        return cs.tertiary;
+      case 'upstream':
+        return cs.primary;
+      default:
+        return cs.outline;
+    }
+  }
 }
