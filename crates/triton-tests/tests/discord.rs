@@ -432,6 +432,105 @@ async fn burst_succeeds_then_excess_is_ratelimited() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn button_callback_with_values_is_rejected() {
+    // Codex PR 25 blocker: a hostile or future-shaped payload
+    // could send `data.values` on a Button (component_type=2)
+    // callback. Without strict shape validation that would
+    // mutate the args by filling a null slot. Inbound now
+    // rejects.
+    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let token = triton_correlation::encode(
+        "narrate",
+        &json!({ "subject": "bob" }),
+        CORRELATION_KEY.as_bytes(),
+    )
+    .expect("token fits");
+    let interaction = json!({
+        "type": 3,
+        "id": "i-forged-values",
+        "user": { "id": "99" },
+        "data": {
+            "custom_id": token,
+            "component_type": 2, // Button
+            "values": ["alice"], // forged
+        },
+        "message": { "timestamp": now_rfc3339() }
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 400, "button + values MUST 400");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn selection_callback_substitutes_picked_value_and_dispatches() {
+    // PR 25: a string-select callback carries the chosen value in
+    // `data.values[0]`. The mapper emitted the menu with a token
+    // encoding `(tool, {args_key: null})`; the inbound handler
+    // substitutes the null with the chosen value, then dispatches.
+    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    // Mint a token shaped the way the mapper would: tool=narrate,
+    // args = {subject: null}. The handler MUST substitute the
+    // null with `data.values[0]` before invoking the tool.
+    let select_token = triton_correlation::encode(
+        "narrate",
+        &json!({ "subject": serde_json::Value::Null }),
+        CORRELATION_KEY.as_bytes(),
+    )
+    .expect("token fits");
+
+    let interaction = json!({
+        "type": 3, // MESSAGE_COMPONENT
+        "id": "i-select",
+        "user": { "id": "99" },
+        "data": {
+            "custom_id": select_token,
+            "component_type": 3, // STRING_SELECT
+            "values": ["bob"]
+        },
+        "message": { "timestamp": now_rfc3339() }
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST select");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let body: Value = resp.json().await.expect("response body");
+    assert_eq!(body["type"], 4);
+    let content = body["data"]["content"].as_str().expect("content");
+    // narrate was invoked with subject="bob" (substituted from
+    // data.values[0]). Its surface text contains "Hello, bob".
+    assert!(
+        content.contains("Hello, bob"),
+        "selection callback should dispatch narrate(subject=bob); got: {content}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_message_timestamp_fails_closed() {
     // Codex PR 23 review blocker: absence of the freshness anchor
     // MUST NOT bypass replay protection. A type=3 interaction

@@ -49,14 +49,32 @@ pub const DISCORD_BUTTONS_PER_ROW: usize = 5;
 pub const DISCORD_MAX_ROWS: usize = 5;
 pub const DISCORD_MAX_BUTTONS: usize = DISCORD_BUTTONS_PER_ROW * DISCORD_MAX_ROWS;
 
+/// Discord's string-select cap: max 25 options per menu, and
+/// each select menu occupies a whole Action Row (one menu per
+/// row, no other components alongside). PR 25 enforces both at
+/// the mapper edge (Codex PR 22 selection-coverage concern).
+pub const DISCORD_SELECT_MAX_OPTIONS: usize = 25;
+
 #[derive(Debug, Clone)]
 pub struct RenderedInteraction {
     pub content: String,
     pub components: Option<Value>,
     /// Count of `Component::Button` entries we encountered but
-    /// did not render (oversized correlation tokens or button-cap
-    /// overflow beyond DISCORD_MAX_BUTTONS).
+    /// did not render (oversized correlation tokens, button-cap
+    /// overflow beyond DISCORD_MAX_BUTTONS, or row-cap
+    /// exhaustion competing with Selection menus).
     pub deferred_buttons: usize,
+    /// Count of `Component::Selection` entries we encountered but
+    /// did not render (oversized correlation tokens, empty
+    /// options, options past the 25-cap, or row-cap exhaustion).
+    /// PR 25 ships native string-select menus otherwise.
+    pub deferred_selections: usize,
+    /// Count of `Component::Form` entries we encountered. PR 25
+    /// doesn't ship Discord Modal forms yet; the next PR opens
+    /// modals via interaction-response type 9 + interaction-type
+    /// 5 MODAL_SUBMIT (Codex PR 25 nit — previously folded into
+    /// `deferred_buttons`).
+    pub deferred_forms: usize,
     /// Count of `Component::Dashboard` entries we encountered.
     /// Per architecture.md §8.7 dashboards must rasterise (PNG
     /// surface) on text-first adapters; PR 22 doesn't ship the
@@ -87,8 +105,11 @@ pub fn render(
 ) -> Result<RenderedInteraction, RenderError> {
     let mut chunks: Vec<String> = Vec::new();
     let mut deferred_buttons = 0usize;
+    let mut deferred_selections = 0usize;
+    let mut deferred_forms = 0usize;
     let mut deferred_dashboards = 0usize;
     let mut buttons: Vec<Value> = Vec::new();
+    let mut select_rows: Vec<Value> = Vec::new();
     for c in &surface.components {
         match c {
             Component::Text { value } => {
@@ -121,20 +142,87 @@ pub fn render(
                     }
                 }
             }
-            // Selection / Form: render the prompt/title as a
-            // chunk; full components-v2 select-menu / modal
-            // mapping lands in a later PR (deferred action).
+            // PR 25: native Discord string-select menu. The
+            // callback comes back as a component interaction with
+            // `data.values: ["<chosen_value>"]`; the adapter's
+            // inbound handler reads the args_key sentinel
+            // (encoded as the only key in `args` with a `null`
+            // value) and substitutes the picked value before
+            // dispatching. Each select menu owns a whole Action
+            // Row (Discord rule) so they count against the same
+            // 5-row total budget as button rows.
             Component::Selection {
-                prompt, options, ..
+                prompt,
+                options,
+                tool,
+                args_key,
             } => {
-                let opts: Vec<String> = options.iter().map(|o| md_escape(&o.label)).collect();
-                chunks.push(format!("{}\n{}", md_escape(prompt), opts.join(" | ")));
-                deferred_buttons += 1;
+                // Codex PR 25 concern: defer empty option lists.
+                // Discord rejects `options: []` on string-select
+                // menus, so an empty Selection has to surface as
+                // a deferred render, not a malformed component.
+                if options.is_empty() || options.len() > DISCORD_SELECT_MAX_OPTIONS {
+                    deferred_selections += 1;
+                    // Defer means we don't ship the prompt either —
+                    // sending the prompt with no control attached
+                    // would be misleading (Codex concern). The
+                    // operator sees the deferral via tracing.
+                    continue;
+                }
+                // Args carry a sentinel: the args_key set to null,
+                // signalling the inbound handler should fill it
+                // with `data.values[0]`. No extra wire-format change
+                // to the correlation token (PR 21 stays
+                // compatible). The inbound side strictly validates
+                // the `{ <one_key>: null }` shape before
+                // substituting; see `handle_message_component`.
+                let args = json!({ args_key.as_str(): Value::Null });
+                let token = match triton_correlation::encode(tool, &args, correlation_key) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        deferred_selections += 1;
+                        continue;
+                    }
+                };
+                let opts: Vec<Value> = options
+                    .iter()
+                    .map(|o| {
+                        json!({
+                            "label": o.label,
+                            "value": o.value,
+                        })
+                    })
+                    .collect();
+                let menu = json!({
+                    "type": 3, // STRING_SELECT
+                    "custom_id": token,
+                    "placeholder": prompt,
+                    "options": opts,
+                    "min_values": 1,
+                    "max_values": 1,
+                });
+                select_rows.push(json!({
+                    "type": 1, // ACTION_ROW (one menu per row)
+                    "components": [menu],
+                }));
+                // The prompt also ships as content for accessibility
+                // (screen readers / non-Discord clients that render
+                // the message but not the component). We only add
+                // it AFTER successfully queueing the row — Codex
+                // PR 25 concern: a deferred select with a visible
+                // prompt-but-no-control is worse than dropping
+                // both.
+                chunks.push(md_escape(prompt));
             }
             Component::Form { title, fields, .. } => {
+                // Form → Modal (interaction response type 9) is
+                // a separate handler shape; PR 25 ships Selection
+                // only. Render the form as a text summary so the
+                // user sees something, and bump `deferred_forms`
+                // (its own counter post-Codex-PR-25-nit).
                 let names: Vec<String> = fields.iter().map(|f| md_escape(&f.label)).collect();
                 chunks.push(format!("**{}**\n{}", md_escape(title), names.join(", ")));
-                deferred_buttons += 1;
+                deferred_forms += 1;
             }
             Component::Dashboard { title, .. } => {
                 // Manifest declares `dashboard: rasterised_png`.
@@ -154,7 +242,7 @@ pub fn render(
         }
     }
 
-    if chunks.is_empty() && buttons.is_empty() {
+    if chunks.is_empty() && buttons.is_empty() && select_rows.is_empty() {
         return Err(RenderError::EmptyAfterRender);
     }
     if chunks.is_empty() {
@@ -168,28 +256,48 @@ pub fn render(
         truncate_chunks(&chunks)
     };
 
-    let components = if buttons.is_empty() {
+    // Combined row budget: at most 5 Action Rows. Select menus
+    // each own a whole row; buttons share rows of 5. Selects come
+    // first, then buttons fill the remaining rows.
+    let mut all_rows: Vec<Value> = Vec::new();
+    let mut rows_left = DISCORD_MAX_ROWS;
+    for row in select_rows.into_iter() {
+        if rows_left == 0 {
+            deferred_selections += 1;
+            continue;
+        }
+        all_rows.push(row);
+        rows_left -= 1;
+    }
+    if !buttons.is_empty() {
+        let button_rows: Vec<Vec<Value>> = buttons
+            .chunks(DISCORD_BUTTONS_PER_ROW)
+            .map(|c| c.to_vec())
+            .collect();
+        for chunk in button_rows {
+            if rows_left == 0 {
+                deferred_buttons += chunk.len();
+                continue;
+            }
+            all_rows.push(json!({
+                "type": 1, // ACTION_ROW
+                "components": chunk,
+            }));
+            rows_left -= 1;
+        }
+    }
+    let components = if all_rows.is_empty() {
         None
     } else {
-        // Chunk into rows of DISCORD_BUTTONS_PER_ROW (5). The
-        // outer loop above also caps the total count at
-        // DISCORD_MAX_BUTTONS (25 = 5×5).
-        let rows: Vec<Value> = buttons
-            .chunks(DISCORD_BUTTONS_PER_ROW)
-            .map(|chunk| {
-                json!({
-                    "type": 1, // ACTION_ROW
-                    "components": chunk.to_vec(),
-                })
-            })
-            .collect();
-        Some(Value::Array(rows))
+        Some(Value::Array(all_rows))
     };
 
     Ok(RenderedInteraction {
         content,
         components,
         deferred_buttons,
+        deferred_selections,
+        deferred_forms,
         deferred_dashboards,
         truncated,
     })
@@ -464,6 +572,92 @@ mod tests {
         let capped = clamp_plain_text(&huge);
         assert!(capped.len() <= DISCORD_CONTENT_MAX_BYTES);
         assert!(capped.ends_with(TRUNCATION_SENTINEL));
+    }
+
+    #[test]
+    fn selection_renders_as_string_select_menu() {
+        use triton_core::a2ui::SelectionOption;
+        let s = Surface {
+            components: vec![
+                Component::Text {
+                    value: "header".into(),
+                },
+                Component::Selection {
+                    prompt: "Pick a tone".into(),
+                    options: vec![
+                        SelectionOption {
+                            label: "Friendly".into(),
+                            value: "friendly".into(),
+                        },
+                        SelectionOption {
+                            label: "Terse".into(),
+                            value: "terse".into(),
+                        },
+                    ],
+                    tool: "narrate".into(),
+                    args_key: "subject".into(),
+                },
+            ],
+        };
+        let r = render(&s, TEST_KEY).expect("renders");
+        let rows = r
+            .components
+            .expect("components")
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(rows.len(), 1);
+        let menu = &rows[0]["components"][0];
+        assert_eq!(menu["type"], 3); // STRING_SELECT
+        assert_eq!(menu["placeholder"], "Pick a tone");
+        let opts = menu["options"].as_array().unwrap();
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0]["label"], "Friendly");
+        assert_eq!(opts[0]["value"], "friendly");
+        // Token decodes to (narrate, {subject: null}); the inbound
+        // handler fills the null with `data.values[0]` at click.
+        let token = menu["custom_id"].as_str().expect("custom_id is string");
+        let (tool, args) = triton_correlation::decode(token, TEST_KEY).expect("verifies");
+        assert_eq!(tool, "narrate");
+        assert!(
+            args["subject"].is_null(),
+            "args_key slot must be null sentinel"
+        );
+        assert_eq!(r.deferred_selections, 0);
+    }
+
+    #[test]
+    fn selection_with_too_many_options_is_deferred() {
+        use triton_core::a2ui::SelectionOption;
+        let options = (0..DISCORD_SELECT_MAX_OPTIONS + 5)
+            .map(|i| SelectionOption {
+                label: format!("opt-{i}"),
+                value: format!("v-{i}"),
+            })
+            .collect();
+        let s = Surface {
+            components: vec![
+                Component::Text { value: "x".into() },
+                Component::Selection {
+                    prompt: "p".into(),
+                    options,
+                    tool: "narrate".into(),
+                    args_key: "subject".into(),
+                },
+            ],
+        };
+        let r = render(&s, TEST_KEY).expect("renders");
+        assert_eq!(r.deferred_selections, 1);
+        // No select menu shipped — the text chunk still goes out.
+        assert!(
+            r.components.is_none()
+                || r.components
+                    .as_ref()
+                    .unwrap()
+                    .as_array()
+                    .unwrap()
+                    .is_empty()
+        );
     }
 
     #[test]
