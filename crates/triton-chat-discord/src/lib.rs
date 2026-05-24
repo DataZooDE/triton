@@ -56,6 +56,13 @@ const HEADER_TIMESTAMP: &str = "X-Signature-Timestamp";
 /// rejecting requests older than ~5 minutes to prevent replay.
 const MAX_TIMESTAMP_SKEW_SECS: u64 = 300;
 
+/// PR 23: how stale a button click can be before we refuse it.
+/// Calibrated from `interaction.message.timestamp` (when the bot
+/// rendered the message), not the click timestamp. Matches
+/// `MAX_TIMESTAMP_SKEW_SECS` so operators see one consistent
+/// number across both checks.
+const CALLBACK_TTL_SECS: u32 = 300;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SenderClaims {
     pub sub: String,
@@ -285,6 +292,46 @@ async fn handle_message_component(
         return (StatusCode::BAD_REQUEST, "missing custom_id").into_response();
     };
 
+    // PR 23 replay protection. `interaction.message.timestamp` is
+    // when Discord persisted the original message carrying the
+    // button. Reject clicks on messages older than CALLBACK_TTL.
+    // The Ed25519 signature already authenticated the inbound, so
+    // a hostile forwarder can't fake the timestamp.
+    if let Some(msg) = interaction.message.as_ref()
+        && let Some(ts_iso) = msg.timestamp.as_deref()
+    {
+        match chrono::DateTime::parse_from_rfc3339(ts_iso) {
+            Ok(dt) => {
+                let msg_secs = dt.timestamp();
+                let now_secs = chrono::Utc::now().timestamp();
+                if msg_secs > 0 && now_secs - msg_secs > CALLBACK_TTL_SECS as i64 {
+                    let age = now_secs - msg_secs;
+                    record_rejection(
+                        adapter,
+                        &claims.sub,
+                        &claims.tenant,
+                        TritonError::Auth(format!(
+                            "stale callback: message age {age}s exceeds TTL {CALLBACK_TTL_SECS}s"
+                        )),
+                    );
+                    return (StatusCode::UNAUTHORIZED, "stale callback").into_response();
+                }
+            }
+            Err(e) => {
+                // Discord sent a timestamp we can't parse —
+                // fail closed rather than admit a click whose
+                // age we can't verify.
+                record_rejection(
+                    adapter,
+                    &claims.sub,
+                    &claims.tenant,
+                    TritonError::Validation(format!("unparseable message.timestamp: {e}")),
+                );
+                return (StatusCode::BAD_REQUEST, "bad message timestamp").into_response();
+            }
+        }
+    }
+
     let (tool_name, args) = match triton_correlation::decode(token, &adapter.correlation_key) {
         Ok(v) => v,
         Err(e) => {
@@ -465,6 +512,21 @@ struct DiscordInteraction {
     user: Option<DiscordUser>,
     #[serde(default)]
     member: Option<DiscordMember>,
+    /// Component interactions carry the originating message; its
+    /// `timestamp` (ISO 8601) is when the bot rendered the button.
+    /// PR 23 uses this as the freshness anchor for replay
+    /// protection.
+    #[serde(default)]
+    message: Option<DiscordInteractionMessage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordInteractionMessage {
+    /// ISO 8601 UTC timestamp Discord assigns at message creation.
+    /// We parse just enough to extract Unix seconds — no
+    /// dependency on a full date crate.
+    #[serde(default)]
+    timestamp: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

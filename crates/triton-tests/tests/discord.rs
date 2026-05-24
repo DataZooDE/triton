@@ -257,6 +257,62 @@ async fn forged_custom_id_token_rejected_at_inbound() {
     });
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stale_message_timestamp_rejects_button_click() {
+    // PR 23 replay protection. We sign a VALID Ed25519 envelope
+    // with a VALID correlation token, but attach an
+    // `interaction.message.timestamp` that's 1 hour in the past.
+    // Adapter must refuse before reaching the dispatcher.
+    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let valid_token = triton_correlation::encode(
+        "narrate",
+        &json!({ "subject": "bob" }),
+        CORRELATION_KEY.as_bytes(),
+    )
+    .expect("token fits");
+
+    let stale_iso = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // 1 hour ago, RFC 3339 UTC.
+        let stale = now - 3600;
+        let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(stale, 0).unwrap();
+        dt.to_rfc3339()
+    };
+
+    let interaction = json!({
+        "type": 3,
+        "id": "i-stale",
+        "user": { "id": "99" },
+        "data": { "custom_id": valid_token, "component_type": 2 },
+        "message": { "timestamp": stale_iso }
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST stale");
+    assert_eq!(resp.status(), 401, "stale message timestamp MUST 401");
+    let _ = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "rejected"
+            && v["result"] == "error:auth"
+            && v["protocol"] == "messenger:discord"
+    });
+}
+
 fn wait_for_audit<F>(proc: &TritonProcess, deadline: Duration, mut matches: F) -> Value
 where
     F: FnMut(&Value) -> bool,

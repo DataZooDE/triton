@@ -1801,6 +1801,7 @@ dependencies = [
  "tokio",
  "tower-http",
  "tracing",
+ "triton-chat-telegram",
  "triton-core",
  "triton-identity",
  "triton-manifest",
@@ -1835,6 +1836,7 @@ name = "triton-chat-discord"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "chrono",
  "ed25519-dalek",
  "hex",
  "serde",
@@ -1938,6 +1940,7 @@ version = "0.0.1"
 dependencies = [
  "axum",
  "base64",
+ "chrono",
  "ed25519-dalek",
  "getrandom 0.2.17",
  "hex",
