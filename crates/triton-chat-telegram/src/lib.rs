@@ -16,8 +16,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use axum::Json;
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -30,6 +30,12 @@ use triton_manifest::{Adapter, AdapterKind, IdentityKind, SecretField, Signature
 
 const PROTOCOL: &str = "messenger:telegram";
 const HEADER_SECRET: &str = "X-Telegram-Bot-Api-Secret-Token";
+/// Upper bound on the configured secret_token length. Telegram's
+/// API documents the secret as 1–256 chars; we pin the constant-time
+/// comparator to a fixed scratch buffer of this size so neither the
+/// configured length nor the presented length is observable from
+/// handler latency (FR-I-8).
+const MAX_SECRET_TOKEN: usize = 256;
 
 /// Per-Telegram-user claims resolved from the `sender_table`. The
 /// table is a JSON object keyed by Telegram user id (as a string)
@@ -79,6 +85,12 @@ impl TelegramAdapter {
 
         let secret_token =
             literal(adapter.inbound.credentials.get("secret"), "inbound.secret")?.to_string();
+        if secret_token.is_empty() || secret_token.len() > MAX_SECRET_TOKEN {
+            return Err(BuildError::Unsupported(format!(
+                "inbound.secret length must be 1..={MAX_SECRET_TOKEN} bytes, got {}",
+                secret_token.len()
+            )));
+        }
 
         let table_json = literal(adapter.identity.credentials.get("table"), "identity.table")?;
         let sender_table: HashMap<String, SenderClaims> =
@@ -150,10 +162,12 @@ struct TelegramUser {
 async fn handle_webhook(
     State(adapter): State<Arc<TelegramAdapter>>,
     headers: HeaderMap,
-    Json(update): Json<TelegramUpdate>,
+    body: Bytes,
 ) -> Response {
-    // Signature check first (FR-I-8 / M-SIG-1). Constant-time
-    // equality so an attacker can't timing-leak the secret.
+    // Signature check FIRST on raw bytes (FR-I-8 / M-SIG-1). The
+    // body extractor is `Bytes`, not `Json`, so we never parse JSON
+    // for an unauthenticated request — that closes the parse-then-
+    // reject audit gap Codex flagged in PR 13 review.
     let presented = headers
         .get(HEADER_SECRET)
         .and_then(|v| v.to_str().ok())
@@ -167,6 +181,23 @@ async fn handle_webhook(
         );
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
+
+    // Only after the secret check do we trust the body enough to
+    // parse it. A malformed body from an authenticated sender is a
+    // Telegram bug; ack with 400 and audit as validation rather than
+    // 5xx (Telegram retries on 5xx — we don't want a loop).
+    let update: TelegramUpdate = match serde_json::from_slice(&body) {
+        Ok(v) => v,
+        Err(e) => {
+            record_rejection(
+                &adapter,
+                "-",
+                "-",
+                TritonError::Validation(format!("malformed update body: {e}")),
+            );
+            return (StatusCode::BAD_REQUEST, "malformed update").into_response();
+        }
+    };
 
     let Some(message) = update.message else {
         // Updates without a `message` (edited messages, channel
@@ -218,12 +249,34 @@ async fn handle_webhook(
     {
         Ok(_) => StatusCode::OK.into_response(),
         Err(e) => {
-            // Dispatcher already audited the failure. Echo the
-            // status back to Telegram so we don't surface a stack
-            // trace; Telegram will retry on 5xx.
-            tracing::warn!(error = %e, "telegram tool dispatch failed");
-            StatusCode::BAD_GATEWAY.into_response()
+            // Dispatcher already audited the failure. Map to a
+            // status that won't trigger Telegram retry storms for
+            // permanent app-layer failures: validation/auth-shaped
+            // errors are acked 200 (Telegram has nothing useful to
+            // retry), and only transient provider faults / open
+            // circuits earn a retryable 5xx.
+            tracing::warn!(error = %e, class = %e.class(), "telegram tool dispatch failed");
+            telegram_status_for(&e).into_response()
         }
+    }
+}
+
+/// Map a dispatcher error to a Telegram-friendly status. We want to
+/// avoid retry storms for permanent app-layer failures: Telegram
+/// retries non-2xx for ~24 h, which would replay the same broken
+/// update endlessly. Permanent failures (validation, auth) are
+/// acked 200 — the message *was* received and decided — and only
+/// transient infra faults earn a retryable 5xx.
+fn telegram_status_for(e: &TritonError) -> StatusCode {
+    if e.is_circuit_open() {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    }
+    if e.is_tool_timeout() {
+        return StatusCode::GATEWAY_TIMEOUT;
+    }
+    match e {
+        TritonError::Provider(_) => StatusCode::BAD_GATEWAY,
+        TritonError::Validation(_) | TritonError::Auth(_) | TritonError::Tool(_) => StatusCode::OK,
     }
 }
 
@@ -242,12 +295,27 @@ fn record_rejection(adapter: &TelegramAdapter, sub: &str, tenant: &str, e: Trito
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        // Lengths differ — already a hard mismatch. Returning
-        // early is fine: a length-mismatch oracle on a 32-byte
-        // secret leaks at most 5 bits, which the operator can
-        // close by enforcing a fixed-length secret_token.
-        return false;
-    }
-    a.ct_eq(b).into()
+    // Constant-time across BOTH content and length (FR-I-8).
+    //
+    // The naive `if a.len() != b.len() { return false }` short-
+    // circuits before the ct_eq, so an attacker controlling the
+    // presented header can bisect the configured secret's length by
+    // measuring handler latency. Codex flagged this in PR 13 review.
+    //
+    // Fix: copy both sides into fixed-size scratch buffers
+    // (zero-padded to MAX_SECRET_TOKEN) and run ct_eq over the full
+    // scratch length. The boot-time bound on `secret_token.len()`
+    // guarantees the configured side fits; the presented side is
+    // truncated past MAX which is fine — anything that long is
+    // already not the configured secret. Folding the length-equality
+    // bit into the final result keeps the function total.
+    let mut a_buf = [0u8; MAX_SECRET_TOKEN];
+    let mut b_buf = [0u8; MAX_SECRET_TOKEN];
+    let a_n = a.len().min(MAX_SECRET_TOKEN);
+    let b_n = b.len().min(MAX_SECRET_TOKEN);
+    a_buf[..a_n].copy_from_slice(&a[..a_n]);
+    b_buf[..b_n].copy_from_slice(&b[..b_n]);
+    let content_eq: bool = a_buf.ct_eq(&b_buf).into();
+    let length_eq = a.len() == b.len();
+    content_eq & length_eq
 }

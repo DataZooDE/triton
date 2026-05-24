@@ -99,6 +99,34 @@ async fn wrong_secret_token_refused_and_audited() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn malformed_body_with_valid_secret_acked_and_audited_validation() {
+    // Codex flagged in PR 13 review: the original handler used the
+    // `Json(...)` extractor, which parses the body BEFORE the
+    // handler runs. A garbage payload with the right secret would
+    // be 400'd by axum without ever emitting a `phase: rejected`
+    // audit line, and Telegram would retry the broken update for
+    // ~24 h. Fix: read raw `Bytes`, verify the secret first, then
+    // parse — and audit as `validation` + ack 400.
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with_manifest()).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", SECRET)
+        .header("content-type", "application/json")
+        .body("{ this is not valid json")
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 400);
+
+    let rejected = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "rejected" && v["protocol"] == "messenger:telegram"
+    });
+    assert_eq!(rejected["result"], "error:validation");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_sender_refused_and_audited() {
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with_manifest()).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
