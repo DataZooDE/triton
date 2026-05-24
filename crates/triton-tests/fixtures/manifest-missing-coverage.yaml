@@ -1,0 +1,25 @@
+# M-COVERAGE-1: tool declares `buttons` in surface_components but
+# the Telegram adapter's degrade table doesn't carry a `buttons`
+# rule. Boot MUST refuse.
+version: "0.2"
+adapters:
+  telegram:
+    kind: telegram
+    inbound:
+      kind: webhook
+      signature: secret_token
+      secret: vault://kv/x#s
+    outbound:
+      kind: rest_api
+      token: vault://kv/x#t
+    identity:
+      kind: sender_table
+      table: vault://kv/x#senders
+    degrade:
+      text: passthrough
+      # MISSING: buttons rule
+    rate_limit: { messages_per_sec: 1, burst: 1 }
+    correlation_key: vault://kv/x#k
+tools:
+  narrate:
+    surface_components: [text, buttons]

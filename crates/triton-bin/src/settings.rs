@@ -40,6 +40,7 @@ pub struct Settings {
     pub upstream_timeout: Duration,
     pub metrics_host: IpAddr,
     pub metrics_port: u16,
+    pub manifest_path: Option<std::path::PathBuf>,
 }
 
 impl Settings {
@@ -147,6 +148,13 @@ struct Cli {
     /// surface at all).
     #[arg(long, env = "TRITON_METRICS_PORT", default_value_t = 9090)]
     metrics_port: u16,
+
+    /// Optional v0.2 `adapter.yaml` manifest path. When set, the
+    /// binary loads + closed-checks it at boot (FR-L-4..6); any
+    /// validation failure refuses startup. When unset, Triton runs
+    /// in v0.1 mode (HTTP trio only, no chat-channel adapters).
+    #[arg(long, env = "TRITON_MANIFEST_PATH")]
+    manifest_path: Option<std::path::PathBuf>,
 }
 
 impl From<Cli> for Settings {
@@ -170,6 +178,7 @@ impl From<Cli> for Settings {
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
             metrics_host: c.metrics_host,
             metrics_port: c.metrics_port,
+            manifest_path: c.manifest_path,
         }
     }
 }

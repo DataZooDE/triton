@@ -11,6 +11,7 @@ tokio = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 libc = "0.2"
+triton-manifest = { path = "../triton-manifest" }
 
 # Real OIDC fixture: Ed25519 keypair + JWT sign + tiny axum issuer
 # serving discovery + JWKS. No mocks per CLAUDE.md §1.
