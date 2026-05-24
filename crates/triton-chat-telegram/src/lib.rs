@@ -816,6 +816,13 @@ fn route_command(text: &str) -> (&'static str, Value) {
             // back. Codex PR 20 review caught this gap.
             #[cfg(feature = "dev-token")]
             "empty" => return ("empty_surface", json!({})),
+            // `demo_panel` (PR 22 / PR 25 / PR 26 reference tool)
+            // emits a Surface covering every component variant
+            // (Text + Narration + Selection + Form + Dashboard +
+            // Button). PR 26 routes `/demo` to it so the Telegram
+            // integration test can exercise Selection → inline
+            // keyboard buttons end-to-end.
+            "demo" => return ("demo_panel", json!({})),
             _ => {
                 // Unknown commands fall through to echo so the
                 // user sees their raw text and knows the command
@@ -855,6 +862,7 @@ fn render_dispatch_result(
         parse_mode: None,
         reply_markup: None,
         deferred_buttons: 0,
+        deferred_selections: 0,
         truncated: false,
     })
 }

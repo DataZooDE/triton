@@ -38,6 +38,11 @@ use triton_core::a2ui::{Component, Surface, extract_surface};
 /// rejects messages Telegram itself would also reject).
 pub const TELEGRAM_TEXT_MAX_BYTES: usize = 4096;
 
+/// Telegram's documented inline-keyboard row cap (architecture.md
+/// §8.7 risk table: "Telegram 8-buttons-per-row"). PR 26
+/// chunks each Selection's options into rows of this size.
+pub const TELEGRAM_BUTTONS_PER_ROW: usize = 8;
+
 /// Sentinel appended when we truncate to fit
 /// [`TELEGRAM_TEXT_MAX_BYTES`]. Bracketed so it's visibly an
 /// adapter artefact, not the tool's output.
@@ -58,15 +63,21 @@ pub struct RenderedMessage {
     pub text: String,
     pub parse_mode: Option<&'static str>,
     /// `reply_markup` JSON for inline keyboards built from Button
-    /// components (PR 21). `None` when there were no buttons or
-    /// every button's token exceeded the platform's callback_data
-    /// cap and got deferred.
+    /// components (PR 21) and Selection options (PR 26 — each
+    /// option becomes its own button under one prompt label).
+    /// `None` when there were no buttons or every button's token
+    /// exceeded the platform's callback_data cap.
     pub reply_markup: Option<Value>,
     /// Number of `Component::Button` entries we encountered but
     /// could not render — either because correlation tokens weren't
     /// available (no key) or because the token would have exceeded
     /// the platform's callback_data cap.
     pub deferred_buttons: usize,
+    /// Number of `Component::Selection` entries we couldn't render
+    /// (PR 26). A Selection defers when ALL its option tokens
+    /// would exceed the 64-byte callback_data cap, or when zero
+    /// options were provided.
+    pub deferred_selections: usize,
     /// True when text was truncated to fit
     /// [`TELEGRAM_TEXT_MAX_BYTES`]. Used by the caller for a
     /// `tracing::warn` line so operators can spot oversized tool
@@ -133,6 +144,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
     // rows via PR 21's HMAC correlation tokens.
     let mut chunks: Vec<PreRender> = Vec::new();
     let mut deferred_buttons = 0usize;
+    let mut deferred_selections = 0usize;
     let mut keyboard_rows: Vec<Vec<Value>> = Vec::new();
     for c in &surface.components {
         match c {
@@ -160,17 +172,61 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
                     }
                 }
             }
-            // Selection / Form: render the prompt or title so the
-            // user sees what's being asked, then count the action
-            // surface as deferred. Full inline-keyboard / numbered-
-            // prompt degradation lands in a later v0.2 PR.
+            // PR 26: Selection → inline_keyboard. Per the manifest's
+            // `selections: inline_keyboard` degrade rule, Telegram
+            // renders each option as its own button under the prompt
+            // label. Each button's callback_data is a correlation
+            // token for `(tool, {args_key: option_value})`, so when
+            // the user clicks the PR 21 dispatch path receives the
+            // fully populated args without any inbound-side
+            // substitution (cleaner than Discord PR 25's null
+            // sentinel; works because Telegram lets a row carry up
+            // to 8 buttons and the message can have many rows).
+            //
+            // Defer rule: an option whose token would exceed the
+            // 64-byte callback_data cap is dropped from the keyboard
+            // and bumps `deferred_buttons`. If ALL options drop OR
+            // the option list is empty, the whole Selection is
+            // deferred (we don't ship a half-built keyboard); the
+            // prompt chunk only ships when at least one option
+            // rendered, matching Codex PR 25's "prompt without
+            // control" guard.
             Component::Selection {
-                prompt, options, ..
+                prompt,
+                options,
+                tool,
+                args_key,
             } => {
-                let opts: Vec<String> = options.iter().map(|o| html_escape(&o.label)).collect();
-                let body = format!("{}\n{}", html_escape(prompt), opts.join(" | "));
-                chunks.push(PreRender::pre_rendered(body, false));
-                deferred_buttons += 1;
+                if options.is_empty() {
+                    deferred_selections += 1;
+                    continue;
+                }
+                let mut option_buttons: Vec<Value> = Vec::new();
+                let mut deferred_in_selection = 0usize;
+                for opt in options {
+                    let args = json!({ args_key.as_str(): &opt.value });
+                    match triton_correlation::encode(tool, &args, correlation_key) {
+                        Ok(token) => option_buttons.push(json!({
+                            "text": opt.label,
+                            "callback_data": token,
+                        })),
+                        Err(_) => deferred_in_selection += 1,
+                    }
+                }
+                if option_buttons.is_empty() {
+                    deferred_selections += 1;
+                    deferred_buttons += deferred_in_selection;
+                    continue;
+                }
+                // 8 buttons per row is Telegram's documented cap.
+                for chunk in option_buttons.chunks(TELEGRAM_BUTTONS_PER_ROW) {
+                    keyboard_rows.push(chunk.to_vec());
+                }
+                deferred_buttons += deferred_in_selection;
+                // Prompt joins the text chunks so the user sees the
+                // question even when their client renders the
+                // inline keyboard below.
+                chunks.push(PreRender::pre_rendered(html_escape(prompt), false));
             }
             Component::Form { title, fields, .. } => {
                 let names: Vec<String> = fields.iter().map(|f| html_escape(&f.label)).collect();
@@ -228,6 +284,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
             parse_mode: if has_html_markers { Some("HTML") } else { None },
             reply_markup,
             deferred_buttons,
+            deferred_selections,
             truncated: false,
         });
     }
@@ -255,6 +312,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
             parse_mode: if has_html_markers { Some("HTML") } else { None },
             reply_markup: reply_markup.clone(),
             deferred_buttons,
+            deferred_selections,
             truncated: true,
         });
     }
@@ -289,6 +347,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
         parse_mode: if has_html_markers { Some("HTML") } else { None },
         reply_markup,
         deferred_buttons,
+        deferred_selections,
         truncated: true,
     })
 }
@@ -426,6 +485,79 @@ mod tests {
         let r = render(&s, TEST_KEY).expect("renders");
         assert_eq!(r.text, "plain");
         assert_eq!(r.parse_mode, None);
+    }
+
+    #[test]
+    fn selection_renders_each_option_as_inline_keyboard_button() {
+        use triton_core::a2ui::SelectionOption;
+        let s = Surface {
+            components: vec![
+                Component::Text {
+                    value: "Header".into(),
+                },
+                Component::Selection {
+                    prompt: "Pick".into(),
+                    options: vec![
+                        SelectionOption {
+                            label: "A".into(),
+                            value: "a".into(),
+                        },
+                        SelectionOption {
+                            label: "B".into(),
+                            value: "b".into(),
+                        },
+                    ],
+                    tool: "narrate".into(),
+                    args_key: "s".into(),
+                },
+            ],
+        };
+        let r = render(&s, TEST_KEY).expect("renders");
+        let markup = r.reply_markup.expect("inline_keyboard set");
+        let rows = markup["inline_keyboard"].as_array().unwrap();
+        // 2 buttons in a single row of 8 (cap).
+        assert_eq!(rows.len(), 1);
+        let row = rows[0].as_array().unwrap();
+        assert_eq!(row.len(), 2);
+        assert_eq!(row[0]["text"], "A");
+        assert_eq!(row[1]["text"], "B");
+
+        // Each button's token decodes to the right (tool, args).
+        let (t1, a1) =
+            triton_correlation::decode(row[0]["callback_data"].as_str().unwrap(), TEST_KEY)
+                .expect("verifies");
+        assert_eq!(t1, "narrate");
+        assert_eq!(a1["s"], "a");
+        let (_, a2) =
+            triton_correlation::decode(row[1]["callback_data"].as_str().unwrap(), TEST_KEY)
+                .expect("verifies");
+        assert_eq!(a2["s"], "b");
+        assert_eq!(r.deferred_selections, 0);
+    }
+
+    #[test]
+    fn empty_selection_options_defer_whole_selection() {
+        let s = Surface {
+            components: vec![
+                Component::Text {
+                    value: "context".into(),
+                },
+                Component::Selection {
+                    prompt: "pick".into(),
+                    options: vec![],
+                    tool: "narrate".into(),
+                    args_key: "s".into(),
+                },
+            ],
+        };
+        let r = render(&s, TEST_KEY).expect("renders");
+        assert_eq!(r.deferred_selections, 1);
+        assert!(r.reply_markup.is_none());
+        // The Selection's prompt MUST NOT ship as visible text
+        // when the whole Selection is deferred (mirrors PR 25's
+        // Codex-flagged "prompt without control" rule). Only the
+        // leading `context` chunk remains.
+        assert_eq!(r.text, "context");
     }
 
     #[test]

@@ -20,6 +20,7 @@ use triton_tests::upstream_fixture::FakeVault;
 const VAULT_TOKEN: &str = "triton-vault-token";
 const RESOLVED_SECRET: &str = "secret-resolved-from-vault";
 const BOT_TOKEN: &str = "12345:resolved-bot-token";
+const CORRELATION_KEY: &str = "correlation-key-from-vault";
 
 fn manifest_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -53,7 +54,7 @@ async fn start_kv_vault() -> FakeVault {
                     "senders",
                     r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
                 ),
-                ("correlation_key", "correlation-key-from-vault"),
+                ("correlation_key", CORRELATION_KEY),
             ],
         )],
     )
@@ -281,6 +282,71 @@ async fn narrate_with_no_arg_routes_to_narrate_not_echo() {
     );
     // narrate emits a Narration component → HTML parse_mode set.
     assert_eq!(captured[0].body["parse_mode"], "HTML");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn demo_selection_renders_inline_keyboard_buttons() {
+    // PR 26: Telegram Selection → inline_keyboard. demo_panel
+    // emits a Selection (3 options bound to narrate(subject))
+    // plus a Refresh Button. Each rendered button carries a
+    // pre-filled correlation token, so PR 21's callback handler
+    // dispatches without any inbound-side substitution.
+    //
+    // Note on the 64-byte cap: a token for `narrate +
+    // {"subject":"<value>"}` only fits when the value is short
+    // (≤ ~6 chars). The demo's "Friendly" and "Formal" options
+    // overflow and get deferred via `deferred_buttons`; only
+    // "Terse" survives. This is the realistic PR 21 behaviour
+    // — exposing it here ensures regressions in the encoder
+    // boundary are caught.
+    let vault = start_kv_vault().await;
+    let telegram = FakeTelegramApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
+
+    let _ = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+        .json(&telegram_update("/demo"))
+        .send()
+        .await
+        .expect("POST");
+
+    let captured = wait_for(Duration::from_secs(2), || {
+        let v = telegram.captured();
+        v.first().cloned()
+    });
+    let rows = captured.body["reply_markup"]["inline_keyboard"]
+        .as_array()
+        .expect("inline_keyboard present");
+    let all_buttons: Vec<&Value> = rows.iter().flat_map(|r| r.as_array().unwrap()).collect();
+
+    // The Refresh button (Component::Button) and the Terse
+    // Selection option both fit the 64-byte cap, so both ship.
+    // Friendly and Formal are deferred.
+    let refresh = all_buttons
+        .iter()
+        .find(|b| b["text"] == "Refresh")
+        .expect("Refresh button present");
+    let (refresh_tool, _) = triton_correlation::decode(
+        refresh["callback_data"].as_str().unwrap(),
+        CORRELATION_KEY.as_bytes(),
+    )
+    .expect("Refresh token verifies");
+    assert_eq!(refresh_tool, "demo_panel");
+
+    let terse = all_buttons
+        .iter()
+        .find(|b| b["text"] == "Terse")
+        .expect("Terse Selection option survives the 64-byte cap");
+    let (terse_tool, terse_args) = triton_correlation::decode(
+        terse["callback_data"].as_str().unwrap(),
+        CORRELATION_KEY.as_bytes(),
+    )
+    .expect("Terse token verifies");
+    assert_eq!(terse_tool, "narrate");
+    assert_eq!(terse_args["subject"], "terse");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
