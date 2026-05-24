@@ -77,8 +77,8 @@ impl TelegramAdapter {
             )));
         }
 
-        let secret_token = literal(adapter.inbound.credentials.get("secret"), "inbound.secret")?
-            .to_string();
+        let secret_token =
+            literal(adapter.inbound.credentials.get("secret"), "inbound.secret")?.to_string();
 
         let table_json = literal(adapter.identity.credentials.get("table"), "identity.table")?;
         let sender_table: HashMap<String, SenderClaims> =
@@ -102,10 +102,7 @@ impl TelegramAdapter {
     }
 }
 
-fn literal<'a>(
-    field: Option<&'a SecretField>,
-    label: &'static str,
-) -> Result<&'a str, BuildError> {
+fn literal<'a>(field: Option<&'a SecretField>, label: &'static str) -> Result<&'a str, BuildError> {
     match field {
         Some(SecretField::Literal(s)) => Ok(s.as_str()),
         Some(SecretField::Vault { .. }) => Err(BuildError::VaultUnsupported(label)),
