@@ -471,3 +471,49 @@ a trap the next developer should not have to step in.
   bind `127.0.0.1:0` and report the bound ports on stdout — deferred
   until we have a use case (PR 9 upstream router stubs may need it).
   Discovered in PR 5.
+
+- **For chat webhooks, never put the body parse (axum's `Json<T>`,
+  `Form<T>`, etc.) ahead of the signature check.** Axum extractors
+  run in argument order and short-circuit on extraction failure with
+  axum's own status — so a request with a malformed body and a wrong
+  signature is rejected by the *extractor* before the handler ever
+  runs, which means no `phase: rejected` audit line is emitted and
+  the attacker has confirmed that the route exists without ever
+  touching our auth code. For inbound chat adapters (FR-I-8 / FR-AU-1),
+  take the body as `axum::body::Bytes`, verify the signature against
+  raw bytes first, then `serde_json::from_slice` and audit any parse
+  failure as `Validation` so it lands on the same audit pivot.
+  Codex flagged this in PR 13 review; closed by switching the
+  Telegram handler from `Json(update)` to `body: Bytes` + manual
+  parse.
+
+- **Constant-time header equality must run over a fixed scratch
+  buffer, not over `min(presented, configured)`.** The naive
+  `if a.len() != b.len() { return false }` early-out and the
+  `a[..n].ct_eq(&b[..n])` "compare-common-prefix-then-AND-with-length"
+  variant both create a secret-length oracle: an attacker controlling
+  the header can sweep `presented.len()` and see handler latency
+  grow until it plateaus at `configured.len()`. For FR-I-8 closure,
+  copy both sides into zero-padded fixed-size buffers (size = the
+  documented platform max — Telegram says 1..=256 for its
+  secret_token header) and ct_eq over the full buffer. Enforce the
+  max at boot so the configured side never gets truncated.
+  Discovered in PR 13 from Codex's second blocker.
+
+- **An adapter that needs Vault before the Vault resolver exists must
+  warn-and-skip, not exit non-zero.** PR 13 wires the Telegram
+  webhook against literal manifest secrets; the production
+  `manifest-valid.yaml` fixture (and any realistic substrate
+  manifest) carries `vault://...` refs. If the boot wiring treats
+  "credential is a Vault ref" as a fatal `BuildError`, the binary
+  refuses to boot the moment a single Vault-ref adapter appears,
+  blocking every test that uses the canonical fixture even though
+  the *other* adapters in the manifest are perfectly serviceable.
+  Encode the carve-out in the adapter's `BuildError` enum
+  (`VaultUnsupported(&'static str)` distinct from
+  `MissingCredential` / `Unsupported`) so main.rs can match on it
+  explicitly: log a warning naming the field, skip wiring that
+  adapter, continue. PR 14 will resolve the Vault ref and lift the
+  carve-out. Discovered in PR 13 — the failing test was the existing
+  `binary_boots_with_valid_manifest`, which I had to keep green
+  while the new wiring was added.

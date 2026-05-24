@@ -18,8 +18,10 @@ use triton_adapters_http::a2a::{A2aState, InMemoryTaskStore};
 use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{McpSessions, McpState};
 use triton_adapters_http::rest::RestState;
+use triton_chat_telegram::TelegramAdapter;
 use triton_core::{Dispatcher, Metrics, RuntimeInfo, ToolRegistry, UpstreamDispatch};
 use triton_identity::{OidcConfig, OidcVerifier};
+use triton_manifest::{AdapterKind, InboundKind};
 use triton_upstream::{ConsulClient, UpstreamConfig, UpstreamRouter, VaultClient};
 
 mod settings;
@@ -38,7 +40,7 @@ async fn main() -> std::io::Result<()> {
     // non-zero exit so Nomad reschedules rather than serving with
     // a broken config (FR-L-4..6, M-MANIFEST-1 / M-COVERAGE-1 /
     // M-SECRETS-1).
-    if let Some(path) = &settings.manifest_path {
+    let manifest: Option<triton_manifest::Manifest> = if let Some(path) = &settings.manifest_path {
         let manifest_env = match settings.env.as_str() {
             "local" | "" => triton_manifest::Env::Dev,
             _ => triton_manifest::Env::Production,
@@ -56,6 +58,7 @@ async fn main() -> std::io::Result<()> {
                     for w in warnings {
                         tracing::warn!("manifest: {w}");
                     }
+                    Some(m)
                 }
                 Err(e) => {
                     tracing::error!(path = %path.display(), error = %e, "manifest validation failed");
@@ -67,7 +70,9 @@ async fn main() -> std::io::Result<()> {
                 std::process::exit(2);
             }
         }
-    }
+    } else {
+        None
+    };
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -208,6 +213,65 @@ async fn main() -> std::io::Result<()> {
         identity: identity.clone(),
     };
 
+    // v0.2 chat-channel adapters. Each manifest-declared adapter
+    // whose `inbound.kind == webhook` mounts its router on the
+    // shared chat-webhook listener at `/<name>/webhook`. Boot fails
+    // hard on any build error so misconfigured secrets never serve
+    // traffic.
+    let mut chat_router: Option<axum::Router> = None;
+    if let Some(m) = &manifest {
+        for (name, adapter) in &m.adapters {
+            if adapter.inbound.kind != InboundKind::Webhook {
+                continue;
+            }
+            match adapter.kind {
+                AdapterKind::Telegram => {
+                    match TelegramAdapter::from_manifest(name, adapter, dispatcher.clone()) {
+                        Ok(built) => {
+                            tracing::info!(adapter = %name, "telegram webhook adapter wired");
+                            let r = Arc::new(built).router();
+                            chat_router = Some(match chat_router.take() {
+                                Some(acc) => acc.merge(r),
+                                None => r,
+                            });
+                        }
+                        Err(triton_chat_telegram::BuildError::VaultUnsupported(field)) => {
+                            // PR 13 ships with literal-secret support
+                            // only; the Vault resolver lands in PR 14.
+                            // Warn and skip so the binary still boots
+                            // for the other adapters in this manifest.
+                            tracing::warn!(
+                                adapter = %name,
+                                field,
+                                "telegram adapter uses Vault refs; skipped until PR 14 wires the resolver",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(adapter = %name, error = %e, "telegram adapter build failed");
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!(
+                        adapter = %name,
+                        kind = ?adapter.kind,
+                        "adapter kind not implemented yet; skipping",
+                    );
+                }
+            }
+        }
+    }
+
+    let chat_listener = if chat_router.is_some() && settings.chat_webhook_port != 0 {
+        let addr: SocketAddr = (settings.chat_webhook_host, settings.chat_webhook_port).into();
+        let l = TcpListener::bind(addr).await?;
+        tracing::info!(chat_webhook = %addr, "chat webhook listener bound");
+        Some(l)
+    } else {
+        None
+    };
+
     let serve_mcp = axum::serve(mcp_listener, triton_adapters_http::mcp::router(mcp_state))
         .with_graceful_shutdown(shutdown.clone().cancelled_owned());
     let serve_a2a = axum::serve(a2a_listener, triton_adapters_http::a2a::router(a2a_state))
@@ -241,9 +305,29 @@ async fn main() -> std::io::Result<()> {
         }),
     };
 
+    // Optional chat-channel webhook listener. Same lifecycle as
+    // /metrics — when disabled the future just waits for shutdown.
+    let chat_token = shutdown.clone();
+    let chat_fut: std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>> =
+        match (chat_listener, chat_router) {
+            (Some(l), Some(router)) => {
+                use std::future::IntoFuture;
+                Box::pin(
+                    axum::serve(l, router)
+                        .with_graceful_shutdown(chat_token.cancelled_owned())
+                        .into_future(),
+                )
+            }
+            _ => Box::pin(async move {
+                chat_token.cancelled().await;
+                Ok(())
+            }),
+        };
+
     let drain = async {
-        let (a, b, c, m) = tokio::join!(serve_mcp, serve_a2a, serve_rest, metrics_fut);
-        a.and(b).and(c).and(m)
+        let (a, b, c, m, ch) =
+            tokio::join!(serve_mcp, serve_a2a, serve_rest, metrics_fut, chat_fut);
+        a.and(b).and(c).and(m).and(ch)
     };
     let outcome = tokio::time::timeout(settings.drain_deadline, drain).await;
     let serve_result = match outcome {

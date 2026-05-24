@@ -4,6 +4,7 @@ members = [
     "crates/triton-core",
     "crates/triton-identity",
     "crates/triton-manifest",
+    "crates/triton-chat-telegram",
     "crates/triton-upstream",
     "crates/triton-adapters-http",
     "crates/triton-bin",

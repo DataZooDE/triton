@@ -41,6 +41,8 @@ pub struct Settings {
     pub metrics_host: IpAddr,
     pub metrics_port: u16,
     pub manifest_path: Option<std::path::PathBuf>,
+    pub chat_webhook_host: IpAddr,
+    pub chat_webhook_port: u16,
 }
 
 impl Settings {
@@ -155,6 +157,16 @@ struct Cli {
     /// in v0.1 mode (HTTP trio only, no chat-channel adapters).
     #[arg(long, env = "TRITON_MANIFEST_PATH")]
     manifest_path: Option<std::path::PathBuf>,
+
+    /// Bind host for the shared chat-channel webhook listener.
+    /// Each manifest-declared webhook adapter mounts at
+    /// `/<adapter-name>/webhook` on this listener.
+    #[arg(long, env = "TRITON_CHAT_WEBHOOK_HOST", default_value = "127.0.0.1")]
+    chat_webhook_host: IpAddr,
+
+    /// Shared chat-channel webhook port. `0` disables the listener.
+    #[arg(long, env = "TRITON_CHAT_WEBHOOK_PORT", default_value_t = 8004)]
+    chat_webhook_port: u16,
 }
 
 impl From<Cli> for Settings {
@@ -179,6 +191,8 @@ impl From<Cli> for Settings {
             metrics_host: c.metrics_host,
             metrics_port: c.metrics_port,
             manifest_path: c.manifest_path,
+            chat_webhook_host: c.chat_webhook_host,
+            chat_webhook_port: c.chat_webhook_port,
         }
     }
 }

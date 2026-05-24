@@ -51,6 +51,7 @@ pub struct TritonProcess {
     pub a2a_addr: SocketAddr,
     pub rest_addr: SocketAddr,
     pub metrics_addr: Option<SocketAddr>,
+    pub chat_webhook_addr: Option<SocketAddr>,
 }
 
 impl TritonProcess {
@@ -128,6 +129,7 @@ impl TritonProcess {
         let a2a_port = free_tcp_port();
         let rest_port = free_tcp_port();
         let metrics_port = free_tcp_port();
+        let chat_webhook_port = free_tcp_port();
         let bin = triton_binary_path();
 
         let mut cmd = Command::new(&bin);
@@ -142,6 +144,8 @@ impl TritonProcess {
             .env("TRITON_REST_PORT", rest_port.to_string())
             .env("TRITON_METRICS_HOST", "127.0.0.1")
             .env("TRITON_METRICS_PORT", metrics_port.to_string())
+            .env("TRITON_CHAT_WEBHOOK_HOST", "127.0.0.1")
+            .env("TRITON_CHAT_WEBHOOK_PORT", chat_webhook_port.to_string())
             // Keep the drain deadline short in tests so a hang fails
             // fast instead of waiting the production default of 30 s.
             .env("TRITON_DRAIN_DEADLINE_SECS", "3")
@@ -178,6 +182,7 @@ impl TritonProcess {
             a2a_addr: format!("127.0.0.1:{a2a_port}").parse().unwrap(),
             rest_addr: format!("127.0.0.1:{rest_port}").parse().unwrap(),
             metrics_addr: Some(format!("127.0.0.1:{metrics_port}").parse().unwrap()),
+            chat_webhook_addr: Some(format!("127.0.0.1:{chat_webhook_port}").parse().unwrap()),
         };
         if proc.wait_for_ready_or_early_exit(boot_deadline).await {
             Ok(proc)
