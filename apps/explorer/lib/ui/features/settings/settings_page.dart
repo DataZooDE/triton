@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../auth/auth_manager.dart';
 import '../../../providers/api_provider.dart';
 import '../../../providers/runtime_provider.dart';
 
@@ -13,32 +14,79 @@ class SettingsPage extends ConsumerStatefulWidget {
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final TextEditingController _tokenCtrl;
+  late final TextEditingController _baseUrlCtrl;
 
   @override
   void initState() {
     super.initState();
     _tokenCtrl = TextEditingController(text: ref.read(tokenProvider) ?? '');
+    _baseUrlCtrl =
+        TextEditingController(text: ref.read(tritonBaseUrlProvider));
   }
 
   @override
   void dispose() {
     _tokenCtrl.dispose();
+    _baseUrlCtrl.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final base = ref.watch(tritonBaseUrlProvider);
+    final auth = ref.watch(authProvider);
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
       body: ListView(
         padding: const EdgeInsets.all(24),
         children: [
           Card(
-            child: ListTile(
-              title: const Text('Triton base URL'),
-              subtitle: Text(base),
-              trailing: const Icon(Icons.lock_outline),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Triton base URL',
+                      style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'The REST adapter root. Same-origin default; '
+                    'override to point at a non-Fabio Triton (e.g. '
+                    'http://localhost:8003 in local dev). Persisted.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _baseUrlCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'base URL',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      FilledButton(
+                        onPressed: () async {
+                          await setTritonBaseUrl(
+                              ref, _baseUrlCtrl.text.trim());
+                          ref.invalidate(runtimeConfigProvider);
+                          ref.invalidate(toolsProvider);
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Base URL saved'),
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                          }
+                        },
+                        child: const Text('Save'),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
           const SizedBox(height: 16),
@@ -52,8 +100,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       style: Theme.of(context).textTheme.titleMedium),
                   const SizedBox(height: 4),
                   const Text(
-                    "Paste the token Triton's identity provider accepts. "
-                    "In nonprod with --features dev-token, use 'dev-token'.",
+                    "Manual override — used when OIDC PKCE isn't "
+                    "configured for this env. Paste 'dev-token' in "
+                    'nonprod with --features dev-token, or an OIDC JWT '
+                    'obtained out-of-band. The OIDC PKCE access token '
+                    'takes precedence when present.',
                     style: TextStyle(fontSize: 12),
                   ),
                   const SizedBox(height: 12),
@@ -88,6 +139,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               ),
             ),
           ),
+          if (auth.status == AuthStatus.loggedIn) ...[
+            const SizedBox(height: 16),
+            Card(
+              child: ListTile(
+                title: Text('OIDC session: ${auth.user?.uid ?? "(unknown)"}'),
+                subtitle: const Text('Signed in via PKCE flow.'),
+                trailing: TextButton.icon(
+                  icon: const Icon(Icons.logout),
+                  label: const Text('Sign out'),
+                  onPressed: () =>
+                      ref.read(authProvider.notifier).logout(),
+                ),
+              ),
+            ),
+          ],
         ],
       ),
     );

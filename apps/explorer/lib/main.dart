@@ -2,21 +2,24 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'auth/auth_manager.dart';
 import 'auth/login_screen.dart';
+import 'providers/api_provider.dart';
 import 'providers/runtime_provider.dart';
 import 'theme/app_theme.dart';
 import 'ui/shell/app_shell.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Read persisted overrides BEFORE the first runApp build so the
+  // SPA never paints the "default" URL only to swap immediately.
+  final baseUrl = await loadInitialBaseUrl(_defaultBaseUrl());
+  final tokenNotifier = await TokenNotifier.load();
   runApp(
     ProviderScope(
       overrides: [
-        // In prod the SPA is served same-origin behind Triton's CORS
-        // layer; `window.location.origin` is the right base. For local
-        // dev (`flutter run -d chrome`) we point at the default
-        // `triton-bin` REST port so a fresh checkout works without
-        // any config tweaking.
-        tritonBaseUrlProvider.overrideWithValue(_defaultBaseUrl()),
+        tritonBaseUrlProvider.overrideWith((ref) => baseUrl),
+        tokenProvider.overrideWith((ref) => tokenNotifier),
       ],
       child: const TritonExplorerApp(),
     ),
@@ -26,27 +29,33 @@ void main() {
 String _defaultBaseUrl() {
   if (kIsWeb) {
     // SAME-ORIGIN path: assumes deployment behind Fabio/Triton's CORS
-    // allow-list. Settings page (PR E2) will let the user override.
+    // allow-list. The Settings page lets the operator override.
     return Uri.base.replace(path: '', query: null, fragment: null).toString();
   }
   return 'http://localhost:8003';
 }
 
-class TritonExplorerApp extends StatelessWidget {
+class TritonExplorerApp extends ConsumerWidget {
   const TritonExplorerApp({super.key});
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-        title: 'Triton Explorer',
-        debugShowCheckedModeBanner: false,
-        theme: ExplorerTheme.light(),
-        // Login → AppShell. PR E2 swaps the placeholder Navigator call
-        // for a proper authenticated state guard (and go_router routes
-        // for deep-linkable tool URLs).
-        initialRoute: '/login',
-        routes: {
-          '/login': (_) => const LoginScreen(),
-          '/': (_) => const AppShell(),
-        },
-      );
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Gate the shell on auth state. When OIDC is configured for this
+    // env (cfg.explorerEnabled is true) the user must be `loggedIn`
+    // OR have pasted a dev-token in Settings before we hand them the
+    // tool playground. When OIDC isn't configured at all, the manual
+    // token is the only path and we let the shell render — the
+    // individual API calls 401 if the token is bad/missing.
+    final auth = ref.watch(authProvider);
+    final manualToken = ref.watch(tokenProvider);
+    final hasManualToken = manualToken != null && manualToken.isNotEmpty;
+    final unlocked =
+        auth.status == AuthStatus.loggedIn || hasManualToken;
+    return MaterialApp(
+      title: 'Triton Explorer',
+      debugShowCheckedModeBanner: false,
+      theme: ExplorerTheme.light(),
+      home: unlocked ? const AppShell() : const LoginScreen(),
+    );
+  }
 }

@@ -1,11 +1,11 @@
 {
-    "name": "triton_explorer",
-    "short_name": "triton_explorer",
+    "name": "Triton Explorer",
+    "short_name": "Triton",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "Triton feature exploration app",
+    "background_color": "#F7F9FF",
+    "theme_color": "#004149",
+    "description": "Internal exploration UI for the Triton agent-ingress gateway.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

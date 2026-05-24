@@ -18,14 +18,15 @@ dependencies:
   shared_preferences: ^2.3.0
   # OIDC PKCE for Flutter web (and mobile). flutter_appauth is
   # mobile-only; `oidc` runs in browsers where the explorer lives.
-  # PR E2 wires the actual PKCE flow; E1 just declares the dependency
-  # so the resolver pins compatible versions.
   oidc: ^0.13.0
+  oidc_default_store: ^0.5.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  integration_test:
+    sdk: flutter
 
 flutter:
   uses-material-design: true
