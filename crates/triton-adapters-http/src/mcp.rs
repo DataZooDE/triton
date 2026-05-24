@@ -29,7 +29,8 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::{Value, json};
-use triton_core::{Dispatcher, TritonError, envelope};
+use triton_core::a2ui::{build_envelope, extract_surface};
+use triton_core::{A2uiVersion, Dispatcher, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
 
@@ -290,13 +291,25 @@ async fn tools_call(
     let tool_name = tool_name.to_string();
     let args = params["arguments"].clone();
 
+    // FR-A-3 / FR-A-6: MCP's per-call A2UI version comes in
+    // `params._meta.a2ui_version`. Unknown values are rejected the
+    // same way A2A handles `metadata.a2ui_version` so the negotiated
+    // version is never silently downgraded.
+    let requested = match parse_mcp_a2ui_version(&params) {
+        Ok(v) => v,
+        Err(e) => return rpc_error(id, CODE_INVALID_PARAMS, &e),
+    };
+
     match state
         .dispatcher
         .invoke(&tool_name, args, principal, "mcp")
         .await
     {
-        Ok(d) => {
+        Ok(mut d) => {
             let trace_id = d.trace_id.clone();
+            if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
+                return rpc_error(id, code_for(&e), &e.to_string());
+            }
             // MCP's `tools/call` result carries `content` (text-shaped
             // for UI display) and `structuredContent` (typed value).
             // We serialise the canonical envelope into both so a
@@ -339,6 +352,35 @@ fn resources_read(id: Value, params: &Value) -> Response {
             &format!("unknown resource uri: {other}"),
         ),
     }
+}
+
+fn parse_mcp_a2ui_version(params: &Value) -> Result<Option<A2uiVersion>, String> {
+    let Some(v) = params["_meta"]["a2ui_version"].as_str() else {
+        return Ok(None);
+    };
+    match v {
+        "v0.8" => Ok(Some(A2uiVersion::V08)),
+        "v0.9" => Ok(Some(A2uiVersion::V09)),
+        other => Err(format!("unknown A2UI version: {other}")),
+    }
+}
+
+fn wrap_a2ui_if_requested(
+    d: &mut triton_core::Dispatch,
+    requested: Option<A2uiVersion>,
+) -> Result<(), TritonError> {
+    let Some(version) = requested else {
+        return Ok(());
+    };
+    if !d.returns_a2ui {
+        return Ok(());
+    }
+    let surface = extract_surface(&d.result).map_err(|e| {
+        tracing::warn!(tool_advertised_a2ui = true, error = %e, "tool returned non-A2UI shape");
+        TritonError::Tool(format!("tool advertised A2UI but {e}"))
+    })?;
+    d.result = build_envelope(&surface, version.into());
+    Ok(())
 }
 
 fn code_for(e: &TritonError) -> i32 {

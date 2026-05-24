@@ -23,6 +23,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use triton_core::a2ui::{build_envelope, extract_surface};
 use triton_core::{A2uiVersion, Dispatcher, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
@@ -155,11 +156,9 @@ async fn message_send(State(state): State<A2aState>, parts: Parts, body: Bytes) 
         }
     };
 
-    // FR-A-3: A2A MUST honour `metadata.a2ui_version`. Validate
-    // here even if PR 10's builder is what actually consumes it;
-    // unknown versions are rejected so callers don't silently
-    // downgrade to the default.
-    let _requested = match parse_a2ui_version(&parsed.metadata) {
+    // FR-A-3: A2A MUST honour `metadata.a2ui_version`. Unknown
+    // versions are rejected so callers don't silently downgrade.
+    let requested = match parse_a2ui_version(&parsed.metadata) {
         Ok(v) => v,
         Err(err) => {
             state.dispatcher.record_rejection(
@@ -196,22 +195,46 @@ async fn message_send(State(state): State<A2aState>, parts: Parts, body: Bytes) 
         .invoke(&tool_name, args, principal, "a2a")
         .await
     {
-        Ok(d) => {
-            state.tasks.record(&trace_id, TaskState::Completed);
-            let msg = OutboundMessage {
-                parts: vec![OutboundPart { data: envelope(&d) }],
-                metadata: OutboundMetadata {
-                    trace_id: d.trace_id.clone(),
-                    task_state: TaskState::Completed,
-                },
-            };
-            (StatusCode::OK, Json(msg)).into_response()
-        }
+        Ok(mut d) => match wrap_a2ui_if_requested(&mut d, requested) {
+            Ok(()) => {
+                state.tasks.record(&trace_id, TaskState::Completed);
+                let msg = OutboundMessage {
+                    parts: vec![OutboundPart { data: envelope(&d) }],
+                    metadata: OutboundMetadata {
+                        trace_id: d.trace_id.clone(),
+                        task_state: TaskState::Completed,
+                    },
+                };
+                (StatusCode::OK, Json(msg)).into_response()
+            }
+            Err(e) => {
+                state.tasks.record(&trace_id, TaskState::Failed);
+                a2a_error_with_trace(&e, &trace_id)
+            }
+        },
         Err(e) => {
             state.tasks.record(&trace_id, TaskState::Failed);
             a2a_error_with_trace(&e, &trace_id)
         }
     }
+}
+
+fn wrap_a2ui_if_requested(
+    d: &mut triton_core::Dispatch,
+    requested: Option<A2uiVersion>,
+) -> Result<(), TritonError> {
+    let Some(version) = requested else {
+        return Ok(());
+    };
+    if !d.returns_a2ui {
+        return Ok(());
+    }
+    let surface = extract_surface(&d.result).map_err(|e| {
+        tracing::warn!(tool_advertised_a2ui = true, error = %e, "tool returned non-A2UI shape");
+        TritonError::Tool(format!("tool advertised A2UI but {e}"))
+    })?;
+    d.result = build_envelope(&surface, version.into());
+    Ok(())
 }
 
 fn parse_a2ui_version(

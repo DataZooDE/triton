@@ -44,6 +44,11 @@ pub struct Dispatch {
     pub result: Value,
     pub trace_id: String,
     pub latency_ms: u64,
+    /// Mirrors the executed tool's `Tool::returns_a2ui()` so the
+    /// adapter can decide whether to wrap into an A2UI envelope
+    /// without an extra registry lookup (FR-A-5). Upstream-routed
+    /// tools default to `false`; PR 10 wraps in-process tools only.
+    pub returns_a2ui: bool,
 }
 
 pub struct Dispatcher {
@@ -121,10 +126,16 @@ impl Dispatcher {
         let outcome = self.run(tool_name, args, &principal).await;
         let latency_ms = started.elapsed().as_millis() as u64;
         self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
+        let returns_a2ui = self
+            .registry
+            .get(tool_name)
+            .map(|t| t.returns_a2ui())
+            .unwrap_or(false);
         outcome.map(|result| Dispatch {
             result,
             trace_id: principal.trace_id,
             latency_ms,
+            returns_a2ui,
         })
     }
 

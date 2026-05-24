@@ -198,6 +198,7 @@ async fn main() -> std::io::Result<()> {
 fn build_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::new();
     registry.register(Arc::new(tools::Echo));
+    registry.register(Arc::new(tools::Narrate));
     registry
 }
 
