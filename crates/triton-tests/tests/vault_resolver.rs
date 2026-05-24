@@ -95,6 +95,54 @@ async fn webhook_authenticates_with_vault_resolved_secret() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn vault_token_never_leaks_into_boot_failure_output() {
+    // Codex (PR 16 review nit): verify the configured Vault token
+    // doesn't appear in stdout/stderr when boot fails. Resolver
+    // errors include URL/status/detail but should NEVER quote the
+    // header. Spawn the binary with a recognisable token against a
+    // Vault that returns 403, scrape its captured output, and make
+    // sure the token literal is absent.
+    let vault = FakeVault::start_kv_v2(
+        "real-server-token-XYZ",
+        &[("kv/data/triton-test/telegram", &[])],
+    )
+    .await;
+    let bin = locate_triton_binary();
+    let secret_marker = "this-token-must-not-leak-leak-leak";
+    let out = std::process::Command::new(&bin)
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_ENV", "local")
+        .env("TRITON_MANIFEST_PATH", manifest_path())
+        .env("TRITON_VAULT_URL", vault.url())
+        .env("TRITON_VAULT_TOKEN", secret_marker)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("spawn triton");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "expected boot failure (wrong vault token), got {:?}",
+        out.status
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stdout.contains(secret_marker),
+        "vault token leaked to stdout"
+    );
+    assert!(
+        !stderr.contains(secret_marker),
+        "vault token leaked to stderr"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn binary_refuses_boot_when_vault_unreachable() {
     // The manifest declares vault:// refs but TRITON_VAULT_URL
     // points at a port nothing listens on. PR 13's behaviour was

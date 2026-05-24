@@ -113,6 +113,25 @@ impl TelegramAdapter {
         let sender_table: HashMap<String, SenderClaims> =
             serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
 
+        // FR-L-6 / NFR-S-5: every credential field MUST resolve at
+        // boot or the binary refuses to start. `outbound.token` and
+        // `correlation_key` aren't functionally consumed yet (PR 17
+        // wires the courier; PR 18 wires HMAC correlation tokens),
+        // but a misconfigured Vault ref in either field would
+        // silently survive boot otherwise — and then surface as a
+        // mid-traffic failure when the dependent PR ships.
+        // Codex caught this gap in PR 16 review.
+        if let Some(field) = adapter.outbound.credentials.get("token") {
+            resolver
+                .resolve(field)
+                .await
+                .map_err(|e| BuildError::Resolve("outbound.token", e))?;
+        }
+        resolver
+            .resolve(&adapter.correlation_key)
+            .await
+            .map_err(|e| BuildError::Resolve("correlation_key", e))?;
+
         Ok(Self {
             name: name.to_string(),
             secret_token,

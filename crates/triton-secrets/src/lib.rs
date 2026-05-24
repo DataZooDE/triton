@@ -50,6 +50,13 @@ impl SecretResolver for LiteralResolver {
 /// Resolves both literal and Vault refs. Vault refs are read via
 /// `GET <base>/v1/<path>` with the configured `X-Vault-Token` and
 /// the requested field plucked out of the KV v2 `data.data` map.
+///
+/// **KV v2 only.** Manifest refs must include the v2 `data/`
+/// segment (e.g. `vault://kv/data/apps/.../telegram#secret`) — the
+/// substrate Vault mount is KV v2 by convention. KV v1 mounts and
+/// dynamic-secret engines (database/, transit/, etc.) aren't in
+/// scope for v0.2; if they're ever needed, add a new resolver
+/// variant rather than overloading this one.
 pub struct VaultKvResolver {
     base: String,
     token: String,
@@ -106,13 +113,23 @@ impl SecretResolver for VaultKvResolver {
                         url: url.clone(),
                         detail: "missing `data.data` envelope (KV v1 mount?)".into(),
                     })?;
-                let value = inner
+                let raw = inner
                     .get(field.as_str())
-                    .and_then(|v| v.as_str())
                     .ok_or_else(|| ResolveError::MissingField {
                         url: url.clone(),
                         field: field.clone(),
                     })?;
+                // Codex (PR 16 review) flagged: collapsing wrong-type
+                // into MissingField hides the diagnosis. A KV v2
+                // entry whose value is an object/array/null/number
+                // is a manifest bug ("you stored a JSON object where
+                // the resolver expects a string") and operators need
+                // it labelled separately from "field not stored".
+                let value = raw.as_str().ok_or_else(|| ResolveError::WrongType {
+                    url: url.clone(),
+                    field: field.clone(),
+                    actual: json_type(raw),
+                })?;
                 Ok(value.to_string())
             }
         }
@@ -136,4 +153,21 @@ pub enum ResolveError {
     Shape { url: String, detail: String },
     #[error("vault secret at {url} has no field `{field}`")]
     MissingField { url: String, field: String },
+    #[error("vault secret at {url} field `{field}` is `{actual}`, expected string")]
+    WrongType {
+        url: String,
+        field: String,
+        actual: &'static str,
+    },
+}
+
+fn json_type(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
