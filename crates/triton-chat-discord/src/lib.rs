@@ -83,6 +83,7 @@ pub struct DiscordAdapter {
     correlation_key: Vec<u8>,
     sender_table: HashMap<String, SenderClaims>,
     dispatcher: Arc<Dispatcher>,
+    rate_limit: triton_core::ratelimit::TokenBucket,
 }
 
 impl DiscordAdapter {
@@ -156,12 +157,17 @@ impl DiscordAdapter {
             .map_err(|e| BuildError::Resolve("correlation_key", e))?
             .into_bytes();
 
+        let rate_limit = triton_core::ratelimit::TokenBucket::new(
+            adapter.rate_limit.messages_per_sec,
+            adapter.rate_limit.burst,
+        );
         Ok(Self {
             name: name.to_string(),
             verifying_key,
             correlation_key,
             sender_table,
             dispatcher,
+            rate_limit,
         })
     }
 
@@ -205,6 +211,27 @@ async fn handle_interaction(
             TritonError::Auth(format!("ed25519: {reason}")),
         );
         return (StatusCode::UNAUTHORIZED, "signature").into_response();
+    }
+
+    // PR 24: per-adapter rate limit (NFR-P-3). Same placement as
+    // Telegram — after the signature check, before body parsing.
+    if let Err(retry_after) = adapter.rate_limit.try_take() {
+        record_rejection(
+            &adapter,
+            "-",
+            "-",
+            TritonError::RateLimited(format!(
+                "discord adapter `{}` rate limit hit; retry in {:.2}s",
+                adapter.name, retry_after
+            )),
+        );
+        let secs = retry_after.ceil().max(1.0) as u64;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", secs.to_string())],
+            "rate limited",
+        )
+            .into_response();
     }
 
     let interaction: DiscordInteraction = match serde_json::from_slice(&body) {

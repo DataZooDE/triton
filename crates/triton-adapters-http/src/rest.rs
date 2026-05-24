@@ -448,5 +448,6 @@ fn http_status_for(e: &TritonError) -> StatusCode {
         TritonError::Validation(_) => StatusCode::BAD_REQUEST,
         TritonError::Tool(_) => StatusCode::BAD_GATEWAY,
         TritonError::Provider(_) => StatusCode::BAD_GATEWAY,
+        TritonError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
     }
 }

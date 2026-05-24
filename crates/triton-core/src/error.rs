@@ -29,6 +29,15 @@ pub enum TritonError {
     /// HTTP 502 / JSON-RPC -32000 / A2A `metadata.error: "provider"`.
     #[error("provider: {0}")]
     Provider(String),
+
+    /// PR 24: the per-adapter token bucket rejected this inbound.
+    /// Adapter maps to HTTP 429 Too Many Requests. The audit class
+    /// `ratelimit` is distinct from `auth` so rate-limit hits show
+    /// up separately in dashboards — they're not failed
+    /// authentication, they're successful authentication followed
+    /// by a quota refusal.
+    #[error("ratelimit: {0}")]
+    RateLimited(String),
 }
 
 impl TritonError {
@@ -39,6 +48,7 @@ impl TritonError {
             Self::Validation(_) => "validation",
             Self::Tool(_) => "tool",
             Self::Provider(_) => "provider",
+            Self::RateLimited(_) => "ratelimit",
         }
     }
 

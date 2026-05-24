@@ -102,6 +102,10 @@ pub struct TelegramAdapter {
     sender_table: HashMap<String, SenderClaims>,
     dispatcher: Arc<Dispatcher>,
     courier: CourierClient,
+    /// PR 24: per-adapter rate limit (NFR-P-3), sized from the
+    /// manifest's `rate_limit` block. Consumed BEFORE body parse
+    /// or sender lookup so a noisy bot can't saturate the dispatcher.
+    rate_limit: triton_core::ratelimit::TokenBucket,
 }
 
 struct CourierClient {
@@ -186,6 +190,10 @@ impl TelegramAdapter {
             .into_bytes();
 
         let courier = CourierClient::new(courier_config)?;
+        let rate_limit = triton_core::ratelimit::TokenBucket::new(
+            adapter.rate_limit.messages_per_sec,
+            adapter.rate_limit.burst,
+        );
         Ok(Self {
             name: name.to_string(),
             secret_token,
@@ -194,6 +202,7 @@ impl TelegramAdapter {
             sender_table,
             dispatcher,
             courier,
+            rate_limit,
         })
     }
 
@@ -464,6 +473,29 @@ async fn handle_webhook(
             TritonError::Auth("bad secret token".into()),
         );
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+
+    // PR 24: per-adapter rate limit (NFR-P-3). Consumed AFTER the
+    // signature check (so attackers can't waste tokens with bogus
+    // sigs) but BEFORE body parsing or sender resolution (so a
+    // single noisy bot can't bypass by spraying random sender ids).
+    if let Err(retry_after) = adapter.rate_limit.try_take() {
+        record_rejection(
+            &adapter,
+            "-",
+            "-",
+            TritonError::RateLimited(format!(
+                "telegram adapter `{}` rate limit hit; retry in {:.2}s",
+                adapter.name, retry_after
+            )),
+        );
+        let secs = retry_after.ceil().max(1.0) as u64;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", secs.to_string())],
+            "rate limited",
+        )
+            .into_response();
     }
 
     // Only after the secret check do we trust the body enough to
@@ -889,6 +921,7 @@ fn telegram_status_for(e: &TritonError) -> StatusCode {
     }
     match e {
         TritonError::Provider(_) => StatusCode::BAD_GATEWAY,
+        TritonError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
         TritonError::Validation(_) | TritonError::Auth(_) | TritonError::Tool(_) => StatusCode::OK,
     }
 }

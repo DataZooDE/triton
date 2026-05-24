@@ -272,6 +272,7 @@ fn a2a_error_with_trace_opt(e: &TritonError, trace_id: Option<&str>) -> Response
         TritonError::Auth(_) => StatusCode::UNAUTHORIZED,
         TritonError::Validation(_) => StatusCode::BAD_REQUEST,
         TritonError::Tool(_) | TritonError::Provider(_) => StatusCode::BAD_GATEWAY,
+        TritonError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
     };
     let mut metadata = json!({ "error": e.class(), "message": e.to_string() });
     if let Some(tid) = trace_id {

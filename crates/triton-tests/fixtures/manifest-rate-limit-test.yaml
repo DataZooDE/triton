@@ -1,0 +1,34 @@
+# PR 24 integration manifest. Telegram adapter with a tiny rate
+# limit (3 messages/sec, burst 2) so the test can drive the bucket
+# empty and confirm the 4th inbound is rejected with 429 +
+# error:ratelimit, while the original 2 still go through.
+version: "0.2"
+
+adapters:
+  telegram:
+    kind: telegram
+    inbound:
+      kind: webhook
+      signature: secret_token
+      secret: webhook-secret-for-test
+    outbound:
+      kind: rest_api
+      token: bot-token-for-test
+    identity:
+      kind: sender_table
+      table: '{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 1
+      burst: 2
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []
