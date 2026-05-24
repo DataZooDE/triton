@@ -561,9 +561,13 @@ fn route_command(text: &str) -> (&'static str, Value) {
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
         match tool {
             "narrate" => return ("narrate", json!({ "subject": subject })),
-            // Dev-only tool used by the PR 20 integration test for
-            // the empty-Surface fallback (production builds reject
-            // the `empty_surface` tool name at the registry).
+            // Dev-only command, gated on the same feature as the
+            // dev-only `EmptySurface` tool itself. Without the gate
+            // a production build would reserve `/empty` and route
+            // it to an unregistered tool, producing a confusing
+            // "unknown tool" instead of the user's text echoing
+            // back. Codex PR 20 review caught this gap.
+            #[cfg(feature = "dev-token")]
             "empty" => return ("empty_surface", json!({})),
             _ => {
                 // Unknown commands fall through to echo so the

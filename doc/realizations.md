@@ -668,6 +668,25 @@ a trap the next developer should not have to step in.
   Test `truncation_preserves_utf8_boundaries` uses a 4-byte
   codepoint (`𝄞`) to verify the cut never lands mid-sequence.
 
+- **Truncating rendered HTML can break it; truncate raw text
+  instead.** Codex PR 20 review caught this: PR 20's first pass
+  truncated the *rendered* string (`<i>...</i>` with `&lt;`
+  entities already inlined), so a cut could land mid-tag or
+  mid-entity and produce HTML Telegram rejects. The replacement
+  approach:
+  1. Render each component to its own complete HTML chunk.
+  2. Truncation cuts only between chunks (always on the `\n\n`
+     separator), so no chunk is ever split mid-tag or mid-entity.
+  3. If even the first chunk exceeds the cap, truncate its
+     *raw* text before HTML-escape and re-render. Use per-char
+     escape-cost accounting (`&` → 5 bytes, `<`/`>` → 4 bytes,
+     others → UTF-8 byte length) so a string of `&` chars
+     doesn't blow up unpredictably when escaped.
+  Tests `truncation_never_splits_html_entities`,
+  `truncation_keeps_italic_tags_balanced`, and
+  `truncation_drops_tail_components_when_head_fits` lock in
+  every branch.
+
 - **`text.strip_prefix('/').and_then(split_once)` silently drops
   no-arg commands.** PR 19's `/narrate` without a space fell
   through to echo because `split_once(' ')` returned None. Use

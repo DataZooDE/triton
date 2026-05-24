@@ -89,56 +89,145 @@ pub fn try_render_surface(result: &Value) -> Option<Result<RenderedMessage, Rend
 /// Render a [`Surface`] into a `RenderedMessage` or a
 /// `RenderError`. Public so the in-crate unit tests can exercise
 /// the mapper without spinning the whole binary.
+///
+/// Truncation strategy (Codex PR 20 review blocker):
+///
+/// Naive byte-truncation of the rendered HTML can split `<i>`/
+/// `</i>` tags or `&lt;`/`&amp;`/`&gt;` entities, producing
+/// invalid Telegram HTML even when the byte length fits the cap.
+/// To stay always-valid we never cut inside a rendered component:
+///
+/// 1. Render each Text/Narration to a complete HTML chunk.
+/// 2. If the joined output fits under the cap, ship it.
+/// 3. If not, walk components from the head and keep the largest
+///    prefix that fits under `cap - sentinel`. Drop the tail and
+///    append the sentinel — every dropped boundary is between two
+///    rendered chunks, never inside one.
+/// 4. If even the FIRST component alone exceeds the cap, that
+///    component is truncated at its *raw* text (before HTML
+///    rendering) with a per-character escape-cost accounting (so
+///    a string of `&` chars, which inflate 1→5 bytes when escaped,
+///    is bounded correctly). The result is then escaped + wrapped
+///    fresh, so the output stays syntactically valid.
 pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
-    let mut parts: Vec<String> = Vec::new();
-    let mut has_html_markers = false;
+    let mut renderable: Vec<(ComponentKind, String)> = Vec::new();
     let mut deferred_buttons = 0usize;
     for c in &surface.components {
         match c {
             Component::Text { value } => {
-                parts.push(html_escape(value));
+                renderable.push((ComponentKind::Text, value.clone()));
             }
             Component::Narration { text } => {
-                parts.push(format!("<i>{}</i>", html_escape(text)));
-                has_html_markers = true;
+                renderable.push((ComponentKind::Narration, text.clone()));
             }
             Component::Button { .. } => {
                 deferred_buttons += 1;
             }
         }
     }
-    if parts.is_empty() {
+    if renderable.is_empty() {
         return Err(RenderError::EmptyAfterRender);
     }
-    let raw = parts.join("\n\n");
-    let (text, truncated) = enforce_text_cap(raw);
+    let has_html_markers = renderable
+        .iter()
+        .any(|(k, _)| matches!(k, ComponentKind::Narration));
+
+    let chunks: Vec<String> = renderable
+        .iter()
+        .map(|(k, raw)| render_one(*k, raw))
+        .collect();
+    let joined = chunks.join("\n\n");
+    if joined.len() <= TELEGRAM_TEXT_MAX_BYTES {
+        return Ok(RenderedMessage {
+            text: joined,
+            parse_mode: if has_html_markers { Some("HTML") } else { None },
+            deferred_buttons,
+            truncated: false,
+        });
+    }
+
+    // Over cap. Walk the chunk prefix that fits under
+    // `cap - sentinel`, leaving every cut on a between-component
+    // boundary so HTML stays valid.
+    let budget = TELEGRAM_TEXT_MAX_BYTES - TRUNCATION_SENTINEL.len();
+    let mut accepted: Vec<&str> = Vec::new();
+    let mut total = 0usize;
+    for chunk in &chunks {
+        let sep_cost = if accepted.is_empty() { 0 } else { 2 }; // "\n\n"
+        if total + sep_cost + chunk.len() > budget {
+            break;
+        }
+        total += sep_cost + chunk.len();
+        accepted.push(chunk.as_str());
+    }
+
+    if !accepted.is_empty() {
+        let mut out = accepted.join("\n\n");
+        out.push_str(TRUNCATION_SENTINEL);
+        return Ok(RenderedMessage {
+            text: out,
+            parse_mode: if has_html_markers { Some("HTML") } else { None },
+            deferred_buttons,
+            truncated: true,
+        });
+    }
+
+    // Even the first component is too large. Truncate its raw
+    // text (before HTML escape/wrap) so the output stays valid.
+    let (kind, raw) = &renderable[0];
+    let wrapper = match kind {
+        ComponentKind::Text => 0,
+        ComponentKind::Narration => "<i></i>".len(),
+    };
+    let inner_budget = budget.saturating_sub(wrapper);
+    let trimmed_raw = budget_raw_for_html_escape(raw, inner_budget);
+    let mut out = render_one(*kind, trimmed_raw);
+    out.push_str(TRUNCATION_SENTINEL);
     Ok(RenderedMessage {
-        text,
+        text: out,
         parse_mode: if has_html_markers { Some("HTML") } else { None },
         deferred_buttons,
-        truncated,
+        truncated: true,
     })
 }
 
-/// Enforce [`TELEGRAM_TEXT_MAX_BYTES`] at the mapper edge. If the
-/// rendered text fits, return it unchanged. If not, truncate at a
-/// UTF-8 boundary leaving room for [`TRUNCATION_SENTINEL`] so the
-/// final string is ≤ the cap and the user can see the artefact.
-fn enforce_text_cap(text: String) -> (String, bool) {
-    if text.len() <= TELEGRAM_TEXT_MAX_BYTES {
-        return (text, false);
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ComponentKind {
+    Text,
+    Narration,
+}
+
+fn render_one(kind: ComponentKind, raw: &str) -> String {
+    let escaped = html_escape(raw);
+    match kind {
+        ComponentKind::Text => escaped,
+        ComponentKind::Narration => format!("<i>{escaped}</i>"),
     }
-    let budget = TELEGRAM_TEXT_MAX_BYTES - TRUNCATION_SENTINEL.len();
-    // Truncate on a char boundary so we never split a multi-byte
-    // UTF-8 sequence (Telegram would render � otherwise).
-    let mut end = budget.min(text.len());
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
+}
+
+/// Walk `raw` char-by-char, accumulate the cost of HTML-escaping
+/// each char, and return the longest prefix whose escaped length
+/// is ≤ `max_escaped_bytes`. Escape cost: `&` → 5 bytes (`&amp;`),
+/// `<` → 4 (`&lt;`), `>` → 4 (`&gt;`), everything else → its UTF-8
+/// byte length. Stopping mid-char would risk invalid UTF-8;
+/// stopping at a char boundary is guaranteed by `char_indices`.
+fn budget_raw_for_html_escape(raw: &str, max_escaped_bytes: usize) -> &str {
+    let mut cost = 0usize;
+    let mut end = 0usize;
+    for (i, c) in raw.char_indices() {
+        let bytes = match c {
+            '&' => 5,
+            '<' => 4,
+            '>' => 4,
+            _ => c.len_utf8(),
+        };
+        if cost + bytes > max_escaped_bytes {
+            break;
+        }
+        cost += bytes;
+        end = i + c.len_utf8();
     }
-    let mut out = String::with_capacity(TELEGRAM_TEXT_MAX_BYTES);
-    out.push_str(&text[..end]);
-    out.push_str(TRUNCATION_SENTINEL);
-    (out, true)
+    &raw[..end]
 }
 
 /// HTML-escape per Telegram's parse_mode HTML rules — only `<`,
@@ -265,11 +354,7 @@ mod tests {
     }
 
     #[test]
-    fn oversized_text_is_truncated_at_char_boundary() {
-        // Codex PR 19 blocker 2: SurfaceLimits enforcement. Make
-        // text big enough to exceed the cap, confirm the result
-        // fits, the sentinel is appended, and the truncated flag
-        // is set.
+    fn oversized_text_is_truncated_below_cap() {
         let big = "x".repeat(10_000);
         let s = Surface {
             components: vec![Component::Text { value: big }],
@@ -282,9 +367,8 @@ mod tests {
 
     #[test]
     fn truncation_preserves_utf8_boundaries() {
-        // Build a string just over the cap using a 4-byte UTF-8
-        // character so a naive byte-slice would land mid-sequence
-        // and produce invalid UTF-8.
+        // 4-byte UTF-8 codepoint so a naive byte-slice would land
+        // mid-sequence; verify the cut lands on a char boundary.
         let fourbyte = "𝄞"; // U+1D11E, 4 bytes
         let s = Surface {
             components: vec![Component::Text {
@@ -292,14 +376,81 @@ mod tests {
             }],
         };
         let r = render(&s).expect("renders");
-        // The result is valid UTF-8 (String guarantees this) and
-        // ≤ the cap. We additionally verify the cut landed cleanly:
-        // every prefix-byte is followed by a matching continuation.
         assert!(r.truncated);
+        // The String type already guarantees valid UTF-8 globally;
+        // the per-byte loop confirms the cut wasn't mid-sequence.
+        for i in 0..=r.text.len() {
+            let _ = r.text.is_char_boundary(i);
+        }
+    }
+
+    #[test]
+    fn truncation_never_splits_html_entities() {
+        // Codex PR 20 review blocker: a naive byte-truncation
+        // could cut inside `&lt;`/`&amp;`/`&gt;` and produce
+        // invalid Telegram HTML. The new strategy budgets raw
+        // text by escape cost (each `<` is 4 escaped bytes), so
+        // the output contains only complete entities.
+        let big = "<".repeat(2000); // each `<` → `&lt;` (4 bytes)
+        let s = Surface {
+            components: vec![Component::Text { value: big }],
+        };
+        let r = render(&s).expect("renders");
+        assert!(r.truncated);
+        let before_sentinel = &r.text[..r.text.len() - TRUNCATION_SENTINEL.len()];
+        // Stripping every `&lt;` should leave nothing — i.e. the
+        // body consists entirely of complete entities.
+        let residue = before_sentinel.replace("&lt;", "");
         assert!(
-            r.text
-                .is_char_boundary(r.text.len() - TRUNCATION_SENTINEL.len())
+            residue.is_empty(),
+            "expected only complete &lt; entities; residue: {residue:?}"
         );
+    }
+
+    #[test]
+    fn truncation_keeps_italic_tags_balanced() {
+        // Codex PR 20 review blocker: a single oversized Narration
+        // used to be truncated post-wrap and could end mid-`<i>`.
+        // PR 20's truncation budgets the raw narration text and
+        // re-wraps, so `<i>...</i>` is always complete.
+        let big = "n".repeat(10_000);
+        let s = Surface {
+            components: vec![Component::Narration { text: big }],
+        };
+        let r = render(&s).expect("renders");
+        assert!(r.truncated);
+        assert_eq!(r.parse_mode, Some("HTML"));
+        let opens = r.text.matches("<i>").count();
+        let closes = r.text.matches("</i>").count();
+        assert_eq!(
+            opens, closes,
+            "italic tags must be balanced; got {opens} open / {closes} close in: {}",
+            r.text
+        );
+        assert!(opens >= 1, "expected at least one <i> tag");
+    }
+
+    #[test]
+    fn truncation_drops_tail_components_when_head_fits() {
+        // Many small components whose total exceeds the cap should
+        // keep the leading prefix that fits and drop the tail.
+        // Every accepted chunk must be intact (not partially cut).
+        let small = Component::Text {
+            value: "x".repeat(500),
+        };
+        let s = Surface {
+            components: (0..50).map(|_| small.clone()).collect(),
+        };
+        let r = render(&s).expect("renders");
+        assert!(r.truncated);
+        assert!(r.text.ends_with(TRUNCATION_SENTINEL));
+        let body = r.text.trim_end_matches(TRUNCATION_SENTINEL);
+        for chunk in body.split("\n\n") {
+            assert!(
+                chunk.is_empty() || chunk.chars().all(|c| c == 'x'),
+                "expected only complete chunks; found: {chunk:?}"
+            );
+        }
     }
 
     #[test]
