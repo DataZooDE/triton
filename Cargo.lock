@@ -1781,6 +1781,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tower-http",
  "tracing",
  "triton-core",
  "triton-identity",
