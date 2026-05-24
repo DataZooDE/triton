@@ -396,7 +396,7 @@ async fn handle_message_component(
         return (StatusCode::UNAUTHORIZED, "future-dated callback").into_response();
     }
 
-    let (tool_name, args) = match triton_correlation::decode(token, &adapter.correlation_key) {
+    let (tool_name, mut args) = match triton_correlation::decode(token, &adapter.correlation_key) {
         Ok(v) => v,
         Err(e) => {
             record_rejection(
@@ -408,6 +408,35 @@ async fn handle_message_component(
             return (StatusCode::UNAUTHORIZED, "token rejected").into_response();
         }
     };
+
+    // PR 25: if `data.values` is present, this is a Selection
+    // callback. The mapper encoded the args as `{args_key: null}`;
+    // substitute the picked value before dispatch. Reject if the
+    // shape doesn't match what we'd have emitted (multi-key args,
+    // non-null value, no null-valued key) — that's a forged or
+    // mismatched payload.
+    if !data.values.is_empty() {
+        let chosen = data.values[0].clone();
+        let mut filled = false;
+        if let Some(obj) = args.as_object_mut() {
+            for (_, v) in obj.iter_mut() {
+                if v.is_null() {
+                    *v = Value::String(chosen.clone());
+                    filled = true;
+                    break;
+                }
+            }
+        }
+        if !filled {
+            record_rejection(
+                adapter,
+                &claims.sub,
+                &claims.tenant,
+                TritonError::Validation("select-menu callback: no null arg slot to fill".into()),
+            );
+            return (StatusCode::BAD_REQUEST, "no slot for selection").into_response();
+        }
+    }
 
     let principal = Principal {
         sub: claims.sub.clone(),
@@ -597,6 +626,15 @@ struct DiscordInteractionMessage {
 struct DiscordInteractionData {
     #[serde(default)]
     custom_id: Option<String>,
+    /// PR 25: string-select-menu callbacks carry the chosen option
+    /// value(s) here. The mapper emits a select menu whose
+    /// correlation token encodes `(tool, {args_key: null})`; at
+    /// callback time we substitute `values[0]` for the null
+    /// before dispatching. PR 25 supports single-select only
+    /// (`min_values = max_values = 1`), so we only ever consume
+    /// `values[0]`.
+    #[serde(default)]
+    values: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
