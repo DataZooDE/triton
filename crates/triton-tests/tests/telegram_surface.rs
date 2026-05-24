@@ -285,20 +285,15 @@ async fn narrate_with_no_arg_routes_to_narrate_not_echo() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn demo_selection_renders_inline_keyboard_buttons() {
-    // PR 26: Telegram Selection → inline_keyboard. demo_panel
-    // emits a Selection (3 options bound to narrate(subject))
-    // plus a Refresh Button. Each rendered button carries a
-    // pre-filled correlation token, so PR 21's callback handler
-    // dispatches without any inbound-side substitution.
-    //
-    // Note on the 64-byte cap: a token for `narrate +
-    // {"subject":"<value>"}` only fits when the value is short
-    // (≤ ~6 chars). The demo's "Friendly" and "Formal" options
-    // overflow and get deferred via `deferred_buttons`; only
-    // "Terse" survives. This is the realistic PR 21 behaviour
-    // — exposing it here ensures regressions in the encoder
-    // boundary are caught.
+async fn demo_selection_defers_when_any_option_overflows_cap() {
+    // PR 26 + Codex pass: defer-all-or-render-all. demo_panel's
+    // Selection includes "Friendly" (8 chars), which pushes
+    // `narrate + {"subject":"friendly"}` past Telegram's 64-byte
+    // callback_data cap. Per the spec direction ("reject oversize
+    // selection sets rather than present a subset"), the whole
+    // Selection defers — only the standalone Refresh Button
+    // ships, and the Selection prompt is dropped too (no
+    // prompt-without-control).
     let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
     let proc =
@@ -322,9 +317,7 @@ async fn demo_selection_renders_inline_keyboard_buttons() {
         .expect("inline_keyboard present");
     let all_buttons: Vec<&Value> = rows.iter().flat_map(|r| r.as_array().unwrap()).collect();
 
-    // The Refresh button (Component::Button) and the Terse
-    // Selection option both fit the 64-byte cap, so both ship.
-    // Friendly and Formal are deferred.
+    // Refresh button (Component::Button, fits) ships.
     let refresh = all_buttons
         .iter()
         .find(|b| b["text"] == "Refresh")
@@ -336,17 +329,33 @@ async fn demo_selection_renders_inline_keyboard_buttons() {
     .expect("Refresh token verifies");
     assert_eq!(refresh_tool, "demo_panel");
 
-    let terse = all_buttons
-        .iter()
-        .find(|b| b["text"] == "Terse")
-        .expect("Terse Selection option survives the 64-byte cap");
-    let (terse_tool, terse_args) = triton_correlation::decode(
-        terse["callback_data"].as_str().unwrap(),
-        CORRELATION_KEY.as_bytes(),
-    )
-    .expect("Terse token verifies");
-    assert_eq!(terse_tool, "narrate");
-    assert_eq!(terse_args["subject"], "terse");
+    // None of the three Selection option labels ship as buttons —
+    // the whole Selection deferred because Friendly overflows.
+    for label in ["Friendly", "Formal", "Terse"] {
+        let present = all_buttons.iter().any(|b| b["text"] == label);
+        assert!(
+            !present,
+            "expected the whole Selection to defer; {label} unexpectedly rendered"
+        );
+    }
+
+    // Selection prompt MUST NOT ship as text either — Codex PR 25
+    // discipline applied to PR 26: prompt-without-control is a
+    // misleading UX. The "Pick a sample tone" prompt is dropped.
+    let text = captured.body["text"].as_str().unwrap_or("");
+    assert!(
+        !text.contains("Pick a sample tone"),
+        "deferred Selection prompt MUST NOT ship as text; got: {text}"
+    );
+
+    // And the deferral surfaces in the audit/log stream so the
+    // operator can see what happened.
+    std::thread::sleep(Duration::from_millis(120));
+    let logs = proc.stdout_snapshot().join("\n");
+    assert!(
+        logs.contains("deferred_selections"),
+        "expected a tracing line naming deferred_selections; got logs:\n{logs}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

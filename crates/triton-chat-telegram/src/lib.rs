@@ -594,6 +594,16 @@ async fn handle_webhook(
                             "telegram surface mapper: button components deferred until correlation-token PR",
                         );
                     }
+                    if rendered.deferred_selections > 0 {
+                        // PR 26 (Codex review concern): operators
+                        // need to see deferred Selection counts
+                        // alongside button counts.
+                        tracing::warn!(
+                            tool = tool_name,
+                            deferred_selections = rendered.deferred_selections,
+                            "telegram surface mapper: Selection components deferred (empty options or token-cap overflow)",
+                        );
+                    }
                     if rendered.truncated {
                         // Codex PR 19 blocker 2 follow-up: log
                         // every truncation event so operators can
@@ -816,12 +826,14 @@ fn route_command(text: &str) -> (&'static str, Value) {
             // back. Codex PR 20 review caught this gap.
             #[cfg(feature = "dev-token")]
             "empty" => return ("empty_surface", json!({})),
-            // `demo_panel` (PR 22 / PR 25 / PR 26 reference tool)
-            // emits a Surface covering every component variant
-            // (Text + Narration + Selection + Form + Dashboard +
-            // Button). PR 26 routes `/demo` to it so the Telegram
-            // integration test can exercise Selection → inline
-            // keyboard buttons end-to-end.
+            // `demo_panel` reference tool emits a Surface covering
+            // every component variant (Text + Narration + Selection
+            // + Form + Dashboard + Button). PR 26's integration
+            // test drives this through `/demo`. Gated on the same
+            // `dev-token` feature as the tool itself so production
+            // builds don't reserve the route for an unregistered
+            // tool (Codex PR 25 review pattern).
+            #[cfg(feature = "dev-token")]
             "demo" => return ("demo_panel", json!({})),
             _ => {
                 // Unknown commands fall through to echo so the

@@ -201,8 +201,14 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
                     deferred_selections += 1;
                     continue;
                 }
+                // Pre-encode every option's token in one pass. If
+                // ANY fails to fit, defer the whole Selection
+                // (Codex PR 26 concern: a partial keyboard
+                // contradicts the spec's "reject oversize selection
+                // sets" directive and gives users a misleading
+                // truncated picker).
                 let mut option_buttons: Vec<Value> = Vec::new();
-                let mut deferred_in_selection = 0usize;
+                let mut any_overflow = false;
                 for opt in options {
                     let args = json!({ args_key.as_str(): &opt.value });
                     match triton_correlation::encode(tool, &args, correlation_key) {
@@ -210,19 +216,20 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
                             "text": opt.label,
                             "callback_data": token,
                         })),
-                        Err(_) => deferred_in_selection += 1,
+                        Err(_) => {
+                            any_overflow = true;
+                            break;
+                        }
                     }
                 }
-                if option_buttons.is_empty() {
+                if any_overflow {
                     deferred_selections += 1;
-                    deferred_buttons += deferred_in_selection;
                     continue;
                 }
                 // 8 buttons per row is Telegram's documented cap.
                 for chunk in option_buttons.chunks(TELEGRAM_BUTTONS_PER_ROW) {
                     keyboard_rows.push(chunk.to_vec());
                 }
-                deferred_buttons += deferred_in_selection;
                 // Prompt joins the text chunks so the user sees the
                 // question even when their client renders the
                 // inline keyboard below.
