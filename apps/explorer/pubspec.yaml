@@ -1,0 +1,31 @@
+name: triton_explorer
+description: Internal exploration UI for the Triton agent-ingress gateway.
+publish_to: 'none'
+version: 0.0.1+1
+
+environment:
+  sdk: ^3.12.0
+  flutter: '>=3.16.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_riverpod: ^2.5.1
+  go_router: ^14.6.0
+  dio: ^5.7.0
+  google_fonts: ^6.2.1
+  shared_preferences: ^2.3.0
+  # OIDC PKCE for Flutter web (and mobile). flutter_appauth is
+  # mobile-only; `oidc` runs in browsers where the explorer lives.
+  # PR E2 wires the actual PKCE flow; E1 just declares the dependency
+  # so the resolver pins compatible versions.
+  oidc: ^0.13.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
