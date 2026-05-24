@@ -15,6 +15,7 @@ publish = false
 
 [workspace.dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "process", "time", "io-util"] }
 tokio-util = { version = "0.7", default-features = false }
 tower = { version = "0.5", default-features = false }

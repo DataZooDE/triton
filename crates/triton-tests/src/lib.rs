@@ -2,6 +2,7 @@
 //! actual tests live in `tests/`. No mocks allowed — the harness
 //! spawns the real `triton` binary and drives it over real HTTP.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::net::{SocketAddr, TcpListener};
 use std::path::PathBuf;
@@ -49,20 +50,54 @@ impl TritonProcess {
     }
 
     pub async fn spawn_with(boot_deadline: Duration) -> Self {
+        Self::spawn_with_env(boot_deadline, HashMap::new()).await
+    }
+
+    /// Spawn with additional `TRITON_*` env vars layered on top of
+    /// the harness defaults (host, ports, drain deadline).
+    pub async fn spawn_with_env(
+        boot_deadline: Duration,
+        extra_env: HashMap<String, String>,
+    ) -> Self {
+        Self::spawn_with_args(boot_deadline, extra_env, Vec::new()).await
+    }
+
+    /// Spawn with extra env vars **and** extra CLI args. Used to
+    /// exercise the NFR-O-1 precedence chain (CLI > env > default).
+    /// Any inherited `TRITON_*` env var from the parent shell is
+    /// scrubbed first so a test running with `TRITON_IMAGE_SHA` set
+    /// externally gets the same view as one without.
+    pub async fn spawn_with_args(
+        boot_deadline: Duration,
+        extra_env: HashMap<String, String>,
+        extra_args: Vec<String>,
+    ) -> Self {
         let mcp_port = free_tcp_port();
         let a2a_port = free_tcp_port();
         let rest_port = free_tcp_port();
         let bin = triton_binary_path();
 
-        let mut child = Command::new(&bin)
-            .env("TRITON_HOST", "127.0.0.1")
+        let mut cmd = Command::new(&bin);
+        for (k, _) in std::env::vars() {
+            if k.starts_with("TRITON_") {
+                cmd.env_remove(k);
+            }
+        }
+        cmd.env("TRITON_HOST", "127.0.0.1")
             .env("TRITON_MCP_PORT", mcp_port.to_string())
             .env("TRITON_A2A_PORT", a2a_port.to_string())
             .env("TRITON_REST_PORT", rest_port.to_string())
             // Keep the drain deadline short in tests so a hang fails
             // fast instead of waiting the production default of 30 s.
             .env("TRITON_DRAIN_DEADLINE_SECS", "3")
-            .env("RUST_LOG", "info")
+            .env("RUST_LOG", "info");
+        for (k, v) in extra_env {
+            cmd.env(k, v);
+        }
+        for arg in extra_args {
+            cmd.arg(arg);
+        }
+        let mut child = cmd
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
