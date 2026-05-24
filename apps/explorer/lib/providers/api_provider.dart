@@ -95,6 +95,13 @@ final manifestProvider = FutureProvider<Map<String, dynamic>>((ref) async {
   return client.manifest();
 });
 
+/// Raw Prometheus text exposition from `/v1/metrics`. Operator pages
+/// parse this client-side rather than depending on a Prom client.
+final metricsProvider = FutureProvider<String>((ref) async {
+  final client = ref.watch(restClientProvider);
+  return client.metrics();
+});
+
 /// Family provider for the audit endpoint: cache key is
 /// `(limit, traceIdFilter)` so the Audit page can swap filters
 /// without losing the most recent fetch for the other key.

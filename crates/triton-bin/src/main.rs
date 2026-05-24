@@ -233,6 +233,7 @@ async fn main() -> std::io::Result<()> {
         dispatcher: dispatcher.clone(),
         identity: identity.clone(),
         manifest: manifest_arc,
+        metrics: metrics.clone(),
     };
     let a2a_state = A2aState {
         dispatcher: dispatcher.clone(),

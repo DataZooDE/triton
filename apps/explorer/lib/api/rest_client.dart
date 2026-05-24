@@ -21,6 +21,18 @@ class RestClient {
     return Options(headers: headers);
   }
 
+  /// `GET /v1/metrics` — Prometheus text exposition. Auth-gated;
+  /// same Bearer as /v1/tools. The unauthenticated tailnet-only
+  /// listener on :9090 is the canonical scrape target; this route
+  /// is for the explorer SPA.
+  Future<String> metrics() async {
+    final r = await _dio.get<String>(
+      '$baseUrl/v1/metrics',
+      options: _opts().copyWith(responseType: ResponseType.plain),
+    );
+    return r.data ?? '';
+  }
+
   /// `POST /v1/surface/render` — runs an A2UI Surface through the
   /// named chat-channel surface mapper and returns what that
   /// adapter would post. Only `telegram` wired today.
