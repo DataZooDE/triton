@@ -506,13 +506,34 @@ Nomad sidecar.
 
 HMAC correlation tokens are emitted on every interactive option
 (button, selection item). The token layout is
-`b64url(JSON({tool, args})) || "." || b64url(HMAC-SHA256(body, key))`
-under the adapter's `CorrelationKey`. On the follow-up event
-(callback_query, component interaction, Action.Submit, or
-numbered-prompt reply text) the inbound listener verifies the HMAC
-in constant time and dispatches the recovered `(tool, args)` pair.
-The platform never sees the tool name or args directly; the
-dispatcher receives a verified `(tool, args, principal)` triple.
+`b64url(JSON({t, a})) || "." || b64url(HMAC-SHA256(body, key))[..N]`
+under the adapter's `CorrelationKey`, where `{t, a}` are the
+short keys (`t` = tool name, `a` = args). Short keys are forced
+by the platform's callback-data cap — Telegram's documented limit
+is 64 bytes, and full long-key JSON + full SHA-256 tag would not
+fit. Each adapter picks `N` (the HMAC truncation length) per its
+own platform cap; the Telegram implementation uses `N = 8` bytes
+(64-bit). 64-bit auth tags under per-adapter rate limits leave
+≥ 2^32 forge attempts on average — same security territory as
+Stripe's truncated webhook signatures.
+
+On the follow-up event (callback_query, component interaction,
+Action.Submit, or numbered-prompt reply text) the inbound
+listener verifies the HMAC in constant time and dispatches the
+recovered `(tool, args)` pair. The token is base64url JSON, so
+the platform CAN read the tool name and args — HMAC protects
+integrity, not confidentiality. What HMAC does guarantee is that
+a hostile platform actor cannot fabricate a token that decodes
+to a tool the operator hasn't authorised through the surface
+mapper. The dispatcher receives a verified `(tool, args,
+principal)` triple where the principal always comes from the
+inbound sender (`from.id` → `sender_table`), never from the
+token body.
+
+Replay protection is not in scope for v0.2's first iteration; a
+stolen token can be replayed until a (timestamp, nonce) envelope
+is added. The trust boundary still holds — replay can't
+impersonate a different user — but the action will fire again.
 
 ## 9. Architecture decisions (ADRs, condensed)
 

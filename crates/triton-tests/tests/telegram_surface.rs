@@ -284,12 +284,12 @@ async fn narrate_with_no_arg_routes_to_narrate_not_echo() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unsupported_components_are_logged_not_silently_dropped() {
-    // `narrate` includes a Button component. PR 19 doesn't render
-    // buttons (the HMAC correlation-token PR lands next), but it
-    // MUST NOT silently drop them — a tracing::warn line names the
-    // deferred component count so the operator can see how often
-    // this happens in practice.
+async fn narrate_renders_button_as_inline_keyboard() {
+    // PR 19 deferred Button components; PR 21 wires HMAC
+    // correlation tokens and ships them as `inline_keyboard` with
+    // `callback_data: <signed token>`. The token round-trip itself
+    // is exercised by `telegram_callback.rs`; here we just confirm
+    // the courier body now carries the `reply_markup`.
     let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
     let proc =
@@ -303,13 +303,26 @@ async fn unsupported_components_are_logged_not_silently_dropped() {
         .send()
         .await
         .expect("POST");
-    // Sleep a tick to let the courier complete + the warn line land.
-    std::thread::sleep(Duration::from_millis(200));
 
-    let stdout = proc.stdout_snapshot().join("\n");
+    let captured = wait_for(Duration::from_secs(2), || {
+        let v = telegram.captured();
+        v.first().cloned()
+    });
+    let markup = &captured.body["reply_markup"];
+    let rows = markup["inline_keyboard"]
+        .as_array()
+        .expect("inline_keyboard present");
+    assert_eq!(rows.len(), 1, "narrate emits one Button row");
+    let cell = &rows[0][0];
+    assert_eq!(cell["text"], "Refresh");
+    let token = cell["callback_data"]
+        .as_str()
+        .expect("callback_data is a string");
+    assert!(!token.is_empty());
     assert!(
-        stdout.contains("button") || stdout.contains("Button"),
-        "expected tracing line naming deferred Button component; got stdout:\n{stdout}"
+        token.len() <= 64,
+        "Telegram callback_data is capped at 64 bytes; got {} for: {token}",
+        token.len(),
     );
 }
 

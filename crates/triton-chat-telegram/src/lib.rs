@@ -76,6 +76,7 @@ pub struct TelegramAdapter {
     name: String,
     secret_token: String,
     bot_token: String,
+    correlation_key: Vec<u8>,
     sender_table: HashMap<String, SenderClaims>,
     dispatcher: Arc<Dispatcher>,
     courier: CourierClient,
@@ -156,16 +157,18 @@ impl TelegramAdapter {
                 .map_err(|e| BuildError::Resolve("outbound.token", e))?,
             None => return Err(BuildError::MissingCredential("outbound.token")),
         };
-        resolver
+        let correlation_key = resolver
             .resolve(&adapter.correlation_key)
             .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?;
+            .map_err(|e| BuildError::Resolve("correlation_key", e))?
+            .into_bytes();
 
         let courier = CourierClient::new(courier_config)?;
         Ok(Self {
             name: name.to_string(),
             secret_token,
             bot_token,
+            correlation_key,
             sender_table,
             dispatcher,
             courier,
@@ -367,6 +370,12 @@ pub enum BuildError {
 struct TelegramUpdate {
     #[serde(default)]
     message: Option<TelegramMessage>,
+    /// Inbound interaction with an inline_keyboard button. Carries
+    /// the HMAC correlation token in `data`; the inbound handler
+    /// verifies the signature and re-dispatches the recovered
+    /// (tool, args) pair as a fresh call (PR 21).
+    #[serde(default)]
+    callback_query: Option<TelegramCallbackQuery>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -375,6 +384,19 @@ struct TelegramMessage {
     chat: TelegramChat,
     #[serde(default)]
     text: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TelegramCallbackQuery {
+    from: TelegramUser,
+    message: Option<TelegramMessage>,
+    /// The correlation token the surface mapper put in
+    /// `callback_data` when it rendered the button. Empty/absent on
+    /// callback queries triggered by non-data buttons (game URLs,
+    /// login URLs); we treat those as malformed since the mapper
+    /// only emits data buttons.
+    #[serde(default)]
+    data: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -431,6 +453,16 @@ async fn handle_webhook(
         }
     };
 
+    // PR 21: callback_query path (button click). The token in
+    // `data` is HMAC-verified against the adapter's correlation_key
+    // and the recovered (tool, args) is dispatched as a fresh
+    // call. The principal still comes from the sender (sender_table
+    // lookup of `from.id`); the token MUST NOT decide the
+    // principal, only the tool+args pair.
+    if let Some(cq) = update.callback_query {
+        return handle_callback_query(&adapter, cq).await;
+    }
+
     let Some(message) = update.message else {
         // Updates without a `message` (edited messages, channel
         // posts, etc.) are silently 200'd in PR 13 — Telegram
@@ -477,6 +509,7 @@ async fn handle_webhook(
     // now this lets PR 19 exercise both tool shapes through the
     // surface mapper.
     let (tool_name, args) = route_command(text);
+    let tool_name: &str = tool_name;
     let chat_id = message.chat.id;
     let principal_for_post = principal.clone();
     let result = adapter
@@ -485,7 +518,7 @@ async fn handle_webhook(
         .await;
     match result {
         Ok(dispatch) => {
-            match render_dispatch_result(&dispatch.result) {
+            match render_dispatch_result(&dispatch.result, &adapter.correlation_key) {
                 Ok(rendered) => {
                     if rendered.deferred_buttons > 0 {
                         // PR 19 doesn't render buttons (need HMAC
@@ -549,6 +582,107 @@ async fn handle_webhook(
     }
 }
 
+/// Handle a Telegram `callback_query` update. The token in
+/// `data` is HMAC-verified against the adapter's `correlation_key`
+/// and the recovered `(tool, args)` re-dispatched. Per
+/// architecture.md §8.7 the platform never sees the tool name or
+/// args directly; we only ever ship the signed token through
+/// Telegram and trust nothing it sends back beyond the HMAC.
+async fn handle_callback_query(
+    adapter: &Arc<TelegramAdapter>,
+    cq: TelegramCallbackQuery,
+) -> Response {
+    // FR-I-7 sender resolution. The principal comes from `from.id`
+    // — never from the token. A hostile platform actor cannot
+    // impersonate a different user by forging tokens because the
+    // sender_table lookup is independent.
+    let sender_key = cq.from.id.to_string();
+    let Some(claims) = adapter.sender_table.get(&sender_key) else {
+        record_rejection(
+            adapter,
+            "-",
+            "-",
+            TritonError::Auth(format!("unknown sender {sender_key}")),
+        );
+        return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+    };
+
+    let Some(token) = cq.data.as_deref().filter(|s| !s.is_empty()) else {
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Validation("callback_query without data".into()),
+        );
+        return (StatusCode::BAD_REQUEST, "callback_query missing data").into_response();
+    };
+
+    let (tool_name, args) = match triton_correlation::decode(token, &adapter.correlation_key) {
+        Ok(v) => v,
+        Err(e) => {
+            record_rejection(
+                adapter,
+                &claims.sub,
+                &claims.tenant,
+                TritonError::Auth(format!("callback token: {e}")),
+            );
+            return (StatusCode::UNAUTHORIZED, "callback token rejected").into_response();
+        }
+    };
+
+    let principal = Principal {
+        sub: claims.sub.clone(),
+        scopes: claims.scopes.clone(),
+        tenant: claims.tenant.clone(),
+        raw_token: String::new(),
+        trace_id: uuid::Uuid::new_v4().to_string(),
+    };
+
+    // For private chats the post-back chat_id equals `from.id`;
+    // group chats embed it on `callback_query.message.chat.id`.
+    // Fall back to `from.id` when the platform omits the parent
+    // message (rare but legal for inline-mode callbacks).
+    let chat_id = cq
+        .message
+        .as_ref()
+        .map(|m| m.chat.id)
+        .unwrap_or(cq.from.id as i64);
+
+    let principal_for_post = principal.clone();
+    let result = adapter
+        .dispatcher
+        .invoke(&tool_name, args, principal, PROTOCOL)
+        .await;
+    match result {
+        Ok(dispatch) => match render_dispatch_result(&dispatch.result, &adapter.correlation_key) {
+            Ok(rendered) => {
+                post_back(adapter, &principal_for_post, &tool_name, chat_id, rendered).await;
+                StatusCode::OK.into_response()
+            }
+            Err(surface_mapper::RenderError::EmptyAfterRender) => {
+                tracing::warn!(
+                    tool = tool_name,
+                    "telegram callback: empty surface; skipping post-back",
+                );
+                let provider =
+                    TritonError::Provider("telegram surface mapper: empty surface".into());
+                adapter.dispatcher.record_post(
+                    &tool_name,
+                    PROTOCOL,
+                    &principal_for_post,
+                    0,
+                    Err((&provider, 0, "dropped")),
+                );
+                StatusCode::OK.into_response()
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, class = %e.class(), "telegram callback dispatch failed");
+            telegram_status_for(&e).into_response()
+        }
+    }
+}
+
 fn route_command(text: &str) -> (&'static str, Value) {
     if let Some(rest) = text.strip_prefix('/') {
         // Split on the first space; if there's no space the whole
@@ -581,12 +715,13 @@ fn route_command(text: &str) -> (&'static str, Value) {
 
 fn render_dispatch_result(
     result: &serde_json::Value,
+    correlation_key: &[u8],
 ) -> Result<RenderedMessage, surface_mapper::RenderError> {
     // Tools that emit an A2UI surface route through the mapper.
     // Everything else falls back to PR 18's bare-text path so the
     // echo-shaped `{ "echo": "..." }` reply still works without
     // forcing every tool into the A2UI envelope.
-    if let Some(r) = surface_mapper::try_render_surface(result) {
+    if let Some(r) = surface_mapper::try_render_surface(result, correlation_key) {
         return r;
     }
     let text = if let Some(obj) = result.as_object()
@@ -605,6 +740,7 @@ fn render_dispatch_result(
     Ok(RenderedMessage {
         text,
         parse_mode: None,
+        reply_markup: None,
         deferred_buttons: 0,
         truncated: false,
     })

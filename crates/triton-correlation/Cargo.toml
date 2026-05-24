@@ -1,0 +1,16 @@
+[package]
+name = "triton-correlation"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+base64 = "0.22"
+hmac = "0.12"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+subtle = "2"
+thiserror = { workspace = true }

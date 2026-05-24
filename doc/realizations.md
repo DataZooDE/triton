@@ -694,3 +694,48 @@ a trap the next developer should not have to step in.
   the command and the args default to empty. Then a match on the
   command routes to the right tool (with empty subject for the
   narrate case) instead of leaking to a different tool entirely.
+
+- **Telegram's 64-byte `callback_data` is the binding constraint
+  for HMAC correlation tokens.** Architecture.md §8.7 specifies
+  `b64url(JSON({tool, args})) || "." || b64url(HMAC-SHA256(body, key))`
+  but doesn't pick a truncation length. Full SHA-256 = 32 bytes →
+  43 b64url chars, more than half the 64 budget; minimal tool+args
+  (`{"tool":"narrate","args":{"subject":"alice"}}` = 43 bytes raw
+  → 58 b64url chars) already overflows. PR 21 closes both by
+  (a) using short keys `{"t","a"}` so the dispatcher decoder
+  re-expands the names, and (b) truncating the HMAC to 8 bytes
+  (64-bit). 64-bit auth tags under per-adapter rate limits
+  (default ≤50 msg/s) still need ≥ 2^32 forge attempts on average
+  — 1000+ years. Same security territory as Stripe webhook
+  signatures. If a tool+args still won't fit, the encoder returns
+  `EncodeError::OversizedToken` and the mapper defers the button
+  via `deferred_buttons` (instead of ever shipping an oversized
+  callback_data to Telegram and 400-ing mid-traffic).
+
+- **Constant-time HMAC verify even when the presented token has
+  the wrong length.** Decoder splits on `.`, base64-decodes both
+  halves, then HMAC checks. Early-return on shape errors (no
+  dot, bad base64) is fine — those leak nothing about the secret.
+  For the HMAC compare itself: always compute the full HMAC over
+  the body and ct_eq even when the presented MAC has the wrong
+  length (pad to expected). Mirrors PR 13's secret-token
+  approach. Gotcha when writing tests: flipping just the LAST
+  char of an 11-char b64url HMAC is NOT a reliable corruption —
+  base64-no-pad ignores the unused bits of the trailing char so
+  the decoded byte may not change. Decode → flip → re-encode, or
+  flip a non-trailing char.
+
+- **The principal comes from the sender, never from the
+  correlation token.** Architecture.md §8.7 says "the platform
+  never sees the tool name or args directly; the dispatcher
+  receives a verified `(tool, args, principal)` triple." PR 21
+  is intentional about WHERE the principal comes from:
+  `callback_query.from.id` → `sender_table` lookup, same shape
+  as the inbound message path. The token only carries
+  `(tool, args)`, never `sub` or `tenant`. A hostile platform
+  actor who replays a stolen token cannot impersonate a different
+  user because the sender_table lookup is independent of the
+  token's contents. Locked in by
+  `forged_callback_token_is_rejected_with_phase_rejected` and the
+  always-from-sender principal construction in
+  `handle_callback_query`.
