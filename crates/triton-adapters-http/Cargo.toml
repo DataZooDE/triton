@@ -19,6 +19,11 @@ triton-core = { path = "../triton-core" }
 triton-identity = { path = "../triton-identity" }
 triton-manifest = { path = "../triton-manifest" }
 triton-chat-telegram = { path = "../triton-chat-telegram" }
+triton-chat-discord = { path = "../triton-chat-discord" }
+triton-chat-googlechat = { path = "../triton-chat-googlechat" }
+triton-chat-msteams = { path = "../triton-chat-msteams" }
+triton-chat-signal = { path = "../triton-chat-signal" }
+triton-chat-whatsapp = { path = "../triton-chat-whatsapp" }
 axum = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -6,16 +6,14 @@ import '../../../providers/api_provider.dart';
 import '../../../widgets/a2ui/a2ui_renderer.dart';
 import '../../../widgets/json_viewer.dart';
 
-/// Side-by-side comparison: the same tool rendered through the
-/// A2UI v0.8 builder, the v0.9 builder, and the Telegram surface
-/// mapper. Fires three REST calls in parallel — two `/v1/tools/...`
-/// with pinned Accept versions, and one `/v1/surface/render`
-/// against the v0.8 result — then renders each in its own column
-/// with the raw payload below.
-///
-/// The Telegram column lets the operator see the L6′ degradation
-/// (the buttons→inline-keyboard rung, narration→italic-HTML, etc.)
-/// alongside the rich web rendering.
+/// Three-column comparison: the same tool rendered through the A2UI
+/// v0.8 builder, the v0.9 builder, and a selectable chat-channel
+/// surface mapper. The chat column has an adapter dropdown
+/// (telegram / discord / googlechat / msteams / signal / whatsapp)
+/// so the operator can see how each platform degrades the same
+/// surface (Telegram inline keyboards, Discord components v2, MS
+/// Teams Adaptive Cards, …) — all through the SAME mappers the live
+/// couriers use, via POST /v1/surface/render.
 class A2uiDiffPage extends ConsumerStatefulWidget {
   const A2uiDiffPage({super.key});
 
@@ -23,13 +21,27 @@ class A2uiDiffPage extends ConsumerStatefulWidget {
   ConsumerState<A2uiDiffPage> createState() => _A2uiDiffPageState();
 }
 
+/// Closed set mirrored from `PREVIEW_ADAPTERS` in
+/// `triton-adapters-http`'s rest.rs. If the server gains an adapter,
+/// add it here; an unknown value just yields a 400 the column shows.
+const _chatAdapters = <String>[
+  'telegram',
+  'discord',
+  'googlechat',
+  'msteams',
+  'signal',
+  'whatsapp',
+];
+
 class _A2uiDiffPageState extends ConsumerState<A2uiDiffPage> {
   ToolDescriptor? _selected;
   InvocationResult? _v08;
   InvocationResult? _v09;
-  Map<String, dynamic>? _telegram;
-  String? _telegramError;
+  String _chatAdapter = 'telegram';
+  Map<String, dynamic>? _chat;
+  String? _chatError;
   bool _running = false;
+  bool _chatLoading = false;
 
   Future<void> _run() async {
     final tool = _selected;
@@ -38,51 +50,55 @@ class _A2uiDiffPageState extends ConsumerState<A2uiDiffPage> {
       _running = true;
       _v08 = null;
       _v09 = null;
-      _telegram = null;
-      _telegramError = null;
+      _chat = null;
+      _chatError = null;
     });
     final client = ref.read(restClientProvider);
     final v08 = await client.invoke(tool.name, const {}, a2uiVersion: '0.8');
     final v09 = await client.invoke(tool.name, const {}, a2uiVersion: '0.9');
-    // For the Telegram render we feed the raw tool result (which has
-    // a `surface` key when the tool advertises returns_a2ui). The
-    // server flips the surface through the same mapper the live
-    // Telegram courier uses.
-    Map<String, dynamic>? telegram;
-    String? error;
-    if (v08.ok) {
-      try {
-        telegram = await client.renderSurface(
-          adapter: 'telegram',
-          // /v1/tools/... wraps the result; for the render endpoint
-          // we want the raw `result` shape with a `surface` field.
-          // The dispatcher returns `{result, returns_a2ui, trace_id, ...}`,
-          // and when A2UI is negotiated the `result` field already
-          // becomes an envelope. We use the v0.9 stream's underlying
-          // surface — easier than reconstructing, since the tool
-          // emitted it that way originally.
-          result: {
-            'surface': _streamToSurface(v09.raw),
-          },
-        );
-      } catch (e) {
-        error = e.toString();
-      }
-    }
     if (!mounted) return;
     setState(() {
       _v08 = v08;
       _v09 = v09;
-      _telegram = telegram;
-      _telegramError = error;
       _running = false;
     });
+    await _renderChat();
+  }
+
+  /// Render the currently-selected chat adapter against the most
+  /// recent v0.9 surface. Called both after `_run()` and when the
+  /// adapter dropdown changes (no tool re-invocation needed).
+  Future<void> _renderChat() async {
+    final v09 = _v09;
+    if (v09 == null || !v09.ok) return;
+    setState(() {
+      _chatLoading = true;
+      _chat = null;
+      _chatError = null;
+    });
+    final client = ref.read(restClientProvider);
+    try {
+      final res = await client.renderSurface(
+        adapter: _chatAdapter,
+        result: {'surface': _streamToSurface(v09.raw)},
+      );
+      if (!mounted) return;
+      setState(() {
+        _chat = res;
+        _chatLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _chatError = e.toString();
+        _chatLoading = false;
+      });
+    }
   }
 
   /// Reverse-map a v0.9 envelope back into the canonical Surface
-  /// shape the mapper expects. v0.9 is structurally close: each
-  /// stream entry has `type`, `text`, `label`, etc. We translate
-  /// only the rungs the mapper handles today.
+  /// shape the mappers expect. v0.9 is structurally close: each
+  /// stream entry has `type`, `text`, `label`, etc.
   Map<String, dynamic> _streamToSurface(Map<String, dynamic> envelope) {
     final stream = (envelope['stream'] as List?) ?? const [];
     final components = <Map<String, dynamic>>[];
@@ -108,8 +124,31 @@ class _A2uiDiffPageState extends ConsumerState<A2uiDiffPage> {
             'args': action['args'] ?? <String, dynamic>{},
           });
           break;
-        // Selection / Form / Dashboard skipped: the Telegram mapper
-        // renders them best-effort but the inverse mapping is lossy.
+        case 'selection':
+          components.add({
+            'kind': 'selection',
+            'prompt': (m['prompt'] as String?) ?? '',
+            'options': m['options'] ?? const [],
+            'tool': (m['tool'] as String?) ?? '',
+            'args_key': (m['args_key'] as String?) ?? 'value',
+          });
+          break;
+        case 'form':
+          components.add({
+            'kind': 'form',
+            'title': (m['title'] as String?) ?? '',
+            'fields': m['fields'] ?? const [],
+            'submit_label': (m['submit_label'] as String?) ?? 'Submit',
+            'tool': (m['tool'] as String?) ?? '',
+          });
+          break;
+        case 'dashboard':
+          components.add({
+            'kind': 'dashboard',
+            'title': (m['title'] as String?) ?? '',
+            'tiles': m['tiles'] ?? const [],
+          });
+          break;
       }
     }
     return {'components': components};
@@ -164,7 +203,7 @@ class _A2uiDiffPageState extends ConsumerState<A2uiDiffPage> {
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.compare),
-                      label: const Text('Invoke all three'),
+                      label: const Text('Invoke'),
                       onPressed: _running || _selected == null ? null : _run,
                     ),
                   ],
@@ -179,12 +218,7 @@ class _A2uiDiffPageState extends ConsumerState<A2uiDiffPage> {
                     const VerticalDivider(width: 1),
                     Expanded(child: _renderColumn('v0.9', _v09)),
                     const VerticalDivider(width: 1),
-                    Expanded(
-                      child: _telegramColumn(
-                        result: _telegram,
-                        error: _telegramError,
-                      ),
-                    ),
+                    Expanded(child: _chatColumn()),
                   ],
                 ),
               ),
@@ -222,98 +256,129 @@ class _A2uiDiffPageState extends ConsumerState<A2uiDiffPage> {
         ),
       );
 
-  Widget _telegramColumn({
-    required Map<String, dynamic>? result,
-    required String? error,
-  }) =>
-      SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Text('telegram',
-                    style: Theme.of(context).textTheme.titleMedium),
+  Widget _chatColumn() {
+    final result = _chat;
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              DropdownButton<String>(
+                value: _chatAdapter,
+                onChanged: (a) {
+                  if (a == null) return;
+                  setState(() => _chatAdapter = a);
+                  _renderChat();
+                },
+                items: [
+                  for (final a in _chatAdapters)
+                    DropdownMenuItem(value: a, child: Text(a)),
+                ],
+              ),
+              const SizedBox(width: 8),
+              const Chip(
+                label: Text('L6′'),
+                visualDensity: VisualDensity.compact,
+              ),
+              if (_chatLoading) ...[
                 const SizedBox(width: 8),
-                const Chip(
-                  label: Text('L6′'),
-                  visualDensity: VisualDensity.compact,
+                const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2),
                 ),
               ],
-            ),
-            const SizedBox(height: 8),
-            if (error != null)
-              Card(
-                color: Theme.of(context).colorScheme.errorContainer,
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(error),
-                ),
-              )
-            else if (result == null)
-              const Text('—')
-            else if (result['rendered'] == false)
-              Card(
-                color: Theme.of(context).colorScheme.surfaceContainerHigh,
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Text(
-                    'Mapper produced no usable Telegram message '
-                    '(reason: ${result['reason']}). Telegram would skip '
-                    'this post entirely.',
-                  ),
-                ),
-              )
-            else ...[
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Wrap(
-                        spacing: 6,
-                        runSpacing: 4,
-                        children: [
-                          Chip(
-                            label: Text(
-                                'parse_mode: ${result['parse_mode'] ?? '—'}'),
-                            visualDensity: VisualDensity.compact,
-                          ),
-                          Chip(
-                            label: Text(
-                                'deferred_buttons: ${result['deferred_buttons']}'),
-                            visualDensity: VisualDensity.compact,
-                          ),
-                          if (result['truncated'] == true)
-                            const Chip(
-                              avatar: Icon(Icons.warning_amber, size: 16),
-                              label: Text('truncated'),
-                              visualDensity: VisualDensity.compact,
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      SelectableText(
-                        result['text'] as String? ?? '',
-                        style: const TextStyle(
-                          fontFamily: 'monospace',
-                          fontSize: 13,
-                          height: 1.4,
-                        ),
-                      ),
-                    ],
-                  ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (_chatError != null)
+            Card(
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(_chatError!),
+              ),
+            )
+          else if (result == null)
+            const Text('— invoke a tool —')
+          else if (result['rendered'] == false)
+            Card(
+              color: Theme.of(context).colorScheme.surfaceContainerHigh,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Text(
+                  '$_chatAdapter produced no usable message '
+                  '(reason: ${result['reason']}). The platform would '
+                  'skip this post entirely.',
                 ),
               ),
-              const SizedBox(height: 12),
-              Text('raw response',
-                  style: Theme.of(context).textTheme.bodySmall),
-              const SizedBox(height: 4),
-              JsonViewer(result),
-            ],
+            )
+          else ...[
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: _chips(result),
+                    ),
+                    const SizedBox(height: 8),
+                    SelectableText(
+                      result['text'] as String? ?? '',
+                      style: const TextStyle(
+                        fontFamily: 'monospace',
+                        fontSize: 13,
+                        height: 1.4,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text('raw response',
+                style: Theme.of(context).textTheme.bodySmall),
+            const SizedBox(height: 4),
+            JsonViewer(result),
           ],
-        ),
-      );
+        ],
+      ),
+    );
+  }
+
+  /// Build the metadata chips from whatever fields the adapter's
+  /// response carried — they differ per platform.
+  List<Widget> _chips(Map<String, dynamic> r) {
+    final chips = <Widget>[];
+    void add(String label) => chips.add(Chip(
+          label: Text(label),
+          visualDensity: VisualDensity.compact,
+        ));
+    if (r['parse_mode'] != null) add('parse_mode: ${r['parse_mode']}');
+    for (final k in [
+      'deferred_buttons',
+      'deferred_selections',
+      'deferred_forms',
+      'deferred_dashboards',
+    ]) {
+      final v = r[k];
+      if (v is int && v > 0) add('$k: $v');
+    }
+    if (r['components'] != null) add('components ✓');
+    if (r['has_dashboard_raster'] == true) add('dashboard → PNG');
+    if (r['truncated'] == true) {
+      chips.add(const Chip(
+        avatar: Icon(Icons.warning_amber, size: 16),
+        label: Text('truncated'),
+        visualDensity: VisualDensity.compact,
+      ));
+    }
+    if (chips.isEmpty) add('no degradation');
+    return chips;
+  }
 }
