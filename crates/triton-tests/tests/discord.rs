@@ -574,6 +574,147 @@ async fn missing_message_timestamp_fails_closed() {
     });
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slash_command_dispatches_with_options_as_args() {
+    // PR 29: type=2 APPLICATION_COMMAND interactions. Discord
+    // ships the slash-command name in `data.name` and the
+    // typed-in arguments in `data.options[]`. Adapter should
+    // flatten options into a JSON args map and dispatch the
+    // command name as the tool — same sender resolution +
+    // per-tenant rate-limit gates as the button-callback path.
+    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let interaction = json!({
+        "type": 2, // APPLICATION_COMMAND
+        "id": "i-slash-1",
+        "application_id": "app-1",
+        "token": "interaction-token",
+        "user": { "id": "99" },
+        "data": {
+            "name": "narrate",
+            // Option type 3 = STRING per Discord docs.
+            "options": [ { "name": "subject", "type": 3, "value": "bob" } ]
+        }
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST slash");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let resp_body: Value = resp.json().await.expect("response json");
+    assert_eq!(resp_body["type"], 4, "expected CHANNEL_MESSAGE_WITH_SOURCE");
+    let content = resp_body["data"]["content"].as_str().expect("content");
+    assert!(
+        content.contains("Hello, bob") && content.contains("narration about bob"),
+        "expected narrate(subject=bob) output; got: {content}"
+    );
+
+    // Audit pivot must record this as a normal dispatch on the
+    // Discord protocol — no special "slash" phase, but with the
+    // dispatched tool name.
+    let dispatches: usize = proc
+        .stdout_snapshot()
+        .iter()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| {
+            v["kind"] == "audit"
+                && v["phase"] == "dispatch"
+                && v["protocol"] == "messenger:discord"
+                && v["tool"] == "narrate"
+                && v["tenant"] == "acme"
+        })
+        .count();
+    assert!(
+        dispatches >= 1,
+        "expected a dispatch audit line for narrate from slash command",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slash_command_unknown_sender_rejected_at_inbound() {
+    // Sender-table lookup must happen for slash commands too:
+    // a user not in the table MUST 401 + audit rejected,
+    // never dispatch.
+    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let interaction = json!({
+        "type": 2,
+        "id": "i-slash-evil",
+        "user": { "id": "1234567890" }, // not in sender_table
+        "data": {
+            "name": "narrate",
+            "options": [ { "name": "subject", "type": 3, "value": "eve" } ]
+        }
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST slash unknown sender");
+    assert_eq!(resp.status(), 401, "unknown sender MUST 401");
+    let _ = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "rejected"
+            && v["result"] == "error:auth"
+            && v["protocol"] == "messenger:discord"
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slash_command_missing_name_rejected() {
+    // Discord guarantees `data.name` on APPLICATION_COMMAND.
+    // A payload without it is malformed; refuse it.
+    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let interaction = json!({
+        "type": 2,
+        "id": "i-no-name",
+        "user": { "id": "99" },
+        "data": { "options": [] } // no `name`
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST slash missing name");
+    assert_eq!(resp.status(), 400, "missing data.name MUST 400");
+    let _ = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "rejected"
+            && v["result"] == "error:validation"
+            && v["protocol"] == "messenger:discord"
+    });
+}
+
 fn wait_for_audit<F>(proc: &TritonProcess, deadline: Duration, mut matches: F) -> Value
 where
     F: FnMut(&Value) -> bool,

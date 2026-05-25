@@ -21,8 +21,11 @@
 //!   shared `triton-correlation` crate, dispatch the recovered
 //!   `(tool, args)`, return a `type: 4` UPDATE_MESSAGE with the
 //!   rendered Surface.
-//! * Slash commands (`type: 2`) are out of scope; that requires
-//!   Discord-side command registration which is operator work.
+//!
+//! PR 29 adds `type: 2` (APPLICATION_COMMAND) — slash commands.
+//! Operator still owns Discord-side command registration; this
+//! adapter just dispatches the named command with its options
+//! flattened into a JSON args map.
 //!
 //! Reuses the Telegram surface mapper's chunk strategy but emits
 //! Discord-native Markdown for narration (`*…*` for italics)
@@ -268,17 +271,15 @@ async fn handle_interaction(
             // with PONG so the bot registration validates the URL.
             (StatusCode::OK, axum::Json(json!({ "type": 1 }))).into_response()
         }
+        2 => handle_application_command(&adapter, interaction).await,
         3 => handle_message_component(&adapter, interaction).await,
         other => {
-            // Other interaction types (2 = APPLICATION_COMMAND for
-            // slash commands, 5 = MODAL_SUBMIT) are documented but
-            // not in PR 22's scope. Discord requires a valid
-            // interaction-response shape; PONG (`type: 1`) is the
-            // PING callback only. Codex PR 22 review caught this:
-            // return a CHANNEL_MESSAGE_WITH_SOURCE with ephemeral
-            // content explaining the gap. The flags=64 hides the
-            // message from other chat members so the apology is
-            // operator-visible without spamming the channel.
+            // Other interaction types (5 = MODAL_SUBMIT) land in
+            // a later PR. Reply with an ephemeral channel message
+            // (Codex PR 22 review pattern: PONG is only valid for
+            // PING; for other unknown types we return type=4 with
+            // flags=64 so the failure is operator-visible without
+            // spamming the channel).
             tracing::warn!(
                 interaction_type = other,
                 "discord interaction type not yet supported",
@@ -287,7 +288,7 @@ async fn handle_interaction(
                 "type": 4,
                 "data": {
                     "content": format!(
-                        "_(Interaction type {other} not implemented yet — slash commands and modal submits land in a later PR.)_"
+                        "_(Interaction type {other} not implemented yet — modal submits land in a later PR.)_"
                     ),
                     "flags": 64
                 }
@@ -633,9 +634,19 @@ async fn handle_message_component(
         }
         Err(e) => {
             tracing::warn!(error = %e, class = %e.class(), "discord dispatch failed");
-            // 200 with the failure body so Discord doesn't retry
-            // forever on a permanent app-layer error. Same
-            // retry-storm avoidance as the Telegram courier.
+            // Codex PR 29 review: every Discord response after a
+            // dispatch attempt must emit `phase: post` — including
+            // the inline error ephemeral. 200 with the failure
+            // body so Discord doesn't retry forever on a permanent
+            // app-layer error (same retry-storm avoidance as the
+            // Telegram courier).
+            adapter.dispatcher.record_post(
+                &tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                latency_ms,
+                Err((&e, 0, "error_response")),
+            );
             let body = json!({
                 "type": 4,
                 "data": { "content": format!("(error: {})", e.class()), "flags": 64 }
@@ -643,6 +654,238 @@ async fn handle_message_component(
             (StatusCode::OK, axum::Json(body)).into_response()
         }
     }
+}
+
+/// PR 29: APPLICATION_COMMAND (type 2) — slash command inbound.
+///
+/// Discord ships the slash-command name in `data.name` and the
+/// typed-in arguments in `data.options[]`. The command itself must
+/// have been pre-registered with Discord by the operator (out of
+/// band of this adapter); at runtime we just dispatch whatever
+/// name comes in against the manifest's tool table, with the same
+/// sender resolution and per-tenant rate-limit gates as the
+/// button-callback path. No `interaction.message.timestamp`
+/// freshness check applies here — the Ed25519-signed envelope's
+/// `X-Signature-Timestamp` (already verified by `verify_signature`)
+/// IS the platform-asserted freshness anchor for slash commands;
+/// the message-timestamp dance is type-3-only because component
+/// callbacks correspond to a prior bot-rendered message.
+async fn handle_application_command(
+    adapter: &Arc<DiscordAdapter>,
+    interaction: DiscordInteraction,
+) -> Response {
+    // Sender resolution (FR-I-7) first, same dual DM/guild
+    // location as the message-component path.
+    let user_id = interaction
+        .user
+        .as_ref()
+        .or_else(|| interaction.member.as_ref().and_then(|m| m.user.as_ref()))
+        .map(|u| u.id.clone())
+        .unwrap_or_default();
+    let Some(claims) = adapter.sender_table.get(&user_id) else {
+        record_rejection(
+            adapter,
+            "-",
+            "-",
+            TritonError::Auth(format!("unknown sender {user_id}")),
+        );
+        return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+    };
+
+    // Per-tenant fair-share (NFR-P-3 second tier).
+    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&claims.tenant) {
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::RateLimited(format!(
+                "tenant `{}` rate limit hit on adapter `{}`; retry in {:.2}s",
+                claims.tenant, adapter.name, retry_after
+            )),
+        );
+        let secs = retry_after.ceil().max(1.0) as u64;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", secs.to_string())],
+            "tenant rate limited",
+        )
+            .into_response();
+    }
+
+    let Some(data) = interaction.data else {
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Validation("application_command without data".into()),
+        );
+        return (StatusCode::BAD_REQUEST, "missing data").into_response();
+    };
+    let Some(tool_name) = data.name.as_deref().filter(|s| !s.is_empty()) else {
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Validation("application_command without data.name".into()),
+        );
+        return (StatusCode::BAD_REQUEST, "missing command name").into_response();
+    };
+
+    let args = match options_to_args(&data.options) {
+        Ok(v) => v,
+        Err(e) => {
+            record_rejection(
+                adapter,
+                &claims.sub,
+                &claims.tenant,
+                TritonError::Validation(format!("slash command options: {e}")),
+            );
+            return (StatusCode::BAD_REQUEST, "bad option").into_response();
+        }
+    };
+
+    let principal = Principal {
+        sub: claims.sub.clone(),
+        scopes: claims.scopes.clone(),
+        tenant: claims.tenant.clone(),
+        raw_token: String::new(),
+        trace_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let principal_for_post = principal.clone();
+
+    let started = std::time::Instant::now();
+    let result = adapter
+        .dispatcher
+        .invoke(tool_name, args, principal, PROTOCOL)
+        .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(dispatch) => {
+            match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
+                Some(Ok(rendered)) => {
+                    let body = surface_mapper::build_interaction_response(&rendered);
+                    adapter.dispatcher.record_post(
+                        tool_name,
+                        PROTOCOL,
+                        &principal_for_post,
+                        latency_ms,
+                        Ok((200, "posted")),
+                    );
+                    (StatusCode::OK, axum::Json(body)).into_response()
+                }
+                Some(Err(surface_mapper::RenderError::EmptyAfterRender)) => {
+                    let provider =
+                        TritonError::Provider("discord surface mapper: empty surface".into());
+                    adapter.dispatcher.record_post(
+                        tool_name,
+                        PROTOCOL,
+                        &principal_for_post,
+                        latency_ms,
+                        Err((&provider, 0, "dropped")),
+                    );
+                    let body = json!({
+                        "type": 4,
+                        "data": { "content": "(no content)", "flags": 64 }
+                    });
+                    (StatusCode::OK, axum::Json(body)).into_response()
+                }
+                None => {
+                    let raw = bare_text(&dispatch.result);
+                    let content = surface_mapper::clamp_plain_text(&raw);
+                    adapter.dispatcher.record_post(
+                        tool_name,
+                        PROTOCOL,
+                        &principal_for_post,
+                        latency_ms,
+                        Ok((200, "posted")),
+                    );
+                    let body = json!({
+                        "type": 4,
+                        "data": { "content": content }
+                    });
+                    (StatusCode::OK, axum::Json(body)).into_response()
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, class = %e.class(), "discord slash-command dispatch failed");
+            // Codex PR 29 review: every Discord response that
+            // follows a dispatch attempt must audit as `phase: post`
+            // — including the inline `(error: …)` ephemeral we send
+            // back so Discord doesn't retry. Mirrors the success
+            // path so operators can correlate dispatch + post on a
+            // single interaction.
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                latency_ms,
+                Err((&e, 0, "error_response")),
+            );
+            let body = json!({
+                "type": 4,
+                "data": { "content": format!("(error: {})", e.class()), "flags": 64 }
+            });
+            (StatusCode::OK, axum::Json(body)).into_response()
+        }
+    }
+}
+
+/// Flatten Discord's slash-command options array into a JSON args
+/// map: `[{name,type,value}, ...] → { name: value, ... }`. The
+/// option's `type` discriminator selects how to interpret `value`
+/// — 3=string, 4=integer, 5=boolean. Other discriminators (incl.
+/// 1/2 = sub-command/sub-command-group and 6-11 = entity refs)
+/// return an error so we never silently drop or coerce arguments
+/// a tool was expecting.
+fn options_to_args(opts: &[DiscordCommandOption]) -> Result<Value, String> {
+    let mut map = serde_json::Map::with_capacity(opts.len());
+    for opt in opts {
+        let v = match opt.kind {
+            3 => {
+                // STRING
+                let Some(s) = opt.value.as_str() else {
+                    return Err(format!(
+                        "option `{}` (string) has non-string value",
+                        opt.name
+                    ));
+                };
+                Value::String(s.to_string())
+            }
+            4 => {
+                // INTEGER. Discord ships int options as JSON
+                // number; serde_json represents them as i64.
+                let Some(n) = opt.value.as_i64() else {
+                    return Err(format!(
+                        "option `{}` (integer) has non-integer value",
+                        opt.name
+                    ));
+                };
+                Value::from(n)
+            }
+            5 => {
+                // BOOLEAN
+                let Some(b) = opt.value.as_bool() else {
+                    return Err(format!(
+                        "option `{}` (boolean) has non-bool value",
+                        opt.name
+                    ));
+                };
+                Value::Bool(b)
+            }
+            other => {
+                return Err(format!(
+                    "unsupported option type {other} for option `{}`",
+                    opt.name
+                ));
+            }
+        };
+        if map.insert(opt.name.clone(), v).is_some() {
+            return Err(format!("duplicate option name `{}`", opt.name));
+        }
+    }
+    Ok(Value::Object(map))
 }
 
 fn bare_text(v: &Value) -> String {
@@ -743,6 +986,20 @@ struct DiscordInteractionMessage {
 struct DiscordInteractionData {
     #[serde(default)]
     custom_id: Option<String>,
+    /// PR 29 (slash commands, interaction type 2): Discord puts
+    /// the command name here. The command must have been
+    /// pre-registered with Discord by the operator; this adapter
+    /// just dispatches whatever name comes in (subject to the
+    /// usual sender resolution + per-tenant rate-limit gates).
+    #[serde(default)]
+    name: Option<String>,
+    /// PR 29: slash-command options. Discord ships them as
+    /// `[{name, type, value}, ...]`; we flatten into a plain
+    /// JSON map keyed by option name. PR 29 ships string +
+    /// integer + boolean option types; richer types (channels,
+    /// mentions, etc.) defer.
+    #[serde(default)]
+    options: Vec<DiscordCommandOption>,
     /// PR 25: string-select-menu callbacks carry the chosen option
     /// value(s) here. The mapper emits a select menu whose
     /// correlation token encodes `(tool, {args_key: null})`; at
@@ -766,6 +1023,22 @@ struct DiscordInteractionData {
 #[derive(Debug, Deserialize)]
 struct DiscordUser {
     id: String,
+}
+
+/// One slash-command option: `{name, type, value}`. PR 29 handles
+/// the three scalar option types (3=STRING, 4=INTEGER, 5=BOOLEAN);
+/// nested sub-commands (option type 1/2) and entity references
+/// (6/7/8/9 = USER/CHANNEL/ROLE/MENTIONABLE) defer until a tool
+/// actually needs them — keeping the value space narrow makes the
+/// "options → args" mapping a straight scalar copy with no
+/// platform-side IDs leaking into the dispatcher.
+#[derive(Debug, Deserialize)]
+struct DiscordCommandOption {
+    name: String,
+    #[serde(rename = "type")]
+    kind: u8,
+    #[serde(default)]
+    value: Value,
 }
 
 #[derive(Debug, Deserialize)]
