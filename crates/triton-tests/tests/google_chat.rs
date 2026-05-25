@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::{FakeGoogleJwks, attacker_signing_key};
+use triton_tests::upstream_fixture::{FakeAgent, FakeConsul, FakeVault};
 
 const AUDIENCE: &str = "1234567890";
 const GOOGLE_ISS: &str = "chat@system.gserviceaccount.com";
@@ -434,6 +435,197 @@ async fn self_enrol_rejects_missing_or_nonuser_sender() {
             && v["result"] == "error:auth"
     });
     let _ = rejections;
+}
+
+// ---- upstream identity strategy (FR-I-7) -------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upstream_identity_resolves_principal_via_resolver_tool() {
+    // FR-I-7 `upstream`: the adapter delegates sender resolution to a
+    // resolver tool reached through the upstream router. A real
+    // resolver agent (FakeAgent) returns {sub, scopes, tenant}; the
+    // adapter then dispatches the actual command under that principal.
+    let jwks = FakeGoogleJwks::start().await;
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "scopes": ["chat"],
+        "tenant": "globex"
+    }))
+    .await;
+    let consul = FakeConsul::start(&[("resolve_identity", resolver.host_port())]).await;
+    let vault = FakeVault::start_minting("vault-minted-agent-token").await;
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-googlechat-upstream-test.yaml")
+        .display()
+        .to_string();
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), manifest),
+        ("TRITON_GOOGLE_CHAT_JWKS_URI".to_string(), jwks.jwks_uri()),
+        ("TRITON_CONSUL_URL".to_string(), consul.url()),
+        ("TRITON_VAULT_URL".to_string(), vault.url()),
+        (
+            "TRITON_VAULT_TOKEN".to_string(),
+            "triton-vault-token".to_string(),
+        ),
+        (
+            "TRITON_VAULT_OIDC_ROLE".to_string(),
+            "agent-oidc-swap".to_string(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let token = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&message_event("users/55", "hello via resolver"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    // The REAL command dispatch (tool = echo) must carry the
+    // principal the resolver returned.
+    let dispatch = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "dispatch"
+            && v["protocol"] == "messenger:google_chat"
+            && v["tool"] == "echo"
+    });
+    assert_eq!(dispatch["who"], "resolved-bob", "sub from resolver tool");
+    assert_eq!(dispatch["tenant"], "globex", "tenant from resolver tool");
+    assert_eq!(dispatch["result"], "ok");
+
+    // Prove the resolve actually traversed the upstream router + Vault
+    // (not an in-process bypass): the resolver agent was hit exactly
+    // once and saw the Vault-minted bearer, never a raw token.
+    assert_eq!(resolver.hits(), 1, "resolver agent must be called once");
+    let bearers = resolver.bearers_seen();
+    assert_eq!(bearers.len(), 1);
+    assert_eq!(
+        bearers[0], "vault-minted-agent-token",
+        "resolver must receive the Vault-minted token"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upstream_identity_rejects_when_resolver_fails() {
+    // If the resolver tool errors (or can't be reached), the inbound
+    // is rejected — never dispatched with a guessed principal.
+    let jwks = FakeGoogleJwks::start().await;
+    let resolver = FakeAgent::start_always_failing().await;
+    let consul = FakeConsul::start(&[("resolve_identity", resolver.host_port())]).await;
+    let vault = FakeVault::start_minting("vault-minted-agent-token").await;
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-googlechat-upstream-test.yaml")
+        .display()
+        .to_string();
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), manifest),
+        ("TRITON_GOOGLE_CHAT_JWKS_URI".to_string(), jwks.jwks_uri()),
+        ("TRITON_CONSUL_URL".to_string(), consul.url()),
+        ("TRITON_VAULT_URL".to_string(), vault.url()),
+        (
+            "TRITON_VAULT_TOKEN".to_string(),
+            "triton-vault-token".to_string(),
+        ),
+        (
+            "TRITON_VAULT_OIDC_ROLE".to_string(),
+            "agent-oidc-swap".to_string(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let token = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&message_event("users/55", "resolver will fail"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert_eq!(
+        resp.status(),
+        401,
+        "resolver failure must reject the inbound"
+    );
+
+    // No `echo` dispatch must occur (only the resolver call, which
+    // fails). Assert no real-command dispatch happened.
+    std::thread::sleep(Duration::from_millis(300));
+    let echo_dispatches = proc
+        .stdout_snapshot()
+        .iter()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| {
+            v["kind"] == "audit"
+                && v["phase"] == "dispatch"
+                && v["protocol"] == "messenger:google_chat"
+                && v["tool"] == "echo"
+        })
+        .count();
+    assert_eq!(
+        echo_dispatches, 0,
+        "no command dispatch on resolver failure"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upstream_resolver_colliding_with_inprocess_tool_refuses_to_boot() {
+    // Codex review finding 1: a resolver_tool that names an in-process
+    // tool (`echo`) would be dispatched locally, bypassing Consul +
+    // the Vault-minted token. The adapter MUST refuse at boot.
+    let bin = locate_triton_binary();
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-googlechat-upstream-collision.yaml")
+        .display()
+        .to_string();
+    let out = std::process::Command::new(&bin)
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_ENV", "local")
+        .env("TRITON_MANIFEST_PATH", manifest)
+        .env("TRITON_GOOGLE_CHAT_JWKS_URI", "https://www.googleapis.com")
+        // Provide Consul+Vault so we get past partial-wiring guards and
+        // reach the adapter build where the collision is caught.
+        .env("TRITON_CONSUL_URL", "http://127.0.0.1:1")
+        .env("TRITON_VAULT_URL", "http://127.0.0.1:1")
+        .env("TRITON_VAULT_TOKEN", "irrelevant")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("spawn triton");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "resolver_tool colliding with an in-process tool MUST refuse to boot; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+fn locate_triton_binary() -> PathBuf {
+    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_triton") {
+        return PathBuf::from(p);
+    }
+    let mut here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while here.parent().is_some() {
+        let cand = here.join("target/debug/triton");
+        if cand.exists() {
+            return cand;
+        }
+        here.pop();
+    }
+    panic!("triton binary not found");
 }
 
 fn wait_for_audit<F>(proc: &TritonProcess, deadline: Duration, mut matches: F) -> Value

@@ -87,6 +87,11 @@ enum IdentityMode {
     /// tool can issue a code; operator confirmation enrols the sender
     /// in this table out-of-band, after which they get full scopes.
     SelfEnrol(HashMap<String, EnrolClaims>),
+    /// Delegate resolution to a resolver tool reached through the
+    /// upstream router (FR-I-7). The adapter calls `resolver_tool`
+    /// with the platform sender id; the tool returns `{sub, scopes,
+    /// tenant}`. A resolver error rejects the inbound.
+    Upstream { resolver_tool: String },
 }
 
 /// Scope granted to an unknown sender during the `self_enrol` pairing
@@ -96,6 +101,20 @@ const PAIRING_SCOPE: &str = "pairing";
 /// traffic shares this bucket for rate-limiting and is trivially
 /// distinguishable in the audit trail.
 const PAIRING_TENANT: &str = "pairing";
+
+/// Protocol label for the resolver-tool dispatch under the `upstream`
+/// identity strategy. Distinct from [`PROTOCOL`] so the resolve call's
+/// audit lines never blur with the real command's.
+const PROTOCOL_RESOLVE: &str = "messenger:google_chat:identity";
+
+/// Principal shape the `upstream` resolver tool returns.
+#[derive(Debug, Deserialize)]
+struct ResolvedPrincipal {
+    sub: String,
+    #[serde(default)]
+    scopes: Vec<String>,
+    tenant: String,
+}
 
 pub struct GoogleChatAdapter {
     name: String,
@@ -125,10 +144,10 @@ impl GoogleChatAdapter {
         }
         if !matches!(
             adapter.identity.kind,
-            IdentityKind::SenderTable | IdentityKind::SelfEnrol
+            IdentityKind::SenderTable | IdentityKind::SelfEnrol | IdentityKind::Upstream
         ) {
             return Err(BuildError::Unsupported(format!(
-                "google_chat adapter supports `identity.kind: sender_table` or `self_enrol`; got {:?}",
+                "google_chat adapter supports `identity.kind: sender_table`, `self_enrol`, or `upstream`; got {:?}",
                 adapter.identity.kind
             )));
         }
@@ -187,6 +206,38 @@ impl GoogleChatAdapter {
                 let table: HashMap<String, EnrolClaims> = serde_json::from_str(&table_json)
                     .map_err(|e| BuildError::TableParse(e.to_string()))?;
                 IdentityMode::SelfEnrol(table)
+            }
+            IdentityKind::Upstream => {
+                let field = adapter
+                    .identity
+                    .credentials
+                    .get("resolver_tool")
+                    .ok_or(BuildError::MissingCredential("identity.resolver_tool"))?;
+                let resolver_tool = resolver
+                    .resolve(field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("identity.resolver_tool", e))?;
+                if resolver_tool.trim().is_empty() {
+                    return Err(BuildError::Unsupported(
+                        "identity.resolver_tool must be non-empty".into(),
+                    ));
+                }
+                // The resolver MUST be an upstream tool (FR-I-7
+                // "reached through the upstream router"). If its name
+                // collides with an in-process tool, dispatcher.invoke
+                // would run that locally and silently bypass Consul +
+                // the Vault-minted token. Refuse at boot.
+                if dispatcher
+                    .descriptors()
+                    .iter()
+                    .any(|d| d.name == resolver_tool)
+                {
+                    return Err(BuildError::Unsupported(format!(
+                        "identity.resolver_tool `{resolver_tool}` collides with an in-process \
+                         tool; the upstream resolver must be a distinct Consul-discovered agent"
+                    )));
+                }
+                IdentityMode::Upstream { resolver_tool }
             }
             // Guarded above; unreachable for other kinds.
             other => {
@@ -399,16 +450,35 @@ async fn handle_webhook(
         .and_then(|s| s.name.as_deref())
         .unwrap_or("");
 
-    // FR-I-7 sender resolution → (sub, scopes, tenant). `None` means
-    // "reject as unknown" (only the sender_table strategy does that).
-    let Some((sub, scopes, tenant)) = resolve_sender(&adapter.identity, sender_name) else {
-        record_rejection(
-            &adapter,
-            "-",
-            "-",
-            TritonError::Auth(format!("unknown sender `{sender_name}`")),
-        );
-        return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+    // FR-I-7 sender resolution → (sub, scopes, tenant).
+    let (sub, scopes, tenant) = match &adapter.identity {
+        // `upstream` delegates to a resolver tool reached through the
+        // upstream router; it's async, so it lives outside the pure
+        // `resolve_sender`.
+        IdentityMode::Upstream { resolver_tool } => {
+            match resolve_via_upstream(&adapter.dispatcher, resolver_tool, sender_name).await {
+                Ok(p) => p,
+                Err(e) => {
+                    record_rejection(&adapter, "-", "-", e);
+                    return (StatusCode::UNAUTHORIZED, "identity resolution failed")
+                        .into_response();
+                }
+            }
+        }
+        // Sync strategies. `None` means reject (sender_table unknown,
+        // or a malformed self_enrol sender).
+        other => match resolve_sender(other, sender_name) {
+            Some(p) => p,
+            None => {
+                record_rejection(
+                    &adapter,
+                    "-",
+                    "-",
+                    TritonError::Auth(format!("unknown sender `{sender_name}`")),
+                );
+                return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+            }
+        },
     };
 
     // NFR-P-3 second tier: per-tenant fair-share, keyed by the
@@ -574,6 +644,10 @@ fn resolve_sender(
                 ),
             })
         }
+        // `upstream` is async and handled by `resolve_via_upstream` at
+        // the call site; never resolved here. Defensive `None` keeps
+        // the match total.
+        IdentityMode::Upstream { .. } => None,
     }
 }
 
@@ -581,6 +655,50 @@ fn resolve_sender(
 /// form `users/<id>` with a non-empty id.
 fn is_valid_user_sender(name: &str) -> bool {
     name.strip_prefix("users/").is_some_and(|id| !id.is_empty())
+}
+
+/// Resolve a sender to `(sub, scopes, tenant)` by invoking the
+/// `resolver_tool` through the upstream router (FR-I-7 `upstream`).
+/// The resolver receives `{platform, sender}` and returns `{sub,
+/// scopes, tenant}`. Any failure (empty sender, resolver error,
+/// malformed reply) is an `Auth` error so the inbound is rejected
+/// rather than dispatched with a guessed principal.
+///
+/// The resolver call is itself a dispatch: it emits a `phase:
+/// dispatch` audit line under [`PROTOCOL_RESOLVE`] plus the upstream
+/// router's `phase: upstream` line (the latter hardcoded to
+/// `protocol: "upstream"`), both under the bootstrap principal's
+/// trace_id — distinct from the real command's audit pair.
+async fn resolve_via_upstream(
+    dispatcher: &Dispatcher,
+    resolver_tool: &str,
+    sender_name: &str,
+) -> Result<(String, Vec<String>, String), TritonError> {
+    if sender_name.is_empty() {
+        return Err(TritonError::Auth(
+            "empty sender for upstream resolver".into(),
+        ));
+    }
+    let bootstrap = Principal {
+        sub: "identity-resolver".to_string(),
+        scopes: vec!["resolve".to_string()],
+        tenant: "system".to_string(),
+        raw_token: String::new(),
+        trace_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let args = serde_json::json!({ "platform": "google_chat", "sender": sender_name });
+    let dispatch = dispatcher
+        .invoke(resolver_tool, args, bootstrap, PROTOCOL_RESOLVE)
+        .await
+        .map_err(|e| TritonError::Auth(format!("identity resolver `{resolver_tool}`: {e}")))?;
+    let resolved: ResolvedPrincipal = serde_json::from_value(dispatch.result)
+        .map_err(|e| TritonError::Auth(format!("resolver reply not {{sub,scopes,tenant}}: {e}")))?;
+    if resolved.sub.trim().is_empty() || resolved.tenant.trim().is_empty() {
+        return Err(TritonError::Auth(
+            "resolver returned empty sub or tenant".into(),
+        ));
+    }
+    Ok((resolved.sub, resolved.scopes, resolved.tenant))
 }
 
 /// Strip a leading `@bot ` mention if present, then route by the

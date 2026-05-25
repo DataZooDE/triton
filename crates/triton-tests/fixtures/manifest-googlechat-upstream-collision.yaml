@@ -1,0 +1,34 @@
+# upstream-resolver Google Chat adapter whose resolver_tool collides
+# with an in-process tool name (`echo`). The adapter MUST refuse to
+# build: a resolver that resolves to an in-process tool would bypass
+# Consul + the Vault-minted token. Booting against this exits 2.
+version: "0.2"
+
+adapters:
+  google_chat:
+    kind: google_chat
+    inbound:
+      kind: webhook
+      signature: google_oidc_jwt
+      audience: "1234567890"
+    outbound:
+      kind: rest_api
+      token: unused-in-pr-33
+    identity:
+      kind: upstream
+      resolver_tool: echo
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: card_v2
+      selections: card_v2
+      forms: card_v2
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

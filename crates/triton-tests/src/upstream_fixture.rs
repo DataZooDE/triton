@@ -230,6 +230,9 @@ async fn kv_v2_handler(
 /// * `always_failing` — returns 500 on every request.
 /// * `failing_then_recovering(n)` — fails the first `n` calls, then
 ///   recovers (used for circuit-breaker cooldown test).
+/// * `returning(json)` — responds with a fixed JSON body on every
+///   request (used by the `upstream` identity-resolver test, where the
+///   resolver agent returns a `{sub, scopes, tenant}` principal).
 pub struct FakeAgent {
     addr: SocketAddr,
     state: Arc<FakeAgentState>,
@@ -240,6 +243,8 @@ struct FakeAgentState {
     bearers_seen: Mutex<Vec<String>>,
     hits: Mutex<u32>,
     failures_remaining: Mutex<u32>,
+    /// Fixed response body for `AgentMode::Returning`.
+    fixed_response: Option<Value>,
 }
 
 #[derive(Clone, Copy)]
@@ -247,27 +252,36 @@ enum AgentMode {
     Echo,
     AlwaysFail,
     FailingThenRecover,
+    Returning,
 }
 
 impl FakeAgent {
     pub async fn start_echoing() -> Self {
-        Self::start(AgentMode::Echo, 0).await
+        Self::start(AgentMode::Echo, 0, None).await
     }
 
     pub async fn start_always_failing() -> Self {
-        Self::start(AgentMode::AlwaysFail, 0).await
+        Self::start(AgentMode::AlwaysFail, 0, None).await
     }
 
     pub async fn start_failing_then_recovering(fail_first: u32) -> Self {
-        Self::start(AgentMode::FailingThenRecover, fail_first).await
+        Self::start(AgentMode::FailingThenRecover, fail_first, None).await
     }
 
-    async fn start(mode: AgentMode, fail_first: u32) -> Self {
+    /// Respond with `body` (status 200) on every request, ignoring the
+    /// request body. The upstream router returns this verbatim as the
+    /// tool result.
+    pub async fn start_returning(body: Value) -> Self {
+        Self::start(AgentMode::Returning, 0, Some(body)).await
+    }
+
+    async fn start(mode: AgentMode, fail_first: u32, fixed_response: Option<Value>) -> Self {
         let state = Arc::new(FakeAgentState {
             mode: Mutex::new(mode),
             bearers_seen: Mutex::new(Vec::new()),
             hits: Mutex::new(0),
             failures_remaining: Mutex::new(fail_first),
+            fixed_response,
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
         let addr = listener.local_addr().unwrap();
@@ -315,7 +329,7 @@ async fn handler(
 
     let mode = *state.mode.lock().unwrap();
     let should_fail = match mode {
-        AgentMode::Echo => false,
+        AgentMode::Echo | AgentMode::Returning => false,
         AgentMode::AlwaysFail => true,
         AgentMode::FailingThenRecover => {
             let mut left = state.failures_remaining.lock().unwrap();
@@ -333,6 +347,11 @@ async fn handler(
             Json(json!({ "error": "fake agent configured to fail" })),
         )
             .into_response();
+    }
+
+    if let AgentMode::Returning = mode {
+        let body = state.fixed_response.clone().unwrap_or(Value::Null);
+        return Json(body).into_response();
     }
 
     let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
