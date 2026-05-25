@@ -415,6 +415,22 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
         });
     }
 
+    // PR 31: WhatsApp Cloud API addresses the per-bot sender by
+    // `phone_number_id` embedded in the outbound URL path
+    // (`/v18.0/{phone_number_id}/messages`). Without it the courier
+    // has no target; the manifest must carry it next to `token`.
+    // Telegram puts its routing id in the bot token itself, so this
+    // rule only fires for `kind: whatsapp_web`.
+    if adapter.kind == AdapterKind::WhatsappWeb
+        && !adapter.outbound.credentials.contains_key("phone_number_id")
+    {
+        return Err(ManifestError::MissingSchemeCredential {
+            adapter: name.to_string(),
+            scheme: "kind=whatsapp_web".to_string(),
+            field: "phone_number_id".to_string(),
+        });
+    }
+
     let identity_required = match adapter.identity.kind {
         IdentityKind::SenderTable => Some(("sender_table", "table")),
         IdentityKind::SelfEnrol => Some(("self_enrol", "fallback_table")),

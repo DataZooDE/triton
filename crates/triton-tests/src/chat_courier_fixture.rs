@@ -6,8 +6,12 @@
 //! captures every `sendMessage` body it receives so a test can
 //! assert on `chat_id` / `text` after the binary's courier fires.
 //!
-//! No mocks per CLAUDE.md §1: this is a real HTTP server speaking
-//! the Telegram Bot API wire shape over real TCP.
+//! PR 31 adds `FakeWhatsAppApi` — same shape, but speaks the Meta
+//! Graph API wire format: `POST /v18.0/{phone_number_id}/messages`
+//! with the bearer token as a header (not URL-embedded) and a
+//! `{messaging_product, to, type, text}` body.
+//!
+//! No mocks per CLAUDE.md §1: real HTTP server over real TCP.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -15,6 +19,7 @@ use std::sync::{Arc, Mutex};
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::routing::post;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -112,4 +117,83 @@ async fn handle_send_message(
             }))
         }
     }
+}
+
+// ---------- WhatsApp Cloud API fake (PR 31) ----------
+
+/// One captured `messages` POST against the fake WhatsApp Cloud
+/// API. `phone_number_id` is the URL-path segment; `authorization`
+/// is the verbatim `Authorization` header value so tests can assert
+/// the bearer token actually made it through credential resolution.
+#[derive(Debug, Clone)]
+pub struct WhatsAppSentMessage {
+    pub phone_number_id: String,
+    pub authorization: String,
+    pub body: Value,
+}
+
+struct WhatsAppState {
+    captured: Mutex<Vec<WhatsAppSentMessage>>,
+}
+
+/// Fake `graph.facebook.com` for the PR 31 outbound courier. Speaks
+/// the `/v18.0/{phone_number_id}/messages` wire shape with a stub
+/// `{messaging_product, contacts, messages: [{id: "wamid.stub"}]}`
+/// response on every POST.
+pub struct FakeWhatsAppApi {
+    addr: SocketAddr,
+    state: Arc<WhatsAppState>,
+}
+
+impl FakeWhatsAppApi {
+    pub async fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
+        let addr = listener.local_addr().unwrap();
+        let state = Arc::new(WhatsAppState {
+            captured: Mutex::new(Vec::new()),
+        });
+
+        let router = Router::new()
+            .route(
+                "/v18.0/{phone_number_id}/messages",
+                post(handle_whatsapp_send),
+            )
+            .with_state(state.clone());
+
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        Self { addr, state }
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    pub fn captured(&self) -> Vec<WhatsAppSentMessage> {
+        self.state.captured.lock().unwrap().clone()
+    }
+}
+
+async fn handle_whatsapp_send(
+    State(state): State<Arc<WhatsAppState>>,
+    Path(phone_number_id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let authorization = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    state.captured.lock().unwrap().push(WhatsAppSentMessage {
+        phone_number_id: phone_number_id.clone(),
+        authorization,
+        body,
+    });
+    Json(json!({
+        "messaging_product": "whatsapp",
+        "contacts": [{ "input": "stub", "wa_id": "stub" }],
+        "messages": [{ "id": "wamid.STUB" }],
+    }))
 }
