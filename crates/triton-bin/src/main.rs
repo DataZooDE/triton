@@ -343,6 +343,49 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                 }
+                AdapterKind::WhatsappWeb => {
+                    // NFR-S-4 v0.2: only `graph.facebook.com` is on
+                    // the substrate ACL allowlist. Outside `local`
+                    // env we refuse any `TRITON_WHATSAPP_API_BASE`
+                    // override so a compromised env var can't
+                    // exfiltrate user content + the access token to
+                    // an arbitrary host. Mirrors the Telegram pattern.
+                    const CANONICAL: &str = "https://graph.facebook.com";
+                    if settings.env != "local" && settings.whatsapp_api_base != CANONICAL {
+                        tracing::error!(
+                            env = %settings.env,
+                            whatsapp_api_base = %settings.whatsapp_api_base,
+                            "non-`local` env MUST use TRITON_WHATSAPP_API_BASE={CANONICAL} (NFR-S-4 egress allowlist)",
+                        );
+                        std::process::exit(2);
+                    }
+                    let courier_config = triton_chat_whatsapp::CourierConfig {
+                        api_base: settings.whatsapp_api_base.clone(),
+                        timeout: settings.courier_timeout,
+                    };
+                    match triton_chat_whatsapp::WhatsAppAdapter::from_manifest(
+                        name,
+                        adapter,
+                        resolver.as_ref(),
+                        dispatcher.clone(),
+                        courier_config,
+                    )
+                    .await
+                    {
+                        Ok(built) => {
+                            tracing::info!(adapter = %name, "whatsapp webhook adapter wired");
+                            let r = Arc::new(built).router();
+                            chat_router = Some(match chat_router.take() {
+                                Some(acc) => acc.merge(r),
+                                None => r,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!(adapter = %name, error = %e, "whatsapp adapter build failed");
+                            std::process::exit(2);
+                        }
+                    }
+                }
                 _ => {
                     tracing::warn!(
                         adapter = %name,
