@@ -483,7 +483,6 @@ async fn handle_activity_post(
     Json(json!({ "id": "stub-activity-id" }))
 }
 
-
 // ---------- WhatsApp Cloud API fake (PR 31) ----------
 
 /// One captured `messages` POST against the fake WhatsApp Cloud
