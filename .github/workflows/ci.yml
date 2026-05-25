@@ -56,6 +56,19 @@ jobs:
           RUST_BACKTRACE: 1
         run: cargo test --workspace --locked
 
+      # ACC-13 — exercise the external-consumer smoke as a
+      # SEPARATE Cargo workspace so the harness's `pub` surface
+      # stays consumable from non-workspace crates. The example
+      # at `examples/consumer-smoke` declares its own
+      # `[workspace]` and pulls `triton-tests` in as a path
+      # dependency. This step would catch a refactor that
+      # silently moves a fixture into `pub(crate)` visibility.
+      - name: cargo test (external consumer smoke)
+        env:
+          RUST_BACKTRACE: 1
+        working-directory: examples/consumer-smoke
+        run: cargo test --locked
+
   flutter:
     name: flutter analyze + test + build web (apps/explorer)
     runs-on: ubuntu-latest
