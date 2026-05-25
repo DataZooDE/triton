@@ -529,6 +529,309 @@ async fn msteams_rejects_jwt_beyond_5min_skew() {
     assert_eq!(rejected["result"], "error:auth");
 }
 
+// ---- azure identity strategy (FR-I-7) ----------------------------
+
+fn azure_manifest_path() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-msteams-azure-test.yaml")
+        .display()
+        .to_string()
+}
+
+/// An Activity carrying the Entra (AAD) identity fields the `azure`
+/// strategy derives the Principal from: `from.aadObjectId` and
+/// `channelData.tenant.id`. No sender_table entry is involved.
+fn azure_message_activity(text: &str, aad_object_id: &str, tenant_id: &str) -> Value {
+    json!({
+        "type": "message",
+        "id": "msg-azure-1",
+        "timestamp": "2026-05-25T10:00:00.0000000Z",
+        "serviceUrl": "https://placeholder.example/",
+        "channelId": "msteams",
+        "from": { "id": "29:zzz", "name": "Alice", "aadObjectId": aad_object_id },
+        "conversation": { "id": "a:conv-azure", "conversationType": "personal" },
+        "recipient": { "id": "28:bot-1", "name": "MyBot" },
+        "channelData": { "tenant": { "id": tenant_id } },
+        "text": text,
+        "textFormat": "plain"
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn azure_identity_derives_principal_from_aad_claims() {
+    // FR-I-7 `azure`: with no sender_table, the Principal is derived
+    // from the activity's verified-by-derivation Entra claims —
+    // `from.aadObjectId` → sub, `channelData.tenant.id` → tenant.
+    let fake = FakeBotFramework::start().await;
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), azure_manifest_path()),
+        ("TRITON_MSTEAMS_OPENID_URL".to_string(), fake.openid_url()),
+        ("TRITON_MSTEAMS_TOKEN_URL".to_string(), fake.token_url()),
+        (
+            "TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS".to_string(),
+            "127.0.0.1".to_string(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    let jwt = fake.sign_jwt(good_claims(&fake));
+    let activity = azure_message_activity("hello azure", "aad-obj-alice", "tenant-guid-acme");
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&activity)
+        .send()
+        .await
+        .expect("POST");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    // The dispatcher must see a Principal sourced from the AAD claims,
+    // not a sender_table lookup.
+    let dispatch = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["protocol"] == "messenger:msteams"
+    });
+    assert_eq!(dispatch["who"], "aad-obj-alice", "sub = from.aadObjectId");
+    assert_eq!(dispatch["subject"], "aad-obj-alice");
+    assert_eq!(
+        dispatch["tenant"], "tenant-guid-acme",
+        "tenant = channelData.tenant.id"
+    );
+    assert_eq!(dispatch["result"], "ok");
+
+    // Reply still couriers back through the bot connector.
+    let captured = wait_for(Duration::from_secs(3), || {
+        let v = fake.captured();
+        (!v.is_empty()).then_some(v)
+    });
+    assert_eq!(captured.len(), 1);
+    assert!(
+        captured[0].body["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("hello azure")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn azure_identity_rejects_disallowed_tenant() {
+    // A perfectly valid JWT + AAD object id, but the inbound tenant
+    // is not on the adapter's `allowed_tenants` list → 401 + a
+    // `phase: rejected` audit, no dispatch, no outbound reply. This
+    // is the cross-tenant-isolation guarantee.
+    let fake = FakeBotFramework::start().await;
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), azure_manifest_path()),
+        ("TRITON_MSTEAMS_OPENID_URL".to_string(), fake.openid_url()),
+        ("TRITON_MSTEAMS_TOKEN_URL".to_string(), fake.token_url()),
+        (
+            "TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS".to_string(),
+            "127.0.0.1".to_string(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    let jwt = fake.sign_jwt(good_claims(&fake));
+    let activity = azure_message_activity("hello", "aad-obj-mallory", "tenant-guid-evil");
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&activity)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 401);
+
+    let rejected = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit" && v["phase"] == "rejected" && v["protocol"] == "messenger:msteams"
+    });
+    assert_eq!(rejected["result"], "error:auth");
+    assert!(
+        fake.captured().is_empty(),
+        "disallowed tenant MUST NOT trigger an outbound reply"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn azure_identity_rejects_missing_aad_object_id() {
+    // `azure` requires `from.aadObjectId`; a message activity without
+    // it (e.g. a non-AAD channel) cannot yield an Entra principal and
+    // must be refused rather than fall back to `from.id`.
+    let fake = FakeBotFramework::start().await;
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), azure_manifest_path()),
+        ("TRITON_MSTEAMS_OPENID_URL".to_string(), fake.openid_url()),
+        ("TRITON_MSTEAMS_TOKEN_URL".to_string(), fake.token_url()),
+        (
+            "TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS".to_string(),
+            "127.0.0.1".to_string(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    let jwt = fake.sign_jwt(good_claims(&fake));
+    // No aadObjectId, no channelData.
+    let activity = json!({
+        "type": "message",
+        "id": "msg-azure-2",
+        "serviceUrl": "https://placeholder.example/",
+        "channelId": "msteams",
+        "from": { "id": "29:zzz", "name": "Alice" },
+        "conversation": { "id": "a:conv-azure", "conversationType": "personal" },
+        "recipient": { "id": "28:bot-1", "name": "MyBot" },
+        "text": "no aad id",
+        "textFormat": "plain"
+    });
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&activity)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 401);
+
+    let rejected = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit" && v["phase"] == "rejected" && v["protocol"] == "messenger:msteams"
+    });
+    assert_eq!(rejected["result"], "error:auth");
+    assert!(fake.captured().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn azure_identity_rejects_missing_tenant() {
+    // Codex review finding 4: exercise the tenant-missing rejection
+    // path specifically — aadObjectId IS present but channelData (and
+    // thus tenant.id) is absent, so resolution must fail at the
+    // tenant step, not the aadObjectId step.
+    let fake = FakeBotFramework::start().await;
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), azure_manifest_path()),
+        ("TRITON_MSTEAMS_OPENID_URL".to_string(), fake.openid_url()),
+        ("TRITON_MSTEAMS_TOKEN_URL".to_string(), fake.token_url()),
+        (
+            "TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS".to_string(),
+            "127.0.0.1".to_string(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    let jwt = fake.sign_jwt(good_claims(&fake));
+    // aadObjectId present, channelData/tenant absent.
+    let activity = json!({
+        "type": "message",
+        "id": "msg-azure-3",
+        "serviceUrl": "https://placeholder.example/",
+        "channelId": "msteams",
+        "from": { "id": "29:zzz", "name": "Alice", "aadObjectId": "aad-obj-alice" },
+        "conversation": { "id": "a:conv-azure", "conversationType": "personal" },
+        "recipient": { "id": "28:bot-1", "name": "MyBot" },
+        "text": "no tenant",
+        "textFormat": "plain"
+    });
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&activity)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 401);
+
+    let rejected = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit" && v["phase"] == "rejected" && v["protocol"] == "messenger:msteams"
+    });
+    assert_eq!(rejected["result"], "error:auth");
+    assert!(fake.captured().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn azure_identity_rejects_non_teams_channel() {
+    // Codex review finding 2: the AAD identity fields are body fields,
+    // trusted only because the request is connector-authenticated AND
+    // came over the Teams channel. A valid Bot Framework token for the
+    // same bot on a different channel must NOT be allowed to inject an
+    // Entra-shaped principal. Reject anything whose channelId != msteams.
+    let fake = FakeBotFramework::start().await;
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), azure_manifest_path()),
+        ("TRITON_MSTEAMS_OPENID_URL".to_string(), fake.openid_url()),
+        ("TRITON_MSTEAMS_TOKEN_URL".to_string(), fake.token_url()),
+        (
+            "TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS".to_string(),
+            "127.0.0.1".to_string(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    let jwt = fake.sign_jwt(good_claims(&fake));
+    let mut activity = azure_message_activity("hello", "aad-obj-alice", "tenant-guid-acme");
+    activity["channelId"] = json!("directline"); // not Teams
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&activity)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 401);
+
+    let rejected = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit" && v["phase"] == "rejected" && v["protocol"] == "messenger:msteams"
+    });
+    assert_eq!(rejected["result"], "error:auth");
+    assert!(
+        fake.captured().is_empty(),
+        "non-Teams channel MUST NOT trigger an outbound reply"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn azure_empty_allowed_tenants_refuses_to_boot() {
+    // Codex review finding 3: fail closed. An `azure` adapter with an
+    // empty allowed_tenants list provides no cross-tenant isolation;
+    // the binary MUST refuse to start rather than silently accept any
+    // tenant's users.
+    let bin = locate_triton_binary();
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-msteams-azure-empty-tenants.yaml")
+        .display()
+        .to_string();
+    let out = std::process::Command::new(&bin)
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_ENV", "local")
+        .env("TRITON_MANIFEST_PATH", manifest)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("spawn triton");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "azure adapter with empty allowed_tenants MUST refuse to boot; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
 // Locate the `triton` debug binary the same way `telegram_courier.rs`
 // does — by walking up from the test crate's manifest dir.
 fn locate_triton_binary() -> std::path::PathBuf {
