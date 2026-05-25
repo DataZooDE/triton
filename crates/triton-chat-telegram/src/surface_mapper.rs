@@ -28,7 +28,7 @@
 //! stray `<` or `&`.
 
 use serde_json::{Value, json};
-use triton_core::a2ui::{Component, Surface, extract_surface};
+use triton_core::a2ui::{Component, FormField, Surface, extract_surface};
 
 /// Telegram `sendMessage.text` hard limit. Architecture.md §8.7
 /// names `SurfaceLimits` as the cap-enforcement seam at L6′.
@@ -118,6 +118,59 @@ pub fn try_render_surface(
 ) -> Option<Result<RenderedMessage, RenderError>> {
     let surface = extract_surface(result).ok()?;
     Some(render(&surface, correlation_key))
+}
+
+/// PR 32 (numbered_prompts intercept): if the tool result is an
+/// A2UI surface whose SOLE component is a `Component::Form`,
+/// return a snapshot of `(title, submit_tool, fields)`. The
+/// adapter uses this to install per-chat form state and send the
+/// first prompt INSTEAD of routing through the normal surface
+/// mapper. Returns `None` for any other shape (non-Surface result,
+/// empty Surface, multi-component Surface, or Surface whose single
+/// component isn't a Form) so the caller falls back to the normal
+/// rendering path — where Form-mixed-with-other still defers via
+/// the existing `deferred_buttons` counter shape until a v0.2.x
+/// design lift unifies the mixed-surface story.
+///
+/// Mirrors Discord PR 30's `try_render_form_modal` placement: the
+/// adapter checks this BEFORE calling `render_dispatch_result` so
+/// a form-only surface never reaches the mapper.
+pub fn try_extract_form_only(result: &Value) -> Option<FormOnly> {
+    let surface = extract_surface(result).ok()?;
+    if surface.components.len() != 1 {
+        return None;
+    }
+    let Component::Form {
+        submit_label: _,
+        title,
+        fields,
+        tool,
+    } = surface.components.into_iter().next().unwrap()
+    else {
+        return None;
+    };
+    Some(FormOnly {
+        title,
+        submit_tool: tool,
+        fields,
+    })
+}
+
+/// Owned snapshot of the single `Component::Form` carried by a
+/// form-only surface. The adapter consumes this to seed the
+/// numbered-prompts state machine; nothing here references the
+/// original `Value`, so the caller can drop the surface freely.
+#[derive(Debug, Clone)]
+pub struct FormOnly {
+    /// Title the tool put on the form. The adapter includes this
+    /// in the first prompt so the user sees what they're filling
+    /// in (e.g. "Customer feedback — 1/3 — Your name (required)").
+    pub title: String,
+    /// Tool to dispatch on submit.
+    pub submit_tool: String,
+    /// Ordered field list. Empty here is impossible by construction
+    /// (Surface is non-empty); the state machine still validates.
+    pub fields: Vec<FormField>,
 }
 
 /// Render a [`Surface`] into a `RenderedMessage` or a
@@ -821,6 +874,66 @@ mod tests {
                 "expected only complete chunks; found: {chunk:?}"
             );
         }
+    }
+
+    #[test]
+    fn form_only_surface_is_extracted() {
+        use triton_core::a2ui::{FormField, FormFieldKind};
+        let s = Surface {
+            components: vec![Component::Form {
+                title: "Feedback".into(),
+                fields: vec![FormField {
+                    name: "name".into(),
+                    label: "Your name".into(),
+                    kind: FormFieldKind::String,
+                    required: true,
+                }],
+                submit_label: "Send".into(),
+                tool: "echo".into(),
+            }],
+        };
+        let result = json!({ "surface": s });
+        let extracted = try_extract_form_only(&result).expect("form-only");
+        assert_eq!(extracted.title, "Feedback");
+        assert_eq!(extracted.submit_tool, "echo");
+        assert_eq!(extracted.fields.len(), 1);
+        assert_eq!(extracted.fields[0].name, "name");
+    }
+
+    #[test]
+    fn mixed_surface_is_not_form_only() {
+        // Form + Text → not form-only; the adapter falls through
+        // to the normal render path and the Form defers as text.
+        use triton_core::a2ui::{FormField, FormFieldKind};
+        let s = Surface {
+            components: vec![
+                Component::Text {
+                    value: "header".into(),
+                },
+                Component::Form {
+                    title: "Feedback".into(),
+                    fields: vec![FormField {
+                        name: "name".into(),
+                        label: "Your name".into(),
+                        kind: FormFieldKind::String,
+                        required: true,
+                    }],
+                    submit_label: "Send".into(),
+                    tool: "echo".into(),
+                },
+            ],
+        };
+        let result = json!({ "surface": s });
+        assert!(try_extract_form_only(&result).is_none());
+    }
+
+    #[test]
+    fn non_form_single_component_surface_is_not_form_only() {
+        let s = Surface {
+            components: vec![Component::Text { value: "hi".into() }],
+        };
+        let result = json!({ "surface": s });
+        assert!(try_extract_form_only(&result).is_none());
     }
 
     #[test]

@@ -1,0 +1,38 @@
+# PR 34 integration manifest. Single Signal adapter using literal
+# credentials (dev mode only). The signald_addr is overridden at
+# runtime by the test via TRITON_SIGNAL_SIGNALD_ADDR to point at the
+# FakeSignald fixture's ephemeral port.
+version: "0.2"
+
+adapters:
+  signal:
+    kind: signal
+    inbound:
+      kind: socket
+      signature: trusted_socket
+      # Default placeholder — TRITON_SIGNAL_SIGNALD_ADDR overrides
+      # this at runtime so the test can point us at the FakeSignald
+      # fixture's `tcp://127.0.0.1:<ephemeral>` URI.
+      signald_addr: tcp://127.0.0.1:1
+      account: "+15551234567"
+    outbound:
+      kind: socket
+    identity:
+      kind: sender_table
+      # JSON: maps Signal sender UUID (string) → Principal claims.
+      table: '{"00000000-0000-0000-0000-000000000001":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: numbered_prompts
+      selections: numbered_prompts
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

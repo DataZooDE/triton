@@ -130,6 +130,13 @@ pub enum SignatureScheme {
     BotFrameworkJwt,
     Ed25519,
     GoogleOidcJwt,
+    /// PR 34: signald has no message-signing envelope — the trust
+    /// boundary is the network path (the daemon is reachable only on
+    /// the tailnet). The adapter still resolves credentials at boot
+    /// (`signald_addr`, `account`) so a misconfigured deploy fails
+    /// closed; runtime relies on NFR-S-4 egress allowlist instead of
+    /// a per-message signature scheme.
+    TrustedSocket,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -381,38 +388,64 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
     // can't function without. Keep this table close to the enum
     // definitions so a new variant is impossible to ship without
     // also stating its required field.
-    let inbound_required = match adapter.inbound.signature {
-        SignatureScheme::SecretToken => Some(("secret_token", "secret")),
-        SignatureScheme::Hmac256 => Some(("hmac256", "secret")),
-        SignatureScheme::Ed25519 => Some(("ed25519", "public_key")),
-        // Bot Framework + Google OIDC validate against the
-        // platform's published OpenID metadata; the adapter holds
-        // no shared secret of its own.
-        SignatureScheme::BotFrameworkJwt | SignatureScheme::GoogleOidcJwt => None,
+    let inbound_required: &[(&str, &str)] = match adapter.inbound.signature {
+        SignatureScheme::SecretToken => &[("secret_token", "secret")],
+        SignatureScheme::Hmac256 => &[("hmac256", "secret")],
+        SignatureScheme::Ed25519 => &[("ed25519", "public_key")],
+        // Bot Framework: validate against Microsoft's published
+        // JWKS. The adapter still needs the bot's Microsoft App ID
+        // (matches the JWT's `aud` claim) — without it any
+        // Microsoft-signed Bot Framework JWT would verify, so
+        // `inbound.audience` is mandatory (PR 35).
+        SignatureScheme::BotFrameworkJwt => &[("bot_framework_jwt", "audience")],
+        // Google Chat: validate against Google's published certs
+        // (JWKS). No shared secret, but the adapter MUST be told
+        // which `aud` value to require — the bot's project number
+        // — or any Google-signed JWT for any bot would verify
+        // (PR 33).
+        SignatureScheme::GoogleOidcJwt => &[("google_oidc_jwt", "audience")],
+        // PR 34 — signald has no envelope signature; the adapter
+        // still needs the daemon address (where to connect) and the
+        // bot's Signal phone number (which account to subscribe).
+        // Both are resolved at boot so a Vault-ref typo fails closed
+        // (M-SECRETS-1 / FR-L-4 / FR-L-6).
+        SignatureScheme::TrustedSocket => &[
+            ("trusted_socket", "signald_addr"),
+            ("trusted_socket", "account"),
+        ],
     };
-    if let Some((scheme, field)) = inbound_required
-        && !adapter.inbound.credentials.contains_key(field)
-    {
-        return Err(ManifestError::MissingSchemeCredential {
-            adapter: name.to_string(),
-            scheme: format!("inbound.signature={scheme}"),
-            field: field.to_string(),
-        });
+    for (scheme, field) in inbound_required {
+        if !adapter.inbound.credentials.contains_key(*field) {
+            return Err(ManifestError::MissingSchemeCredential {
+                adapter: name.to_string(),
+                scheme: format!("inbound.signature={scheme}"),
+                field: (*field).to_string(),
+            });
+        }
     }
 
-    let outbound_required = match adapter.outbound.kind {
-        OutboundKind::RestApi => Some(("rest_api", "token")),
-        OutboundKind::Socket => None, // session-locality, no token
-        OutboundKind::BotConnector => Some(("bot_connector", "azure_identity")),
+    let outbound_required: &[(&str, &str)] = match adapter.outbound.kind {
+        OutboundKind::RestApi => &[("rest_api", "token")],
+        OutboundKind::Socket => &[], // session-locality, no token
+        // Bot Framework outbound mints OAuth2 access tokens from
+        // `login.microsoftonline.com/botframework.com/oauth2/v2.0/
+        // token` via the client_credentials grant — needs the
+        // bot's `client_id` + `client_secret` resolved at boot
+        // (PR 35). Mirrors the WhatsApp `phone_number_id`-style
+        // declared-required wiring.
+        OutboundKind::BotConnector => &[
+            ("bot_connector", "client_id"),
+            ("bot_connector", "client_secret"),
+        ],
     };
-    if let Some((scheme, field)) = outbound_required
-        && !adapter.outbound.credentials.contains_key(field)
-    {
-        return Err(ManifestError::MissingSchemeCredential {
-            adapter: name.to_string(),
-            scheme: format!("outbound.kind={scheme}"),
-            field: field.to_string(),
-        });
+    for (scheme, field) in outbound_required {
+        if !adapter.outbound.credentials.contains_key(*field) {
+            return Err(ManifestError::MissingSchemeCredential {
+                adapter: name.to_string(),
+                scheme: format!("outbound.kind={scheme}"),
+                field: (*field).to_string(),
+            });
+        }
     }
 
     let identity_required = match adapter.identity.kind {

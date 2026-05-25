@@ -778,6 +778,44 @@ a trap the next developer should not have to step in.
   public key is a useful canonical value here because it's
   traceable to a public spec.
 
+- **The numbered_prompts state machine lives on the adapter,
+  not behind the dispatcher.** PR 32 first sketched putting the
+  per-chat form state on the dispatcher (so every chat adapter
+  could share it). That broke ADR-6 in subtle ways: the
+  dispatcher is the single audit pivot, but form-prompt
+  sendMessages are *adapter* events with *no underlying tool
+  dispatch* (the user is mid-form; nothing has run yet). Forcing
+  those into the dispatcher's audit shape meant inventing a
+  synthetic tool name and a synthetic dispatch phase — both
+  worse than the v0.2 status quo of `phase: post` lines that
+  the adapter constructs via `record_post(tool_name="form_prompt", …)`.
+  Keep state on the adapter; let the audit shape stay honest;
+  `record_post` already accepts arbitrary `tool_name` strings.
+
+- **`(chat_id, sender_sub)` is the only form-state key shape
+  that survives sender_table reloads.** Keying just by `chat_id`
+  loses isolation when two senders share a chat. Keying just by
+  platform `from.id` loses isolation when the sender_table
+  reload swaps the sub → tenant resolution mid-form (you'd
+  apply the OLD tenant's policy to the NEW sender's submission).
+  Keying by `(chat_id, sub)` makes the lookup follow the
+  verified identity, and re-deriving the principal from the
+  sender_table at submit time means the latest manifest's
+  authorisation always wins. PR 32 discovered this when writing
+  the integration test that runs two senders in two chats
+  simultaneously.
+
+- **In-memory adapter state needs a per-tenant cap and an LRU
+  eviction story, not just a global limit.** G-8 forbids on-disk
+  state, so a noisy tenant with infinite in-flight forms is the
+  default OOM surface. Cap per-tenant (defaults to 100 in PR 32),
+  evict oldest on overflow, audit the eviction as
+  `phase: rejected, result: error:validation` so the operator
+  notices the noisy tenant. Global-only caps starve well-behaved
+  tenants when one tenant misbehaves; per-tenant caps + LRU
+  give every tenant a steady-state quota independent of
+  neighbours.
+
 - **The harness `pub` surface is the consumer-test contract,
   not an internal artefact.** When you rename
   `FakeVault::start_kv_v2` or change `TritonProcess::spawn_with_env`'s
