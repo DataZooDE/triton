@@ -25,7 +25,7 @@
 //! would also reject).
 
 use serde_json::{Value, json};
-use triton_core::a2ui::{Component, Surface, extract_surface};
+use triton_core::a2ui::{Component, DashboardTile, Surface, extract_surface};
 
 /// WhatsApp `text.body` hard limit. Same byte-conservative reading
 /// as Telegram's TELEGRAM_TEXT_MAX_BYTES (UTF-8 length ≤ UTF-16
@@ -47,8 +47,30 @@ pub struct RenderedMessage {
     pub deferred_buttons: usize,
     pub deferred_selections: usize,
     pub deferred_forms: usize,
+    /// Number of `Component::Dashboard` entries we couldn't ship.
+    /// PR 38 wires the rasterizer, so the FIRST Dashboard in a
+    /// surface is surfaced via [`Self::dashboard`] for the adapter
+    /// to rasterise + send as a WhatsApp image message. Any
+    /// subsequent dashboards bump this counter — WhatsApp image
+    /// messages carry one media attachment.
     pub deferred_dashboards: usize,
     pub truncated: bool,
+    /// PR 38: the FIRST `Component::Dashboard` found in the surface,
+    /// surfaced to the caller for rasterisation. The adapter calls
+    /// the rasterizer service, uploads the PNG to WhatsApp's media
+    /// endpoint, and dispatches an `image` message carrying the
+    /// returned `media_id`. Mirrors Telegram PR 36's
+    /// `RenderedMessage::dashboard` slot.
+    pub dashboard: Option<RasterDashboard>,
+}
+
+/// Dashboard payload the caller passes to the rasterizer. Local to
+/// the adapter — each chat adapter owns its own L6′ rendering
+/// concerns; sharing the type across crates would couple them.
+#[derive(Debug, Clone)]
+pub struct RasterDashboard {
+    pub title: String,
+    pub tiles: Vec<DashboardTile>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -76,6 +98,10 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     let mut deferred_selections = 0usize;
     let mut deferred_forms = 0usize;
     let mut deferred_dashboards = 0usize;
+    // PR 38: first Dashboard surfaced to the caller for rasterisation.
+    // WhatsApp image messages carry one media attachment, so any
+    // subsequent dashboards bump `deferred_dashboards`.
+    let mut first_dashboard: Option<RasterDashboard> = None;
     // Track which chunks came from raw text so the single-chunk
     // fallback path can re-render at a smaller budget without
     // corrupting markup. Narration carries `_..._` wrappers we
@@ -111,16 +137,37 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             Component::Form { .. } => {
                 deferred_forms += 1;
             }
-            Component::Dashboard { .. } => {
-                // Same rule as Telegram PR 27 and Discord PR 22:
-                // the manifest declares `dashboard: rasterised_png`,
-                // so we never leak raw tile content.
-                deferred_dashboards += 1;
+            Component::Dashboard { title, tiles } => {
+                // PR 38: the manifest's `dashboard: rasterised_png`
+                // degrade rule now has a real renderer behind it.
+                // The mapper surfaces the FIRST Dashboard for
+                // rasterisation. The adapter uploads the PNG to
+                // WhatsApp's media endpoint and dispatches an
+                // `image` message carrying the returned media_id.
+                //
+                // We deliberately do NOT push a text chunk for the
+                // dashboard: surrounding Text/Narration components
+                // become the IMAGE's caption (WhatsApp's image
+                // message supports an inline `caption` field), and
+                // the dashboard itself is the image. The fallback
+                // path adds its own placeholder string when needed.
+                if first_dashboard.is_none() {
+                    first_dashboard = Some(RasterDashboard {
+                        title: title.clone(),
+                        tiles: tiles.clone(),
+                    });
+                } else {
+                    deferred_dashboards += 1;
+                }
             }
         }
     }
 
-    if chunks.is_empty() {
+    // PR 38: a dashboard-only surface is legitimate — WhatsApp's
+    // image messages don't require a caption, so we can ship a
+    // photo with no text. Only refuse when there's literally
+    // nothing renderable.
+    if chunks.is_empty() && first_dashboard.is_none() {
         return Err(RenderError::EmptyAfterRender);
     }
 
@@ -133,6 +180,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             deferred_forms,
             deferred_dashboards,
             truncated: false,
+            dashboard: first_dashboard,
         });
     }
 
@@ -161,6 +209,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             deferred_forms,
             deferred_dashboards,
             truncated: true,
+            dashboard: first_dashboard,
         });
     }
 
@@ -199,6 +248,28 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
         deferred_forms,
         deferred_dashboards,
         truncated: true,
+        dashboard: first_dashboard,
+    })
+}
+
+/// Build the WhatsApp `messages` body for an `image` message
+/// carrying a previously-uploaded media_id. The PR 38 dashboard
+/// path uploads the rasterised PNG to `/v18.0/{id}/media` first,
+/// then sends this body to `/v18.0/{id}/messages`. The optional
+/// caption is the rendered Text/Narration content that surrounded
+/// the dashboard in the source surface.
+pub fn build_image_message_body(to: &str, media_id: &str, caption: Option<&str>) -> Value {
+    let mut image = serde_json::Map::new();
+    image.insert("id".into(), Value::String(media_id.to_string()));
+    if let Some(c) = caption.filter(|s| !s.is_empty()) {
+        image.insert("caption".into(), Value::String(c.to_string()));
+    }
+    json!({
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "image",
+        "image": Value::Object(image),
     })
 }
 
@@ -269,7 +340,12 @@ mod tests {
     }
 
     #[test]
-    fn buttons_selection_form_dashboard_are_deferred_not_rendered() {
+    fn buttons_selection_form_are_deferred_dashboard_is_surfaced() {
+        // PR 38 update: Dashboards are no longer deferred — the
+        // first one is surfaced to the caller for rasterisation
+        // (subsequent ones bump `deferred_dashboards`). The other
+        // interactive primitives remain deferred until PR 32's
+        // numbered_prompts wiring lands on WhatsApp.
         use serde_json::json;
         use triton_core::a2ui::{DashboardTile, FormField, FormFieldKind, SelectionOption};
         let s = Surface {
@@ -318,10 +394,60 @@ mod tests {
         assert_eq!(r.deferred_buttons, 1);
         assert_eq!(r.deferred_selections, 1);
         assert_eq!(r.deferred_forms, 1);
-        assert_eq!(r.deferred_dashboards, 1);
-        // Dashboard tile content MUST NEVER leak into the body.
+        // PR 38: first dashboard surfaced, not deferred.
+        assert_eq!(r.deferred_dashboards, 0);
+        let dash = r.dashboard.as_ref().expect("dashboard surfaced");
+        assert_eq!(dash.title, "Secrets");
+        assert_eq!(dash.tiles[0].label, "invocations");
+        // Dashboard tile content MUST NEVER leak into the body
+        // (would silently violate the `rasterised_png` degrade rule).
         assert!(!r.text.contains("invocations"));
         assert!(!r.text.contains("1234"));
+    }
+
+    #[test]
+    fn second_dashboard_is_deferred_first_is_surfaced() {
+        // WhatsApp image messages carry one media attachment. With
+        // two Dashboards in the same surface, the first becomes the
+        // image and any others bump `deferred_dashboards`.
+        use triton_core::a2ui::DashboardTile;
+        let make_dash = |title: &str| Component::Dashboard {
+            title: title.into(),
+            tiles: vec![DashboardTile {
+                label: "x".into(),
+                value: "1".into(),
+                trend: None,
+            }],
+        };
+        let s = Surface {
+            components: vec![make_dash("first"), make_dash("second")],
+        };
+        let r = render(&s).expect("renders");
+        let dash = r.dashboard.expect("first surfaced");
+        assert_eq!(dash.title, "first");
+        assert_eq!(r.deferred_dashboards, 1);
+    }
+
+    #[test]
+    fn dashboard_only_surface_renders_with_empty_caption() {
+        // A surface that's nothing but a Dashboard is now valid:
+        // WhatsApp's image message accepts no caption, so we ship
+        // the photo with no text rather than failing
+        // EmptyAfterRender.
+        use triton_core::a2ui::DashboardTile;
+        let s = Surface {
+            components: vec![Component::Dashboard {
+                title: "Solo".into(),
+                tiles: vec![DashboardTile {
+                    label: "x".into(),
+                    value: "1".into(),
+                    trend: None,
+                }],
+            }],
+        };
+        let r = render(&s).expect("renders");
+        assert!(r.text.is_empty());
+        assert!(r.dashboard.is_some());
     }
 
     #[test]
@@ -399,6 +525,7 @@ mod tests {
             deferred_forms: 0,
             deferred_dashboards: 0,
             truncated: false,
+            dashboard: None,
         };
         let body = build_messages_body("491234567", &msg);
         assert_eq!(body["messaging_product"], "whatsapp");
@@ -407,5 +534,22 @@ mod tests {
         assert_eq!(body["type"], "text");
         assert_eq!(body["text"]["body"], "hello");
         assert_eq!(body["text"]["preview_url"], false);
+    }
+
+    #[test]
+    fn build_image_message_body_shape_matches_cloud_api() {
+        let body = build_image_message_body("491234567", "media_id_stub", Some("a caption"));
+        assert_eq!(body["messaging_product"], "whatsapp");
+        assert_eq!(body["recipient_type"], "individual");
+        assert_eq!(body["to"], "491234567");
+        assert_eq!(body["type"], "image");
+        assert_eq!(body["image"]["id"], "media_id_stub");
+        assert_eq!(body["image"]["caption"], "a caption");
+    }
+
+    #[test]
+    fn build_image_message_body_omits_caption_when_empty() {
+        let body = build_image_message_body("491234567", "m1", None);
+        assert!(body["image"].as_object().unwrap().get("caption").is_none());
     }
 }

@@ -81,6 +81,41 @@ async fn oversized_dashboard_rejected_with_400() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oversize_tile_value_rejected_with_400() {
+    // PR 38 codex review hardening: a tile string past
+    // MAX_TILE_FIELD_BYTES (128) must be refused at the rasterizer
+    // edge BEFORE any SVG / raster work. A title-only cap would
+    // miss this — the renderer's hot path scales with
+    // tile-field length even when title length and tile count
+    // both look healthy.
+    let raster = RasterizerProcess::spawn().await;
+    let client = reqwest::Client::new();
+
+    // One tile whose `value` is 129 bytes (cap+1).
+    let body = json!({
+        "title": "ok",
+        "tiles": [{
+            "label": "a",
+            "value": "x".repeat(triton_rasterizer::MAX_TILE_FIELD_BYTES + 1),
+            "trend": null,
+        }],
+    });
+    let resp = client
+        .post(format!("{}/v1/dashboard.png", raster.url()))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 400);
+    let body = resp.text().await.unwrap_or_default();
+    assert!(
+        body.contains("tile[0].value")
+            && body.contains(&format!("{}", triton_rasterizer::MAX_TILE_FIELD_BYTES)),
+        "expected per-field cap message, got: {body}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn malformed_body_rejected_with_400() {
     let raster = RasterizerProcess::spawn().await;
     let client = reqwest::Client::new();

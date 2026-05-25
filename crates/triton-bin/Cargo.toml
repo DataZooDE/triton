@@ -18,6 +18,7 @@ default = ["dev-token"]
 dev-token = [
     "triton-adapters-http/dev-token",
     "triton-chat-telegram/dev-token",
+    "triton-chat-whatsapp/dev-token",
 ]
 
 [dependencies]

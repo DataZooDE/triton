@@ -587,14 +587,29 @@ pub struct WhatsAppSentMessage {
     pub body: Value,
 }
 
-struct WhatsAppState {
-    captured: Mutex<Vec<WhatsAppSentMessage>>,
+/// One captured `/media` multipart upload (PR 38). `photo_bytes`
+/// holds the verbatim PNG body so tests can assert PNG magic + size
+/// without re-uploading anything.
+#[derive(Debug, Clone)]
+pub struct WhatsAppCapturedMedia {
+    pub phone_number_id: String,
+    pub authorization: String,
+    pub messaging_product: String,
+    pub kind: String,
+    pub photo_bytes: Vec<u8>,
 }
 
-/// Fake `graph.facebook.com` for the PR 31 outbound courier. Speaks
-/// the `/v18.0/{phone_number_id}/messages` wire shape with a stub
+struct WhatsAppState {
+    captured: Mutex<Vec<WhatsAppSentMessage>>,
+    captured_media: Mutex<Vec<WhatsAppCapturedMedia>>,
+}
+
+/// Fake `graph.facebook.com` for the PR 31 outbound courier + PR 38
+/// media upload. Speaks the `/v18.0/{phone_number_id}/messages` wire
+/// shape with a stub
 /// `{messaging_product, contacts, messages: [{id: "wamid.stub"}]}`
-/// response on every POST.
+/// response, and the `/v18.0/{phone_number_id}/media` wire shape
+/// with a stub `{id: "media_id_stub"}` response.
 pub struct FakeWhatsAppApi {
     addr: SocketAddr,
     state: Arc<WhatsAppState>,
@@ -606,12 +621,17 @@ impl FakeWhatsAppApi {
         let addr = listener.local_addr().unwrap();
         let state = Arc::new(WhatsAppState {
             captured: Mutex::new(Vec::new()),
+            captured_media: Mutex::new(Vec::new()),
         });
 
         let router = Router::new()
             .route(
                 "/v18.0/{phone_number_id}/messages",
                 post(handle_whatsapp_send),
+            )
+            .route(
+                "/v18.0/{phone_number_id}/media",
+                post(handle_whatsapp_media),
             )
             .with_state(state.clone());
 
@@ -627,6 +647,13 @@ impl FakeWhatsAppApi {
 
     pub fn captured(&self) -> Vec<WhatsAppSentMessage> {
         self.state.captured.lock().unwrap().clone()
+    }
+
+    /// PR 38: captured `/v18.0/{id}/media` multipart uploads. Each
+    /// entry carries the raw PNG bytes so tests can assert PNG magic
+    /// without re-extracting them from the form.
+    pub fn captured_media(&self) -> Vec<WhatsAppCapturedMedia> {
+        self.state.captured_media.lock().unwrap().clone()
     }
 }
 
@@ -651,4 +678,55 @@ async fn handle_whatsapp_send(
         "contacts": [{ "input": "stub", "wa_id": "stub" }],
         "messages": [{ "id": "wamid.STUB" }],
     }))
+}
+
+/// PR 38: WhatsApp Cloud `/v18.0/{id}/media` multipart upload route.
+/// Captures the PNG file part + the `messaging_product` and `type`
+/// text parts, then returns a stub `{id: "media_id_stub"}` envelope
+/// that the adapter plugs into the subsequent image-message body.
+async fn handle_whatsapp_media(
+    State(state): State<Arc<WhatsAppState>>,
+    Path(phone_number_id): Path<String>,
+    headers: axum::http::HeaderMap,
+    mut multipart: axum::extract::Multipart,
+) -> Json<Value> {
+    let authorization = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let mut messaging_product = String::new();
+    let mut kind = String::new();
+    let mut photo_bytes: Vec<u8> = Vec::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "file" => {
+                photo_bytes = field.bytes().await.unwrap_or_default().to_vec();
+            }
+            "messaging_product" => {
+                messaging_product = field.text().await.unwrap_or_default();
+            }
+            "type" => {
+                kind = field.text().await.unwrap_or_default();
+            }
+            _ => {
+                // Forward-compatible: drain unknown fields so the
+                // fixture doesn't reject future shape additions.
+                let _ = field.bytes().await;
+            }
+        }
+    }
+    state
+        .captured_media
+        .lock()
+        .unwrap()
+        .push(WhatsAppCapturedMedia {
+            phone_number_id,
+            authorization,
+            messaging_product,
+            kind,
+            photo_bytes,
+        });
+    Json(json!({ "id": "media_id_stub" }))
 }

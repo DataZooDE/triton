@@ -6,15 +6,23 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Mirrors the workspace-wide `dev-token` feature: gates dev-only
+# command parser routes (e.g. `/demo` → `demo_panel`) so the
+# routing table matches the registry's set of registered tools.
+# Off in production builds.
+dev-token = []
+
 [dependencies]
 triton-core = { path = "../triton-core" }
 triton-correlation = { path = "../triton-correlation" }
 triton-manifest = { path = "../triton-manifest" }
+triton-rasterizer = { path = "../triton-rasterizer" }
 triton-secrets = { path = "../triton-secrets" }
 axum = { workspace = true }
 hex = "0.4"
 hmac = "0.12"
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = "0.10"

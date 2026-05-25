@@ -860,3 +860,55 @@ a trap the next developer should not have to step in.
   bit me here. Lint aid for later: a `clippy::needless_raw_strings`
   lint exists but doesn't catch this — `cargo expand`-style
   inspection is the manual fallback.
+
+- **Discord interaction responses can carry attachments, but only
+  via `multipart/form-data`.** Plain JSON channel-message responses
+  can't embed inline image bytes; the documented path is a
+  multipart body with a `payload_json` part referencing
+  `attachments: [{id: 0, filename: ...}]` + one `files[N]` part per
+  attachment. The Content-Type on the HTTP response changes from
+  `application/json` to `multipart/form-data; boundary=...`. PR 38
+  hand-rolls the multipart body in `triton-chat-discord::lib`
+  (RFC 2046 framing) because `reqwest::multipart::Form` is for
+  outgoing client requests, not axum responses. A future
+  refactor could share the framing with `multer` or similar; for
+  now the inline build is small enough to live next to the call
+  site.
+
+- **`reqwest::Response::bytes().await` reads the entire body with
+  no cap.** A misbehaving (or attacker-controlled) rasterizer can
+  flood the adapter's memory before the chat-platform courier ever
+  runs. PR 38 added a `MAX_RESPONSE_BYTES = 2 MiB` cap and switched
+  to a chunk-by-chunk read so the stream aborts the moment the cap
+  is exceeded. The cap surfaces as `RasterizerError::Server("...too
+  large...")`, mapped by the adapter to the same `rasterizer_failed`
+  audit path as a 5xx — operators get one consistent fail mode.
+
+- **Per-component caps need per-field caps too.** PR 36's
+  `DashboardRequest::validate` capped title (256 B) and tile count
+  (32) but NOT each tile's `label`/`value`/`trend` strings. A tool
+  emitting 32 tiles with 4 KB strings each would blow the SVG body
+  to ~400 KB even though the headline caps look fine. PR 38 added
+  `MAX_TILE_FIELD_BYTES = 128` per string with per-tile error
+  messages naming the offending index + field. Lesson: when adding
+  a structural cap, also cap every variable-length payload INSIDE
+  the structure — otherwise the cap is a fence with one missing
+  rail.
+
+- **Two known gaps deferred from PR 38 codex review.** Both need
+  bigger design discussions than the PR scope allowed:
+  - **Blocking-render cancellation.** The rasterizer's
+    `spawn_blocking` raster step doesn't cooperate with the HTTP
+    timeout — `tokio::time::timeout` cancels the AWAIT, not the
+    `spawn_blocking` task itself, which keeps running until the
+    raster naturally returns. A pathological SVG that takes 10s to
+    render still occupies a blocking worker for 10s. Real fix:
+    move the renderer to a separate OS process with a hard kill
+    timer. Out of scope for v0.2.
+  - **Client admission control.** The chat adapter calls the
+    rasterizer with no in-flight limit, so a burst of dashboards
+    can saturate it. A `Semaphore::new(N)` around `Client::render`
+    would gate concurrency, but `N` needs design — too low and a
+    slow Telegram POST blocks unrelated Discord dashboards; too
+    high and the rasterizer's own `spawn_blocking` pool saturates
+    first. Will land alongside a fleet-level capacity story.
