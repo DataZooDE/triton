@@ -69,6 +69,13 @@ pub struct JwtVerifier {
     audience: String,
     http: reqwest::Client,
     cache: Mutex<Option<CachedJwks>>,
+    /// PR 37: NFR-S-4 host allowlist for the inbound JWT's
+    /// `serviceUrl` claim. Production builds use the documented
+    /// Microsoft hosts only ([`SERVICE_URL_HOST_SUFFIXES`]); test
+    /// fixtures pass additional `127.0.0.1` / fake-host entries via
+    /// `with_extra_service_url_hosts`. A nontrivial value is fatal
+    /// outside `local` env (the binary enforces that at wiring time).
+    extra_service_url_hosts: Vec<String>,
 }
 
 struct CachedJwks {
@@ -89,6 +96,20 @@ struct BotFrameworkClaims {
     service_url: String,
 }
 
+/// NFR-S-4 host allowlist for the Bot Framework `serviceUrl`
+/// reply target. Even a correctly-signed JWT could carry an
+/// arbitrary `serviceUrl` (e.g. one minted by a Microsoft
+/// developer playground); the adapter must refuse to POST reply
+/// activities to anything outside Microsoft's documented service-
+/// URL shapes. Suffixes are matched on a DNS-label boundary —
+/// `*.botframework.com.evil.example` does NOT pass.
+///
+/// Documented hosts (Bot Framework / Teams):
+///   * `*.botframework.com` (channel-direct service URLs)
+///   * `*.trafficmanager.net` (the Teams channel's documented
+///     reply target, e.g. `https://smba.trafficmanager.net/teams/`)
+pub const SERVICE_URL_HOST_SUFFIXES: &[&str] = &[".botframework.com", ".trafficmanager.net"];
+
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
     #[error("openid discovery fetch failed: {0}")]
@@ -108,6 +129,8 @@ pub enum VerifyError {
     },
     #[error("jwt missing required claim `{0}`")]
     MissingClaim(&'static str),
+    #[error("jwt `serviceUrl` `{0}` is not on the bot framework host allowlist")]
+    UntrustedServiceUrl(String),
 }
 
 impl JwtVerifier {
@@ -121,7 +144,24 @@ impl JwtVerifier {
             audience: audience.into(),
             http,
             cache: Mutex::new(None),
+            extra_service_url_hosts: Vec::new(),
         }
+    }
+
+    /// Extend the `serviceUrl` host allowlist with additional hosts.
+    /// Only meaningful for the integration test fixture (the fake bot
+    /// framework binds at `127.0.0.1:<port>`, which isn't on the
+    /// production list). The binary refuses to populate this outside
+    /// `local` env, so a misconfigured production deploy can never
+    /// reach this entry point.
+    pub fn with_extra_service_url_hosts<I, S>(mut self, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.extra_service_url_hosts
+            .extend(hosts.into_iter().map(Into::into));
+        self
     }
 
     /// Verify `token`. Returns the trusted-by-derivation claims the
@@ -148,10 +188,15 @@ impl JwtVerifier {
         validation.set_audience(&[self.audience.as_str()]);
         // We check `iss` ourselves below so we can fail with a
         // typed BadIssuer error; `jsonwebtoken` would only say
-        // "InvalidIssuer". jsonwebtoken still enforces `exp` with
-        // its built-in 60s leeway.
+        // "InvalidIssuer".
         validation.validate_aud = true;
         validation.validate_exp = true;
+        // PR 37 Finding 4 (HIGH): jsonwebtoken's default exp/nbf
+        // leeway is 60s, NOT the 5min skew the comment block above
+        // claimed. Explicitly set 300s (5 min) — Microsoft's Bot
+        // Framework SDK does the same — so a JWT minted seconds
+        // before a brief clock drift still validates.
+        validation.leeway = 300;
 
         let data = decode::<BotFrameworkClaims>(token, &key, &validation)
             .map_err(|e| VerifyError::Decode(e.to_string()))?;
@@ -163,6 +208,19 @@ impl JwtVerifier {
         }
         if data.claims.service_url.is_empty() {
             return Err(VerifyError::MissingClaim("serviceUrl"));
+        }
+        // PR 37: NFR-S-4 host allowlist. A correctly-signed JWT can
+        // still come from a Bot Framework developer playground that
+        // sets `serviceUrl` to an attacker-controlled host. Refuse
+        // anything outside Microsoft's documented shapes (plus the
+        // test fixture's extra hosts, when configured) so the
+        // outbound reply Activity never POSTs to a non-Microsoft
+        // endpoint.
+        if !service_url_host_allowed_with_extras(
+            &data.claims.service_url,
+            &self.extra_service_url_hosts,
+        ) {
+            return Err(VerifyError::UntrustedServiceUrl(data.claims.service_url));
         }
         Ok(VerifiedClaims {
             service_url: data.claims.service_url,
@@ -204,5 +262,96 @@ impl JwtVerifier {
             fetched_at: Instant::now(),
         });
         Ok(arc)
+    }
+}
+
+/// True iff `service_url` parses as an `https` URL whose host ends
+/// with one of [`SERVICE_URL_HOST_SUFFIXES`] on a DNS-label boundary.
+/// Returns `false` on any parse failure or scheme mismatch — a
+/// malformed claim fails closed.
+///
+/// Public so the integration test (and any future caller) can
+/// validate ad-hoc claims without minting a full JWT.
+pub fn service_url_host_allowed(service_url: &str) -> bool {
+    service_url_host_allowed_with_extras(service_url, &[] as &[String])
+}
+
+/// Same as [`service_url_host_allowed`] but also accepts hosts listed
+/// in `extras`. Used by the verifier when the test fixture wires in
+/// `127.0.0.1` etc. via [`JwtVerifier::with_extra_service_url_hosts`].
+pub fn service_url_host_allowed_with_extras<S: AsRef<str>>(
+    service_url: &str,
+    extras: &[S],
+) -> bool {
+    let Ok(parsed) = url::Url::parse(service_url) else {
+        return false;
+    };
+    // Allow `http` ONLY when the host matches an extras entry —
+    // i.e. a test fixture pointed at `http://127.0.0.1:<port>/`.
+    // Production hosts MUST be `https`.
+    let scheme = parsed.scheme();
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let extras_match = extras.iter().any(|e| e.as_ref() == host);
+    if extras_match {
+        return scheme == "http" || scheme == "https";
+    }
+    if scheme != "https" {
+        return false;
+    }
+    SERVICE_URL_HOST_SUFFIXES.iter().any(|suffix| {
+        let s: &str = suffix;
+        if let Some(apex) = s.strip_prefix('.') {
+            host == apex || host.ends_with(s)
+        } else {
+            host == s
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::service_url_host_allowed;
+
+    // PR 37: NFR-S-4 fix. A correctly-signed JWT could still carry
+    // a `serviceUrl` pointed at an attacker host (Bot Framework dev
+    // playground); the adapter must refuse anything off Microsoft's
+    // documented host shapes.
+
+    #[test]
+    fn allows_documented_microsoft_service_urls() {
+        // Teams channel canonical (trafficmanager).
+        assert!(service_url_host_allowed(
+            "https://smba.trafficmanager.net/teams/"
+        ));
+        // Bot Framework direct (botframework.com).
+        assert!(service_url_host_allowed(
+            "https://smba.example.botframework.com/"
+        ));
+        // No-path variant.
+        assert!(service_url_host_allowed("https://smba.trafficmanager.net"));
+    }
+
+    #[test]
+    fn rejects_arbitrary_hosts_even_when_jwt_is_otherwise_valid() {
+        assert!(!service_url_host_allowed("https://attacker.example/"));
+        // Subdomain-suffix attack: ends with the magic string but
+        // not on a label boundary.
+        assert!(!service_url_host_allowed(
+            "https://smba.trafficmanager.net.evil.example/"
+        ));
+        assert!(!service_url_host_allowed(
+            "https://botframework.com.evil.example/"
+        ));
+        // Wrong scheme.
+        assert!(!service_url_host_allowed("http://smba.trafficmanager.net/"));
+        // Unparseable / empty.
+        assert!(!service_url_host_allowed("not a url"));
+        assert!(!service_url_host_allowed(""));
+        // Userinfo smuggling.
+        assert!(!service_url_host_allowed(
+            "https://smba.trafficmanager.net@evil.example/"
+        ));
     }
 }

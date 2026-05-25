@@ -67,8 +67,17 @@ pub struct Settings {
     /// Optional override for the Microsoft OAuth2 token endpoint.
     /// `None` ⇒ use the hardcoded canonical endpoint inside
     /// `token_client.rs`. Tests set this so the fake bot framework
-    /// can mint stub access tokens.
+    /// can mint stub access tokens. PR 37: NFR-S-4 — the binary
+    /// refuses any value outside `local` env so a compromised env
+    /// var can't post `client_credentials` at an attacker host.
     pub msteams_token_url: Option<String>,
+    /// PR 37: comma-separated extra hosts the MS Teams JWT verifier
+    /// will accept on the inbound `serviceUrl` claim beyond Microsoft's
+    /// documented suffixes (`.botframework.com`, `.trafficmanager.net`).
+    /// Empty by default. The binary refuses non-empty values outside
+    /// `local` env (NFR-S-4 egress allowlist for the outbound reply
+    /// Activity).
+    pub msteams_extra_service_url_hosts: Vec<String>,
     pub courier_timeout: Duration,
     /// Comma-separated allow-list of origins that may make
     /// cross-origin requests to the HTTP trio. Empty by default —
@@ -280,6 +289,16 @@ struct Cli {
     #[arg(long, env = "TRITON_MSTEAMS_TOKEN_URL")]
     msteams_token_url: Option<String>,
 
+    /// PR 37: comma-separated `serviceUrl` host extras the MS Teams
+    /// JWT verifier accepts. Empty by default; the binary refuses
+    /// non-empty values outside `local` env.
+    #[arg(
+        long,
+        env = "TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS",
+        default_value = ""
+    )]
+    msteams_extra_service_url_hosts: String,
+
     /// Comma-separated CORS allow-list (e.g.
     /// `https://explorer-nonprod.tailnet.ts.net`). Default empty:
     /// no CORS layer mounted, response headers identical to v0.1.
@@ -337,6 +356,12 @@ impl From<Cli> for Settings {
             signal_signald_addr: c.signal_signald_addr,
             msteams_openid_url: c.msteams_openid_url,
             msteams_token_url: c.msteams_token_url,
+            msteams_extra_service_url_hosts: c
+                .msteams_extra_service_url_hosts
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             courier_timeout: Duration::from_millis(c.courier_timeout_ms),
             cors_allowed_origins: triton_adapters_http::cors::parse_origins(
                 &c.cors_allowed_origins,

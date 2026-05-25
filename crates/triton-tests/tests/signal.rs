@@ -41,6 +41,153 @@ fn env_with_signald(uri: &str) -> HashMap<String, String> {
     ])
 }
 
+fn vault_manifest_path() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-signal-vault.yaml")
+        .display()
+        .to_string()
+}
+
+fn locate_triton_binary() -> PathBuf {
+    let mut here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while here.parent().is_some() {
+        let cand = here.join("target/debug/triton");
+        if cand.exists() {
+            return cand;
+        }
+        here.pop();
+    }
+    panic!("triton binary not found");
+}
+
+/// Spawn `triton` synchronously with the given env, collect the exit
+/// status. Used by the NFR-S-4 boot-rejection tests where we expect
+/// the binary to exit with code 2 BEFORE listeners come up.
+fn spawn_and_wait_for_exit(env: &[(&str, &str)]) -> std::process::Output {
+    let bin = locate_triton_binary();
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("spawn triton")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signal_rejects_non_tailnet_addr_in_nonprod() {
+    // PR 37 Finding 7 (MEDIUM, NFR-S-4): the previous check only
+    // refused an EMPTY TRITON_SIGNAL_SIGNALD_ADDR outside `local`.
+    // Setting it to anything non-empty was accepted, so an operator
+    // (or a compromised env var) could redirect signald connections
+    // at an arbitrary host. The fix: outside `local`, the tcp://
+    // host MUST end with `.ts.net` (the Tailscale tailnet domain).
+    let mpath = vault_manifest_path();
+    let out = spawn_and_wait_for_exit(&[
+        ("TRITON_ENV", "nonprod"),
+        ("TRITON_MANIFEST_PATH", &mpath),
+        ("TRITON_VAULT_URL", "http://127.0.0.1:1"),
+        ("TRITON_VAULT_TOKEN", "irrelevant"),
+        // The SSRF-tempting override.
+        ("TRITON_SIGNAL_SIGNALD_ADDR", "tcp://attacker.example:15432"),
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "non-local env with non-tailnet TRITON_SIGNAL_SIGNALD_ADDR MUST exit 2;\nstderr:\n{}\nstdout:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout),
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("NFR-S-4"),
+        "exit log MUST mention NFR-S-4; got: {combined}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signal_accepts_tailnet_addr_in_nonprod() {
+    // Paired with the rejection test: a `tcp://*.ts.net:port` is on
+    // the tailnet allowlist and MUST get past the NFR-S-4 gate. The
+    // binary still fails downstream (the manifest's vault refs are
+    // unreachable against `http://127.0.0.1:1`) but the FAILURE
+    // MODE is what matters: the NFR-S-4 path emits a specific
+    // "MUST set TRITON_SIGNAL_SIGNALD_ADDR" + "NFR-S-4" error.
+    // A non-allowlist value triggers that error; an allowlist value
+    // skips it and the binary fails downstream for a different
+    // reason (or boots, depending on Vault availability).
+    let mpath = vault_manifest_path();
+    let out = spawn_and_wait_for_exit(&[
+        ("TRITON_ENV", "nonprod"),
+        ("TRITON_MANIFEST_PATH", &mpath),
+        ("TRITON_VAULT_URL", "http://127.0.0.1:1"),
+        ("TRITON_VAULT_TOKEN", "irrelevant"),
+        // Allowlist-passing override.
+        (
+            "TRITON_SIGNAL_SIGNALD_ADDR",
+            "tcp://signald.example.ts.net:15432",
+        ),
+    ]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Negative assertion: the NFR-S-4 boot-rejection path must NOT
+    // have fired. The binary will still exit 2 for the downstream
+    // vault-unreachable failure; that's expected. We just need the
+    // NFR-S-4 path to have been skipped.
+    assert!(
+        !combined.contains(
+            "non-`local` env MUST set TRITON_SIGNAL_SIGNALD_ADDR \
+             to a `unix://...` path or a `tcp://*.ts.net[:port]`"
+        ),
+        "tailnet addr MUST pass the NFR-S-4 gate; combined output:\n{combined}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signal_accepts_unix_socket_addr_in_nonprod() {
+    // PR 37 Finding 7 nuance: `unix://...` is a file path, not a
+    // network destination, so NFR-S-4 doesn't restrict it. A unix
+    // socket override MUST get past the gate regardless of the
+    // host suffix (because there is no host).
+    let mpath = vault_manifest_path();
+    let out = spawn_and_wait_for_exit(&[
+        ("TRITON_ENV", "nonprod"),
+        ("TRITON_MANIFEST_PATH", &mpath),
+        ("TRITON_VAULT_URL", "http://127.0.0.1:1"),
+        ("TRITON_VAULT_TOKEN", "irrelevant"),
+        (
+            "TRITON_SIGNAL_SIGNALD_ADDR",
+            "unix:///var/run/signald/signald.sock",
+        ),
+    ]);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !combined.contains(
+            "non-`local` env MUST set TRITON_SIGNAL_SIGNALD_ADDR \
+             to a `unix://...` path or a `tcp://*.ts.net[:port]`"
+        ),
+        "unix:// addr MUST pass the NFR-S-4 gate; combined output:\n{combined}"
+    );
+}
+
 fn wait_for_audit<F>(proc: &TritonProcess, deadline: Duration, mut matches: F) -> Value
 where
     F: FnMut(&Value) -> bool,

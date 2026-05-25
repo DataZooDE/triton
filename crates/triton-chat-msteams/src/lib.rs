@@ -56,6 +56,13 @@ pub struct SenderClaims {
 pub struct AdapterOverrides {
     pub openid_url: Option<String>,
     pub token_url: Option<String>,
+    /// PR 37: additional `serviceUrl` hosts the JWT verifier should
+    /// accept beyond Microsoft's documented suffixes. Production
+    /// wiring leaves this empty; the binary refuses to populate it
+    /// outside `local` env. Test fixtures pass `["127.0.0.1"]` (or
+    /// the fake bot framework's host) so the integration tests can
+    /// drive the adapter without minting `*.botframework.com` URLs.
+    pub extra_service_url_hosts: Vec<String>,
 }
 
 pub struct MsTeamsAdapter {
@@ -174,7 +181,8 @@ impl MsTeamsAdapter {
         let openid_url = overrides
             .openid_url
             .unwrap_or_else(|| jwt_verifier::DEFAULT_OPENID_URL.to_string());
-        let verifier = JwtVerifier::new(openid_url, audience.clone());
+        let verifier = JwtVerifier::new(openid_url, audience.clone())
+            .with_extra_service_url_hosts(overrides.extra_service_url_hosts);
         let token_client = match overrides.token_url {
             Some(url) => TokenClient::with_token_url(client_id, client_secret, url),
             None => TokenClient::new(client_id, client_secret),

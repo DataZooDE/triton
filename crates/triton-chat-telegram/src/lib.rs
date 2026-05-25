@@ -711,14 +711,20 @@ async fn handle_webhook(
 
     // PR 32: numbered_prompts intercept. Before the normal
     // command parser, check whether there's an active form for
-    // this (chat, sender). The intercept order is:
+    // this (chat, telegram_user_id). The intercept order is:
     //   1. `/cancel` while a form is active → clear + ack.
     //   2. Active form → feed the message as the next field's
     //      value; on completion dispatch the form's submit tool.
     //   3. No active form → fall through to `route_command`.
+    //
+    // PR 37 Finding 5: the FormKey carries `telegram_user_id`
+    // (platform-asserted `from.id`), NOT the verified `sub`. Two
+    // entries in `sender_table` can map distinct user ids to the
+    // SAME sub (e.g. cross-tenant duplicates) — keying on the
+    // platform id makes the lookup unambiguous.
     let form_key = form_state::FormKey {
         chat_id,
-        sender_sub: claims.sub.clone(),
+        telegram_user_id: message.from.id as i64,
     };
     let principal_for_post = principal.clone();
 
@@ -756,6 +762,7 @@ async fn handle_webhook(
         tool_name.to_string(),
         args,
         chat_id,
+        form_key.telegram_user_id,
     )
     .await
 }
@@ -777,6 +784,7 @@ async fn dispatch_and_render(
     tool_name: String,
     args: Value,
     chat_id: i64,
+    telegram_user_id: i64,
 ) -> Response {
     let result = adapter
         .dispatcher
@@ -795,6 +803,7 @@ async fn dispatch_and_render(
                     &principal_for_post,
                     &tool_name,
                     chat_id,
+                    telegram_user_id,
                     form_only,
                 )
                 .await;
@@ -910,27 +919,27 @@ async fn handle_form_outcome(
             // thing needed to continue, not a snapshot of the
             // boot-time identity).
             //
-            // NOTE: we re-derive principal from form_key + the
-            // sender_table. If the table changed between install
-            // and complete (manifest reload), the new claims win
-            // — the in-flight form's submission goes through with
-            // the LATEST authorisation, which is the spec-correct
-            // behaviour (the table is the source of truth).
-            let Some(claims) = adapter
-                .sender_table
-                .iter()
-                .find_map(|(_, c)| (c.sub == form_key.sender_sub).then_some(c))
-            else {
+            // PR 37 Finding 5: we look up `sender_table` by the
+            // platform-asserted `telegram_user_id` from the form
+            // key, NOT by scanning for a matching `sub`. The
+            // platform id is the same key the inbound handler
+            // already uses, so this lookup is unambiguous. (The
+            // old code scanned for the first sub-match, which is
+            // wrong when two ids share a sub.) If the table
+            // changed between install and complete the new claims
+            // win — the table is the source of truth.
+            let sender_key = form_key.telegram_user_id.to_string();
+            let Some(claims) = adapter.sender_table.get(&sender_key) else {
                 // Sender disappeared mid-flight (table reload).
                 // Drop the submission with a rejection audit + a
                 // user-facing notice. No dispatch happens.
                 record_rejection(
                     adapter,
-                    &form_key.sender_sub,
-                    "-",
+                    &principal_for_post.sub,
+                    &principal_for_post.tenant,
                     TritonError::Auth(format!(
-                        "sender `{}` no longer in sender_table; form submission dropped",
-                        form_key.sender_sub
+                        "telegram user id `{}` no longer in sender_table; form submission dropped",
+                        sender_key
                     )),
                 );
                 let reply =
@@ -953,6 +962,7 @@ async fn handle_form_outcome(
                 submit_tool,
                 args,
                 chat_id,
+                form_key.telegram_user_id,
             )
             .await
         }
@@ -966,17 +976,19 @@ async fn install_form_and_prompt(
     principal_for_post: &Principal,
     dispatching_tool: &str,
     chat_id: i64,
+    telegram_user_id: i64,
     form: surface_mapper::FormOnly,
 ) -> Response {
     let key = form_state::FormKey {
         chat_id,
-        sender_sub: principal_for_post.sub.clone(),
+        telegram_user_id,
     };
     let title = form.title.clone();
     let outcome = adapter.form_state.install(
         key.clone(),
         form.submit_tool,
         form.fields,
+        principal_for_post.sub.clone(),
         principal_for_post.tenant.clone(),
     );
     let outcome = match outcome {
@@ -1003,16 +1015,24 @@ async fn install_form_and_prompt(
             return StatusCode::OK.into_response();
         }
     };
-    // Per-tenant LRU eviction: audit the dropped form so a
-    // chronically-over-cap tenant shows up in the audit feed.
-    if let form_state::InstallOutcome::InstalledEvicted { evicted } = &outcome {
+    // Per-tenant LRU eviction: audit the DROPPED form's principal,
+    // not the installer's. PR 37 Finding 6 — the operator needs to
+    // see WHOSE state was lost, otherwise an attacker installing a
+    // form right after a victim could mask the victim's loss with
+    // their own (attacker's) sub.
+    if let form_state::InstallOutcome::InstalledEvicted {
+        evicted,
+        evicted_sub,
+        evicted_tenant,
+    } = &outcome
+    {
         record_rejection(
             adapter,
-            &principal_for_post.sub,
-            &principal_for_post.tenant,
+            evicted_sub,
+            evicted_tenant,
             TritonError::Validation(format!(
-                "form state per-tenant cap reached for tenant `{}`; evicted oldest form for (chat_id={}, sender={}) on adapter `{}`",
-                principal_for_post.tenant, evicted.chat_id, evicted.sender_sub, adapter.name
+                "form state per-tenant cap reached for tenant `{}`; evicted oldest form for (chat_id={}, telegram_user_id={}) on adapter `{}`",
+                evicted_tenant, evicted.chat_id, evicted.telegram_user_id, adapter.name
             )),
         );
     }

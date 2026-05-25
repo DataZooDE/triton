@@ -81,6 +81,33 @@ async fn start_kv_vault() -> FakeVault {
     .await
 }
 
+/// PR 37 Finding 5 fixture: two Telegram user_ids both resolving to
+/// the SAME `sub` (`alice`) but DIFFERENT tenants. Reproduces the
+/// ambiguity the FormKey-by-sub code allowed: user 43 sending a
+/// value used to advance user 42's form because the store scanned
+/// for the first sub match.
+async fn start_kv_vault_shared_sub() -> FakeVault {
+    FakeVault::start_kv_v2(
+        VAULT_TOKEN,
+        &[(
+            "kv/data/triton-test/telegram",
+            &[
+                ("webhook_secret", RESOLVED_SECRET),
+                ("bot_token", BOT_TOKEN),
+                (
+                    "senders",
+                    r#"{
+                        "42":{"sub":"alice","scopes":["chat"],"tenant":"acme"},
+                        "43":{"sub":"alice","scopes":["chat"],"tenant":"beta"}
+                    }"#,
+                ),
+                ("correlation_key", CORRELATION_KEY),
+            ],
+        )],
+    )
+    .await
+}
+
 fn env_with(vault: &FakeVault, telegram: &FakeTelegramApi) -> HashMap<String, String> {
     HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
@@ -678,4 +705,201 @@ async fn form_per_tenant_cap_evicts_oldest() {
                 .unwrap_or(false)
     });
     assert!(echo.body["text"].as_str().unwrap().contains("Alice"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn form_state_isolates_two_senders_sharing_sub() {
+    // PR 37 Finding 5: the FormKey USED to be `(chat_id, sender_sub)`
+    // and the Complete path scanned `sender_table` for the FIRST
+    // entry whose `sub` matched. When two telegram_user_ids map to
+    // the same `sub` (different tenants), sender 43's message could
+    // re-derive principal under sender 42's claims.
+    //
+    // After the fix the FormKey is `(chat_id, telegram_user_id)`,
+    // so each user has an independent form slot. User 43 sending a
+    // value in the same chat MUST NOT advance user 42's form.
+    let vault = start_kv_vault_shared_sub().await;
+    let telegram = FakeTelegramApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    // Both senders share `chat_id = 1000` (a group chat). User 42
+    // installs a form; user 43 sends a plain text. After the fix,
+    // user 43's message routes through `route_command` (echo),
+    // user 42's form stays at step 1/3.
+    let make_update = |user_id: u64, chat_id: i64, text: &str| -> Value {
+        json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "from": { "id": user_id, "is_bot": false, "first_name": "X" },
+                "chat": { "id": chat_id, "type": "group" },
+                "date": 1_700_000_000,
+                "text": text
+            }
+        })
+    };
+
+    // User 42 (alice@acme) installs the form in chat 1000.
+    assert!(
+        post_webhook(webhook, &make_update(42, 1000, "/form_only_demo_multi"))
+            .await
+            .is_success()
+    );
+    let _prompt = wait_for_send(&telegram, Duration::from_secs(2), |m| {
+        m.body["chat_id"] == 1000
+            && m.body["text"]
+                .as_str()
+                .map(|s| s.contains("1/3"))
+                .unwrap_or(false)
+    });
+
+    // User 42's dispatch must have resolved to tenant acme.
+    let _ = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "dispatch"
+            && v["protocol"] == "messenger:telegram"
+            && v["tenant"] == "acme"
+    });
+
+    // User 43 (alice@BETA — same sub, different tenant) sends a
+    // value in the same chat. The pre-fix bug: this would advance
+    // user 42's form because the store keyed on `sub`. The fix:
+    // user 43 has no active form, so route_command kicks in and
+    // echoes back. The echo dispatch audit must be tagged
+    // `tenant: beta`, NOT `tenant: acme`.
+    assert!(
+        post_webhook(webhook, &make_update(43, 1000, "hello"))
+            .await
+            .is_success()
+    );
+
+    let beta_dispatch = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "dispatch"
+            && v["protocol"] == "messenger:telegram"
+            && v["tenant"] == "beta"
+    });
+    assert_eq!(beta_dispatch["tool"], "echo");
+
+    // Sanity: user 42's form is still active at step 1/3 — user 43's
+    // message did NOT leak in as a form value. We verify by feeding
+    // user 42 their actual next value and checking we move to 2/3.
+    assert!(
+        post_webhook(webhook, &make_update(42, 1000, "AliceName"))
+            .await
+            .is_success()
+    );
+    let _ = wait_for_send(&telegram, Duration::from_secs(2), |m| {
+        m.body["chat_id"] == 1000
+            && m.body["text"]
+                .as_str()
+                .map(|s| s.contains("2/3"))
+                .unwrap_or(false)
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn form_eviction_audit_records_evictee_principal() {
+    // PR 37 Finding 6: when a per-tenant LRU eviction fires, the
+    // adapter MUST audit the dropped form's principal (sub/tenant),
+    // NOT the installer's. The previous code wrote the installer's
+    // sub into the audit line, masking whose state was actually
+    // lost — useless to operators tracing why a tenant's form
+    // disappeared.
+    //
+    // We drive 3 installs from 3 distinct (telegram_user_id) senders
+    // under the same tenant. Cap = 2, so the third install evicts
+    // the first. The eviction audit MUST name the FIRST installer's
+    // sub, not the third's.
+    //
+    // The shared_sub fixture maps `42 -> alice@acme`,
+    // `43 -> alice@beta`. We need a tenant-shared but sub-distinct
+    // setup so we can prove the audit picks the right principal,
+    // independent of which sender installed last. Use a small
+    // 3-sender vault for this.
+    let vault = FakeVault::start_kv_v2(
+        VAULT_TOKEN,
+        &[(
+            "kv/data/triton-test/telegram",
+            &[
+                ("webhook_secret", RESOLVED_SECRET),
+                ("bot_token", BOT_TOKEN),
+                (
+                    "senders",
+                    r#"{
+                        "42":{"sub":"alice","scopes":["chat"],"tenant":"acme"},
+                        "43":{"sub":"bob","scopes":["chat"],"tenant":"acme"},
+                        "44":{"sub":"carol","scopes":["chat"],"tenant":"acme"}
+                    }"#,
+                ),
+                ("correlation_key", CORRELATION_KEY),
+            ],
+        )],
+    )
+    .await;
+    let telegram = FakeTelegramApi::start().await;
+    let mut env = env_with(&vault, &telegram);
+    env.insert(
+        "TRITON_TELEGRAM_FORM_CAP_PER_TENANT".to_string(),
+        "2".to_string(),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let make_update = |user_id: u64, chat_id: i64, text: &str| -> Value {
+        json!({
+            "update_id": 1,
+            "message": {
+                "message_id": 1,
+                "from": { "id": user_id, "is_bot": false, "first_name": "X" },
+                "chat": { "id": chat_id, "type": "private" },
+                "date": 1_700_000_000,
+                "text": text
+            }
+        })
+    };
+
+    // alice (42) installs in chat 100. bob (43) installs in chat
+    // 101. carol (44) installs in chat 102 — this evicts alice's
+    // form (oldest).
+    assert!(
+        post_webhook(webhook, &make_update(42, 100, "/form_only_demo_multi"))
+            .await
+            .is_success()
+    );
+    let _ = wait_for_send(&telegram, Duration::from_secs(2), |m| {
+        m.body["chat_id"] == 100
+    });
+    assert!(
+        post_webhook(webhook, &make_update(43, 101, "/form_only_demo_multi"))
+            .await
+            .is_success()
+    );
+    let _ = wait_for_send(&telegram, Duration::from_secs(2), |m| {
+        m.body["chat_id"] == 101
+    });
+    assert!(
+        post_webhook(webhook, &make_update(44, 102, "/form_only_demo_multi"))
+            .await
+            .is_success()
+    );
+    let _ = wait_for_send(&telegram, Duration::from_secs(2), |m| {
+        m.body["chat_id"] == 102
+    });
+
+    // Eviction audit must name `alice` (the evictee), NOT `carol`
+    // (the installer). Same tenant — both are `acme`.
+    let eviction = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "rejected"
+            && v["protocol"] == "messenger:telegram"
+            && v["result"] == "error:validation"
+            && v["tenant"] == "acme"
+    });
+    assert_eq!(
+        eviction["who"], "alice",
+        "eviction audit MUST name the EVICTEE (alice), not the installer (carol). Full line: {eviction}"
+    );
 }

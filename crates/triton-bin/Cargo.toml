@@ -43,3 +43,9 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# `url` is a transitive dep of reqwest; pinning it explicitly lets
+# the NFR-S-4 egress allowlist checks parse + host-match URLs without
+# falling back to substring matches that allowed e.g.
+# `https://www.googleapis.com.evil.example/...` to slip through a
+# `starts_with("https://www.googleapis.com")` check.
+url = "2"

@@ -41,6 +41,17 @@ fn env_with(fake: &FakeBotFramework) -> HashMap<String, String> {
         ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
         ("TRITON_MSTEAMS_OPENID_URL".to_string(), fake.openid_url()),
         ("TRITON_MSTEAMS_TOKEN_URL".to_string(), fake.token_url()),
+        // PR 37 NFR-S-4: the fake bot framework serves replies from
+        // `127.0.0.1:<port>` which is NOT on the production host
+        // allowlist (`.botframework.com` / `.trafficmanager.net`).
+        // The integration tests opt in to the extras list so the
+        // JWT verifier accepts the fixture's `serviceUrl`. The
+        // binary refuses this env var outside `local`, so it can't
+        // leak into production.
+        (
+            "TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS".to_string(),
+            "127.0.0.1".to_string(),
+        ),
     ])
 }
 
@@ -334,6 +345,202 @@ async fn non_message_activity_silently_acked() {
         fake.captured().is_empty(),
         "conversationUpdate MUST NOT trigger an outbound reply"
     );
+}
+
+fn vault_manifest_path() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-msteams-vault.yaml")
+        .display()
+        .to_string()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn msteams_token_url_override_refused_in_nonprod() {
+    // PR 37 Finding 1 (CRITICAL, NFR-S-4): the binary must refuse to
+    // wire the MS Teams adapter when `TRITON_ENV != local` AND
+    // `TRITON_MSTEAMS_TOKEN_URL` is set to anything at all. Without
+    // this guard, a compromised env var would POST the bot's
+    // `client_credentials` (including `client_secret`) at an
+    // attacker-controlled host.
+    //
+    // We use a vault-ref manifest so the manifest validation step
+    // doesn't reject the literal-credential variant first. The fake
+    // Vault is never actually contacted — the NFR-S-4 settings check
+    // runs BEFORE credential resolution.
+    let bin = locate_triton_binary();
+    let out = std::process::Command::new(&bin)
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_ENV", "nonprod")
+        .env("TRITON_MANIFEST_PATH", vault_manifest_path())
+        // Vault wiring so we pass the partial-wiring guard. The
+        // settings check exits before any actual Vault traffic.
+        .env("TRITON_VAULT_URL", "http://127.0.0.1:1")
+        .env("TRITON_VAULT_TOKEN", "irrelevant")
+        // The SSRF/exfil-tempting override.
+        .env("TRITON_MSTEAMS_TOKEN_URL", "https://attacker.example/token")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("spawn triton");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "non-local env with overridden TRITON_MSTEAMS_TOKEN_URL MUST exit 2; \
+         stderr:\n{}\nstdout:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout),
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("NFR-S-4"),
+        "exit log MUST mention NFR-S-4; got: {combined}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn msteams_rejects_unexpected_service_url() {
+    // PR 37 Finding 2 (HIGH, NFR-S-4): a JWT can be otherwise valid
+    // (issued, signed, in-audience, in-window) and STILL carry a
+    // `serviceUrl` pointed at an attacker host (e.g. minted from a
+    // Bot Framework developer playground). The adapter must refuse
+    // before issuing any outbound. The audit emits `phase: rejected`
+    // / `result: error:auth`; the fake bot framework must not see
+    // any outbound activity.
+    let fake = FakeBotFramework::start().await;
+    // For this test we explicitly do NOT pass the 127.0.0.1 extras
+    // so the JWT's attacker.example serviceUrl falls outside ALL
+    // allowed hosts; the binary still uses the fake for OpenID +
+    // token endpoints, both of which are dialled directly from
+    // settings (no need for serviceUrl extras).
+    let env: HashMap<String, String> = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
+        ("TRITON_MSTEAMS_OPENID_URL".to_string(), fake.openid_url()),
+        ("TRITON_MSTEAMS_TOKEN_URL".to_string(), fake.token_url()),
+        // No EXTRA_SERVICE_URL_HOSTS — the fake's host is irrelevant
+        // here; we sign with `serviceUrl: https://attacker.example/`.
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    let mut claims = good_claims(&fake);
+    claims["serviceUrl"] = json!("https://attacker.example/v3/conversations/");
+    let jwt = fake.sign_jwt(claims);
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&message_activity("hello"))
+        .send()
+        .await
+        .expect("POST");
+    // 401 because the JWT verifier rejected the claim.
+    assert_eq!(resp.status(), 401);
+
+    let rejected = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit" && v["phase"] == "rejected" && v["protocol"] == "messenger:msteams"
+    });
+    assert_eq!(rejected["result"], "error:auth");
+
+    // The outbound courier MUST NOT have been called.
+    assert!(
+        fake.captured().is_empty(),
+        "untrusted serviceUrl MUST NOT trigger an outbound reply"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn msteams_accepts_jwt_within_5min_skew() {
+    // PR 37 Finding 4 (HIGH): jsonwebtoken's default exp leeway is
+    // 60s; the adapter must use 5min (300s) — Microsoft's documented
+    // skew. We sign a JWT whose `exp` is 4 minutes in the PAST —
+    // would be rejected at the default 60s leeway, accepted at 300s.
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&fake)).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    let mut claims = good_claims(&fake);
+    // exp 4 min in the past, iat further back. With leeway = 300 this
+    // verifies; with the 60s default it would fail.
+    claims["exp"] = json!(now_unix() - 4 * 60);
+    claims["iat"] = json!(now_unix() - 10 * 60);
+    let jwt = fake.sign_jwt(claims);
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&message_activity("exp slightly past ok under skew"))
+        .send()
+        .await
+        .expect("POST");
+    assert!(
+        resp.status().is_success(),
+        "JWT with exp 4min in past must verify under 5min leeway; got {}",
+        resp.status()
+    );
+
+    // Dispatch audit fires (verification succeeded; downstream
+    // dispatch follows normally).
+    let _ = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["protocol"] == "messenger:msteams"
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn msteams_rejects_jwt_beyond_5min_skew() {
+    // Paired with the previous test: a JWT whose `exp` is 6 minutes
+    // PAST (beyond the 5-min leeway) must still be rejected so the
+    // larger leeway doesn't accidentally accept stale tokens.
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&fake)).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    let claims = json!({
+        "iss": BOT_ISSUER,
+        "aud": AUDIENCE,
+        // exp 6 minutes ago — beyond the 5-min leeway → rejected.
+        "exp": now_unix() - 6 * 60,
+        "iat": now_unix() - 12 * 60,
+        "serviceUrl": fake.service_url(),
+    });
+    let jwt = fake.sign_jwt(claims);
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&message_activity("expired beyond skew"))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 401);
+
+    let rejected = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit" && v["phase"] == "rejected" && v["protocol"] == "messenger:msteams"
+    });
+    assert_eq!(rejected["result"], "error:auth");
+}
+
+// Locate the `triton` debug binary the same way `telegram_courier.rs`
+// does — by walking up from the test crate's manifest dir.
+fn locate_triton_binary() -> std::path::PathBuf {
+    let mut here = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while here.parent().is_some() {
+        let cand = here.join("target/debug/triton");
+        if cand.exists() {
+            return cand;
+        }
+        here.pop();
+    }
+    panic!("triton binary not found");
 }
 
 // ---- helpers -----------------------------------------------------
