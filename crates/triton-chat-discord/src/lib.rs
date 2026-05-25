@@ -49,7 +49,7 @@ use std::sync::Arc;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -57,6 +57,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use triton_core::{Dispatcher, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
+use triton_rasterizer::{Client as RasterizerClient, DashboardRequest, RasterizerError};
 use triton_secrets::{ResolveError, SecretResolver};
 
 pub const PROTOCOL: &str = "messenger:discord";
@@ -98,6 +99,11 @@ pub struct DiscordAdapter {
     /// PR 28: per-tenant rate limit (NFR-P-3 second tier).
     /// Consumed AFTER sender resolution.
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
+    /// PR 38: optional out-of-process dashboard rasterizer (FR-A-11).
+    /// `None` falls back to the pre-PR-38 deferred-text path for
+    /// `Component::Dashboard`. `Some(client)` ships rasterised
+    /// PNGs as multipart interaction-response attachments.
+    rasterizer: Option<RasterizerClient>,
 }
 
 impl DiscordAdapter {
@@ -106,6 +112,7 @@ impl DiscordAdapter {
         adapter: &Adapter,
         resolver: &dyn SecretResolver,
         dispatcher: Arc<Dispatcher>,
+        rasterizer: Option<RasterizerClient>,
     ) -> Result<Self, BuildError> {
         if adapter.kind != AdapterKind::Discord {
             return Err(BuildError::WrongKind);
@@ -194,6 +201,7 @@ impl DiscordAdapter {
             dispatcher,
             rate_limit,
             per_tenant_limit,
+            rasterizer,
         })
     }
 
@@ -622,15 +630,14 @@ async fn handle_message_component(
             }
             match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
                 Some(Ok(rendered)) => {
-                    let body = surface_mapper::build_interaction_response(&rendered);
-                    adapter.dispatcher.record_post(
+                    build_response_with_rasterizer(
+                        adapter,
                         &tool_name,
-                        PROTOCOL,
                         &principal_for_post,
+                        rendered,
                         latency_ms,
-                        Ok((200, "posted")),
-                    );
-                    (StatusCode::OK, axum::Json(body)).into_response()
+                    )
+                    .await
                 }
                 Some(Err(surface_mapper::RenderError::EmptyAfterRender)) => {
                     tracing::warn!(
@@ -840,15 +847,14 @@ async fn handle_application_command(
             }
             match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
                 Some(Ok(rendered)) => {
-                    let body = surface_mapper::build_interaction_response(&rendered);
-                    adapter.dispatcher.record_post(
+                    build_response_with_rasterizer(
+                        adapter,
                         tool_name,
-                        PROTOCOL,
                         &principal_for_post,
+                        rendered,
                         latency_ms,
-                        Ok((200, "posted")),
-                    );
-                    (StatusCode::OK, axum::Json(body)).into_response()
+                    )
+                    .await
                 }
                 Some(Err(surface_mapper::RenderError::EmptyAfterRender)) => {
                     let provider =
@@ -1112,15 +1118,14 @@ async fn handle_modal_submit(
         Ok(dispatch) => {
             match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
                 Some(Ok(rendered)) => {
-                    let body = surface_mapper::build_interaction_response(&rendered);
-                    adapter.dispatcher.record_post(
+                    build_response_with_rasterizer(
+                        adapter,
                         &tool_name,
-                        PROTOCOL,
                         &principal_for_post,
+                        rendered,
                         latency_ms,
-                        Ok((200, "posted")),
-                    );
-                    (StatusCode::OK, axum::Json(body)).into_response()
+                    )
+                    .await
                 }
                 Some(Err(surface_mapper::RenderError::EmptyAfterRender)) => {
                     let provider =
@@ -1228,6 +1233,268 @@ fn options_to_args(opts: &[DiscordCommandOption]) -> Result<Value, String> {
         }
     }
     Ok(Value::Object(map))
+}
+
+/// Build the actual interaction response from a `RenderedInteraction`,
+/// calling the rasterizer when the surface carries a Dashboard.
+///
+/// Returns:
+///   * `Ok(Response)` — caller forwards verbatim to the HTTP client.
+///   * `Err(rasterizer_error_string)` — caller emits a
+///     `rasterizer_failed` post-audit and ships a fallback text
+///     channel-message.
+///
+/// PR 38: Discord's interaction-response model is inline (no separate
+/// outbound API call), so the multipart body IS the courier output.
+/// On rasterizer failure we synthesise the same one-line placeholder
+/// the Telegram adapter emits — operators get one consistent shape
+/// across both platforms.
+async fn build_response_with_rasterizer(
+    adapter: &Arc<DiscordAdapter>,
+    tool_name: &str,
+    principal_for_post: &Principal,
+    rendered: RenderedInteraction,
+    latency_ms: u64,
+) -> Response {
+    let RenderedInteraction {
+        content,
+        components,
+        dashboard,
+        ..
+    } = rendered;
+    // No dashboard → plain JSON channel-message. Same shape as
+    // pre-PR-38.
+    let Some(dash) = dashboard else {
+        let body = build_plain_response(&content, components.as_ref());
+        adapter.dispatcher.record_post(
+            tool_name,
+            PROTOCOL,
+            principal_for_post,
+            latency_ms,
+            Ok((200, "posted")),
+        );
+        return (StatusCode::OK, axum::Json(body)).into_response();
+    };
+    // Dashboard with no rasterizer configured → deferred-text
+    // fallback. Operators see the gap via tracing; user still
+    // gets the surrounding text.
+    let Some(rasterizer) = adapter.rasterizer.as_ref() else {
+        tracing::warn!(
+            tool = tool_name,
+            dashboard_title = %dash.title,
+            "discord adapter: no rasterizer configured; dashboard deferred",
+        );
+        let placeholder = format!(
+            "*(dashboard '{title}' deferred — rasterizer not configured)*",
+            title = md_escape_caption(&dash.title)
+        );
+        let content_with_placeholder = if content.is_empty() {
+            placeholder
+        } else {
+            format!("{content}\n\n{placeholder}")
+        };
+        let body = build_plain_response(&content_with_placeholder, components.as_ref());
+        adapter.dispatcher.record_post(
+            tool_name,
+            PROTOCOL,
+            principal_for_post,
+            latency_ms,
+            Ok((200, "posted")),
+        );
+        return (StatusCode::OK, axum::Json(body)).into_response();
+    };
+    // Rasterizer call. Audit the network hop separately from the
+    // final post outcome so operators can see WHICH leg failed.
+    match rasterize_dashboard(adapter, principal_for_post, tool_name, rasterizer, &dash).await {
+        Ok(png) => {
+            // Build the multipart interaction response: a
+            // `payload_json` part carrying the channel-message
+            // body + a `files[0]` part carrying the PNG bytes. The
+            // `payload_json.attachments` array references the file
+            // by index so Discord wires them up.
+            let attachments = vec![json!({
+                "id": 0,
+                "filename": "dashboard.png",
+                "description": dash.title,
+            })];
+            let mut data = serde_json::Map::new();
+            if !content.is_empty() {
+                data.insert("content".into(), Value::String(content.clone()));
+            }
+            if let Some(c) = components.as_ref() {
+                data.insert("components".into(), c.clone());
+            }
+            data.insert("attachments".into(), Value::Array(attachments));
+            let payload = json!({
+                "type": 4,
+                "data": Value::Object(data),
+            });
+            let (body, boundary) = build_multipart_body(&payload, &png);
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                principal_for_post,
+                latency_ms,
+                Ok((200, "posted")),
+            );
+            let content_type = format!("multipart/form-data; boundary={boundary}");
+            (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], body).into_response()
+        }
+        Err(_e) => {
+            // Rasterizer failed — fall back to text. The
+            // rasterize_dashboard helper already emitted a
+            // `rasterizer_failed` audit line; here we just emit
+            // the user-facing channel-message + a regular
+            // post-audit.
+            let placeholder = format!(
+                "*(dashboard '{title}' unavailable — rasterizer failed)*",
+                title = md_escape_caption(&dash.title)
+            );
+            let content_with_placeholder = if content.is_empty() {
+                placeholder
+            } else {
+                format!("{content}\n\n{placeholder}")
+            };
+            let body = build_plain_response(&content_with_placeholder, components.as_ref());
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                principal_for_post,
+                latency_ms,
+                Ok((200, "posted")),
+            );
+            (StatusCode::OK, axum::Json(body)).into_response()
+        }
+    }
+}
+
+/// Build a plain type-4 channel-message body (no attachments).
+fn build_plain_response(content: &str, components: Option<&Value>) -> Value {
+    let mut data = serde_json::Map::new();
+    data.insert("content".into(), Value::String(content.to_string()));
+    if let Some(c) = components {
+        data.insert("components".into(), c.clone());
+    }
+    json!({ "type": 4, "data": Value::Object(data) })
+}
+
+/// Build a `multipart/form-data` body carrying the `payload_json`
+/// part + one `files[0]` PNG file part. Returns `(body, boundary)`
+/// so the caller can stamp the matching `Content-Type` header.
+///
+/// Hand-rolled (no `reqwest::multipart::Form` here) because the
+/// multipart body is consumed by axum's outgoing response, not by
+/// `reqwest`'s request builder. The framing is the same RFC 2046
+/// shape; just a different consumer.
+fn build_multipart_body(payload_json: &Value, png: &[u8]) -> (Vec<u8>, String) {
+    // Boundary: a fixed prefix + a uuid so we never collide with
+    // a value that legitimately appears inside the PNG bytes.
+    let boundary = format!("triton-discord-{}", uuid::Uuid::new_v4().simple());
+    let mut buf: Vec<u8> = Vec::with_capacity(png.len() + 512);
+    // Part 1: payload_json (Content-Type: application/json).
+    buf.extend_from_slice(b"--");
+    buf.extend_from_slice(boundary.as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(b"Content-Disposition: form-data; name=\"payload_json\"\r\n");
+    buf.extend_from_slice(b"Content-Type: application/json\r\n\r\n");
+    buf.extend_from_slice(
+        serde_json::to_vec(payload_json)
+            .unwrap_or_else(|_| b"{}".to_vec())
+            .as_slice(),
+    );
+    buf.extend_from_slice(b"\r\n");
+    // Part 2: files[0] (the PNG itself).
+    buf.extend_from_slice(b"--");
+    buf.extend_from_slice(boundary.as_bytes());
+    buf.extend_from_slice(b"\r\n");
+    buf.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"files[0]\"; filename=\"dashboard.png\"\r\n",
+    );
+    buf.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+    buf.extend_from_slice(png);
+    buf.extend_from_slice(b"\r\n");
+    // Closing boundary.
+    buf.extend_from_slice(b"--");
+    buf.extend_from_slice(boundary.as_bytes());
+    buf.extend_from_slice(b"--\r\n");
+    (buf, boundary)
+}
+
+/// Drive the rasterizer call and audit the result. Emits the
+/// special `phase: post, status_label: rasterizer_call` audit line
+/// on success and `result: error:provider, status_label:
+/// rasterizer_failed` on failure (per architecture §8.7's network
+/// dependency audit shape — same wire format as the Telegram
+/// adapter so operators don't have to learn a second schema).
+async fn rasterize_dashboard(
+    adapter: &Arc<DiscordAdapter>,
+    principal: &Principal,
+    tool_name: &str,
+    rasterizer: &RasterizerClient,
+    dash: &surface_mapper::RasterDashboard,
+) -> Result<Vec<u8>, RasterizerError> {
+    // Logging discipline: NEVER log raw tile contents at info level.
+    // Title + tile count only (FR-AU-3 / spec Constraints).
+    tracing::info!(
+        tool = tool_name,
+        dashboard_title = %dash.title,
+        tile_count = dash.tiles.len(),
+        "discord adapter: calling rasterizer for dashboard",
+    );
+    let req = DashboardRequest {
+        title: dash.title.clone(),
+        tiles: dash.tiles.clone(),
+    };
+    let start = std::time::Instant::now();
+    let result = rasterizer.render(&req).await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+    match &result {
+        Ok(_) => {
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                principal,
+                latency_ms,
+                Ok((200, "rasterizer_call")),
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                tool = tool_name,
+                error = %e,
+                latency_ms,
+                "discord adapter: rasterizer call failed",
+            );
+            let provider = TritonError::Provider(format!("rasterizer: {e}"));
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                principal,
+                latency_ms,
+                Err((&provider, 0, "rasterizer_failed")),
+            );
+        }
+    }
+    result
+}
+
+/// Minimal Markdown escape for caption text — local rather than
+/// pulling the mapper's `md_escape` (which is private). The only
+/// caller is the dashboard-fallback placeholder; everything else
+/// goes through the surface mapper's escape pipeline.
+fn md_escape_caption(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for c in s.chars() {
+        match c {
+            '\\' | '*' | '_' | '~' | '`' | '>' | '|' | '#' | '-' | '+' | '.' | '!' | '[' | ']'
+            | '(' | ')' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 fn bare_text(v: &Value) -> String {

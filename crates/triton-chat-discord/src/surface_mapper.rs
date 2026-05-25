@@ -28,7 +28,7 @@
 //!   oversized component as a last resort.
 
 use serde_json::{Value, json};
-use triton_core::a2ui::{Component, Surface, extract_surface};
+use triton_core::a2ui::{Component, DashboardTile, Surface, extract_surface};
 
 /// Discord `data.content` hard limit. Documented as 2000 chars
 /// (UTF-16 code units); we treat as bytes (conservative).
@@ -75,15 +75,34 @@ pub struct RenderedInteraction {
     /// 5 MODAL_SUBMIT (Codex PR 25 nit — previously folded into
     /// `deferred_buttons`).
     pub deferred_forms: usize,
-    /// Count of `Component::Dashboard` entries we encountered.
-    /// Per architecture.md §8.7 dashboards must rasterise (PNG
-    /// surface) on text-first adapters; PR 22 doesn't ship the
-    /// rasteriser, so we defer with a `tracing::warn`-class
-    /// signal. The Discord adapter never ships the raw tile
-    /// content (which would silently violate the manifest's
-    /// `dashboard: rasterised_png` rule).
+    /// Count of `Component::Dashboard` entries we couldn't ship.
+    /// PR 38 wires the rasterizer, so the FIRST Dashboard in a
+    /// surface is surfaced via [`Self::dashboard`] for the adapter
+    /// to rasterise + attach to the interaction response. Any
+    /// subsequent dashboards bump this counter (one image per
+    /// channel-message attachment slot is enough — multi-dashboard
+    /// surfaces are an L6′ degrade-rule excess we drop rather
+    /// than chunk).
     pub deferred_dashboards: usize,
     pub truncated: bool,
+    /// PR 38: the FIRST `Component::Dashboard` found in the surface,
+    /// surfaced to the caller for rasterisation. The adapter calls
+    /// the rasterizer service and builds a `multipart/form-data`
+    /// interaction response carrying the rendered PNG instead of
+    /// a plain JSON channel-message. Mirrors Telegram PR 36's
+    /// `RenderedMessage::dashboard` slot.
+    pub dashboard: Option<RasterDashboard>,
+}
+
+/// Dashboard payload the caller passes to the rasterizer. Same
+/// shape as Telegram's `surface_mapper::RasterDashboard` — keeping
+/// the type local rather than sharing across crates because the
+/// Discord/Telegram/WhatsApp mappers each own their L6′ rendering
+/// concerns and a shared type would couple them unnecessarily.
+#[derive(Debug, Clone)]
+pub struct RasterDashboard {
+    pub title: String,
+    pub tiles: Vec<DashboardTile>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -110,6 +129,11 @@ pub fn render(
     let mut deferred_dashboards = 0usize;
     let mut buttons: Vec<Value> = Vec::new();
     let mut select_rows: Vec<Value> = Vec::new();
+    // PR 38: first Dashboard surfaced to the caller for rasterisation.
+    // Subsequent dashboards bump `deferred_dashboards` (one PNG per
+    // channel-message attachment slot is enough — multi-dashboard
+    // surfaces are an L6′ degrade-rule excess).
+    let mut first_dashboard: Option<RasterDashboard> = None;
     for c in &surface.components {
         match c {
             Component::Text { value } => {
@@ -224,28 +248,49 @@ pub fn render(
                 chunks.push(format!("**{}**\n{}", md_escape(title), names.join(", ")));
                 deferred_forms += 1;
             }
-            Component::Dashboard { title, .. } => {
-                // Manifest declares `dashboard: rasterised_png`.
-                // PR 22 doesn't ship the rasteriser, so we MUST
-                // NOT render the raw tile text (that would silently
-                // violate the degrade rule per Codex PR 22 blocker
-                // 2). Defer with a one-line summary so the user
-                // sees the dashboard was offered.
-                chunks.push(format!(
-                    "*({})*",
-                    md_escape(&format!(
-                        "dashboard '{title}' deferred — rasterizer not yet wired"
-                    ))
-                ));
-                deferred_dashboards += 1;
+            Component::Dashboard { title, tiles } => {
+                // PR 38: the manifest's `dashboard: rasterised_png`
+                // degrade rule now has a real renderer behind it.
+                // The mapper surfaces the FIRST Dashboard to the
+                // caller via `RenderedInteraction.dashboard`; the
+                // caller calls the out-of-process rasterizer and
+                // builds a multipart interaction response carrying
+                // the rendered PNG.
+                //
+                // We deliberately do NOT push a chunk for the
+                // dashboard: surrounding Text/Narration components
+                // become the message content (rendered alongside
+                // the attached image), but the dashboard itself is
+                // the IMAGE — emitting any placeholder string here
+                // would either duplicate content (image + text) or,
+                // on rasterizer failure (the lib.rs fallback path),
+                // make it look like a successful render. The
+                // fallback path constructs its own placeholder when
+                // it needs one.
+                if first_dashboard.is_none() {
+                    first_dashboard = Some(RasterDashboard {
+                        title: title.clone(),
+                        tiles: tiles.clone(),
+                    });
+                } else {
+                    deferred_dashboards += 1;
+                }
             }
         }
     }
 
-    if chunks.is_empty() && buttons.is_empty() && select_rows.is_empty() {
+    if chunks.is_empty()
+        && buttons.is_empty()
+        && select_rows.is_empty()
+        && first_dashboard.is_none()
+    {
         return Err(RenderError::EmptyAfterRender);
     }
-    if chunks.is_empty() {
+    // PR 38: a dashboard-only surface is legitimate — Discord's
+    // multipart channel-message response can carry an image with no
+    // text content. We only need to synthesise placeholder content
+    // for the historical button-only-surface case.
+    if chunks.is_empty() && !buttons.is_empty() && first_dashboard.is_none() {
         chunks.push(BUTTON_ONLY_PLACEHOLDER.into());
     }
 
@@ -255,6 +300,7 @@ pub fn render(
     } else {
         truncate_chunks(&chunks)
     };
+    // PR 38: build_send_photo_fields-style flag set up by the caller.
 
     // Combined row budget: at most 5 Action Rows. Select menus
     // each own a whole row; buttons share rows of 5. Selects come
@@ -300,6 +346,7 @@ pub fn render(
         deferred_forms,
         deferred_dashboards,
         truncated,
+        dashboard: first_dashboard,
     })
 }
 
@@ -536,6 +583,11 @@ fn clamp_label(s: &str) -> String {
     s[..end].to_string()
 }
 
+/// Build a type-4 channel-message body from a `RenderedInteraction`.
+/// Kept around for the adapter's plain-JSON (no-dashboard) path and
+/// for parity with the v0.2 rendered-shape unit tests; the rasterizer
+/// path (PR 38) bypasses this helper in favour of a multipart body.
+#[allow(dead_code)]
 pub fn build_interaction_response(rendered: &RenderedInteraction) -> Value {
     let mut data = json!({ "content": rendered.content });
     if let Some(components) = &rendered.components {
@@ -692,11 +744,15 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_is_deferred_not_rendered_as_tile_text() {
-        // PR 22 doesn't ship the rasterizer — Dashboard must NOT
-        // leak as plain text (would silently violate the manifest's
-        // `dashboard: rasterised_png` rule). Codex PR 22 blocker 2.
-        use triton_core::a2ui::DashboardTile;
+    fn dashboard_is_surfaced_for_rasterisation_not_rendered_as_text() {
+        // PR 38: dashboards now travel out through
+        // `RenderedInteraction.dashboard` so the caller can call the
+        // rasterizer and build a multipart interaction response. The
+        // raw tile content (label, value, trend) must NEVER appear
+        // in the content — that would either duplicate the rendered
+        // image on success, or silently violate the manifest's
+        // `dashboard: rasterised_png` degrade rule on the fallback
+        // path (the adapter constructs its own placeholder string).
         let s = Surface {
             components: vec![
                 Component::Text {
@@ -713,12 +769,71 @@ mod tests {
             ],
         };
         let r = render(&s, TEST_KEY).expect("renders");
-        // The raw tile content (e.g. "1234", "+5%") must not
-        // appear in the rendered content.
+        // None of the tile content appears in the content — only
+        // the leading Text/Narration components do.
         assert!(!r.content.contains("1234"));
         assert!(!r.content.contains("+5%"));
         assert!(!r.content.contains("invocations"));
+        assert!(!r.content.contains("Secrets"));
+        // First (and only) dashboard surfaced to caller.
+        let dash = r.dashboard.as_ref().expect("dashboard surfaced");
+        assert_eq!(dash.title, "Secrets");
+        assert_eq!(dash.tiles.len(), 1);
+        assert_eq!(dash.tiles[0].label, "invocations");
+        // First (and only) dashboard does NOT count as deferred —
+        // it's the image attachment, not a dropped component.
+        assert_eq!(r.deferred_dashboards, 0);
+        // Leading text component still ships as content.
+        assert!(
+            r.content.contains("header"),
+            "expected content to carry the leading Text chunk, got: {}",
+            r.content,
+        );
+    }
+
+    #[test]
+    fn second_dashboard_is_deferred_first_is_surfaced() {
+        // Discord channel messages carry one image attachment. With
+        // two Dashboards in the same surface, the first becomes the
+        // image and any others bump `deferred_dashboards`.
+        let make_dash = |title: &str| Component::Dashboard {
+            title: title.into(),
+            tiles: vec![DashboardTile {
+                label: "x".into(),
+                value: "1".into(),
+                trend: None,
+            }],
+        };
+        let s = Surface {
+            components: vec![make_dash("first"), make_dash("second")],
+        };
+        let r = render(&s, TEST_KEY).expect("renders");
+        let dash = r.dashboard.expect("first surfaced");
+        assert_eq!(dash.title, "first");
         assert_eq!(r.deferred_dashboards, 1);
+    }
+
+    #[test]
+    fn dashboard_only_surface_renders_with_empty_content() {
+        // A surface that's nothing but a Dashboard is now valid:
+        // Discord multipart interaction responses don't require
+        // any text content alongside attachments. The mapper
+        // returns Ok with an empty `content`; the adapter ships
+        // the PNG file part with no caption rather than failing
+        // EmptyAfterRender.
+        let s = Surface {
+            components: vec![Component::Dashboard {
+                title: "Solo".into(),
+                tiles: vec![DashboardTile {
+                    label: "x".into(),
+                    value: "1".into(),
+                    trend: None,
+                }],
+            }],
+        };
+        let r = render(&s, TEST_KEY).expect("renders");
+        assert!(r.content.is_empty());
+        assert!(r.dashboard.is_some());
     }
 
     #[test]

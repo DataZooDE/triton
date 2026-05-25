@@ -276,6 +276,85 @@ async fn main() -> std::io::Result<()> {
     // not a router mount. Both shapes coexist in the same loop;
     // each adapter dispatches on `inbound.kind`.
     let mut socket_adapter_joins: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+    // PR 38: build the rasterizer client once for any adapter that
+    // needs it (Telegram / Discord / WhatsApp all consume the same
+    // out-of-process renderer per FR-A-11). The NFR-S-4 egress
+    // allowlist check fires ONCE if any rasterizer-using adapter
+    // is in the manifest — moving it to process boot would break
+    // existing OIDC integration tests that don't enable chat
+    // adapters (see realizations.md §7 "NFR-S-4 egress checks belong
+    // next to the adapter that needs the egress").
+    let rasterizer_client: Option<RasterizerClient> = {
+        let needs_rasterizer = manifest
+            .as_ref()
+            .map(|m| {
+                m.adapters.values().any(|a| {
+                    matches!(
+                        a.kind,
+                        AdapterKind::Telegram | AdapterKind::Discord | AdapterKind::WhatsappWeb
+                    )
+                })
+            })
+            .unwrap_or(false);
+        if needs_rasterizer {
+            // NFR-S-4: the rasterizer is a network dependency in
+            // the adapter hot path. Default `http://127.0.0.1:9320`
+            // is fine for local dev; outside `local` env the
+            // operator MUST point at a tailnet-resolved hostname
+            // (any dotted host that isn't an IP literal — a
+            // `*.tailnet.ts.net` will do). Refusing loopback /
+            // public-by-default values stops a misconfigured deploy
+            // from exfiltrating dashboard payloads to an unaudited
+            // host. PR 37: parse the URL through the `url` crate so
+            // a malformed env var fails closed at the parse step.
+            if settings.env != "local" {
+                let parsed_host: Option<String> = url::Url::parse(&settings.rasterizer_url)
+                    .ok()
+                    .and_then(|u| u.host_str().map(|h| h.to_string()));
+                let host_ok = parsed_host
+                    .as_deref()
+                    .map(|host| {
+                        !host.is_empty()
+                            && host != "127.0.0.1"
+                            && host != "localhost"
+                            && host != "0.0.0.0"
+                            && host.contains('.')
+                            && !host.chars().all(|c| c.is_ascii_digit() || c == '.')
+                    })
+                    .unwrap_or(false);
+                if !host_ok {
+                    tracing::error!(
+                        env = %settings.env,
+                        rasterizer_url = %settings.rasterizer_url,
+                        "non-`local` env MUST set TRITON_RASTERIZER_URL to a tailnet-resolved hostname (NFR-S-4 egress allowlist)",
+                    );
+                    std::process::exit(2);
+                }
+            }
+            // Build the client lazily: dashboards are an opt-in
+            // feature, but the mapper declares
+            // `dashboard: rasterised_png` in every manifest we
+            // ship, so the URL is essentially always set. Boot
+            // failure on a bad URL is fatal so dashboards can never
+            // silently fall through to text (M-RASTER-1).
+            match RasterizerClient::new(RasterizerConfig {
+                base: settings.rasterizer_url.clone(),
+                ..Default::default()
+            }) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::error!(
+                        rasterizer_url = %settings.rasterizer_url,
+                        error = %e,
+                        "rasterizer client build failed",
+                    );
+                    std::process::exit(2);
+                }
+            }
+        } else {
+            None
+        }
+    };
     if let Some(m) = &manifest {
         for (name, adapter) in &m.adapters {
             if adapter.inbound.kind == InboundKind::Socket {
@@ -402,75 +481,16 @@ async fn main() -> std::io::Result<()> {
                         );
                         std::process::exit(2);
                     }
-                    // PR 36 NFR-S-4: rasterizer is a network
-                    // dependency in the adapter hot path. Default
-                    // `http://127.0.0.1:9320` is fine for local
-                    // dev; outside `local` env the operator MUST
-                    // point at a tailnet-resolved hostname (any
-                    // dotted host that isn't an IP literal — a
-                    // `*.tailnet.ts.net` will do). Refusing
-                    // loopback / public-by-default values stops a
-                    // misconfigured deploy from exfiltrating
-                    // dashboard payloads to an unaudited host. We
-                    // run this check ONLY when a Telegram adapter
-                    // is actually being wired — a Triton instance
-                    // running without chat adapters has no
-                    // rasterizer egress to allowlist.
-                    if settings.env != "local" {
-                        // PR 37: parse the URL through the `url` crate
-                        // so a malformed env var fails closed at the
-                        // parse step (the old hand-rolled `parse_host`
-                        // accepted e.g. `not a url`). Same heuristics
-                        // afterwards — anything that isn't a dotted
-                        // hostname is treated as misconfigured.
-                        let parsed_host: Option<String> = url::Url::parse(&settings.rasterizer_url)
-                            .ok()
-                            .and_then(|u| u.host_str().map(|h| h.to_string()));
-                        let host_ok = parsed_host
-                            .as_deref()
-                            .map(|host| {
-                                !host.is_empty()
-                                    && host != "127.0.0.1"
-                                    && host != "localhost"
-                                    && host != "0.0.0.0"
-                                    && host.contains('.')
-                                    && !host.chars().all(|c| c.is_ascii_digit() || c == '.')
-                            })
-                            .unwrap_or(false);
-                        if !host_ok {
-                            tracing::error!(
-                                env = %settings.env,
-                                rasterizer_url = %settings.rasterizer_url,
-                                "non-`local` env MUST set TRITON_RASTERIZER_URL to a tailnet-resolved hostname (NFR-S-4 egress allowlist)",
-                            );
-                            std::process::exit(2);
-                        }
-                    }
+                    // PR 38: rasterizer client built once at the top
+                    // of the chat-adapter wiring (shared with Discord
+                    // + WhatsApp); the NFR-S-4 egress allowlist check
+                    // also runs there if any rasterizer-using adapter
+                    // is present. See realizations.md §7 "NFR-S-4
+                    // egress checks belong next to the adapter that
+                    // needs the egress".
                     let courier_config = CourierConfig {
                         api_base: settings.telegram_api_base.clone(),
                         timeout: settings.courier_timeout,
-                    };
-                    // PR 36: build the rasterizer client lazily —
-                    // dashboards are an opt-in feature, but the
-                    // mapper already declares `dashboard:
-                    // rasterised_png` in every manifest we ship, so
-                    // the URL is essentially always set. Boot
-                    // failure on a bad URL is fatal so dashboards
-                    // can never silently fall through to text
-                    // (M-RASTER-1).
-                    let rasterizer = match RasterizerClient::new(RasterizerConfig {
-                        base: settings.rasterizer_url.clone(),
-                        ..Default::default()
-                    }) {
-                        Ok(c) => Some(c),
-                        Err(e) => {
-                            tracing::error!(
-                                rasterizer_url = %settings.rasterizer_url,
-                                error = %e,
-                                "rasterizer client build failed"
-                            );
-                            std::process::exit(2);
-                        }
                     };
                     match TelegramAdapter::from_manifest(
                         name,
@@ -478,7 +498,7 @@ async fn main() -> std::io::Result<()> {
                         resolver.as_ref(),
                         dispatcher.clone(),
                         courier_config,
-                        rasterizer,
+                        rasterizer_client.clone(),
                     )
                     .await
                     {
@@ -551,6 +571,7 @@ async fn main() -> std::io::Result<()> {
                         adapter,
                         resolver.as_ref(),
                         dispatcher.clone(),
+                        rasterizer_client.clone(),
                     )
                     .await
                     {
@@ -602,6 +623,7 @@ async fn main() -> std::io::Result<()> {
                         resolver.as_ref(),
                         dispatcher.clone(),
                         courier_config,
+                        rasterizer_client.clone(),
                     )
                     .await
                     {

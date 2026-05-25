@@ -46,6 +46,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use triton_core::{Dispatcher, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
+use triton_rasterizer::{Client as RasterizerClient, DashboardRequest, RasterizerError};
 use triton_secrets::{ResolveError, SecretResolver};
 
 pub const PROTOCOL: &str = "messenger:whatsapp";
@@ -101,6 +102,12 @@ pub struct WhatsAppAdapter {
     rate_limit: triton_core::ratelimit::TokenBucket,
     /// NFR-P-3 second tier: per-tenant fair-share gate.
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
+    /// PR 38: optional out-of-process dashboard rasterizer (FR-A-11).
+    /// `None` falls back to the pre-PR-38 deferred-text path for
+    /// `Component::Dashboard`. `Some(client)` uploads the rendered
+    /// PNG to WhatsApp's media endpoint and sends an `image`
+    /// message carrying the returned media_id.
+    rasterizer: Option<RasterizerClient>,
 }
 
 struct CourierClient {
@@ -115,6 +122,7 @@ impl WhatsAppAdapter {
         resolver: &dyn SecretResolver,
         dispatcher: Arc<Dispatcher>,
         courier_config: CourierConfig,
+        rasterizer: Option<RasterizerClient>,
     ) -> Result<Self, BuildError> {
         if adapter.kind != AdapterKind::WhatsappWeb {
             return Err(BuildError::WrongKind);
@@ -221,6 +229,7 @@ impl WhatsAppAdapter {
             courier,
             rate_limit,
             per_tenant_limit,
+            rasterizer,
         })
     }
 
@@ -280,6 +289,65 @@ impl CourierClient {
             PostLabel::Dropped
         };
         Err(CourierError::Application { http_status, label })
+    }
+
+    /// PR 38: upload a PNG to `<base>/v18.0/{phone_number_id}/media`.
+    /// WhatsApp Cloud API's media endpoint accepts
+    /// `multipart/form-data` carrying the file part + a
+    /// `messaging_product=whatsapp` text part + a `type=image/png`
+    /// text part, and returns `{id: "<media_id>"}` on success. The
+    /// returned id is plugged into the subsequent image-message
+    /// body's `image.id` field.
+    async fn upload_media(
+        &self,
+        access_token: &str,
+        phone_number_id: &str,
+        png: Vec<u8>,
+    ) -> Result<String, CourierError> {
+        let url = format!("{}/v18.0/{}/media", self.base, phone_number_id);
+        let part = reqwest::multipart::Part::bytes(png)
+            .file_name("dashboard.png")
+            .mime_str("image/png")
+            .map_err(|e| CourierError::Transport(redact(&e.to_string(), access_token)))?;
+        let form = reqwest::multipart::Form::new()
+            .text("messaging_product", "whatsapp")
+            .text("type", "image/png")
+            .part("file", part);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(access_token)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| CourierError::Transport(redact(&e.to_string(), access_token)))?;
+        let http_status = resp.status().as_u16();
+        if !(200..300).contains(&http_status) {
+            let label = if http_status == 429 || http_status >= 500 {
+                PostLabel::Retry
+            } else {
+                PostLabel::Dropped
+            };
+            return Err(CourierError::Application { http_status, label });
+        }
+        // Decode the `{id: "..."}` envelope. A 200 with no id is a
+        // malformed response — treat as Dropped so we don't try to
+        // chain a send_message with an empty media_id.
+        #[derive(Deserialize)]
+        struct MediaResp {
+            id: String,
+        }
+        let media: MediaResp = resp
+            .json()
+            .await
+            .map_err(|e| CourierError::Transport(redact(&e.to_string(), access_token)))?;
+        if media.id.is_empty() {
+            return Err(CourierError::Application {
+                http_status,
+                label: PostLabel::Dropped,
+            });
+        }
+        Ok(media.id)
     }
 }
 
@@ -654,8 +722,15 @@ fn log_deferrals(tool_name: &str, rendered: &RenderedMessage) {
 fn route_command(text: &str) -> (&'static str, Value) {
     if let Some(rest) = text.strip_prefix('/') {
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
-        if tool == "narrate" {
-            return ("narrate", json!({ "subject": subject }));
+        match tool {
+            "narrate" => return ("narrate", json!({ "subject": subject })),
+            // PR 38: dev-only command exercising the rasterizer
+            // wiring. Same `dev-token` gate as the underlying
+            // `demo_panel` tool so production builds don't reserve
+            // a route for an unregistered tool.
+            #[cfg(feature = "dev-token")]
+            "demo" => return ("demo_panel", json!({})),
+            _ => {}
         }
     }
     ("echo", json!({ "message": text }))
@@ -687,6 +762,7 @@ fn render_dispatch_result(
         deferred_forms: 0,
         deferred_dashboards: 0,
         truncated: false,
+        dashboard: None,
     })
 }
 
@@ -695,8 +771,102 @@ async fn post_back(
     principal: &Principal,
     tool_name: &str,
     to: &str,
-    msg: RenderedMessage,
+    mut msg: RenderedMessage,
 ) {
+    // PR 38: surface carries a Dashboard → call the rasterizer +
+    // upload the PNG to WhatsApp's media endpoint + send an
+    // `image` message. On rasterizer failure we fall back to the
+    // text path with a placeholder so the user gets SOMETHING
+    // (mirrors Telegram PR 36's fallback shape).
+    if let Some(dash) = msg.dashboard.take() {
+        if let Some(rasterizer) = adapter.rasterizer.as_ref() {
+            match rasterize_dashboard(adapter, principal, tool_name, rasterizer, &dash).await {
+                Ok(png) => {
+                    // Two-step courier: upload media first, then
+                    // send the image message referencing it. The
+                    // surrounding Text/Narration (if any) becomes
+                    // the image's caption.
+                    let upload_start = std::time::Instant::now();
+                    let media = adapter
+                        .courier
+                        .upload_media(&adapter.access_token, &adapter.phone_number_id, png)
+                        .await;
+                    let upload_latency = upload_start.elapsed().as_millis() as u64;
+                    let media_id = match media {
+                        Ok(id) => id,
+                        Err(e) => {
+                            let label = e.label();
+                            let http_status = e.http_status();
+                            let m = e.message();
+                            tracing::warn!(
+                                courier_label = label.as_str(),
+                                "whatsapp media upload failed: {m}"
+                            );
+                            let provider = TritonError::Provider(m);
+                            adapter.dispatcher.record_post(
+                                tool_name,
+                                PROTOCOL,
+                                principal,
+                                upload_latency,
+                                Err((&provider, http_status, label.as_str())),
+                            );
+                            return;
+                        }
+                    };
+                    let caption: Option<&str> = if msg.text.is_empty() {
+                        None
+                    } else {
+                        Some(msg.text.as_str())
+                    };
+                    let body = surface_mapper::build_image_message_body(to, &media_id, caption);
+                    let send_start = std::time::Instant::now();
+                    let outcome = adapter
+                        .courier
+                        .send_message(&adapter.access_token, &adapter.phone_number_id, &body)
+                        .await;
+                    let send_latency = send_start.elapsed().as_millis() as u64;
+                    record_post_outcome(adapter, tool_name, principal, send_latency, outcome);
+                    return;
+                }
+                Err(_) => {
+                    // Rasterizer failed — fall through to text
+                    // fallback. Append a one-line placeholder so
+                    // the user knows a dashboard was offered.
+                    // Tile content stays out of the placeholder
+                    // (would silently violate `rasterised_png`).
+                    let placeholder = format!(
+                        "(dashboard '{title}' unavailable — rasterizer failed)",
+                        title = dash.title
+                    );
+                    if msg.text.is_empty() {
+                        msg.text = placeholder;
+                    } else {
+                        msg.text.push_str("\n\n");
+                        msg.text.push_str(&placeholder);
+                    }
+                }
+            }
+        } else {
+            // No rasterizer configured — same deferred-text shape
+            // as the pre-PR-38 path.
+            let placeholder = format!(
+                "(dashboard '{title}' deferred — rasterizer not configured)",
+                title = dash.title
+            );
+            if msg.text.is_empty() {
+                msg.text = placeholder;
+            } else {
+                msg.text.push_str("\n\n");
+                msg.text.push_str(&placeholder);
+            }
+            tracing::warn!(
+                tool = tool_name,
+                dashboard_title = %dash.title,
+                "whatsapp adapter: no rasterizer configured; dashboard deferred"
+            );
+        }
+    }
+
     let body = surface_mapper::build_messages_body(to, &msg);
     let start = std::time::Instant::now();
     let outcome = adapter
@@ -704,6 +874,16 @@ async fn post_back(
         .send_message(&adapter.access_token, &adapter.phone_number_id, &body)
         .await;
     let latency_ms = start.elapsed().as_millis() as u64;
+    record_post_outcome(adapter, tool_name, principal, latency_ms, outcome);
+}
+
+fn record_post_outcome(
+    adapter: &WhatsAppAdapter,
+    tool_name: &str,
+    principal: &Principal,
+    latency_ms: u64,
+    outcome: Result<SendOutcome, CourierError>,
+) {
     match outcome {
         Ok(send) => {
             adapter.dispatcher.record_post(
@@ -732,6 +912,60 @@ async fn post_back(
             );
         }
     }
+}
+
+/// Drive the rasterizer call and audit the result. Same audit shape
+/// as Telegram PR 36 / Discord PR 38: `phase: post, status_label:
+/// rasterizer_call` on success, `result: error:provider,
+/// status_label: rasterizer_failed` on failure.
+async fn rasterize_dashboard(
+    adapter: &WhatsAppAdapter,
+    principal: &Principal,
+    tool_name: &str,
+    rasterizer: &RasterizerClient,
+    dash: &surface_mapper::RasterDashboard,
+) -> Result<Vec<u8>, RasterizerError> {
+    tracing::info!(
+        tool = tool_name,
+        dashboard_title = %dash.title,
+        tile_count = dash.tiles.len(),
+        "whatsapp adapter: calling rasterizer for dashboard",
+    );
+    let req = DashboardRequest {
+        title: dash.title.clone(),
+        tiles: dash.tiles.clone(),
+    };
+    let start = std::time::Instant::now();
+    let result = rasterizer.render(&req).await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+    match &result {
+        Ok(_) => {
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                principal,
+                latency_ms,
+                Ok((200, "rasterizer_call")),
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                tool = tool_name,
+                error = %e,
+                latency_ms,
+                "whatsapp adapter: rasterizer call failed",
+            );
+            let provider = TritonError::Provider(format!("rasterizer: {e}"));
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                principal,
+                latency_ms,
+                Err((&provider, 0, "rasterizer_failed")),
+            );
+        }
+    }
+    result
 }
 
 fn record_rejection(adapter: &WhatsAppAdapter, sub: &str, tenant: &str, e: TritonError) {
