@@ -1,0 +1,25 @@
+# Paste into your app crate's Cargo.toml.
+#
+# IMPORTANT: your test crate must be a SEPARATE Cargo workspace so it
+# is not pulled into Triton's. If you keep Triton as a sibling
+# checkout, declare an empty [workspace] table to root your crate
+# locally (see examples/consumer-smoke/Cargo.toml in the Triton repo):
+#
+#   [workspace]
+#
+# Depend on the harness via path (sibling checkout) or git (pinned
+# commit). It is NOT on crates.io — pin a SHA for a frozen point.
+
+[dev-dependencies]
+# EDIT: point at your Triton checkout, or use a git rev.
+triton-tests = { path = "../triton/crates/triton-tests" }
+# triton-tests = { git = "https://.../triton", rev = "<commit-sha>" }
+
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+
+# Prereq: the `triton` binary must be built before these tests run.
+# In CI: `cargo build` (or `--release`) inside the Triton checkout
+# first, or set CARGO_BIN_EXE_triton to the binary path. TritonProcess
+# spawns that binary (references/08).
