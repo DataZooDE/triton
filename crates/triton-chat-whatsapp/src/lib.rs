@@ -30,6 +30,12 @@
 pub mod surface_mapper;
 pub use surface_mapper::RenderedMessage;
 
+/// WhatsApp Web bridge (persistent socket) inbound — the alternative
+/// to the Cloud-API webhook in this file. Connects to a local
+/// Baileys-style bridge daemon.
+pub mod bridge;
+pub use bridge::WhatsAppBridgeAdapter;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

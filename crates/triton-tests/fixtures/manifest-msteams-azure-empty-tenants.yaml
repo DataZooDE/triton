@@ -1,0 +1,35 @@
+# azure-identity MS Teams adapter with an EMPTY allowed_tenants list.
+# The adapter MUST refuse to build (fail-closed cross-tenant
+# isolation): an empty list would accept any Entra tenant's users,
+# which is not isolation. Booting against this manifest exits 2.
+version: "0.2"
+
+adapters:
+  msteams:
+    kind: ms_teams
+    inbound:
+      kind: webhook
+      signature: bot_framework_jwt
+      audience: triton-msteams-test-appid
+    outbound:
+      kind: bot_connector
+      client_id: triton-msteams-test-appid
+      client_secret: literal-client-secret-for-test
+    identity:
+      kind: azure
+      azure_identity: '{"allowed_tenants":[],"scopes":["chat"]}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: adaptive_card
+      selections: adaptive_card
+      forms: adaptive_card
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

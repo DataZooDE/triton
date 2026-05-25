@@ -404,15 +404,22 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
         // — or any Google-signed JWT for any bot would verify
         // (PR 33).
         SignatureScheme::GoogleOidcJwt => &[("google_oidc_jwt", "audience")],
-        // PR 34 — signald has no envelope signature; the adapter
-        // still needs the daemon address (where to connect) and the
-        // bot's Signal phone number (which account to subscribe).
-        // Both are resolved at boot so a Vault-ref typo fails closed
-        // (M-SECRETS-1 / FR-L-4 / FR-L-6).
-        SignatureScheme::TrustedSocket => &[
-            ("trusted_socket", "signald_addr"),
-            ("trusted_socket", "account"),
-        ],
+        // `trusted_socket` means "no per-message signature; trust the
+        // socket/session". The required inbound credentials depend on
+        // the adapter:
+        //   * Signal (PR 34): the signald daemon address + the bot's
+        //     Signal phone number, resolved at boot so a Vault-ref
+        //     typo fails closed (M-SECRETS-1 / FR-L-4 / FR-L-6).
+        //   * Discord Gateway: auth is the bot token presented in
+        //     IDENTIFY, which lives in `outbound.token` — no inbound
+        //     credential is required.
+        SignatureScheme::TrustedSocket => match adapter.kind {
+            AdapterKind::Signal => &[
+                ("trusted_socket", "signald_addr"),
+                ("trusted_socket", "account"),
+            ],
+            _ => &[],
+        },
     };
     for (scheme, field) in inbound_required {
         if !adapter.inbound.credentials.contains_key(*field) {
@@ -453,8 +460,11 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
     // (`/v18.0/{phone_number_id}/messages`). Without it the courier
     // has no target; the manifest must carry it next to `token`.
     // Telegram puts its routing id in the bot token itself, so this
-    // rule only fires for `kind: whatsapp_web`.
+    // rule only fires for `kind: whatsapp_web`. The WhatsApp **Web
+    // bridge** (inbound.kind=socket) replies over the bridge socket,
+    // not the Graph API, so phone_number_id does not apply there.
     if adapter.kind == AdapterKind::WhatsappWeb
+        && adapter.inbound.kind != InboundKind::Socket
         && !adapter.outbound.credentials.contains_key("phone_number_id")
     {
         return Err(ManifestError::MissingSchemeCredential {

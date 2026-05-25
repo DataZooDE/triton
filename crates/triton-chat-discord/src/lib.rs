@@ -46,6 +46,11 @@
 pub mod surface_mapper;
 pub use surface_mapper::RenderedInteraction;
 
+/// Discord Gateway (persistent WebSocket) socket inbound — the
+/// alternative to the Interactions webhook in this file.
+pub mod gateway;
+pub use gateway::DiscordGatewayAdapter;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 

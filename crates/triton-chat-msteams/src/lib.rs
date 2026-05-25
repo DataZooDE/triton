@@ -49,6 +49,47 @@ pub struct SenderClaims {
     pub tenant: String,
 }
 
+/// Config for the `azure` identity strategy (FR-I-7).
+///
+/// **Trust model.** The inbound Bot Framework JWT proves the request
+/// came from Microsoft's connector (signature, `iss`, `aud`, `exp`
+/// all verified before this config is consulted). It does NOT
+/// cryptographically bind the per-user identity fields — those
+/// (`from.aadObjectId`, `channelData.tenant.id`) ride in the request
+/// body, not in the JWT claims. So the derived principal is
+/// *connector-authenticated body metadata*, not a signed per-user
+/// proof: a party holding a valid bearer for this bot could replay it
+/// with a different body within the token's validity window. The
+/// mitigations are (a) tokens never logged (FR-AU-3), (b) tailnet/
+/// Fabio ingress restricted, (c) the `channelId == "msteams"` gate in
+/// `dispatch_message`, and (d) the mandatory `allowed_tenants`
+/// allowlist below.
+///
+/// `scopes` are adapter-granted roles (the channel JWT carries no
+/// per-user OAuth scopes), not user-delegated OAuth scopes.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AzureConfig {
+    /// Entra tenant GUIDs accepted by this adapter. MUST be non-empty
+    /// — `from_manifest` refuses to build otherwise (fail-closed
+    /// cross-tenant isolation: an empty list would accept any tenant,
+    /// which is not isolation).
+    #[serde(default)]
+    pub allowed_tenants: Vec<String>,
+    /// Adapter-granted scopes for azure-authenticated senders.
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
+/// How this adapter resolves an inbound sender to a `Principal`.
+enum IdentityMode {
+    /// `from.id` (the AAD object id encoded as `29:...`) keyed into an
+    /// operator-enumerated table.
+    SenderTable(HashMap<String, SenderClaims>),
+    /// Principal derived from the activity's Entra claims:
+    /// `from.aadObjectId` → sub, `channelData.tenant.id` → tenant.
+    Azure(AzureConfig),
+}
+
 /// Optional override hook for tests. Production builds use the
 /// canonical Microsoft endpoints; the integration test points the
 /// adapter at its `FakeBotFramework` axum app.
@@ -71,7 +112,7 @@ pub struct MsTeamsAdapter {
     audience: String,
     #[allow(dead_code)]
     correlation_key: Vec<u8>,
-    sender_table: HashMap<String, SenderClaims>,
+    identity: IdentityMode,
     dispatcher: Arc<Dispatcher>,
     verifier: JwtVerifier,
     token_client: TokenClient,
@@ -103,9 +144,12 @@ impl MsTeamsAdapter {
                 adapter.outbound.kind
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
+        if !matches!(
+            adapter.identity.kind,
+            IdentityKind::SenderTable | IdentityKind::Azure
+        ) {
             return Err(BuildError::Unsupported(format!(
-                "msteams adapter requires `identity.kind: sender_table`; got {:?}",
+                "msteams adapter supports `identity.kind: sender_table` or `azure`; got {:?}",
                 adapter.identity.kind
             )));
         }
@@ -144,17 +188,52 @@ impl MsTeamsAdapter {
             .await
             .map_err(|e| BuildError::Resolve("outbound.client_secret", e))?;
 
-        let table_field = adapter
-            .identity
-            .credentials
-            .get("table")
-            .ok_or(BuildError::MissingCredential("identity.table"))?;
-        let table_json = resolver
-            .resolve(table_field)
-            .await
-            .map_err(|e| BuildError::Resolve("identity.table", e))?;
-        let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+        let identity = match adapter.identity.kind {
+            IdentityKind::SenderTable => {
+                let table_field = adapter
+                    .identity
+                    .credentials
+                    .get("table")
+                    .ok_or(BuildError::MissingCredential("identity.table"))?;
+                let table_json = resolver
+                    .resolve(table_field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("identity.table", e))?;
+                let table: HashMap<String, SenderClaims> = serde_json::from_str(&table_json)
+                    .map_err(|e| BuildError::TableParse(e.to_string()))?;
+                IdentityMode::SenderTable(table)
+            }
+            IdentityKind::Azure => {
+                let cfg_field = adapter
+                    .identity
+                    .credentials
+                    .get("azure_identity")
+                    .ok_or(BuildError::MissingCredential("identity.azure_identity"))?;
+                let cfg_json = resolver
+                    .resolve(cfg_field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("identity.azure_identity", e))?;
+                let cfg: AzureConfig = serde_json::from_str(&cfg_json)
+                    .map_err(|e| BuildError::TableParse(e.to_string()))?;
+                // Fail closed: an empty allowlist is not cross-tenant
+                // isolation. A single-tenant deployment lists its one
+                // tenant explicitly.
+                if cfg.allowed_tenants.is_empty() {
+                    return Err(BuildError::Unsupported(
+                        "azure identity requires a non-empty `allowed_tenants` list \
+                         (fail-closed cross-tenant isolation)"
+                            .into(),
+                    ));
+                }
+                IdentityMode::Azure(cfg)
+            }
+            // Guarded above; unreachable for other kinds.
+            other => {
+                return Err(BuildError::Unsupported(format!(
+                    "msteams adapter supports `identity.kind: sender_table` or `azure`; got {other:?}"
+                )));
+            }
+        };
 
         let correlation_key = resolver
             .resolve(&adapter.correlation_key)
@@ -196,7 +275,7 @@ impl MsTeamsAdapter {
             name: name.to_string(),
             audience,
             correlation_key,
-            sender_table,
+            identity,
             dispatcher,
             verifier,
             token_client,
@@ -241,10 +320,29 @@ struct Activity {
     conversation: Option<ActivityConversation>,
     #[serde(default)]
     recipient: Option<ActivityRecipient>,
+    #[serde(default, rename = "channelId")]
+    channel_id: Option<String>,
+    #[serde(default, rename = "channelData")]
+    channel_data: Option<ChannelData>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ActivityFrom {
+    id: String,
+    /// Entra (AAD) object id. Present on AAD-backed channels (Teams);
+    /// the `azure` identity strategy derives `Principal.sub` from it.
+    #[serde(default, rename = "aadObjectId")]
+    aad_object_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelData {
+    #[serde(default)]
+    tenant: Option<ChannelTenant>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChannelTenant {
     id: String,
 }
 
@@ -351,8 +449,9 @@ async fn dispatch_message(
     activity: &Activity,
     text: &str,
 ) -> Response {
-    // FR-I-7 sender resolution. The `from.id` carries the AAD
-    // object id (`29:...`); an unknown sender is a 401.
+    // The `from.id` carries the channel-scoped id (`29:...`); we
+    // always need it as the outbound reply target, regardless of how
+    // identity is resolved.
     let Some(from) = activity.from.as_ref() else {
         record_rejection(
             adapter,
@@ -362,26 +461,97 @@ async fn dispatch_message(
         );
         return (StatusCode::BAD_REQUEST, "missing from.id").into_response();
     };
-    let Some(claims) = adapter.sender_table.get(&from.id) else {
-        record_rejection(
-            adapter,
-            "-",
-            "-",
-            TritonError::Auth(format!("unknown sender {}", from.id)),
-        );
-        return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+
+    // FR-I-7 sender resolution → (sub, scopes, tenant).
+    let resolved = match &adapter.identity {
+        IdentityMode::SenderTable(table) => match table.get(&from.id) {
+            Some(c) => (c.sub.clone(), c.scopes.clone(), c.tenant.clone()),
+            None => {
+                record_rejection(
+                    adapter,
+                    "-",
+                    "-",
+                    TritonError::Auth(format!("unknown sender {}", from.id)),
+                );
+                return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+            }
+        },
+        IdentityMode::Azure(cfg) => {
+            // The AAD identity fields are unsigned body metadata,
+            // trusted only because the request is connector-
+            // authenticated AND arrived over the Teams channel. A
+            // valid Bot Framework token for this bot on another
+            // channel must NOT inject an Entra-shaped principal.
+            if activity.channel_id.as_deref() != Some("msteams") {
+                record_rejection(
+                    adapter,
+                    "-",
+                    "-",
+                    TritonError::Auth(format!(
+                        "azure identity requires channelId=msteams; got {:?}",
+                        activity.channel_id
+                    )),
+                );
+                return (StatusCode::UNAUTHORIZED, "wrong channel").into_response();
+            }
+            // sub = from.aadObjectId. Refuse rather than fall back to
+            // the channel id: a message with no AAD object id can't
+            // yield an Entra principal.
+            let Some(sub) = from.aad_object_id.as_ref().filter(|s| !s.is_empty()) else {
+                record_rejection(
+                    adapter,
+                    "-",
+                    "-",
+                    TritonError::Auth(
+                        "azure identity requires from.aadObjectId on the activity".into(),
+                    ),
+                );
+                return (StatusCode::UNAUTHORIZED, "missing aadObjectId").into_response();
+            };
+            // tenant = channelData.tenant.id.
+            let Some(tenant) = activity
+                .channel_data
+                .as_ref()
+                .and_then(|c| c.tenant.as_ref())
+                .map(|t| t.id.as_str())
+                .filter(|s| !s.is_empty())
+            else {
+                record_rejection(
+                    adapter,
+                    sub,
+                    "-",
+                    TritonError::Auth(
+                        "azure identity requires channelData.tenant.id on the activity".into(),
+                    ),
+                );
+                return (StatusCode::UNAUTHORIZED, "missing tenant").into_response();
+            };
+            // Cross-tenant isolation: the inbound tenant MUST be on
+            // the allowlist (guaranteed non-empty at build time).
+            if !cfg.allowed_tenants.iter().any(|t| t == tenant) {
+                record_rejection(
+                    adapter,
+                    sub,
+                    tenant,
+                    TritonError::Auth(format!("tenant {tenant} not on allowed_tenants")),
+                );
+                return (StatusCode::UNAUTHORIZED, "tenant not allowed").into_response();
+            }
+            (sub.clone(), cfg.scopes.clone(), tenant.to_string())
+        }
     };
+    let (sub, scopes, tenant) = resolved;
 
     // NFR-P-3 second tier: per-tenant fair-share. Bucketed by the
-    // verified tenant id so a noisy tenant can't starve others.
-    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&claims.tenant) {
+    // resolved tenant id so a noisy tenant can't starve others.
+    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&tenant) {
         record_rejection(
             adapter,
-            &claims.sub,
-            &claims.tenant,
+            &sub,
+            &tenant,
             TritonError::RateLimited(format!(
                 "tenant `{}` rate limit hit on adapter `{}`; retry in {:.2}s",
-                claims.tenant, adapter.name, retry_after
+                tenant, adapter.name, retry_after
             )),
         );
         let secs = retry_after.ceil().max(1.0) as u64;
@@ -396,8 +566,8 @@ async fn dispatch_message(
     let Some(conversation) = activity.conversation.as_ref() else {
         record_rejection(
             adapter,
-            &claims.sub,
-            &claims.tenant,
+            &sub,
+            &tenant,
             TritonError::Validation("message activity missing conversation.id".into()),
         );
         return (StatusCode::BAD_REQUEST, "missing conversation.id").into_response();
@@ -405,8 +575,8 @@ async fn dispatch_message(
     let Some(recipient) = activity.recipient.as_ref() else {
         record_rejection(
             adapter,
-            &claims.sub,
-            &claims.tenant,
+            &sub,
+            &tenant,
             TritonError::Validation("message activity missing recipient.id".into()),
         );
         return (StatusCode::BAD_REQUEST, "missing recipient.id").into_response();
@@ -419,9 +589,9 @@ async fn dispatch_message(
     let stripped = strip_mention_prefix(text);
 
     let principal = Principal {
-        sub: claims.sub.clone(),
-        scopes: claims.scopes.clone(),
-        tenant: claims.tenant.clone(),
+        sub: sub.clone(),
+        scopes: scopes.clone(),
+        tenant: tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
     };

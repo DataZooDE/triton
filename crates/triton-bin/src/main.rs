@@ -289,10 +289,17 @@ async fn main() -> std::io::Result<()> {
             .as_ref()
             .map(|m| {
                 m.adapters.values().any(|a| {
-                    matches!(
-                        a.kind,
-                        AdapterKind::Telegram | AdapterKind::Discord | AdapterKind::WhatsappWeb
-                    )
+                    // Only the WEBHOOK rasterizing adapters dial the
+                    // rasterizer. The socket variants (Discord Gateway,
+                    // WhatsApp Web bridge) reply text-only and never
+                    // receive a rasterizer client, so a bridge-only
+                    // deploy must not be forced to configure one
+                    // (Codex review).
+                    a.inbound.kind == InboundKind::Webhook
+                        && matches!(
+                            a.kind,
+                            AdapterKind::Telegram | AdapterKind::Discord | AdapterKind::WhatsappWeb
+                        )
                 })
             })
             .unwrap_or(false);
@@ -442,11 +449,179 @@ async fn main() -> std::io::Result<()> {
                             }
                         }
                     }
+                    AdapterKind::Discord => {
+                        // NFR-S-4 egress allowlist: outside `local`
+                        // env the Gateway URL MUST be Discord's
+                        // canonical WSS host and the REST base
+                        // discord.com — no override that could point
+                        // the socket (carrying the bot token) or the
+                        // reply POST at an attacker host.
+                        if settings.env != "local" {
+                            if !is_canonical_url(
+                                &settings.discord_gateway_url,
+                                "wss",
+                                "gateway.discord.gg",
+                            ) {
+                                tracing::error!(
+                                    env = %settings.env,
+                                    discord_gateway_url = %settings.discord_gateway_url,
+                                    "non-`local` env MUST use TRITON_DISCORD_GATEWAY_URL=wss://gateway.discord.gg (NFR-S-4 egress allowlist)",
+                                );
+                                std::process::exit(2);
+                            }
+                            if !is_canonical_url(&settings.discord_api_base, "https", "discord.com")
+                            {
+                                tracing::error!(
+                                    env = %settings.env,
+                                    discord_api_base = %settings.discord_api_base,
+                                    "non-`local` env MUST use TRITON_DISCORD_API_BASE with host discord.com (NFR-S-4 egress allowlist)",
+                                );
+                                std::process::exit(2);
+                            }
+                        }
+                        match triton_chat_discord::DiscordGatewayAdapter::from_manifest(
+                            name,
+                            adapter,
+                            resolver.as_ref(),
+                            dispatcher.clone(),
+                            settings.discord_gateway_url.clone(),
+                            settings.discord_api_base.clone(),
+                        )
+                        .await
+                        {
+                            Ok(built) => {
+                                tracing::info!(adapter = %name, "discord gateway socket adapter wired");
+                                let h = Arc::new(built).spawn(shutdown.clone());
+                                socket_adapter_joins.push(h);
+                            }
+                            Err(e) => {
+                                tracing::error!(adapter = %name, error = %e, "discord gateway adapter build failed");
+                                std::process::exit(2);
+                            }
+                        }
+                    }
+                    AdapterKind::WhatsappWeb => {
+                        // The WhatsApp Web bridge daemon is a local
+                        // sidecar terminating the WhatsApp session
+                        // inside the trust boundary. NFR-S-4 / C-11
+                        // (mirrors Signal): outside `local` the bridge
+                        // addr MUST be a `unix://` path or a
+                        // `tcp://*.ts.net` tailnet target — never an
+                        // arbitrary host.
+                        let addr = settings.whatsapp_bridge_addr.as_str();
+                        if addr.is_empty() {
+                            tracing::error!(
+                                adapter = %name,
+                                "whatsapp socket adapter requires TRITON_WHATSAPP_BRIDGE_ADDR (tcp://host:port or unix:///path)",
+                            );
+                            std::process::exit(2);
+                        }
+                        if settings.env != "local" {
+                            let allowed = if is_unix_socket_addr(addr) {
+                                true
+                            } else {
+                                let host = parse_host(addr).unwrap_or("");
+                                !host.is_empty()
+                                    && host
+                                        .strip_suffix(".ts.net")
+                                        .is_some_and(|prefix| !prefix.is_empty())
+                            };
+                            if !allowed {
+                                tracing::error!(
+                                    env = %settings.env,
+                                    whatsapp_bridge_addr = %addr,
+                                    "non-`local` env MUST set TRITON_WHATSAPP_BRIDGE_ADDR to a \
+                                     `unix://...` path or a `tcp://*.ts.net[:port]` tailnet target \
+                                     (NFR-S-4 / C-11 locality)",
+                                );
+                                std::process::exit(2);
+                            }
+                        }
+                        match triton_chat_whatsapp::WhatsAppBridgeAdapter::from_manifest(
+                            name,
+                            adapter,
+                            resolver.as_ref(),
+                            dispatcher.clone(),
+                            addr,
+                        )
+                        .await
+                        {
+                            Ok(built) => {
+                                tracing::info!(adapter = %name, "whatsapp bridge socket adapter wired");
+                                let h = Arc::new(built).spawn(shutdown.clone());
+                                socket_adapter_joins.push(h);
+                            }
+                            Err(e) => {
+                                tracing::error!(adapter = %name, error = %e, "whatsapp bridge adapter build failed");
+                                std::process::exit(2);
+                            }
+                        }
+                    }
                     _ => {
                         tracing::warn!(
                             adapter = %name,
                             kind = ?adapter.kind,
                             "socket-inbound adapter kind not implemented yet; skipping",
+                        );
+                    }
+                }
+                continue;
+            }
+            if adapter.inbound.kind == InboundKind::LongPoll {
+                // FR-A-1.v0.2 `long_poll`: a worker that polls
+                // getUpdates instead of receiving webhooks. Currently
+                // only Telegram offers this as an alternative to its
+                // webhook inbound.
+                match adapter.kind {
+                    AdapterKind::Telegram => {
+                        // Same NFR-S-4 egress allowlist as the webhook
+                        // path — the long-poll worker dials the SAME
+                        // api base, so the guard must be identical.
+                        const CANONICAL: &str = "https://api.telegram.org";
+                        if settings.env != "local"
+                            && !is_canonical_url(
+                                &settings.telegram_api_base,
+                                "https",
+                                "api.telegram.org",
+                            )
+                        {
+                            tracing::error!(
+                                env = %settings.env,
+                                telegram_api_base = %settings.telegram_api_base,
+                                "non-`local` env MUST use TRITON_TELEGRAM_API_BASE={CANONICAL} (NFR-S-4 egress allowlist)",
+                            );
+                            std::process::exit(2);
+                        }
+                        let courier_config = CourierConfig {
+                            api_base: settings.telegram_api_base.clone(),
+                            timeout: settings.courier_timeout,
+                        };
+                        match TelegramAdapter::from_manifest(
+                            name,
+                            adapter,
+                            resolver.as_ref(),
+                            dispatcher.clone(),
+                            courier_config,
+                            rasterizer_client.clone(),
+                        )
+                        .await
+                        {
+                            Ok(built) => {
+                                tracing::info!(adapter = %name, "telegram long-poll adapter wired");
+                                let h = Arc::new(built).spawn_long_poll(shutdown.clone());
+                                socket_adapter_joins.push(h);
+                            }
+                            Err(e) => {
+                                tracing::error!(adapter = %name, error = %e, "telegram adapter build failed");
+                                std::process::exit(2);
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(
+                            adapter = %name,
+                            kind = ?adapter.kind,
+                            "long_poll inbound not implemented for this adapter kind; skipping",
                         );
                     }
                 }

@@ -1,0 +1,41 @@
+# azure-identity MS Teams adapter (FR-I-7). Unlike the sender_table
+# variant, identity is derived from the Bot Framework activity's
+# Entra (AAD) claims: `from.aadObjectId` → Principal.sub and
+# `channelData.tenant.id` → Principal.tenant. The `azure_identity`
+# config restricts which Entra tenants are accepted and what scopes
+# their users receive (the channel JWT carries no per-user scopes).
+# Literal credentials are dev-mode only.
+version: "0.2"
+
+adapters:
+  msteams:
+    kind: ms_teams
+    inbound:
+      kind: webhook
+      signature: bot_framework_jwt
+      audience: triton-msteams-test-appid
+    outbound:
+      kind: bot_connector
+      client_id: triton-msteams-test-appid
+      client_secret: literal-client-secret-for-test
+    identity:
+      kind: azure
+      # JSON: allowed Entra tenants + scopes granted to their users.
+      azure_identity: '{"allowed_tenants":["tenant-guid-acme"],"scopes":["chat"]}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: adaptive_card
+      selections: adaptive_card
+      forms: adaptive_card
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []
+  narrate:
+    surface_components: [text, narration, buttons]
