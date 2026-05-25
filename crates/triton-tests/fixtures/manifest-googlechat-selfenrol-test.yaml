@@ -1,0 +1,39 @@
+# self_enrol Google Chat adapter (FR-I-7, M-ENROL-1). Unknown
+# senders are not rejected: first contact yields a Principal with the
+# literal scope "pairing" only (subject = the platform sender id).
+# Operator confirmation enrols the sender in `fallback_table`
+# (out-of-band, by editing the Vault-referenced table); subsequent
+# events then yield a fully-scoped Principal with the SAME subject.
+# The fallback_table maps `users/<id>` -> {scopes, tenant}; subject is
+# always the sender id so it is stable across enrolment.
+version: "0.2"
+
+adapters:
+  google_chat:
+    kind: google_chat
+    inbound:
+      kind: webhook
+      signature: google_oidc_jwt
+      audience: "1234567890"
+    outbound:
+      kind: rest_api
+      token: unused-in-pr-33
+    identity:
+      kind: self_enrol
+      # users/77 is already enrolled; users/55 is not (→ pairing).
+      fallback_table: '{"users/77":{"scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: card_v2
+      selections: card_v2
+      forms: card_v2
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

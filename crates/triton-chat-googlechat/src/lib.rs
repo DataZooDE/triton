@@ -66,10 +66,41 @@ pub struct SenderClaims {
     pub tenant: String,
 }
 
+/// Per-user claims in the `self_enrol` strategy's `fallback_table`.
+/// Unlike `sender_table` there is no `sub`: the subject is always the
+/// platform sender id (`users/<id>`), so it stays stable across the
+/// unknown→enrolled transition (M-ENROL-1 "same subject"). The table
+/// only supplies the scopes + tenant an enrolled sender receives.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EnrolClaims {
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    pub tenant: String,
+}
+
+/// How this adapter resolves an inbound sender to a `Principal`.
+enum IdentityMode {
+    /// Operator-enumerated `users/<id>` → claims. Unknown sender = 401.
+    SenderTable(HashMap<String, SenderClaims>),
+    /// Pairing flow: unknown senders are admitted with the literal
+    /// scope `"pairing"` (subject = sender id) so an upstream pairing
+    /// tool can issue a code; operator confirmation enrols the sender
+    /// in this table out-of-band, after which they get full scopes.
+    SelfEnrol(HashMap<String, EnrolClaims>),
+}
+
+/// Scope granted to an unknown sender during the `self_enrol` pairing
+/// phase. The only scope they carry until an operator enrols them.
+const PAIRING_SCOPE: &str = "pairing";
+/// Tenant marker for pairing-phase principals. All unknown-sender
+/// traffic shares this bucket for rate-limiting and is trivially
+/// distinguishable in the audit trail.
+const PAIRING_TENANT: &str = "pairing";
+
 pub struct GoogleChatAdapter {
     name: String,
     verifier: Arc<GoogleJwtVerifier>,
-    sender_table: HashMap<String, SenderClaims>,
+    identity: IdentityMode,
     dispatcher: Arc<Dispatcher>,
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
@@ -92,9 +123,12 @@ impl GoogleChatAdapter {
                 adapter.inbound.signature
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
+        if !matches!(
+            adapter.identity.kind,
+            IdentityKind::SenderTable | IdentityKind::SelfEnrol
+        ) {
             return Err(BuildError::Unsupported(format!(
-                "google_chat adapter requires `identity.kind: sender_table`; got {:?}",
+                "google_chat adapter supports `identity.kind: sender_table` or `self_enrol`; got {:?}",
                 adapter.identity.kind
             )));
         }
@@ -125,17 +159,42 @@ impl GoogleChatAdapter {
                 .map_err(|e| BuildError::Resolve("outbound.token", e))?;
         }
 
-        let table_field = adapter
-            .identity
-            .credentials
-            .get("table")
-            .ok_or(BuildError::MissingCredential("identity.table"))?;
-        let table_json = resolver
-            .resolve(table_field)
-            .await
-            .map_err(|e| BuildError::Resolve("identity.table", e))?;
-        let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+        let identity = match adapter.identity.kind {
+            IdentityKind::SenderTable => {
+                let table_field = adapter
+                    .identity
+                    .credentials
+                    .get("table")
+                    .ok_or(BuildError::MissingCredential("identity.table"))?;
+                let table_json = resolver
+                    .resolve(table_field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("identity.table", e))?;
+                let table: HashMap<String, SenderClaims> = serde_json::from_str(&table_json)
+                    .map_err(|e| BuildError::TableParse(e.to_string()))?;
+                IdentityMode::SenderTable(table)
+            }
+            IdentityKind::SelfEnrol => {
+                let table_field = adapter
+                    .identity
+                    .credentials
+                    .get("fallback_table")
+                    .ok_or(BuildError::MissingCredential("identity.fallback_table"))?;
+                let table_json = resolver
+                    .resolve(table_field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("identity.fallback_table", e))?;
+                let table: HashMap<String, EnrolClaims> = serde_json::from_str(&table_json)
+                    .map_err(|e| BuildError::TableParse(e.to_string()))?;
+                IdentityMode::SelfEnrol(table)
+            }
+            // Guarded above; unreachable for other kinds.
+            other => {
+                return Err(BuildError::Unsupported(format!(
+                    "google_chat adapter supports `identity.kind: sender_table` or `self_enrol`; got {other:?}"
+                )));
+            }
+        };
 
         // `correlation_key` isn't functionally consumed in PR 33
         // (no Buttons mean no HMAC correlation tokens) but we still
@@ -165,7 +224,7 @@ impl GoogleChatAdapter {
         Ok(Self {
             name: name.to_string(),
             verifier,
-            sender_table,
+            identity,
             dispatcher,
             rate_limit,
             per_tenant_limit,
@@ -339,7 +398,10 @@ async fn handle_webhook(
         .as_ref()
         .and_then(|s| s.name.as_deref())
         .unwrap_or("");
-    let Some(claims) = adapter.sender_table.get(sender_name) else {
+
+    // FR-I-7 sender resolution → (sub, scopes, tenant). `None` means
+    // "reject as unknown" (only the sender_table strategy does that).
+    let Some((sub, scopes, tenant)) = resolve_sender(&adapter.identity, sender_name) else {
         record_rejection(
             &adapter,
             "-",
@@ -350,15 +412,15 @@ async fn handle_webhook(
     };
 
     // NFR-P-3 second tier: per-tenant fair-share, keyed by the
-    // verified tenant id (never the platform sender name).
-    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&claims.tenant) {
+    // resolved tenant id (never the platform sender name).
+    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&tenant) {
         record_rejection(
             &adapter,
-            &claims.sub,
-            &claims.tenant,
+            &sub,
+            &tenant,
             TritonError::RateLimited(format!(
                 "tenant `{}` rate limit hit on adapter `{}`; retry in {:.2}s",
-                claims.tenant, adapter.name, retry_after
+                tenant, adapter.name, retry_after
             )),
         );
         let secs = retry_after.ceil().max(1.0) as u64;
@@ -371,9 +433,9 @@ async fn handle_webhook(
     }
 
     let principal = Principal {
-        sub: claims.sub.clone(),
-        scopes: claims.scopes.clone(),
-        tenant: claims.tenant.clone(),
+        sub: sub.clone(),
+        scopes: scopes.clone(),
+        tenant: tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
     };
@@ -470,6 +532,57 @@ async fn handle_webhook(
     }
 }
 
+/// Resolve a platform sender to `(sub, scopes, tenant)`. `None` means
+/// the sender must be rejected (401).
+///
+/// Policy note (intentional, per requirements §7): the `"pairing"`
+/// scope is an *identity signal forwarded to upstream tools*, not an
+/// authorization boundary Triton enforces. Triton is identity-aware,
+/// not policy-rich — upstream agents enforce per-tool policy on the
+/// scopes they receive. A pairing-phase principal is clearly marked
+/// (`scopes == ["pairing"]`, `tenant == "pairing"`) so an upstream
+/// pairing tool admits it and every other tool refuses it.
+///
+/// Enrolment is not hot-reloaded: like `sender_table`, the
+/// `fallback_table` is resolved once at boot from the immutable
+/// manifest (FR-L-4). Operator confirmation takes effect on the next
+/// manifest reload / alloc restart.
+fn resolve_sender(
+    identity: &IdentityMode,
+    sender_name: &str,
+) -> Option<(String, Vec<String>, String)> {
+    match identity {
+        IdentityMode::SenderTable(table) => table
+            .get(sender_name)
+            .map(|c| (c.sub.clone(), c.scopes.clone(), c.tenant.clone())),
+        IdentityMode::SelfEnrol(table) => {
+            // A pairing subject must be a real human user resource
+            // name. Reject empty / non-`users/` senders (e.g. Google's
+            // `bots/<id>` actors) rather than admit a malformed subject.
+            if !is_valid_user_sender(sender_name) {
+                return None;
+            }
+            // M-ENROL-1: unknown senders are admitted with scope
+            // "pairing" only; subject = the platform sender id so it
+            // is stable once the operator enrols them in fallback_table.
+            Some(match table.get(sender_name) {
+                Some(c) => (sender_name.to_string(), c.scopes.clone(), c.tenant.clone()),
+                None => (
+                    sender_name.to_string(),
+                    vec![PAIRING_SCOPE.to_string()],
+                    PAIRING_TENANT.to_string(),
+                ),
+            })
+        }
+    }
+}
+
+/// A Google Chat human sender resource name: non-empty and of the
+/// form `users/<id>` with a non-empty id.
+fn is_valid_user_sender(name: &str) -> bool {
+    name.strip_prefix("users/").is_some_and(|id| !id.is_empty())
+}
+
 /// Strip a leading `@bot ` mention if present, then route by the
 /// first word. Mirrors Telegram's `route_command`: `/<tool> <rest>`
 /// goes to `tool` with `{ subject: rest }` for narrate, otherwise
@@ -528,4 +641,78 @@ fn record_rejection(adapter: &GoogleChatAdapter, sub: &str, tenant: &str, e: Tri
         &uuid::Uuid::new_v4().to_string(),
         &e,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn enrol_table() -> IdentityMode {
+        let mut t = HashMap::new();
+        t.insert(
+            "users/77".to_string(),
+            EnrolClaims {
+                scopes: vec!["chat".to_string()],
+                tenant: "acme".to_string(),
+            },
+        );
+        IdentityMode::SelfEnrol(t)
+    }
+
+    #[test]
+    fn self_enrol_unknown_sender_gets_only_pairing_scope() {
+        // The audit trail can't show scopes; pin the exact pairing
+        // principal here. Unknown sender → subject = sender id,
+        // scopes == ["pairing"] EXACTLY (no leakage), tenant marker.
+        let (sub, scopes, tenant) = resolve_sender(&enrol_table(), "users/55").unwrap();
+        assert_eq!(sub, "users/55", "subject = platform sender id");
+        assert_eq!(scopes, vec!["pairing".to_string()]);
+        assert_eq!(tenant, "pairing");
+    }
+
+    #[test]
+    fn self_enrol_enrolled_sender_keeps_sender_id_as_subject() {
+        // Enrolled sender → same subject (sender id), full scopes +
+        // tenant from the fallback_table.
+        let (sub, scopes, tenant) = resolve_sender(&enrol_table(), "users/77").unwrap();
+        assert_eq!(
+            sub, "users/77",
+            "subject stays the sender id across enrolment"
+        );
+        assert_eq!(scopes, vec!["chat".to_string()]);
+        assert_eq!(tenant, "acme");
+    }
+
+    #[test]
+    fn self_enrol_rejects_empty_or_nonuser_sender() {
+        let id = enrol_table();
+        // Empty sender → reject.
+        assert!(resolve_sender(&id, "").is_none());
+        // Non-`users/` actor (bot) → reject.
+        assert!(resolve_sender(&id, "bots/42").is_none());
+        // `users/` with empty id → reject.
+        assert!(resolve_sender(&id, "users/").is_none());
+        // Valid human user → admitted (pairing, since not enrolled).
+        assert!(resolve_sender(&id, "users/55").is_some());
+    }
+
+    #[test]
+    fn sender_table_unknown_returns_none_for_rejection() {
+        let mut t = HashMap::new();
+        t.insert(
+            "users/99".to_string(),
+            SenderClaims {
+                sub: "alice".to_string(),
+                scopes: vec!["chat".to_string()],
+                tenant: "acme".to_string(),
+            },
+        );
+        let id = IdentityMode::SenderTable(t);
+        assert!(resolve_sender(&id, "users/unknown").is_none());
+        let (sub, _, _) = resolve_sender(&id, "users/99").unwrap();
+        assert_eq!(
+            sub, "alice",
+            "sender_table uses the table's sub, not the id"
+        );
+    }
 }

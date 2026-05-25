@@ -286,6 +286,156 @@ async fn non_message_event_types_silently_acked() {
     );
 }
 
+// ---- self_enrol identity strategy (FR-I-7, M-ENROL-1) ------------
+
+fn selfenrol_manifest_path() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-googlechat-selfenrol-test.yaml")
+        .display()
+        .to_string()
+}
+
+fn selfenrol_env(jwks: &FakeGoogleJwks) -> HashMap<String, String> {
+    HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        (
+            "TRITON_MANIFEST_PATH".to_string(),
+            selfenrol_manifest_path(),
+        ),
+        ("TRITON_GOOGLE_CHAT_JWKS_URI".to_string(), jwks.jwks_uri()),
+    ])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn self_enrol_unknown_sender_gets_pairing_principal_not_rejected() {
+    // M-ENROL-1: an unknown sender (not in fallback_table) is NOT
+    // rejected. First contact dispatches with the literal scope
+    // "pairing" and a stable subject (the platform sender id). We
+    // observe the pairing phase via the dispatch audit: who = sender
+    // id, tenant = "pairing".
+    let jwks = FakeGoogleJwks::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), selfenrol_env(&jwks)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let token = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&message_event("users/55", "hi, I'm new"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(
+        resp.status().is_success(),
+        "unknown sender under self_enrol must dispatch (pairing), not 401; got {}",
+        resp.status()
+    );
+
+    let dispatch = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["protocol"] == "messenger:google_chat"
+    });
+    assert_eq!(
+        dispatch["who"], "users/55",
+        "pairing-phase subject = the platform sender id"
+    );
+    assert_eq!(dispatch["tenant"], "pairing", "pairing-phase tenant marker");
+    assert_eq!(dispatch["result"], "ok");
+
+    // It must NOT have produced a rejection audit.
+    let rejections: usize = proc
+        .stdout_snapshot()
+        .iter()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| {
+            v["kind"] == "audit"
+                && v["phase"] == "rejected"
+                && v["protocol"] == "messenger:google_chat"
+        })
+        .count();
+    assert_eq!(
+        rejections, 0,
+        "unknown self_enrol sender must not be rejected"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn self_enrol_enrolled_sender_gets_full_principal_same_subject() {
+    // The flip side: a sender already present in fallback_table
+    // yields a fully-scoped Principal. Subject is STILL the platform
+    // sender id (same subject as the pairing phase would have used),
+    // and tenant is the enrolled tenant, not "pairing".
+    let jwks = FakeGoogleJwks::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), selfenrol_env(&jwks)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let token = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&message_event("users/77", "I'm enrolled"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let dispatch = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["protocol"] == "messenger:google_chat"
+    });
+    assert_eq!(
+        dispatch["who"], "users/77",
+        "enrolled subject = the same platform sender id (stable across enrolment)"
+    );
+    assert_eq!(
+        dispatch["tenant"], "acme",
+        "enrolled tenant from fallback_table"
+    );
+    assert_eq!(dispatch["result"], "ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn self_enrol_rejects_missing_or_nonuser_sender() {
+    // Codex review finding 3: a MESSAGE whose sender.name is absent
+    // (or is a non-`users/` actor such as a bot) cannot form a valid
+    // Entra-style subject and MUST be rejected under self_enrol —
+    // NOT admitted as a pairing principal with an empty/odd subject.
+    let jwks = FakeGoogleJwks::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), selfenrol_env(&jwks)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let token = jwks.sign_jwt(standard_claims());
+
+    // (a) sender object present but no `name`.
+    let mut no_name = message_event("users/x", "hi");
+    no_name["message"]["sender"] = json!({ "displayName": "Anon", "type": "HUMAN" });
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&no_name)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 401, "missing sender.name must be rejected");
+
+    // (b) a non-`users/` actor (Google sends `bots/<id>` for bots).
+    let bot = message_event("bots/42", "I am a bot");
+    let resp2 = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&bot)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp2.status(), 401, "non-users/ sender must be rejected");
+
+    let rejections = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "rejected"
+            && v["protocol"] == "messenger:google_chat"
+            && v["result"] == "error:auth"
+    });
+    let _ = rejections;
+}
+
 fn wait_for_audit<F>(proc: &TritonProcess, deadline: Duration, mut matches: F) -> Value
 where
     F: FnMut(&Value) -> bool,
