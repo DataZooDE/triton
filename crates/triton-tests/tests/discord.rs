@@ -715,6 +715,250 @@ async fn slash_command_missing_name_rejected() {
     });
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn slash_command_form_only_surface_opens_modal() {
+    // PR 30: a tool whose Surface contains exactly one Form
+    // component must yield an interaction response of type 9
+    // (MODAL) — NOT a type-4 channel message with deferred text.
+    // The modal's custom_id is a correlation token committing
+    // to the submit tool + the expected field set.
+    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let interaction = json!({
+        "type": 2, // APPLICATION_COMMAND
+        "id": "i-form-1",
+        "user": { "id": "99" },
+        "data": { "name": "form_only_demo", "options": [] }
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST form-slash");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let resp_body: Value = resp.json().await.expect("response json");
+    assert_eq!(resp_body["type"], 9, "expected MODAL response");
+
+    let data = &resp_body["data"];
+    let title = data["title"].as_str().expect("title");
+    assert_eq!(title, "Quick feedback");
+    let custom_id = data["custom_id"].as_str().expect("custom_id");
+    // Token must decode to (echo, {message:null}). Discord modal
+    // custom_ids use the platform-native 100-byte cap, not
+    // Telegram's 64-byte callback_data cap.
+    let (tool, args) = triton_correlation::decode_with_cap(
+        custom_id,
+        CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+    )
+    .expect("token verifies");
+    assert_eq!(tool, "echo");
+    let obj = args.as_object().expect("args object");
+    assert_eq!(obj.len(), 1);
+    assert!(obj["message"].is_null());
+
+    // One ACTION_ROW carrying one TEXT_INPUT (component type 4)
+    // with the field name as custom_id.
+    let rows = data["components"].as_array().expect("components array");
+    assert_eq!(rows.len(), 1);
+    let input = &rows[0]["components"][0];
+    assert_eq!(input["type"], 4);
+    assert_eq!(input["custom_id"], "message");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn modal_submit_substitutes_values_and_dispatches() {
+    // PR 30: a MODAL_SUBMIT (interaction type 5) whose
+    // `data.components` carry user-typed values gets dispatched
+    // through the form's submit tool with those values
+    // substituted into the args-skeleton the modal-opener
+    // committed to.
+    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    // Mint the token the modal-opener would have minted: echo
+    // tool, args = { message: null }. Uses the 100-byte Discord
+    // modal cap.
+    let token = triton_correlation::encode_with_cap(
+        "echo",
+        &json!({ "message": Value::Null }),
+        CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+    )
+    .expect("token fits");
+
+    let interaction = json!({
+        "type": 5, // MODAL_SUBMIT
+        "id": "i-modal-1",
+        "user": { "id": "99" },
+        "data": {
+            "custom_id": token,
+            "components": [
+                { "type": 1, "components": [
+                    { "type": 4, "custom_id": "message", "value": "everything works" }
+                ]}
+            ]
+        }
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST modal-submit");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let resp_body: Value = resp.json().await.expect("modal-submit json");
+    assert_eq!(resp_body["type"], 4, "expected CHANNEL_MESSAGE_WITH_SOURCE");
+    // Echo just returns its args; the surface mapper renders it
+    // as plain content (no Surface).
+    let content = resp_body["data"]["content"].as_str().expect("content");
+    assert!(
+        content.contains("everything works"),
+        "expected echo of submitted message; got: {content}"
+    );
+
+    // Audit: dispatch on echo with the submitted values.
+    let dispatches: usize = proc
+        .stdout_snapshot()
+        .iter()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| {
+            v["kind"] == "audit"
+                && v["phase"] == "dispatch"
+                && v["protocol"] == "messenger:discord"
+                && v["tool"] == "echo"
+                && v["tenant"] == "acme"
+        })
+        .count();
+    assert!(
+        dispatches >= 1,
+        "expected dispatch audit for echo from modal-submit",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn modal_submit_with_extra_field_rejected() {
+    // PR 30 security: the correlation token commits to exactly
+    // the field names the modal-opener emitted. A forged
+    // modal-submit that adds an extra field MUST be refused at
+    // the inbound boundary, never reach the dispatcher.
+    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    // Token commits to { subject: null }. Attacker submits both
+    // subject AND a surprise `admin: true` field.
+    let token = triton_correlation::encode(
+        "echo",
+        &json!({ "subject": Value::Null }),
+        CORRELATION_KEY.as_bytes(),
+    )
+    .expect("token fits");
+
+    let interaction = json!({
+        "type": 5,
+        "id": "i-modal-evil",
+        "user": { "id": "99" },
+        "data": {
+            "custom_id": token,
+            "components": [
+                { "type": 1, "components": [
+                    { "type": 4, "custom_id": "subject", "value": "ok" }
+                ]},
+                { "type": 1, "components": [
+                    { "type": 4, "custom_id": "admin", "value": "true" }
+                ]}
+            ]
+        }
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST modal extra field");
+    assert_eq!(resp.status(), 400, "extra field MUST 400");
+    let _ = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "rejected"
+            && v["result"] == "error:validation"
+            && v["protocol"] == "messenger:discord"
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn modal_submit_with_forged_custom_id_rejected() {
+    // The MODAL custom_id is a HMAC correlation token. A
+    // submission signed with a different key MUST fail token
+    // verification (401 + error:auth audit) before any args
+    // substitution happens.
+    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let forged = triton_correlation::encode(
+        "echo",
+        &json!({ "subject": Value::Null }),
+        b"wrong-correlation-key-32-bytes!!",
+    )
+    .expect("forged token fits");
+
+    let interaction = json!({
+        "type": 5,
+        "id": "i-modal-forged",
+        "user": { "id": "99" },
+        "data": {
+            "custom_id": forged,
+            "components": [
+                { "type": 1, "components": [
+                    { "type": 4, "custom_id": "subject", "value": "ok" }
+                ]}
+            ]
+        }
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST forged modal token");
+    assert_eq!(resp.status(), 401, "forged token MUST 401");
+    let _ = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "rejected"
+            && v["result"] == "error:auth"
+            && v["protocol"] == "messenger:discord"
+    });
+}
+
 fn wait_for_audit<F>(proc: &TritonProcess, deadline: Duration, mut matches: F) -> Value
 where
     F: FnMut(&Value) -> bool,

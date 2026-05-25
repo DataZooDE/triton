@@ -30,3 +30,5 @@ tools:
     surface_components: []
   narrate:
     surface_components: [text, narration, buttons]
+  form_only_demo:
+    surface_components: [forms]
