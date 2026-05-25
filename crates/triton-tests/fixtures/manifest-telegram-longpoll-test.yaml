@@ -1,0 +1,35 @@
+# Telegram adapter using the `long_poll` inbound (FR-A-1.v0.2): a
+# worker polls getUpdates instead of receiving webhooks. The inbound
+# `secret` is unused in long-poll mode (getUpdates is authenticated by
+# the bot token in the URL path) but the manifest schema still
+# requires a signature + secret; it's a harmless placeholder here.
+version: "0.2"
+
+adapters:
+  telegram:
+    kind: telegram
+    inbound:
+      kind: long_poll
+      signature: secret_token
+      secret: unused-in-long-poll
+    outbound:
+      kind: rest_api
+      token: bot-token-for-test
+    identity:
+      kind: sender_table
+      table: '{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

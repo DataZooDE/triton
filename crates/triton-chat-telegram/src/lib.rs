@@ -27,6 +27,7 @@ pub mod form_state;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::Bytes;
@@ -276,6 +277,106 @@ impl TelegramAdapter {
             .route(&path, post(handle_webhook))
             .with_state(self)
     }
+
+    /// Spawn the long-poll inbound worker (FR-A-1.v0.2 `long_poll`):
+    /// the alternative to the webhook listener. It polls Telegram's
+    /// `getUpdates` and feeds each update through the same
+    /// [`process_update`] pipeline the webhook handler uses, so
+    /// identity / form / dispatch / audit are identical across both
+    /// inbound shapes. Stops on `shutdown` (FR-L-2 graceful drain).
+    pub fn spawn_long_poll(
+        self: Arc<Self>,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move { self.long_poll_loop(shutdown).await })
+    }
+
+    async fn long_poll_loop(self: Arc<Self>, shutdown: tokio_util::sync::CancellationToken) {
+        // getUpdates long-poll hold time (server-side). Against real
+        // Telegram the server holds the connection until an update or
+        // this timeout; a fake returns immediately, so the empty-batch
+        // backoff below paces the loop.
+        let poll_timeout_secs: u64 = std::env::var("TRITON_TELEGRAM_LONGPOLL_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(25);
+        let idle_backoff = Duration::from_millis(
+            std::env::var("TRITON_TELEGRAM_LONGPOLL_BACKOFF_MS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200),
+        );
+        let mut offset: i64 = 0;
+        tracing::info!(adapter = %self.name, "telegram long-poll worker started");
+        loop {
+            if shutdown.is_cancelled() {
+                return;
+            }
+            let poll = self
+                .courier
+                .get_updates(&self.bot_token, offset, poll_timeout_secs);
+            let updates = tokio::select! {
+                _ = shutdown.cancelled() => return,
+                r = poll => match r {
+                    Ok(u) => u,
+                    Err(e) => {
+                        tracing::warn!(adapter = %self.name, error = %e, "telegram getUpdates failed");
+                        // Back off on error so a persistent failure
+                        // (e.g. bad token) doesn't hot-loop.
+                        tokio::select! {
+                            _ = shutdown.cancelled() => return,
+                            _ = tokio::time::sleep(idle_backoff) => {}
+                        }
+                        continue;
+                    }
+                },
+            };
+            if updates.is_empty() {
+                tokio::select! {
+                    _ = shutdown.cancelled() => return,
+                    _ = tokio::time::sleep(idle_backoff) => {}
+                }
+                continue;
+            }
+            for update in updates {
+                // Advance the offset past every fetched update. The
+                // next `getUpdates(offset)` acks everything below it,
+                // so an update we drop here (rate limit / panic) is NOT
+                // re-delivered — deliberate lossy backpressure. This
+                // differs from the webhook path's 429, where Telegram
+                // retries; long-poll has a single cursor and cannot
+                // selectively retry without head-of-line blocking.
+                offset = offset.max(update.update_id + 1);
+                // Adapter-wide rate limit (the DoS floor). On excess we
+                // drop + audit (see lossy-backpressure note above).
+                if self.rate_limit.try_take().is_err() {
+                    record_rejection(
+                        &self,
+                        "-",
+                        "-",
+                        TritonError::RateLimited(format!(
+                            "telegram adapter `{}` rate limit hit (long-poll)",
+                            self.name
+                        )),
+                    );
+                    continue;
+                }
+                // Isolate per-update processing in a task so a panic
+                // fails just that update, never the whole worker loop
+                // (which would silently stop all future updates).
+                let adapter = self.clone();
+                if let Err(join_err) =
+                    tokio::spawn(async move { process_update(adapter, update).await }).await
+                {
+                    tracing::error!(
+                        adapter = %self.name,
+                        error = %join_err,
+                        "telegram long-poll: update processing panicked; worker continues",
+                    );
+                }
+            }
+        }
+    }
 }
 
 impl CourierClient {
@@ -288,6 +389,57 @@ impl CourierClient {
             base: cfg.api_base.trim_end_matches('/').to_string(),
             http,
         })
+    }
+
+    /// Poll `<base>/bot{token}/getUpdates` (long-poll inbound). Returns
+    /// the decoded `result` array. `offset` acks all updates with a
+    /// lower id; `timeout` is the server-side long-poll hold (seconds).
+    /// The bot token rides in the URL path, so errors are logged
+    /// without the URL (FR-AU-3 token-leak guard, mirroring the
+    /// courier send path).
+    async fn get_updates(
+        &self,
+        bot_token: &str,
+        offset: i64,
+        timeout_secs: u64,
+    ) -> Result<Vec<TelegramUpdate>, String> {
+        let url = format!("{}/bot{}/getUpdates", self.base, bot_token);
+        let resp = self
+            .http
+            .post(&url)
+            .json(&json!({
+                "offset": offset,
+                "timeout": timeout_secs,
+                "allowed_updates": ["message", "callback_query"],
+            }))
+            // The per-request timeout MUST exceed the server-side
+            // long-poll hold, or the shared courier client's (short,
+            // ~10s) timeout would abort the poll mid-hold and spam
+            // "getUpdates timed out". Override it with the hold +
+            // margin.
+            .timeout(Duration::from_secs(timeout_secs.saturating_add(10)))
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    "getUpdates timed out".to_string()
+                } else {
+                    "getUpdates request failed".to_string()
+                }
+            })?;
+        if !resp.status().is_success() {
+            return Err(format!("getUpdates returned HTTP {}", resp.status()));
+        }
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|_| "getUpdates returned undecodable body".to_string())?;
+        if body.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err("getUpdates ok=false".to_string());
+        }
+        let result = body.get("result").cloned().unwrap_or(Value::Null);
+        serde_json::from_value::<Vec<TelegramUpdate>>(result)
+            .map_err(|e| format!("getUpdates result not an update array: {e}"))
     }
 
     /// POST `<base>/bot{token}/sendPhoto` as multipart/form-data
@@ -521,6 +673,10 @@ pub enum BuildError {
 
 #[derive(Debug, Deserialize)]
 struct TelegramUpdate {
+    /// Monotonic update id. Used by the long-poll worker to advance
+    /// the `getUpdates` offset; ignored on the webhook path.
+    #[serde(default)]
+    update_id: i64,
     #[serde(default)]
     message: Option<TelegramMessage>,
     /// Inbound interaction with an inline_keyboard button. Carries
@@ -637,6 +793,17 @@ async fn handle_webhook(
         }
     };
 
+    process_update(adapter, update).await
+}
+
+/// Process one parsed Telegram update through the callback / identity
+/// / form / dispatch pipeline. Transport-agnostic: the webhook
+/// handler calls it after the secret-token check + adapter
+/// rate-limit; the long-poll worker calls it per fetched update. The
+/// returned `Response` is what the webhook path replies with — the
+/// long-poll worker discards it (the platform reply, if any, goes out
+/// via the courier inside this function).
+async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -> Response {
     // PR 21: callback_query path (button click). The token in
     // `data` is HMAC-verified against the adapter's correlation_key
     // and the recovered (tool, args) is dispatched as a fresh

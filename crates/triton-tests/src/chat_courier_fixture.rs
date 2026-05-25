@@ -64,6 +64,10 @@ struct FakeState {
     captured: Mutex<Vec<SentMessage>>,
     captured_photos: Mutex<Vec<SentPhoto>>,
     profile: Profile,
+    /// Updates the `getUpdates` long-poll route serves. Each carries
+    /// an `update_id`; the route returns those with `update_id >=
+    /// offset`, mirroring real Telegram offset semantics.
+    queued_updates: Mutex<Vec<Value>>,
 }
 
 pub struct FakeTelegramApi {
@@ -77,17 +81,30 @@ impl FakeTelegramApi {
     }
 
     pub async fn with_profile(profile: Profile) -> Self {
+        Self::build(profile, Vec::new()).await
+    }
+
+    /// Start a fake whose `getUpdates` route serves `updates` (each a
+    /// full Telegram Update object with an `update_id`). Used by the
+    /// long-poll inbound test.
+    pub async fn with_updates(updates: Vec<Value>) -> Self {
+        Self::build(Profile::Ok, updates).await
+    }
+
+    async fn build(profile: Profile, updates: Vec<Value>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
         let addr = listener.local_addr().unwrap();
         let state = Arc::new(FakeState {
             captured: Mutex::new(Vec::new()),
             captured_photos: Mutex::new(Vec::new()),
             profile,
+            queued_updates: Mutex::new(updates),
         });
 
         let router = Router::new()
             .route("/bot{token}/sendMessage", post(handle_send_message))
             .route("/bot{token}/sendPhoto", post(handle_send_photo))
+            .route("/bot{token}/getUpdates", post(handle_get_updates))
             .with_state(state.clone());
 
         tokio::spawn(async move {
@@ -108,6 +125,27 @@ impl FakeTelegramApi {
     pub fn captured_photos(&self) -> Vec<SentPhoto> {
         self.state.captured_photos.lock().unwrap().clone()
     }
+}
+
+/// Long-poll `getUpdates`: return queued updates with `update_id >=
+/// offset`. Telegram treats a request with `offset = N` as an ack of
+/// all updates `< N`, so once the worker advances its offset past the
+/// seeded update, subsequent polls return an empty array.
+async fn handle_get_updates(
+    State(state): State<Arc<FakeState>>,
+    Path(_token): Path<String>,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let offset = body.get("offset").and_then(Value::as_i64).unwrap_or(0);
+    let result: Vec<Value> = state
+        .queued_updates
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|u| u.get("update_id").and_then(Value::as_i64).unwrap_or(0) >= offset)
+        .cloned()
+        .collect();
+    Json(json!({ "ok": true, "result": result }))
 }
 
 async fn handle_send_photo(

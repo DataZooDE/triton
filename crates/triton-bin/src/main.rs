@@ -452,6 +452,66 @@ async fn main() -> std::io::Result<()> {
                 }
                 continue;
             }
+            if adapter.inbound.kind == InboundKind::LongPoll {
+                // FR-A-1.v0.2 `long_poll`: a worker that polls
+                // getUpdates instead of receiving webhooks. Currently
+                // only Telegram offers this as an alternative to its
+                // webhook inbound.
+                match adapter.kind {
+                    AdapterKind::Telegram => {
+                        // Same NFR-S-4 egress allowlist as the webhook
+                        // path — the long-poll worker dials the SAME
+                        // api base, so the guard must be identical.
+                        const CANONICAL: &str = "https://api.telegram.org";
+                        if settings.env != "local"
+                            && !is_canonical_url(
+                                &settings.telegram_api_base,
+                                "https",
+                                "api.telegram.org",
+                            )
+                        {
+                            tracing::error!(
+                                env = %settings.env,
+                                telegram_api_base = %settings.telegram_api_base,
+                                "non-`local` env MUST use TRITON_TELEGRAM_API_BASE={CANONICAL} (NFR-S-4 egress allowlist)",
+                            );
+                            std::process::exit(2);
+                        }
+                        let courier_config = CourierConfig {
+                            api_base: settings.telegram_api_base.clone(),
+                            timeout: settings.courier_timeout,
+                        };
+                        match TelegramAdapter::from_manifest(
+                            name,
+                            adapter,
+                            resolver.as_ref(),
+                            dispatcher.clone(),
+                            courier_config,
+                            rasterizer_client.clone(),
+                        )
+                        .await
+                        {
+                            Ok(built) => {
+                                tracing::info!(adapter = %name, "telegram long-poll adapter wired");
+                                let h = Arc::new(built).spawn_long_poll(shutdown.clone());
+                                socket_adapter_joins.push(h);
+                            }
+                            Err(e) => {
+                                tracing::error!(adapter = %name, error = %e, "telegram adapter build failed");
+                                std::process::exit(2);
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(
+                            adapter = %name,
+                            kind = ?adapter.kind,
+                            "long_poll inbound not implemented for this adapter kind; skipping",
+                        );
+                    }
+                }
+                continue;
+            }
             if adapter.inbound.kind != InboundKind::Webhook {
                 continue;
             }
