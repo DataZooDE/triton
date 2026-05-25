@@ -1,0 +1,35 @@
+# PR 37 NFR-S-4 fix-up: signal manifest with vault-ref credentials
+# so the manifest validates in `production` env. Used only by the
+# Signal NFR-S-4 boot-time rejection tests; the binary refuses the
+# env var BEFORE any credential resolution so the fake Vault is
+# never actually contacted.
+version: "0.2"
+
+adapters:
+  signal:
+    kind: signal
+    inbound:
+      kind: socket
+      signature: trusted_socket
+      signald_addr: vault://kv/data/triton-test/signal#signald_addr
+      account: vault://kv/data/triton-test/signal#account
+    outbound:
+      kind: socket
+    identity:
+      kind: sender_table
+      table: vault://kv/data/triton-test/signal#sender_table
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: numbered_prompts
+      selections: numbered_prompts
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: vault://kv/data/triton-test/signal#correlation_key
+
+tools:
+  echo:
+    surface_components: []

@@ -282,21 +282,46 @@ async fn main() -> std::io::Result<()> {
                 match adapter.kind {
                     AdapterKind::Signal => {
                         // NFR-S-4 egress allowlist: outside `local`
-                        // env, the operator MUST set
-                        // `TRITON_SIGNAL_SIGNALD_ADDR` to the
-                        // tailnet hostname for signald. We refuse
-                        // any default in non-`local` envs so a
-                        // misconfigured deploy can't reach an
-                        // arbitrary host. Empty == "use the address
-                        // declared in adapter.yaml verbatim"; the
-                        // env var is the substrate-side override.
-                        if settings.env != "local" && settings.signal_signald_addr.is_empty() {
-                            tracing::error!(
-                                env = %settings.env,
-                                "non-`local` env MUST set TRITON_SIGNAL_SIGNALD_ADDR \
-                                 (NFR-S-4 egress allowlist)",
-                            );
-                            std::process::exit(2);
+                        // env the operator MUST set
+                        // `TRITON_SIGNAL_SIGNALD_ADDR`, and the
+                        // address MUST resolve to a tailnet target.
+                        //
+                        // PR 37 hardening: previously any non-empty
+                        // string was accepted, which let a misset env
+                        // var redirect signald connections at an
+                        // arbitrary host. Now:
+                        //   * empty → reject (must be set explicitly)
+                        //   * `unix://...` → accept (file path, not a
+                        //     network destination)
+                        //   * `tcp://host[:port]` (or bare `host:port`)
+                        //     → host MUST end with `.ts.net`, i.e. a
+                        //     Tailscale tailnet hostname.
+                        if settings.env != "local" {
+                            let addr = settings.signal_signald_addr.as_str();
+                            let allowed = if addr.is_empty() {
+                                false
+                            } else if is_unix_socket_addr(addr) {
+                                true
+                            } else {
+                                // tcp:// or bare host:port. Parse the
+                                // host portion and require a `.ts.net`
+                                // suffix on a label boundary.
+                                let host = parse_host(addr).unwrap_or("");
+                                !host.is_empty()
+                                    && host
+                                        .strip_suffix(".ts.net")
+                                        .is_some_and(|prefix| !prefix.is_empty())
+                            };
+                            if !allowed {
+                                tracing::error!(
+                                    env = %settings.env,
+                                    signald_addr = %addr,
+                                    "non-`local` env MUST set TRITON_SIGNAL_SIGNALD_ADDR \
+                                     to a `unix://...` path or a `tcp://*.ts.net[:port]` \
+                                     tailnet target (NFR-S-4 egress allowlist)",
+                                );
+                                std::process::exit(2);
+                            }
                         }
                         // If the operator supplied an override, the
                         // adapter's manifest field gets shadowed.
@@ -356,12 +381,20 @@ async fn main() -> std::io::Result<()> {
                     // NFR-S-4 v0.2: only `api.telegram.org` is on the
                     // substrate ACL allowlist. Outside `local` env we
                     // refuse any `TRITON_TELEGRAM_API_BASE` override
-                    // so a misconfigured deploy (or compromised env
-                    // var) cannot exfiltrate user content + the bot
-                    // token to an arbitrary host. Codex flagged this
-                    // in PR 18 review.
+                    // that doesn't parse to exactly that host so a
+                    // misconfigured deploy (or compromised env var)
+                    // cannot exfiltrate user content + the bot token
+                    // to an arbitrary host (PR 37 hardened the check
+                    // from string-equality to parsed-URL equality so
+                    // a trailing slash or path doesn't matter).
                     const CANONICAL: &str = "https://api.telegram.org";
-                    if settings.env != "local" && settings.telegram_api_base != CANONICAL {
+                    if settings.env != "local"
+                        && !is_canonical_url(
+                            &settings.telegram_api_base,
+                            "https",
+                            "api.telegram.org",
+                        )
+                    {
                         tracing::error!(
                             env = %settings.env,
                             telegram_api_base = %settings.telegram_api_base,
@@ -384,13 +417,26 @@ async fn main() -> std::io::Result<()> {
                     // running without chat adapters has no
                     // rasterizer egress to allowlist.
                     if settings.env != "local" {
-                        let host = parse_host(&settings.rasterizer_url).unwrap_or("");
-                        let host_ok = !host.is_empty()
-                            && host != "127.0.0.1"
-                            && host != "localhost"
-                            && host != "0.0.0.0"
-                            && host.contains('.')
-                            && !host.chars().all(|c| c.is_ascii_digit() || c == '.');
+                        // PR 37: parse the URL through the `url` crate
+                        // so a malformed env var fails closed at the
+                        // parse step (the old hand-rolled `parse_host`
+                        // accepted e.g. `not a url`). Same heuristics
+                        // afterwards — anything that isn't a dotted
+                        // hostname is treated as misconfigured.
+                        let parsed_host: Option<String> = url::Url::parse(&settings.rasterizer_url)
+                            .ok()
+                            .and_then(|u| u.host_str().map(|h| h.to_string()));
+                        let host_ok = parsed_host
+                            .as_deref()
+                            .map(|host| {
+                                !host.is_empty()
+                                    && host != "127.0.0.1"
+                                    && host != "localhost"
+                                    && host != "0.0.0.0"
+                                    && host.contains('.')
+                                    && !host.chars().all(|c| c.is_ascii_digit() || c == '.')
+                            })
+                            .unwrap_or(false);
                         if !host_ok {
                             tracing::error!(
                                 env = %settings.env,
@@ -455,19 +501,24 @@ async fn main() -> std::io::Result<()> {
                     // allowlist for the Google Chat adapter is the
                     // canonical googleapis.com JWKS endpoint. Outside
                     // `local` env we refuse any override of
-                    // `TRITON_GOOGLE_CHAT_JWKS_URI` so a misconfigured
-                    // deploy can't redirect cert fetches to an
-                    // attacker-controlled host (PR 33).
+                    // `TRITON_GOOGLE_CHAT_JWKS_URI` whose parsed host
+                    // isn't `www.googleapis.com` exactly. PR 37
+                    // replaced an earlier `starts_with` check that an
+                    // attacker could bypass by registering
+                    // `www.googleapis.com.evil.example` — the parsed
+                    // host comparison is unambiguous.
                     const CANONICAL_JWKS_HOST: &str = "https://www.googleapis.com";
                     if settings.env != "local"
-                        && !settings
-                            .google_chat_jwks_uri
-                            .starts_with(CANONICAL_JWKS_HOST)
+                        && !is_canonical_url(
+                            &settings.google_chat_jwks_uri,
+                            "https",
+                            "www.googleapis.com",
+                        )
                     {
                         tracing::error!(
                             env = %settings.env,
                             jwks_uri = %settings.google_chat_jwks_uri,
-                            "non-`local` env MUST use TRITON_GOOGLE_CHAT_JWKS_URI starting with {CANONICAL_JWKS_HOST} (NFR-S-4 egress allowlist)",
+                            "non-`local` env MUST use TRITON_GOOGLE_CHAT_JWKS_URI with host www.googleapis.com (NFR-S-4 egress allowlist; canonical base {CANONICAL_JWKS_HOST})",
                         );
                         std::process::exit(2);
                     }
@@ -521,15 +572,23 @@ async fn main() -> std::io::Result<()> {
                     // NFR-S-4 v0.2: only `graph.facebook.com` is on
                     // the substrate ACL allowlist. Outside `local`
                     // env we refuse any `TRITON_WHATSAPP_API_BASE`
-                    // override so a compromised env var can't
-                    // exfiltrate user content + the access token to
-                    // an arbitrary host. Mirrors the Telegram pattern.
+                    // whose parsed host isn't `graph.facebook.com`
+                    // exactly. Mirrors the Telegram pattern; PR 37
+                    // generalised this to a parsed-URL check so the
+                    // operator can vary path / trailing-slash freely
+                    // but cannot redirect to a sibling host.
                     const CANONICAL: &str = "https://graph.facebook.com";
-                    if settings.env != "local" && settings.whatsapp_api_base != CANONICAL {
+                    if settings.env != "local"
+                        && !is_canonical_url(
+                            &settings.whatsapp_api_base,
+                            "https",
+                            "graph.facebook.com",
+                        )
+                    {
                         tracing::error!(
                             env = %settings.env,
                             whatsapp_api_base = %settings.whatsapp_api_base,
-                            "non-`local` env MUST use TRITON_WHATSAPP_API_BASE={CANONICAL} (NFR-S-4 egress allowlist)",
+                            "non-`local` env MUST use TRITON_WHATSAPP_API_BASE with host graph.facebook.com (NFR-S-4 egress allowlist; canonical base {CANONICAL})",
                         );
                         std::process::exit(2);
                     }
@@ -573,7 +632,19 @@ async fn main() -> std::io::Result<()> {
                     // listed.
                     const CANONICAL_OPENID: &str =
                         triton_chat_msteams::jwt_verifier::DEFAULT_OPENID_URL;
-                    if settings.env != "local" && settings.msteams_openid_url != CANONICAL_OPENID {
+                    // PR 37: keep exact-string equality (the canonical
+                    // URL has a single documented form) AND add a
+                    // parsed-URL host check so a path-only tweak like
+                    // `.../openidconfiguration?foo=bar` still fails
+                    // closed. Production has zero reason to vary this.
+                    if settings.env != "local"
+                        && (settings.msteams_openid_url != CANONICAL_OPENID
+                            || !is_canonical_url(
+                                &settings.msteams_openid_url,
+                                "https",
+                                "login.botframework.com",
+                            ))
+                    {
                         tracing::error!(
                             env = %settings.env,
                             msteams_openid_url = %settings.msteams_openid_url,
@@ -581,9 +652,44 @@ async fn main() -> std::io::Result<()> {
                         );
                         std::process::exit(2);
                     }
+                    // PR 37 critical finding: the same NFR-S-4 rule
+                    // applies to `TRITON_MSTEAMS_TOKEN_URL`. The token
+                    // endpoint accepts `client_credentials` — posting
+                    // those credentials at an attacker-controlled host
+                    // exfiltrates the bot's `client_secret`. There is
+                    // NO valid production reason to override; only
+                    // the integration test fixture sets it. Refuse
+                    // any value outside `local`.
+                    if settings.env != "local" && settings.msteams_token_url.is_some() {
+                        tracing::error!(
+                            env = %settings.env,
+                            msteams_token_url = %settings.msteams_token_url.as_deref().unwrap_or(""),
+                            "non-`local` env MUST NOT set TRITON_MSTEAMS_TOKEN_URL — \
+                             the Microsoft token endpoint is hardcoded for NFR-S-4 \
+                             (overriding would post client_credentials at an \
+                             arbitrary host)",
+                        );
+                        std::process::exit(2);
+                    }
+                    // PR 37: same NFR-S-4 rule for the `serviceUrl`
+                    // host extras. Only the integration test fixture
+                    // needs additional hosts; production must use
+                    // Microsoft's documented suffixes only.
+                    if settings.env != "local"
+                        && !settings.msteams_extra_service_url_hosts.is_empty()
+                    {
+                        tracing::error!(
+                            env = %settings.env,
+                            hosts = ?settings.msteams_extra_service_url_hosts,
+                            "non-`local` env MUST NOT set TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS \
+                             (NFR-S-4 egress allowlist for outbound reply Activity)",
+                        );
+                        std::process::exit(2);
+                    }
                     let overrides = triton_chat_msteams::AdapterOverrides {
                         openid_url: Some(settings.msteams_openid_url.clone()),
                         token_url: settings.msteams_token_url.clone(),
+                        extra_service_url_hosts: settings.msteams_extra_service_url_hosts.clone(),
                     };
                     match triton_chat_msteams::MsTeamsAdapter::from_manifest(
                         name,
@@ -776,6 +882,32 @@ fn parse_host(url: &str) -> Option<&str> {
     if host.is_empty() { None } else { Some(host) }
 }
 
+/// NFR-S-4: exact-host canonical-URL check. Returns true iff `raw`
+/// parses as a URL whose scheme matches `expected_scheme` and whose
+/// host matches `expected_host` byte-for-byte.
+///
+/// Why a parsed-URL check and not `starts_with`? A naive prefix
+/// match like
+/// `raw.starts_with("https://www.googleapis.com")` accepts
+/// `https://www.googleapis.com.evil.example/path` — the attacker
+/// just registers a subdomain whose label starts with
+/// `www.googleapis.com`. Parsing extracts the authoritative host
+/// component so the comparison is unambiguous.
+fn is_canonical_url(raw: &str, expected_scheme: &str, expected_host: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(raw) else {
+        return false;
+    };
+    parsed.scheme() == expected_scheme && parsed.host_str() == Some(expected_host)
+}
+
+/// True iff `addr` looks like `unix://...` — Signal's signald
+/// daemon supports both `tcp://` and `unix://` socket forms. The
+/// NFR-S-4 tailnet check applies only to the `tcp://` form; a Unix
+/// socket is a file path, not a network destination.
+fn is_unix_socket_addr(addr: &str) -> bool {
+    addr.starts_with("unix://")
+}
+
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt;
@@ -786,4 +918,89 @@ fn init_tracing() {
         .with_target(false)
         .json()
         .init();
+}
+
+#[cfg(test)]
+mod url_host_check_tests {
+    use super::{is_canonical_url, is_unix_socket_addr};
+
+    // NFR-S-4 / fix-up PR 37: the Google Chat / WhatsApp / MS Teams
+    // egress-allowlist checks used `starts_with` which a sub-domain
+    // attacker could trivially defeat (e.g.
+    // `https://www.googleapis.com.evil.example/...`). The parsed-URL
+    // helper closes that gap.
+
+    #[test]
+    fn canonical_googleapis_uri_accepts_only_canonical_host() {
+        // Canonical: scheme + host match → true.
+        assert!(is_canonical_url(
+            "https://www.googleapis.com/service_accounts/v1/metadata/x509/chat@system.gserviceaccount.com",
+            "https",
+            "www.googleapis.com",
+        ));
+        // Subdomain-prefix attack — `starts_with` would accept.
+        assert!(!is_canonical_url(
+            "https://www.googleapis.com.evil.example/service_accounts/v1/metadata/x509/chat@system.gserviceaccount.com",
+            "https",
+            "www.googleapis.com",
+        ));
+        // Userinfo / @-host smuggling: `https://www.googleapis.com@evil.example/...`
+        // — parser puts `evil.example` in host_str, so false.
+        assert!(!is_canonical_url(
+            "https://www.googleapis.com@evil.example/foo",
+            "https",
+            "www.googleapis.com",
+        ));
+        // Bare host (no subdomain).
+        assert!(!is_canonical_url(
+            "https://googleapis.com/foo",
+            "https",
+            "www.googleapis.com",
+        ));
+        // Wrong scheme.
+        assert!(!is_canonical_url(
+            "http://www.googleapis.com/foo",
+            "https",
+            "www.googleapis.com",
+        ));
+        // Unparseable junk.
+        assert!(!is_canonical_url(
+            "not a url",
+            "https",
+            "www.googleapis.com"
+        ));
+        assert!(!is_canonical_url("", "https", "www.googleapis.com"));
+    }
+
+    #[test]
+    fn canonical_telegram_and_whatsapp_check() {
+        assert!(is_canonical_url(
+            "https://api.telegram.org",
+            "https",
+            "api.telegram.org"
+        ));
+        assert!(!is_canonical_url(
+            "https://api.telegram.org.evil.example",
+            "https",
+            "api.telegram.org"
+        ));
+        assert!(is_canonical_url(
+            "https://graph.facebook.com/v18.0/123/messages",
+            "https",
+            "graph.facebook.com"
+        ));
+        assert!(!is_canonical_url(
+            "https://graph.facebook.com.evil.example",
+            "https",
+            "graph.facebook.com"
+        ));
+    }
+
+    #[test]
+    fn unix_socket_addr_recognised() {
+        assert!(is_unix_socket_addr("unix:///var/run/signald/signald.sock"));
+        assert!(!is_unix_socket_addr("tcp://signald.tailnet.ts.net:15432"));
+        assert!(!is_unix_socket_addr("signald.tailnet.ts.net:15432"));
+        assert!(!is_unix_socket_addr(""));
+    }
 }
