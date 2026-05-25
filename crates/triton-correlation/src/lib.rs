@@ -52,9 +52,15 @@ use subtle::ConstantTimeEq;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Telegram's published cap on `callback_data` bytes. Used as the
-/// max we'll ever emit so the same token is valid across every
-/// platform that adopts callback_data semantics.
+/// default max we'll ever emit so the same token is valid across
+/// every platform that adopts callback_data semantics.
 pub const PLATFORM_MAX_CALLBACK_DATA: usize = 64;
+
+/// Discord's documented `custom_id` cap (buttons, select menus,
+/// modals). PR 30 uses this for modal correlation tokens — a
+/// form with several field names overflows the 64-byte Telegram
+/// budget, but Discord modals comfortably fit 100.
+pub const DISCORD_MAX_CUSTOM_ID: usize = 100;
 
 /// HMAC truncation length in bytes. 8 bytes = 64 bits. Don't
 /// change this without thinking about backwards compatibility —
@@ -85,6 +91,22 @@ struct CompactBodyOwned {
 /// counter so a long-args tool surfaces as a logged gap instead
 /// of a Telegram 400 mid-traffic.
 pub fn encode(tool: &str, args: &Value, key: &[u8]) -> Result<String, EncodeError> {
+    encode_with_cap(tool, args, key, PLATFORM_MAX_CALLBACK_DATA)
+}
+
+/// Same as [`encode`] but with a caller-supplied byte cap.
+/// PR 30 uses this for Discord modal correlation tokens, which
+/// have a higher platform-native cap ([`DISCORD_MAX_CUSTOM_ID`])
+/// than Telegram's `callback_data`. The decode side has a
+/// matching `decode_with_cap` so a longer token signed for
+/// Discord doesn't accidentally re-cross the 64-byte DoS gate
+/// that protects Telegram-style inbounds.
+pub fn encode_with_cap(
+    tool: &str,
+    args: &Value,
+    key: &[u8],
+    cap: usize,
+) -> Result<String, EncodeError> {
     if tool.is_empty() {
         return Err(EncodeError::EmptyTool);
     }
@@ -95,10 +117,10 @@ pub fn encode(tool: &str, args: &Value, key: &[u8]) -> Result<String, EncodeErro
     let body_b64 = URL_SAFE_NO_PAD.encode(body_json.as_bytes());
     let mac_b64 = URL_SAFE_NO_PAD.encode(mac);
     let token = format!("{body_b64}.{mac_b64}");
-    if token.len() > PLATFORM_MAX_CALLBACK_DATA {
+    if token.len() > cap {
         return Err(EncodeError::OversizedToken {
             len: token.len(),
-            cap: PLATFORM_MAX_CALLBACK_DATA,
+            cap,
         });
     }
     Ok(token)
@@ -118,7 +140,18 @@ pub fn encode(tool: &str, args: &Value, key: &[u8]) -> Result<String, EncodeErro
 /// this; the same rule applies to every chat-channel adapter
 /// that adopts callback_data semantics.
 pub fn decode(token: &str, key: &[u8]) -> Result<(String, Value), DecodeError> {
-    if token.len() > PLATFORM_MAX_CALLBACK_DATA {
+    decode_with_cap(token, key, PLATFORM_MAX_CALLBACK_DATA)
+}
+
+/// Same as [`decode`] but with a caller-supplied byte cap.
+/// Discord adapter uses [`DISCORD_MAX_CUSTOM_ID`] for modal-submit
+/// custom_ids; the matching `encode_with_cap` mints them.
+pub fn decode_with_cap(
+    token: &str,
+    key: &[u8],
+    cap: usize,
+) -> Result<(String, Value), DecodeError> {
+    if token.len() > cap {
         return Err(DecodeError::Malformed);
     }
     let (body_b64, mac_b64) = token.split_once('.').ok_or(DecodeError::Malformed)?;

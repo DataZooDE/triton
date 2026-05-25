@@ -27,6 +27,14 @@
 //! adapter just dispatches the named command with its options
 //! flattened into a JSON args map.
 //!
+//! PR 30 adds `type: 5` (MODAL_SUBMIT) and the inverse path:
+//! tool surfaces containing exactly one `Component::Form`
+//! become `type: 9` interaction responses (modal openers)
+//! instead of channel messages. Modal correlation tokens use
+//! the 100-byte Discord-native cap
+//! ([`triton_correlation::DISCORD_MAX_CUSTOM_ID`]) rather than
+//! Telegram's 64-byte `callback_data` budget.
+//!
 //! Reuses the Telegram surface mapper's chunk strategy but emits
 //! Discord-native Markdown for narration (`*…*` for italics)
 //! instead of HTML, and components v2 (`{type:1 ActionRow,
@@ -273,22 +281,30 @@ async fn handle_interaction(
         }
         2 => handle_application_command(&adapter, interaction).await,
         3 => handle_message_component(&adapter, interaction).await,
+        5 => handle_modal_submit(&adapter, interaction).await,
         other => {
-            // Other interaction types (5 = MODAL_SUBMIT) land in
-            // a later PR. Reply with an ephemeral channel message
-            // (Codex PR 22 review pattern: PONG is only valid for
-            // PING; for other unknown types we return type=4 with
-            // flags=64 so the failure is operator-visible without
-            // spamming the channel).
+            // No remaining Discord interaction types currently in
+            // scope. Codex PR 30 review fix: every refused inbound
+            // MUST emit a rejection audit so a future Discord
+            // protocol revision can't silently bypass the pivot.
+            // Sender resolution has not happened (and may not be
+            // safe to attempt on an unknown payload shape), so
+            // sub/tenant are placeholders.
             tracing::warn!(
                 interaction_type = other,
-                "discord interaction type not yet supported",
+                "discord interaction type not supported",
+            );
+            record_rejection(
+                &adapter,
+                "-",
+                "-",
+                TritonError::Validation(format!("unsupported discord interaction type {other}")),
             );
             let body = json!({
                 "type": 4,
                 "data": {
                     "content": format!(
-                        "_(Interaction type {other} not implemented yet — modal submits land in a later PR.)_"
+                        "_(Interaction type {other} not supported.)_"
                     ),
                     "flags": 64
                 }
@@ -574,6 +590,36 @@ async fn handle_message_component(
 
     match result {
         Ok(dispatch) => {
+            // PR 30: form-only Surfaces become Discord modals
+            // (type=9 interaction response). Check this BEFORE
+            // the normal text+components path so a Form doesn't
+            // get rendered as deferred text. Mixed surfaces (form
+            // + other components) still fall through to the
+            // existing path where Form defers.
+            if let Some(form_result) =
+                surface_mapper::try_render_form_modal(&dispatch.result, &adapter.correlation_key)
+            {
+                match form_result {
+                    Ok(modal) => {
+                        adapter.dispatcher.record_post(
+                            &tool_name,
+                            PROTOCOL,
+                            &principal_for_post,
+                            latency_ms,
+                            Ok((200, "modal_opened")),
+                        );
+                        return (StatusCode::OK, axum::Json(modal)).into_response();
+                    }
+                    Err(e) => {
+                        // Modal couldn't be built (too many fields,
+                        // unsupported field kind, etc.). Log and
+                        // fall through to the surface mapper so
+                        // the user still sees something (deferred
+                        // form rendering).
+                        tracing::warn!(error = ?e, tool = tool_name, "form modal build failed; falling back to text render");
+                    }
+                }
+            }
             match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
                 Some(Ok(rendered)) => {
                     let body = surface_mapper::build_interaction_response(&rendered);
@@ -762,6 +808,36 @@ async fn handle_application_command(
 
     match result {
         Ok(dispatch) => {
+            // PR 30: form-only Surfaces become Discord modals
+            // (type=9 interaction response). Check this BEFORE
+            // the normal text+components path so a Form doesn't
+            // get rendered as deferred text. Mixed surfaces (form
+            // + other components) still fall through to the
+            // existing path where Form defers.
+            if let Some(form_result) =
+                surface_mapper::try_render_form_modal(&dispatch.result, &adapter.correlation_key)
+            {
+                match form_result {
+                    Ok(modal) => {
+                        adapter.dispatcher.record_post(
+                            tool_name,
+                            PROTOCOL,
+                            &principal_for_post,
+                            latency_ms,
+                            Ok((200, "modal_opened")),
+                        );
+                        return (StatusCode::OK, axum::Json(modal)).into_response();
+                    }
+                    Err(e) => {
+                        // Modal couldn't be built (too many fields,
+                        // unsupported field kind, etc.). Log and
+                        // fall through to the surface mapper so
+                        // the user still sees something (deferred
+                        // form rendering).
+                        tracing::warn!(error = ?e, tool = tool_name, "form modal build failed; falling back to text render");
+                    }
+                }
+            }
             match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
                 Some(Ok(rendered)) => {
                     let body = surface_mapper::build_interaction_response(&rendered);
@@ -818,6 +894,272 @@ async fn handle_application_command(
             // single interaction.
             adapter.dispatcher.record_post(
                 tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                latency_ms,
+                Err((&e, 0, "error_response")),
+            );
+            let body = json!({
+                "type": 4,
+                "data": { "content": format!("(error: {})", e.class()), "flags": 64 }
+            });
+            (StatusCode::OK, axum::Json(body)).into_response()
+        }
+    }
+}
+
+/// PR 30: MODAL_SUBMIT (type 5) — the user has filled the modal
+/// we opened from a Form-bearing surface and clicked submit.
+///
+/// Flow:
+/// 1. Sender resolution + per-tenant rate limit (same as
+///    button/slash paths).
+/// 2. Decode `data.custom_id` (the correlation token we minted
+///    when opening the modal) → recovers `(submit_tool,
+///    args_skeleton)` where the skeleton's keys list the exact
+///    field names the form committed to. A forged custom_id
+///    can't substitute the tool or change the field set.
+/// 3. Read `data.components[].components[]` — Discord's
+///    Action-Row-wrapped TEXT_INPUTs. Each `custom_id` is the
+///    field name, `value` is the user's text. Substitute into
+///    the args skeleton; refuse any submission that adds fields
+///    the token didn't authorise or omits required ones.
+/// 4. Dispatch `submit_tool(args)`, render the result as a
+///    type=4 channel message via the normal surface mapper.
+async fn handle_modal_submit(
+    adapter: &Arc<DiscordAdapter>,
+    interaction: DiscordInteraction,
+) -> Response {
+    let user_id = interaction
+        .user
+        .as_ref()
+        .or_else(|| interaction.member.as_ref().and_then(|m| m.user.as_ref()))
+        .map(|u| u.id.clone())
+        .unwrap_or_default();
+    let Some(claims) = adapter.sender_table.get(&user_id) else {
+        record_rejection(
+            adapter,
+            "-",
+            "-",
+            TritonError::Auth(format!("unknown sender {user_id}")),
+        );
+        return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+    };
+
+    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&claims.tenant) {
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::RateLimited(format!(
+                "tenant `{}` rate limit hit on adapter `{}`; retry in {:.2}s",
+                claims.tenant, adapter.name, retry_after
+            )),
+        );
+        let secs = retry_after.ceil().max(1.0) as u64;
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            [("Retry-After", secs.to_string())],
+            "tenant rate limited",
+        )
+            .into_response();
+    }
+
+    let Some(data) = interaction.data else {
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Validation("modal_submit without data".into()),
+        );
+        return (StatusCode::BAD_REQUEST, "missing data").into_response();
+    };
+    let Some(token) = data.custom_id.as_deref().filter(|s| !s.is_empty()) else {
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Validation("modal_submit without custom_id".into()),
+        );
+        return (StatusCode::BAD_REQUEST, "missing custom_id").into_response();
+    };
+
+    let (tool_name, mut args) = match triton_correlation::decode_with_cap(
+        token,
+        &adapter.correlation_key,
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            record_rejection(
+                adapter,
+                &claims.sub,
+                &claims.tenant,
+                TritonError::Auth(format!("modal custom_id token: {e}")),
+            );
+            return (StatusCode::UNAUTHORIZED, "token rejected").into_response();
+        }
+    };
+
+    // Substitute the user-supplied text inputs into the args
+    // skeleton the token committed to. Refuse any submission that
+    // doesn't match the expected shape exactly (Codex PR 25
+    // pattern: forged payloads with extra/missing fields must
+    // not slip past the cryptographic commit).
+    let Some(skeleton) = args.as_object_mut() else {
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Validation("modal token args not object".into()),
+        );
+        return (StatusCode::BAD_REQUEST, "args shape mismatch").into_response();
+    };
+
+    let mut submitted: HashMap<String, String> = HashMap::new();
+    for row in &data.components {
+        for input in &row.components {
+            // Codex PR 30 review: empty `custom_id` on a submitted
+            // TEXT_INPUT is malformed (modal-opener guarantees
+            // every TEXT_INPUT has a non-empty custom_id matching
+            // a token-committed field name). Refuse instead of
+            // silently skipping — silent-skip lets a forged
+            // payload include controls whose values are accepted
+            // by the user but then dropped server-side.
+            if input.custom_id.is_empty() {
+                record_rejection(
+                    adapter,
+                    &claims.sub,
+                    &claims.tenant,
+                    TritonError::Validation(
+                        "modal submission has TEXT_INPUT with empty custom_id".into(),
+                    ),
+                );
+                return (StatusCode::BAD_REQUEST, "empty field name").into_response();
+            }
+            if submitted
+                .insert(input.custom_id.clone(), input.value.clone())
+                .is_some()
+            {
+                record_rejection(
+                    adapter,
+                    &claims.sub,
+                    &claims.tenant,
+                    TritonError::Validation(format!(
+                        "duplicate field `{}` in modal submission",
+                        input.custom_id
+                    )),
+                );
+                return (StatusCode::BAD_REQUEST, "duplicate field").into_response();
+            }
+        }
+    }
+
+    // Every skeleton key must appear in the submission; no extra
+    // keys allowed. Discord normally enforces this client-side
+    // (you can't submit a modal with surprise fields), but never
+    // trust the platform — the token is what authorises this
+    // dispatch and the token only commits to these field names.
+    for (key, slot) in skeleton.iter_mut() {
+        let Some(val) = submitted.remove(key) else {
+            record_rejection(
+                adapter,
+                &claims.sub,
+                &claims.tenant,
+                TritonError::Validation(format!("modal submission missing field `{key}`")),
+            );
+            return (StatusCode::BAD_REQUEST, "missing field").into_response();
+        };
+        if !slot.is_null() {
+            record_rejection(
+                adapter,
+                &claims.sub,
+                &claims.tenant,
+                TritonError::Validation(format!("modal token field `{key}` not a null slot")),
+            );
+            return (StatusCode::BAD_REQUEST, "args slot not null").into_response();
+        }
+        *slot = Value::String(val);
+    }
+    if !submitted.is_empty() {
+        let extras: Vec<String> = submitted.keys().cloned().collect();
+        record_rejection(
+            adapter,
+            &claims.sub,
+            &claims.tenant,
+            TritonError::Validation(format!("modal submission has unexpected fields {extras:?}")),
+        );
+        return (StatusCode::BAD_REQUEST, "unexpected fields").into_response();
+    }
+
+    let principal = Principal {
+        sub: claims.sub.clone(),
+        scopes: claims.scopes.clone(),
+        tenant: claims.tenant.clone(),
+        raw_token: String::new(),
+        trace_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let principal_for_post = principal.clone();
+
+    let started = std::time::Instant::now();
+    let result = adapter
+        .dispatcher
+        .invoke(&tool_name, args, principal, PROTOCOL)
+        .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(dispatch) => {
+            match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
+                Some(Ok(rendered)) => {
+                    let body = surface_mapper::build_interaction_response(&rendered);
+                    adapter.dispatcher.record_post(
+                        &tool_name,
+                        PROTOCOL,
+                        &principal_for_post,
+                        latency_ms,
+                        Ok((200, "posted")),
+                    );
+                    (StatusCode::OK, axum::Json(body)).into_response()
+                }
+                Some(Err(surface_mapper::RenderError::EmptyAfterRender)) => {
+                    let provider =
+                        TritonError::Provider("discord surface mapper: empty surface".into());
+                    adapter.dispatcher.record_post(
+                        &tool_name,
+                        PROTOCOL,
+                        &principal_for_post,
+                        latency_ms,
+                        Err((&provider, 0, "dropped")),
+                    );
+                    let body = json!({
+                        "type": 4,
+                        "data": { "content": "(no content)", "flags": 64 }
+                    });
+                    (StatusCode::OK, axum::Json(body)).into_response()
+                }
+                None => {
+                    let raw = bare_text(&dispatch.result);
+                    let content = surface_mapper::clamp_plain_text(&raw);
+                    adapter.dispatcher.record_post(
+                        &tool_name,
+                        PROTOCOL,
+                        &principal_for_post,
+                        latency_ms,
+                        Ok((200, "posted")),
+                    );
+                    let body = json!({
+                        "type": 4,
+                        "data": { "content": content }
+                    });
+                    (StatusCode::OK, axum::Json(body)).into_response()
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, class = %e.class(), "discord modal-submit dispatch failed");
+            adapter.dispatcher.record_post(
+                &tool_name,
                 PROTOCOL,
                 &principal_for_post,
                 latency_ms,
@@ -1018,6 +1360,32 @@ struct DiscordInteractionData {
     /// mapper would never emit.
     #[serde(default)]
     component_type: Option<u8>,
+    /// PR 30: MODAL_SUBMIT (interaction type 5) carries the user's
+    /// text inputs nested under `data.components[].components[]`.
+    /// Each outer entry is an Action Row (type 1); each inner is
+    /// a TEXT_INPUT (type 4) with a `custom_id` (the field name)
+    /// and a `value` (what the user typed). Empty on non-modal
+    /// interactions.
+    #[serde(default)]
+    components: Vec<DiscordModalRow>,
+}
+
+/// PR 30: Action Row inside a MODAL_SUBMIT payload. We don't care
+/// about the row's `type` discriminator — Discord always sends
+/// type=1 here — only the nested TEXT_INPUTs.
+#[derive(Debug, Deserialize)]
+struct DiscordModalRow {
+    #[serde(default)]
+    components: Vec<DiscordModalInput>,
+}
+
+/// PR 30: one TEXT_INPUT inside a modal-submit Action Row.
+#[derive(Debug, Deserialize)]
+struct DiscordModalInput {
+    #[serde(default)]
+    custom_id: String,
+    #[serde(default)]
+    value: String,
 }
 
 #[derive(Debug, Deserialize)]

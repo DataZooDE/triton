@@ -371,6 +371,171 @@ pub fn clamp_plain_text(raw: &str) -> String {
     out
 }
 
+/// PR 30: render a form-only surface as a Discord modal (type=9
+/// interaction response). Returns `Some(modal_response)` when the
+/// surface contains exactly one `Component::Form` and nothing else;
+/// returns `None` for all other surfaces so the caller falls back
+/// to the normal text/components path (where Form continues to
+/// render as `**title** + field labels` + `deferred_forms += 1`,
+/// matching pre-PR-30 behaviour for mixed surfaces).
+///
+/// Discord modal constraints (documented):
+///   * `custom_id` ≤ 100 chars — our HMAC correlation tokens come
+///     in well under that.
+///   * `title` ≤ 45 chars.
+///   * `components` is a list of Action Rows; each row contains
+///     exactly one TEXT_INPUT (component type 4). Max 5 rows ⇒
+///     max 5 form fields per modal.
+///   * Each TEXT_INPUT.custom_id ≤ 100 chars, label ≤ 45 chars.
+///
+/// Field-kind handling: Discord modals only support TEXT_INPUT.
+/// PR 30 ships STRING fields only; INTEGER/BOOLEAN fields cause
+/// us to refuse the modal path (returns None → falls back to
+/// deferred text rendering). A later PR can add server-side
+/// coercion.
+pub fn try_render_form_modal(
+    result: &Value,
+    correlation_key: &[u8],
+) -> Option<Result<Value, FormModalError>> {
+    let surface = extract_surface(result).ok()?;
+    if surface.components.len() != 1 {
+        return None;
+    }
+    let Component::Form {
+        title,
+        fields,
+        submit_label: _,
+        tool,
+    } = &surface.components[0]
+    else {
+        return None;
+    };
+    Some(build_modal_response(title, fields, tool, correlation_key))
+}
+
+/// Maximum number of TEXT_INPUTs we'll put in a single modal. The
+/// Discord limit is 5 Action Rows per modal, and one TEXT_INPUT
+/// takes one row.
+pub const DISCORD_MODAL_MAX_FIELDS: usize = 5;
+
+/// Discord modal title cap.
+pub const DISCORD_MODAL_TITLE_MAX: usize = 45;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FormModalError {
+    /// Form has more fields than Discord allows in one modal.
+    TooManyFields(usize),
+    /// Form has zero fields (Discord rejects empty modals).
+    NoFields,
+    /// Form field uses an INTEGER or BOOLEAN kind. PR 30 ships
+    /// STRING-only; richer coercion is a separate PR.
+    UnsupportedFieldKind(String),
+    /// Codex PR 30 review: a field with an empty `name`. Discord
+    /// requires non-empty `custom_id` on TEXT_INPUT, and the
+    /// modal-submit handler treats empty `custom_id` as malformed.
+    EmptyFieldName,
+    /// Codex PR 30 review: two form fields share the same name.
+    /// The correlation token's JSON skeleton can't represent
+    /// duplicate keys — it would silently collapse to one,
+    /// weakening the "exact field set" invariant the submit
+    /// handler relies on. Caller must rename.
+    DuplicateFieldName(String),
+    /// Correlation token didn't fit Discord's 100-char custom_id
+    /// budget (this shouldn't happen for a 5-field form with
+    /// reasonable names, but belt-and-braces).
+    TokenOversize,
+}
+
+fn build_modal_response(
+    title: &str,
+    fields: &[triton_core::a2ui::FormField],
+    submit_tool: &str,
+    correlation_key: &[u8],
+) -> Result<Value, FormModalError> {
+    if fields.is_empty() {
+        return Err(FormModalError::NoFields);
+    }
+    if fields.len() > DISCORD_MODAL_MAX_FIELDS {
+        return Err(FormModalError::TooManyFields(fields.len()));
+    }
+    // PR 30 scope: STRING only. Also (Codex PR 30 review) refuse
+    // empty or duplicate field names BEFORE building the JSON
+    // skeleton — a duplicate would silently collapse to one key,
+    // weakening the "token commits to the exact field set"
+    // invariant the modal-submit handler relies on.
+    let mut seen = std::collections::HashSet::with_capacity(fields.len());
+    for f in fields {
+        if !matches!(f.kind, triton_core::a2ui::FormFieldKind::String) {
+            return Err(FormModalError::UnsupportedFieldKind(f.name.clone()));
+        }
+        if f.name.is_empty() {
+            return Err(FormModalError::EmptyFieldName);
+        }
+        if !seen.insert(f.name.as_str()) {
+            return Err(FormModalError::DuplicateFieldName(f.name.clone()));
+        }
+    }
+
+    // Build the args skeleton: { field_name: null, ... }. On
+    // submit we substitute the user's input for each null slot,
+    // strictly matching what the token committed to. Same
+    // null-sentinel pattern as PR 25's Selection callback.
+    let mut skeleton = serde_json::Map::with_capacity(fields.len());
+    for f in fields {
+        skeleton.insert(f.name.clone(), Value::Null);
+    }
+    let args = Value::Object(skeleton);
+    let custom_id = triton_correlation::encode_with_cap(
+        submit_tool,
+        &args,
+        correlation_key,
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+    )
+    .map_err(|_| FormModalError::TokenOversize)?;
+
+    let mut components = Vec::with_capacity(fields.len());
+    for f in fields {
+        // TEXT_INPUT (component type 4) inside an Action Row.
+        // `style: 1` = short single-line input.
+        let input = json!({
+            "type": 4,
+            "custom_id": f.name,
+            "label": clamp_label(&f.label),
+            "style": 1,
+            "required": f.required,
+        });
+        components.push(json!({
+            "type": 1, // ACTION_ROW
+            "components": [input],
+        }));
+    }
+
+    Ok(json!({
+        "type": 9, // MODAL
+        "data": {
+            "custom_id": custom_id,
+            "title": clamp_title(title),
+            "components": components,
+        }
+    }))
+}
+
+fn clamp_title(s: &str) -> String {
+    let mut end = s.len().min(DISCORD_MODAL_TITLE_MAX);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+fn clamp_label(s: &str) -> String {
+    let mut end = s.len().min(DISCORD_MODAL_TITLE_MAX);
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
 pub fn build_interaction_response(rendered: &RenderedInteraction) -> Value {
     let mut data = json!({ "content": rendered.content });
     if let Some(components) = &rendered.components {

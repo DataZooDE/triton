@@ -276,6 +276,60 @@ impl Tool for DemoPanel {
 /// would be a misbehaving production tool — which the
 /// `dev-token`-gated registry entry below makes impossible to
 /// register in a production build (ADR-10 / FR-I-5 parallel).
+/// Dev-only A2UI tool emitting a Surface that contains **only** a
+/// `Component::Form`. PR 30's Discord adapter routes form-only
+/// Surfaces through the modal-opener path (interaction response
+/// type 9), so the integration test exercises:
+///   * slash command / button → form-only surface → type=9 modal
+///     opener with a correlation token in `custom_id`,
+///   * modal submit (type 5) → token decode → arg substitution →
+///     dispatch the form's submit tool (`echo`) → type=4 reply.
+///
+/// The single field uses `kind: String` because Discord modals
+/// only support TEXT_INPUT; PR 30 doesn't attempt Integer/Boolean
+/// coercion yet.
+#[cfg(feature = "dev-token")]
+pub struct FormOnlyDemo;
+
+#[cfg(feature = "dev-token")]
+#[async_trait]
+impl Tool for FormOnlyDemo {
+    fn name(&self) -> &'static str {
+        "form_only_demo"
+    }
+
+    fn returns_a2ui(&self) -> bool {
+        true
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false
+        })
+    }
+
+    async fn invoke(&self, _args: Value, _principal: &ToolPrincipal) -> Result<Value, TritonError> {
+        // One-field form so the submit dispatches `echo(message)`
+        // against echo's existing input schema (one required
+        // `message` string, `additionalProperties: false`).
+        let surface = Surface {
+            components: vec![Component::Form {
+                title: "Quick feedback".into(),
+                fields: vec![FormField {
+                    name: "message".into(),
+                    label: "Your message".into(),
+                    kind: FormFieldKind::String,
+                    required: true,
+                }],
+                submit_label: "Send".into(),
+                tool: "echo".into(),
+            }],
+        };
+        Ok(serde_json::json!({ "surface": surface }))
+    }
+}
+
 #[cfg(feature = "dev-token")]
 pub struct EmptySurface;
 
