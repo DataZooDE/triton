@@ -42,6 +42,14 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --workspace -- -D warnings
 
+      # Integration tests in `triton-tests` spawn the real `triton`
+      # binary from `target/debug/triton`. `cargo test --workspace`
+      # builds the test crates but does NOT build the separate
+      # binary by default, so without this step the spawn-based
+      # tests panic with "could not locate `triton` binary".
+      - name: cargo build --bin triton
+        run: cargo build --locked --bin triton
+
       - name: cargo test --workspace
         env:
           RUST_BACKTRACE: 1
