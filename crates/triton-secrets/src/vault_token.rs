@@ -74,7 +74,7 @@ impl VaultToken {
             inner: Arc::new(Inner::Wi(Wi {
                 base: base_url.into().trim_end_matches('/').to_string(),
                 jwt_path: jwt_path.into(),
-                mount: auth_mount.into(),
+                mount: auth_mount.into().trim_matches('/').to_string(),
                 role: role.into(),
                 http,
                 cache: Mutex::new(None),
@@ -152,14 +152,23 @@ impl Wi {
     }
 }
 
-/// Renew at half the lease, floored at 10s; treat a 0 (root/∞) lease
-/// as a 1h re-check so a misconfigured infinite token still rotates.
+/// Renew at half the lease; treat a 0 (root/∞) lease as a 1h re-check
+/// so a misconfigured infinite token still rotates. A 10s floor avoids
+/// hammering Vault on small leases — but the floor must never push the
+/// refresh to or past expiry, so for very short leases we fall back to
+/// the (always-before-expiry) half-lease value.
 fn refresh_after(lease_secs: u64) -> Duration {
     if lease_secs == 0 {
-        Duration::from_secs(3600)
-    } else {
-        Duration::from_secs((lease_secs / 2).max(10))
+        return Duration::from_secs(3600);
     }
+    let half = lease_secs / 2;
+    let floored = half.max(10);
+    let secs = if floored >= lease_secs {
+        half.max(1)
+    } else {
+        floored
+    };
+    Duration::from_secs(secs)
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,8 +209,21 @@ mod tests {
     #[test]
     fn refresh_after_halves_the_lease_with_a_floor() {
         assert_eq!(refresh_after(3600), Duration::from_secs(1800));
-        assert_eq!(refresh_after(10), Duration::from_secs(10)); // floor
+        assert_eq!(refresh_after(60), Duration::from_secs(30));
         assert_eq!(refresh_after(0), Duration::from_secs(3600)); // ∞ → recheck
+    }
+
+    #[test]
+    fn refresh_after_never_lands_at_or_past_expiry_for_short_leases() {
+        // The 10s floor must not push the refresh to/past the lease.
+        // (A 1s lease is degenerate — not expressible sub-second.)
+        for lease in 2..=30u64 {
+            let r = refresh_after(lease).as_secs();
+            assert!(
+                r < lease,
+                "lease={lease}s would refresh at {r}s — not before expiry"
+            );
+        }
     }
 
     #[tokio::test]

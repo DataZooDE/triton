@@ -1090,10 +1090,10 @@ fn build_vault_token_source(s: &Settings) -> Option<VaultToken> {
             std::process::exit(2);
         }
         // Static token (wins over workload identity if both given).
-        (Some(_), Some(token), jwt_path, _) => {
-            if jwt_path.is_some() {
-                tracing::info!(
-                    "both TRITON_VAULT_TOKEN and TRITON_VAULT_JWT_PATH set; using the static token"
+        (Some(_), Some(token), jwt_path, jwt_role) => {
+            if jwt_path.is_some() || jwt_role.is_some() {
+                tracing::warn!(
+                    "TRITON_VAULT_TOKEN set alongside TRITON_VAULT_JWT_PATH/_ROLE; using the static token and ignoring workload identity"
                 );
             }
             Some(VaultToken::fixed(token))

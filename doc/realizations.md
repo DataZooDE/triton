@@ -912,3 +912,18 @@ a trap the next developer should not have to step in.
     slow Telegram POST blocks unrelated Discord dashboards; too
     high and the rasterizer's own `spawn_blocking` pool saturates
     first. Will land alongside a fleet-level capacity story.
+
+- **Vault token revocation mid-lease is not yet self-healing
+  (deferred from the workload-identity PR's codex review).** The
+  `VaultToken` (`triton-secrets/src/vault_token.rs`) refreshes
+  *proactively* at half the lease, so normal expiry never bites. But
+  if a cached token is revoked *before* `refresh_at` (operator
+  `vault token revoke`, policy change, Vault restart losing the
+  lease), every consumer — the KV resolver at boot and the per-call
+  OIDC mint in `triton-upstream` — keeps presenting the dead token
+  and failing with 401/403 until the timer fires. Real fix: add
+  `VaultToken::invalidate()` (or `get_fresh()`) and have the two
+  consumers retry once on an auth-status response, forcing a
+  re-login. Deferred because it needs its own no-mocks integration
+  test (FakeVault returning 403-then-200 and asserting recovery),
+  which is a separate conceptual change from "introduce WI auth".

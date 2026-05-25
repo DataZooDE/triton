@@ -6,12 +6,14 @@
 //! Two impls ship today:
 //!
 //! * [`LiteralResolver`] — refuses Vault refs. Selected when the
-//!   substrate hasn't injected `TRITON_VAULT_URL` / `_TOKEN`. A
-//!   manifest carrying Vault refs against this resolver fails boot,
+//!   substrate hasn't injected `TRITON_VAULT_URL` (+ an auth method).
+//!   A manifest carrying Vault refs against this resolver fails boot,
 //!   which is the FR-L-4 / M-SECRETS-1 contract.
-//! * [`VaultKvResolver`] — calls Vault KV v2 over HTTP, presents the
-//!   stored Triton vault token in `X-Vault-Token`, decodes the
-//!   `data.data.<field>` envelope.
+//! * [`VaultKvResolver`] — calls Vault KV v2 over HTTP, presents a
+//!   [`VaultToken`] in `X-Vault-Token`, decodes the `data.data.<field>`
+//!   envelope. The token comes either from a static `TRITON_VAULT_TOKEN`
+//!   or from Nomad workload identity (the binary logs in at
+//!   `auth/<mount>/login`); see [`VaultToken`].
 //!
 //! The trait is `async` because Vault reads are HTTP; the dispatcher
 //! never needs to call this at request time — secrets are resolved
