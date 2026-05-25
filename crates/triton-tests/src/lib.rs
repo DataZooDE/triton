@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 pub mod chat_courier_fixture;
 mod oidc_fixture;
+pub mod rasterizer_fixture;
 pub mod signald_fixture;
 pub mod upstream_fixture;
 pub use oidc_fixture::TestIssuer;

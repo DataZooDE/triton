@@ -828,3 +828,35 @@ a trap the next developer should not have to step in.
   aid for later: a `cargo public-api` snapshot in CI would catch
   accidental breakage at PR time; not wired up yet, follow-up
   when the surface starts moving fast enough to need it.
+
+- **NFR-S-4 egress checks belong next to the adapter that needs
+  the egress, not at process boot.** PR 36's rasterizer URL has
+  the same shape as `TRITON_TELEGRAM_API_BASE` — outside `local`
+  env it MUST point at a tailnet hostname. The first version of
+  the check ran in `main` before any adapter was wired, which
+  broke every existing integration test using `TRITON_ENV=nonprod`
+  to exercise OIDC — those tests don't enable chat adapters and
+  shouldn't care about a rasterizer URL they'll never call.
+  Lesson: gate every egress allowlist check on "is this network
+  dependency actually being used?" The check now lives inside
+  the `AdapterKind::Telegram` arm where we KNOW the rasterizer
+  will be reached. Same pattern as Telegram's own api_base check.
+
+- **`tiny-skia` 0.11's PNG feature is `png-format`, not `png`.**
+  When pinning the version in `[workspace.dependencies]`, look at
+  `cargo info tiny-skia` (or src/Cargo.toml on docs.rs) before
+  picking feature names — the docs page on crates.io can lag a
+  major release. Wrong feature name = silent fallback to no-PNG,
+  which surfaces as a runtime "PNG encode failed" only after the
+  first render attempt. Discovered while wiring the rasterizer
+  in PR 36.
+
+- **`r#"..."#` raw-string delimiters collide with `#` characters
+  inside the string (e.g. hex color `#ff0000`).** Use `r##"..."##`
+  when the string body contains any `"#` sequence — Rust's parser
+  treats the first `"#` it sees as the close of the raw string.
+  The error message ("expected `;`") is unhelpful; the fix is the
+  delimiter count, not the content. PR 36's rasterizer test SVG
+  bit me here. Lint aid for later: a `clippy::needless_raw_strings`
+  lint exists but doesn't catch this — `cargo expand`-style
+  inspection is the manual fallback.

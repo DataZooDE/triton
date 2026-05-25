@@ -6,6 +6,10 @@
 //! captures every `sendMessage` body it receives so a test can
 //! assert on `chat_id` / `text` after the binary's courier fires.
 //!
+//! PR 36 adds a `sendPhoto` route — multipart/form-data carrying a
+//! PNG file part — so dashboard rasterisation can be exercised
+//! end-to-end against the real PNG bytes the rasterizer produced.
+//!
 //! No mocks per CLAUDE.md §1: this is a real HTTP server speaking
 //! the Telegram Bot API wire shape over real TCP.
 
@@ -14,7 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Multipart, Path, State};
 use axum::routing::post;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -27,6 +31,20 @@ use tokio::net::TcpListener;
 pub struct SentMessage {
     pub token: String,
     pub body: Value,
+}
+
+/// One captured `sendPhoto` multipart invocation (PR 36).
+/// `photo_bytes` holds the raw photo file part — tests assert PNG
+/// magic bytes against this to confirm the rasterizer actually
+/// produced a PNG and the courier actually forwarded it.
+#[derive(Debug, Clone)]
+pub struct SentPhoto {
+    pub token: String,
+    pub chat_id: String,
+    pub caption: Option<String>,
+    pub parse_mode: Option<String>,
+    pub reply_markup: Option<String>,
+    pub photo_bytes: Vec<u8>,
 }
 
 /// Response profile the fake should return on each `sendMessage`.
@@ -44,6 +62,7 @@ pub enum Profile {
 
 struct FakeState {
     captured: Mutex<Vec<SentMessage>>,
+    captured_photos: Mutex<Vec<SentPhoto>>,
     profile: Profile,
 }
 
@@ -62,11 +81,13 @@ impl FakeTelegramApi {
         let addr = listener.local_addr().unwrap();
         let state = Arc::new(FakeState {
             captured: Mutex::new(Vec::new()),
+            captured_photos: Mutex::new(Vec::new()),
             profile,
         });
 
         let router = Router::new()
             .route("/bot{token}/sendMessage", post(handle_send_message))
+            .route("/bot{token}/sendPhoto", post(handle_send_photo))
             .with_state(state.clone());
 
         tokio::spawn(async move {
@@ -81,6 +102,76 @@ impl FakeTelegramApi {
 
     pub fn captured(&self) -> Vec<SentMessage> {
         self.state.captured.lock().unwrap().clone()
+    }
+
+    /// Captured `sendPhoto` multipart uploads (PR 36).
+    pub fn captured_photos(&self) -> Vec<SentPhoto> {
+        self.state.captured_photos.lock().unwrap().clone()
+    }
+}
+
+async fn handle_send_photo(
+    State(state): State<Arc<FakeState>>,
+    Path(token): Path<String>,
+    mut multipart: Multipart,
+) -> Json<Value> {
+    let mut chat_id = String::new();
+    let mut caption: Option<String> = None;
+    let mut parse_mode: Option<String> = None;
+    let mut reply_markup: Option<String> = None;
+    let mut photo_bytes: Vec<u8> = Vec::new();
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "photo" => {
+                photo_bytes = field.bytes().await.unwrap_or_default().to_vec();
+            }
+            "chat_id" => {
+                chat_id = field.text().await.unwrap_or_default();
+            }
+            "caption" => {
+                caption = Some(field.text().await.unwrap_or_default());
+            }
+            "parse_mode" => {
+                parse_mode = Some(field.text().await.unwrap_or_default());
+            }
+            "reply_markup" => {
+                reply_markup = Some(field.text().await.unwrap_or_default());
+            }
+            _ => {
+                // Drain and ignore unknown fields rather than
+                // erroring — keeps the fixture forward-compatible
+                // with any future telegram form fields the adapter
+                // might add.
+                let _ = field.bytes().await;
+            }
+        }
+    }
+    state.captured_photos.lock().unwrap().push(SentPhoto {
+        token,
+        chat_id,
+        caption,
+        parse_mode,
+        reply_markup,
+        photo_bytes,
+    });
+    match &state.profile {
+        Profile::Ok => Json(json!({ "ok": true, "result": { "message_id": 1 } })),
+        Profile::Application {
+            error_code,
+            retry_after,
+        } => {
+            let mut params = serde_json::Map::new();
+            if let Some(s) = retry_after {
+                params.insert("retry_after".to_string(), json!(s));
+            }
+            Json(json!({
+                "ok": false,
+                "error_code": error_code,
+                "description": "fake telegram application error",
+                "parameters": params,
+            }))
+        }
     }
 }
 

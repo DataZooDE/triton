@@ -76,6 +76,13 @@ pub struct Settings {
     /// parity for substrate deployments that don't need a browser
     /// frontend). Set in nonprod to enable the Flutter explorer.
     pub cors_allowed_origins: Vec<String>,
+    /// PR 36: base URL of the out-of-process dashboard rasterizer
+    /// (FR-A-11). Default `http://127.0.0.1:9320` keeps local-dev
+    /// drop-in: `cargo run --bin triton-rasterizer` in one shell,
+    /// `cargo run --bin triton` in another. Outside `local` env
+    /// the operator MUST set this to a `*.<tailnet>` hostname or
+    /// boot fails (NFR-S-4 egress allowlist).
+    pub rasterizer_url: String,
     /// OIDC `client_id` the Flutter explorer should use for its PKCE
     /// login. Reported at `GET /v1/runtime` so the SPA doesn't bake
     /// it in. `None` ⇒ the operator hasn't enabled the explorer in
@@ -287,6 +294,17 @@ struct Cli {
     /// in this env.
     #[arg(long, env = "TRITON_EXPLORER_CLIENT_ID")]
     explorer_client_id: Option<String>,
+
+    /// PR 36: dashboard rasterizer service URL (FR-A-11).
+    /// Default points at the in-repo `triton-rasterizer` binary
+    /// running on its 12-factor default port. Outside `local` env
+    /// the operator MUST point this at a tailnet-resolved host.
+    #[arg(
+        long,
+        env = "TRITON_RASTERIZER_URL",
+        default_value = "http://127.0.0.1:9320"
+    )]
+    rasterizer_url: String,
 }
 
 impl From<Cli> for Settings {
@@ -324,6 +342,7 @@ impl From<Cli> for Settings {
                 &c.cors_allowed_origins,
             ),
             explorer_client_id: c.explorer_client_id,
+            rasterizer_url: c.rasterizer_url,
         }
     }
 }

@@ -1,0 +1,42 @@
+[package]
+name = "triton-rasterizer"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# v0.2 PR 36 — Dashboard rasterizer.
+#
+# The rasterizer is both a library AND a binary:
+#   * Binary `triton-rasterizer`: tiny axum service exposing
+#     `POST /v1/dashboard.png`. Consumes Dashboard JSON
+#     (shape: `{ title, tiles }`) and returns `image/png`.
+#   * Library: thin `Client` used by chat adapters to call the
+#     running service over HTTP.
+#
+# Pure-Rust SVG → PNG pipeline (resvg + tiny-skia) keeps the
+# static-link story intact (NFR-PT-2). The rasterizer is an
+# out-of-process sidecar per realizations.md §5 — chat adapters
+# never embed it. Architecture.md §8.7: dashboards on text-first
+# adapters MUST go through this sidecar.
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "triton-rasterizer"
+path = "src/bin/triton-rasterizer.rs"
+
+[dependencies]
+triton-core = { path = "../triton-core" }
+axum = { workspace = true }
+reqwest = { workspace = true }
+resvg = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tiny-skia = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

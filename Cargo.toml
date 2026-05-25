@@ -15,6 +15,7 @@ members = [
     "crates/triton-upstream",
     "crates/triton-adapters-http",
     "crates/triton-bin",
+    "crates/triton-rasterizer",
     "crates/triton-tests",
 ]
 
@@ -37,7 +38,18 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Integration-test crate deps
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "multipart"] }
+
+# Dashboard rasterizer (PR 36). Pure-Rust SVG → PNG pipeline, no
+# system deps — keeps the static-link story (NFR-PT-2). Pinned
+# here so the rasterizer crate and any future consumer share one
+# version. `usvg` text rendering enabled so dashboard titles +
+# tile labels actually appear in the rendered PNG; system-fonts
+# left ON because the alternative is shipping a TTF inside the
+# binary, and substrate nodes ship with a sans-serif fallback
+# (DejaVu Sans) that resvg's fontdb auto-discovers.
+resvg = { version = "0.47", default-features = false, features = ["text", "system-fonts"] }
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "png-format"] }
 
 [profile.release]
 lto = "thin"

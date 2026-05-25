@@ -28,7 +28,7 @@
 //! stray `<` or `&`.
 
 use serde_json::{Value, json};
-use triton_core::a2ui::{Component, FormField, Surface, extract_surface};
+use triton_core::a2ui::{Component, DashboardTile, FormField, Surface, extract_surface};
 
 /// Telegram `sendMessage.text` hard limit. Architecture.md §8.7
 /// names `SurfaceLimits` as the cap-enforcement seam at L6′.
@@ -37,6 +37,14 @@ use triton_core::a2ui::{Component, FormField, Surface, extract_surface};
 /// bytes is ≤ 4096 UTF-16 code units, so byte-counting only ever
 /// rejects messages Telegram itself would also reject).
 pub const TELEGRAM_TEXT_MAX_BYTES: usize = 4096;
+
+/// Telegram `sendPhoto.caption` cap. Documented at 1024 bytes
+/// (UTF-16 code units, conservatively bounded as 1024 bytes for
+/// the same reason as TELEGRAM_TEXT_MAX_BYTES). Dashboards on
+/// Telegram ship as a sendPhoto + caption; the caption carries
+/// whatever text and narration accompanied the dashboard in the
+/// surface, so it lives under this tighter cap.
+pub const TELEGRAM_CAPTION_MAX_BYTES: usize = 1024;
 
 /// Telegram's documented inline-keyboard row cap (architecture.md
 /// §8.7 risk table: "Telegram 8-buttons-per-row"). PR 26
@@ -91,6 +99,25 @@ pub struct RenderedMessage {
     /// `tracing::warn` line so operators can spot oversized tool
     /// output before it becomes a complaint from users.
     pub truncated: bool,
+    /// PR 36: the FIRST `Component::Dashboard` found in the
+    /// surface, surfaced to the caller for rasterisation. The
+    /// caller calls the rasterizer service and dispatches a
+    /// `sendPhoto` with the resulting PNG instead of a
+    /// `sendMessage`. Additional dashboards in the same surface
+    /// bump `deferred_dashboards` (a Telegram message ships ONE
+    /// piece of media; multi-dashboard surfaces are an L6′
+    /// degrade-rule excess we explicitly drop rather than chunk).
+    pub dashboard: Option<RasterDashboard>,
+}
+
+/// Dashboard payload the caller passes to the rasterizer. Mirrors
+/// the `triton_core::a2ui::Component::Dashboard` shape verbatim;
+/// keeping it in the mapper module rather than `mod.rs` keeps the
+/// surface-mapping concern local.
+#[derive(Debug, Clone)]
+pub struct RasterDashboard {
+    pub title: String,
+    pub tiles: Vec<DashboardTile>,
 }
 
 /// Mapper-edge failure modes that the caller MUST handle without
@@ -208,6 +235,12 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
     let mut deferred_selections = 0usize;
     let mut deferred_dashboards = 0usize;
     let mut keyboard_rows: Vec<Vec<Value>> = Vec::new();
+    // PR 36: first Dashboard in the surface is surfaced to the
+    // caller for rasterisation. The caller calls the rasterizer
+    // service and dispatches `sendPhoto` rather than `sendMessage`.
+    // Subsequent Dashboards bump `deferred_dashboards` (one piece
+    // of media per Telegram message).
+    let mut first_dashboard: Option<RasterDashboard> = None;
     for c in &surface.components {
         match c {
             Component::Text { value } => {
@@ -303,26 +336,37 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
                 chunks.push(PreRender::pre_rendered(body, true));
                 deferred_buttons += 1;
             }
-            Component::Dashboard { title, .. } => {
-                // Manifest declares `dashboard: rasterised_png`.
-                // PR 27 brings Telegram in line with Discord PR 22:
-                // we MUST NOT render the raw tile text because
-                // dashboards are non-negotiably visual (architecture
-                // §8.7) and emitting `• label: value` silently
-                // violates the manifest's `rasterised_png` degrade
-                // rule. Render a one-line deferred placeholder and
-                // bump `deferred_dashboards`; the rasterizer wires
-                // in a follow-up PR.
-                chunks.push(PreRender::pre_rendered(
-                    format!(
-                        "<i>{}</i>",
-                        html_escape(&format!(
-                            "dashboard '{title}' deferred — rasterizer not yet wired"
-                        ))
-                    ),
-                    true,
-                ));
-                deferred_dashboards += 1;
+            Component::Dashboard { title, tiles } => {
+                // PR 36: the manifest's `dashboard: rasterised_png`
+                // degrade rule now has a real renderer behind it.
+                // The mapper surfaces the FIRST Dashboard to the
+                // caller via `RenderedMessage.dashboard`; the
+                // caller calls the out-of-process rasterizer and
+                // dispatches `sendPhoto` instead of `sendMessage`.
+                //
+                // We deliberately do NOT push a chunk for the
+                // dashboard: surrounding Text/Narration components
+                // become the photo's caption, but the dashboard
+                // itself is the IMAGE — emitting a "dashboard '…'
+                // deferred" placeholder would either duplicate
+                // content (image + placeholder text) or, on
+                // rasterizer failure (the lib.rs fallback path),
+                // make it look like a successful render. The
+                // fallback path adds its own placeholder string
+                // when needed.
+                if first_dashboard.is_none() {
+                    first_dashboard = Some(RasterDashboard {
+                        title: title.clone(),
+                        tiles: tiles.clone(),
+                    });
+                } else {
+                    // Telegram messages carry one piece of media.
+                    // Subsequent dashboards in the same surface
+                    // can't share the photo slot; bumping the
+                    // counter lets the operator see how often
+                    // multi-dashboard surfaces hit this gap.
+                    deferred_dashboards += 1;
+                }
             }
         }
     }
@@ -333,10 +377,15 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
     // a stable placeholder ("Choose an option:") when buttons
     // exist but no text chunks do. The buttons still ship; the
     // user still sees a meaningful message.
-    if chunks.is_empty() && keyboard_rows.is_empty() {
+    if chunks.is_empty() && keyboard_rows.is_empty() && first_dashboard.is_none() {
         return Err(RenderError::EmptyAfterRender);
     }
-    if chunks.is_empty() {
+    // A button-only surface still needs the synthetic placeholder
+    // (Telegram requires non-empty `text` even with `reply_markup`).
+    // A photo-only surface, on the other hand, is legitimate —
+    // sendPhoto's `caption` is optional, so we leave chunks empty
+    // and let the caller ship a photo with no caption.
+    if chunks.is_empty() && !keyboard_rows.is_empty() && first_dashboard.is_none() {
         chunks.push(PreRender::pre_rendered(
             BUTTON_ONLY_PLACEHOLDER.into(),
             false,
@@ -348,10 +397,18 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
     } else {
         Some(json!({ "inline_keyboard": keyboard_rows }))
     };
+    // When the surface carries a dashboard, the text we built is
+    // the photo's caption — apply the tighter 1024-byte cap, not
+    // the 4096-byte sendMessage cap.
+    let text_cap = if first_dashboard.is_some() {
+        TELEGRAM_CAPTION_MAX_BYTES
+    } else {
+        TELEGRAM_TEXT_MAX_BYTES
+    };
 
     let chunk_strings: Vec<String> = chunks.iter().map(|p| p.chunk.clone()).collect();
     let joined = chunk_strings.join("\n\n");
-    if joined.len() <= TELEGRAM_TEXT_MAX_BYTES {
+    if joined.len() <= text_cap {
         return Ok(RenderedMessage {
             text: joined,
             parse_mode: if has_html_markers { Some("HTML") } else { None },
@@ -360,13 +417,14 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
             deferred_selections,
             deferred_dashboards,
             truncated: false,
+            dashboard: first_dashboard,
         });
     }
 
     // Over cap. Walk the chunk prefix that fits under
     // `cap - sentinel`, leaving every cut on a between-component
     // boundary so HTML stays valid.
-    let budget = TELEGRAM_TEXT_MAX_BYTES - TRUNCATION_SENTINEL.len();
+    let budget = text_cap.saturating_sub(TRUNCATION_SENTINEL.len());
     let mut accepted: Vec<&str> = Vec::new();
     let mut total = 0usize;
     for chunk in &chunk_strings {
@@ -389,6 +447,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
             deferred_selections,
             deferred_dashboards,
             truncated: true,
+            dashboard: first_dashboard,
         });
     }
 
@@ -425,6 +484,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
         deferred_selections,
         deferred_dashboards,
         truncated: true,
+        dashboard: first_dashboard,
     })
 }
 
@@ -525,6 +585,40 @@ pub fn build_send_message_body(chat_id: i64, msg: &RenderedMessage) -> Value {
     body
 }
 
+/// Form fields for `sendPhoto` other than the photo file part. The
+/// caller assembles a `multipart::Form` from these + the PNG
+/// bytes. Keeping the field selection here (next to the renderer)
+/// means the caption-cap rule lives in one place.
+#[derive(Debug, Clone)]
+pub struct SendPhotoFields {
+    pub chat_id: i64,
+    pub caption: Option<String>,
+    pub parse_mode: Option<&'static str>,
+    pub reply_markup: Option<String>,
+}
+
+/// Build the non-file fields for a `sendPhoto` multipart upload.
+/// Caption is `None` when the rendered text is empty (a
+/// photo-only surface): Telegram accepts sendPhoto without a
+/// caption.
+pub fn build_send_photo_fields(chat_id: i64, msg: &RenderedMessage) -> SendPhotoFields {
+    let caption = if msg.text.is_empty() {
+        None
+    } else {
+        Some(msg.text.clone())
+    };
+    let reply_markup = msg
+        .reply_markup
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()));
+    SendPhotoFields {
+        chat_id,
+        caption,
+        parse_mode: msg.parse_mode,
+        reply_markup,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,13 +706,15 @@ mod tests {
     }
 
     #[test]
-    fn dashboard_is_deferred_not_rendered_as_tile_text() {
-        // PR 27: Telegram aligns with Discord (PR 22) on the
-        // architecture.md §8.7 rule that dashboards on text-first
-        // adapters need a rasterizer. The raw tile content
-        // (label, value, trend) must NEVER reach the post-back —
-        // emitting it would silently violate the manifest's
-        // `dashboard: rasterised_png` degrade rule.
+    fn dashboard_is_surfaced_for_rasterisation_not_rendered_as_text() {
+        // PR 36: dashboards now travel out through
+        // `RenderedMessage.dashboard` so the caller can call the
+        // rasterizer and dispatch `sendPhoto`. The raw tile content
+        // (label, value, trend) must NEVER appear in the
+        // caption/text — that would either duplicate the rendered
+        // image on success or silently violate the manifest's
+        // `dashboard: rasterised_png` degrade rule on the fallback
+        // path (caller decides what placeholder to ship).
         use triton_core::a2ui::DashboardTile;
         let s = Surface {
             components: vec![
@@ -636,17 +732,71 @@ mod tests {
             ],
         };
         let r = render(&s, TEST_KEY).expect("renders");
+        // None of the tile content appears in the caption — only
+        // the leading Text/Narration components do.
         assert!(!r.text.contains("invocations"));
         assert!(!r.text.contains("1234"));
         assert!(!r.text.contains("+5%"));
-        assert_eq!(r.deferred_dashboards, 1);
-        // Title also doesn't leak directly — only the deferred
-        // placeholder mentions it inside `dashboard '<title>' …`.
+        assert!(!r.text.contains("Secrets"));
+        // Dashboard surfaced to caller — exactly one.
+        let dash = r.dashboard.as_ref().expect("dashboard surfaced");
+        assert_eq!(dash.title, "Secrets");
+        assert_eq!(dash.tiles.len(), 1);
+        assert_eq!(dash.tiles[0].label, "invocations");
+        // First (and only) dashboard does NOT count as deferred —
+        // it's the photo for sendPhoto, not a dropped component.
+        assert_eq!(r.deferred_dashboards, 0);
+        // Leading text component still ships as caption.
         assert!(
-            r.text.contains("rasterizer not yet wired"),
-            "expected the placeholder line; got: {}",
+            r.text.contains("header"),
+            "expected caption to carry the leading Text chunk, got: {}",
             r.text
         );
+    }
+
+    #[test]
+    fn second_dashboard_is_deferred_first_is_surfaced() {
+        // Telegram messages carry one piece of media. With two
+        // Dashboards in the same surface, the first becomes the
+        // sendPhoto image and any others bump `deferred_dashboards`
+        // so the operator sees how often surfaces overflow.
+        use triton_core::a2ui::DashboardTile;
+        let make_dash = |title: &str| Component::Dashboard {
+            title: title.into(),
+            tiles: vec![DashboardTile {
+                label: "x".into(),
+                value: "1".into(),
+                trend: None,
+            }],
+        };
+        let s = Surface {
+            components: vec![make_dash("first"), make_dash("second")],
+        };
+        let r = render(&s, TEST_KEY).expect("renders");
+        let dash = r.dashboard.expect("first surfaced");
+        assert_eq!(dash.title, "first");
+        assert_eq!(r.deferred_dashboards, 1);
+    }
+
+    #[test]
+    fn dashboard_only_surface_renders_with_empty_caption() {
+        // A surface that's nothing but a Dashboard is now valid:
+        // sendPhoto's `caption` is optional, so the photo ships
+        // with no caption rather than failing EmptyAfterRender.
+        use triton_core::a2ui::DashboardTile;
+        let s = Surface {
+            components: vec![Component::Dashboard {
+                title: "Solo".into(),
+                tiles: vec![DashboardTile {
+                    label: "x".into(),
+                    value: "1".into(),
+                    trend: None,
+                }],
+            }],
+        };
+        let r = render(&s, TEST_KEY).expect("renders");
+        assert!(r.text.is_empty());
+        assert!(r.dashboard.is_some());
     }
 
     #[test]

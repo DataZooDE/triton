@@ -17,9 +17,10 @@ dev-token = []
 triton-core = { path = "../triton-core" }
 triton-correlation = { path = "../triton-correlation" }
 triton-manifest = { path = "../triton-manifest" }
+triton-rasterizer = { path = "../triton-rasterizer" }
 triton-secrets = { path = "../triton-secrets" }
 axum = { workspace = true }
-reqwest = { workspace = true }
+reqwest = { workspace = true, features = ["multipart"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 subtle = "2"
