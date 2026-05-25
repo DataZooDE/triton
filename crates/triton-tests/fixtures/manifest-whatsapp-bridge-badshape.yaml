@@ -1,0 +1,34 @@
+# A whatsapp_web adapter with a MIXED transport shape: socket inbound
+# but rest_api outbound. The bridge adapter must refuse to build —
+# booting as a bridge while ignoring the declared REST outbound would
+# silently drop replies. Booting against this exits 2.
+version: "0.2"
+
+adapters:
+  whatsapp:
+    kind: whatsapp_web
+    inbound:
+      kind: socket
+      signature: trusted_socket
+    outbound:
+      kind: rest_api
+      token: bot-token-for-test
+      phone_number_id: "12345"
+    identity:
+      kind: sender_table
+      table: '{"4915112345678":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: numbered_prompts
+      selections: numbered_prompts
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 6
+      burst: 12
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

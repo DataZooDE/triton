@@ -460,8 +460,11 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
     // (`/v18.0/{phone_number_id}/messages`). Without it the courier
     // has no target; the manifest must carry it next to `token`.
     // Telegram puts its routing id in the bot token itself, so this
-    // rule only fires for `kind: whatsapp_web`.
+    // rule only fires for `kind: whatsapp_web`. The WhatsApp **Web
+    // bridge** (inbound.kind=socket) replies over the bridge socket,
+    // not the Graph API, so phone_number_id does not apply there.
     if adapter.kind == AdapterKind::WhatsappWeb
+        && adapter.inbound.kind != InboundKind::Socket
         && !adapter.outbound.credentials.contains_key("phone_number_id")
     {
         return Err(ManifestError::MissingSchemeCredential {

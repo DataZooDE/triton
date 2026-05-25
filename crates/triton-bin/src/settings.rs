@@ -47,6 +47,7 @@ pub struct Settings {
     pub whatsapp_api_base: String,
     pub discord_gateway_url: String,
     pub discord_api_base: String,
+    pub whatsapp_bridge_addr: String,
     /// JWKS URI for Google Chat inbound JWT verification. Production
     /// stays at the canonical Google host (`https://www.googleapis.com/...`),
     /// which is the only host on the NFR-S-4 egress allowlist for
@@ -268,6 +269,16 @@ struct Cli {
     )]
     discord_api_base: String,
 
+    /// Address of the local WhatsApp Web bridge daemon (Baileys-style
+    /// sidecar) the socket inbound connects to: `tcp://host:port` or
+    /// `unix:///path`. The bridge terminates the WhatsApp Web session
+    /// inside the trust boundary; outside `local` env it MUST be a
+    /// `unix://` path or a `tcp://*.ts.net` tailnet target (NFR-S-4,
+    /// mirrors the Signal signald locality rule — loopback is allowed
+    /// only in `local`). Empty disables the adapter.
+    #[arg(long, env = "TRITON_WHATSAPP_BRIDGE_ADDR", default_value = "")]
+    whatsapp_bridge_addr: String,
+
     /// Per-call timeout for outbound chat couriers
     /// (sendMessage and friends), in milliseconds.
     #[arg(long, env = "TRITON_COURIER_TIMEOUT_MS", default_value_t = 10_000)]
@@ -377,6 +388,7 @@ impl From<Cli> for Settings {
             whatsapp_api_base: c.whatsapp_api_base,
             discord_gateway_url: c.discord_gateway_url,
             discord_api_base: c.discord_api_base,
+            whatsapp_bridge_addr: c.whatsapp_bridge_addr,
             google_chat_jwks_uri: c.google_chat_jwks_uri,
             signal_signald_addr: c.signal_signald_addr,
             msteams_openid_url: c.msteams_openid_url,

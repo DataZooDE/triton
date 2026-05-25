@@ -1,0 +1,35 @@
+# WhatsApp adapter using the `socket` inbound (WhatsApp Web bridge)
+# instead of the Cloud-API webhook (FR-A-1.v0.2, M-LIFECYCLE-1). The
+# bridge daemon terminates the WhatsApp Web session locally; auth is
+# the session-locality of the bridge socket, so signature is
+# `trusted_socket` and outbound is `socket` (replies go over the
+# bridge, not the Graph API — no phone_number_id needed).
+version: "0.2"
+
+adapters:
+  whatsapp:
+    kind: whatsapp_web
+    inbound:
+      kind: socket
+      signature: trusted_socket
+    outbound:
+      kind: socket
+    identity:
+      kind: sender_table
+      # WhatsApp id (wa-id) → Principal claims.
+      table: '{"4915112345678":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: numbered_prompts
+      selections: numbered_prompts
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 6
+      burst: 12
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

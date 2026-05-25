@@ -289,10 +289,17 @@ async fn main() -> std::io::Result<()> {
             .as_ref()
             .map(|m| {
                 m.adapters.values().any(|a| {
-                    matches!(
-                        a.kind,
-                        AdapterKind::Telegram | AdapterKind::Discord | AdapterKind::WhatsappWeb
-                    )
+                    // Only the WEBHOOK rasterizing adapters dial the
+                    // rasterizer. The socket variants (Discord Gateway,
+                    // WhatsApp Web bridge) reply text-only and never
+                    // receive a rasterizer client, so a bridge-only
+                    // deploy must not be forced to configure one
+                    // (Codex review).
+                    a.inbound.kind == InboundKind::Webhook
+                        && matches!(
+                            a.kind,
+                            AdapterKind::Telegram | AdapterKind::Discord | AdapterKind::WhatsappWeb
+                        )
                 })
             })
             .unwrap_or(false);
@@ -489,6 +496,63 @@ async fn main() -> std::io::Result<()> {
                             }
                             Err(e) => {
                                 tracing::error!(adapter = %name, error = %e, "discord gateway adapter build failed");
+                                std::process::exit(2);
+                            }
+                        }
+                    }
+                    AdapterKind::WhatsappWeb => {
+                        // The WhatsApp Web bridge daemon is a local
+                        // sidecar terminating the WhatsApp session
+                        // inside the trust boundary. NFR-S-4 / C-11
+                        // (mirrors Signal): outside `local` the bridge
+                        // addr MUST be a `unix://` path or a
+                        // `tcp://*.ts.net` tailnet target — never an
+                        // arbitrary host.
+                        let addr = settings.whatsapp_bridge_addr.as_str();
+                        if addr.is_empty() {
+                            tracing::error!(
+                                adapter = %name,
+                                "whatsapp socket adapter requires TRITON_WHATSAPP_BRIDGE_ADDR (tcp://host:port or unix:///path)",
+                            );
+                            std::process::exit(2);
+                        }
+                        if settings.env != "local" {
+                            let allowed = if is_unix_socket_addr(addr) {
+                                true
+                            } else {
+                                let host = parse_host(addr).unwrap_or("");
+                                !host.is_empty()
+                                    && host
+                                        .strip_suffix(".ts.net")
+                                        .is_some_and(|prefix| !prefix.is_empty())
+                            };
+                            if !allowed {
+                                tracing::error!(
+                                    env = %settings.env,
+                                    whatsapp_bridge_addr = %addr,
+                                    "non-`local` env MUST set TRITON_WHATSAPP_BRIDGE_ADDR to a \
+                                     `unix://...` path or a `tcp://*.ts.net[:port]` tailnet target \
+                                     (NFR-S-4 / C-11 locality)",
+                                );
+                                std::process::exit(2);
+                            }
+                        }
+                        match triton_chat_whatsapp::WhatsAppBridgeAdapter::from_manifest(
+                            name,
+                            adapter,
+                            resolver.as_ref(),
+                            dispatcher.clone(),
+                            addr,
+                        )
+                        .await
+                        {
+                            Ok(built) => {
+                                tracing::info!(adapter = %name, "whatsapp bridge socket adapter wired");
+                                let h = Arc::new(built).spawn(shutdown.clone());
+                                socket_adapter_joins.push(h);
+                            }
+                            Err(e) => {
+                                tracing::error!(adapter = %name, error = %e, "whatsapp bridge adapter build failed");
                                 std::process::exit(2);
                             }
                         }

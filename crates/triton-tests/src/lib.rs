@@ -17,6 +17,7 @@ mod oidc_fixture;
 pub mod rasterizer_fixture;
 pub mod signald_fixture;
 pub mod upstream_fixture;
+pub mod whatsapp_bridge_fixture;
 pub use oidc_fixture::TestIssuer;
 
 /// Captured failure context from a spawn attempt that didn't reach
