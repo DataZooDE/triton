@@ -1827,6 +1827,7 @@ dependencies = [
  "triton-chat-msteams",
  "triton-chat-signal",
  "triton-chat-telegram",
+ "triton-chat-whatsapp",
  "triton-core",
  "triton-identity",
  "triton-manifest",
@@ -1927,6 +1928,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "triton-chat-whatsapp"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "hex",
+ "hmac",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "subtle",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "triton-core",
+ "triton-correlation",
+ "triton-manifest",
+ "triton-secrets",
+ "uuid",
+]
+
+[[package]]
 name = "triton-core"
 version = "0.0.1"
 dependencies = [
@@ -2000,12 +2023,14 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.2.17",
  "hex",
+ "hmac",
  "jsonwebtoken",
  "libc",
  "rand_core 0.6.4",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "triton-correlation",
  "triton-manifest",

@@ -28,6 +28,7 @@ triton-manifest = { path = "../triton-manifest" }
 triton-secrets = { path = "../triton-secrets" }
 triton-chat-telegram = { path = "../triton-chat-telegram" }
 triton-chat-discord = { path = "../triton-chat-discord" }
+triton-chat-whatsapp = { path = "../triton-chat-whatsapp" }
 triton-chat-googlechat = { path = "../triton-chat-googlechat" }
 triton-chat-msteams = { path = "../triton-chat-msteams" }
 triton-chat-signal = { path = "../triton-chat-signal" }

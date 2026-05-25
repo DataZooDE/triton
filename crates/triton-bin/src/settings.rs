@@ -44,6 +44,7 @@ pub struct Settings {
     pub chat_webhook_host: IpAddr,
     pub chat_webhook_port: u16,
     pub telegram_api_base: String,
+    pub whatsapp_api_base: String,
     /// JWKS URI for Google Chat inbound JWT verification. Production
     /// stays at the canonical Google host (`https://www.googleapis.com/...`),
     /// which is the only host on the NFR-S-4 egress allowlist for
@@ -216,6 +217,18 @@ struct Cli {
     )]
     telegram_api_base: String,
 
+    /// Base URL the WhatsApp outbound courier POSTs to. Production
+    /// stays at `https://graph.facebook.com` (Meta Graph API);
+    /// integration tests override this to point at the in-repo
+    /// `FakeWhatsAppApi`. NFR-S-4 egress allowlist refuses any
+    /// non-canonical value outside `local` env.
+    #[arg(
+        long,
+        env = "TRITON_WHATSAPP_API_BASE",
+        default_value = "https://graph.facebook.com"
+    )]
+    whatsapp_api_base: String,
+
     /// Per-call timeout for outbound chat couriers
     /// (sendMessage and friends), in milliseconds.
     #[arg(long, env = "TRITON_COURIER_TIMEOUT_MS", default_value_t = 10_000)]
@@ -301,6 +314,7 @@ impl From<Cli> for Settings {
             chat_webhook_host: c.chat_webhook_host,
             chat_webhook_port: c.chat_webhook_port,
             telegram_api_base: c.telegram_api_base,
+            whatsapp_api_base: c.whatsapp_api_base,
             google_chat_jwks_uri: c.google_chat_jwks_uri,
             signal_signald_addr: c.signal_signald_addr,
             msteams_openid_url: c.msteams_openid_url,
