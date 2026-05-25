@@ -1,0 +1,35 @@
+# Discord adapter using the `socket` inbound (Gateway WebSocket)
+# instead of the Interactions webhook (FR-A-1.v0.2, M-LIFECYCLE-1).
+# Gateway auth is the bot token presented in IDENTIFY, not a
+# per-message signature, so the signature scheme is `trusted_socket`
+# (mirrors Signal's session-locality model). Literal creds = dev only.
+version: "0.2"
+
+adapters:
+  discord:
+    kind: discord
+    inbound:
+      kind: socket
+      signature: trusted_socket
+    outbound:
+      kind: rest_api
+      token: bot-token-for-test
+    identity:
+      kind: sender_table
+      # Discord author id → Principal claims.
+      table: '{"7777":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: components_v2
+      selections: components_v2
+      forms: components_v2
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 50
+      burst: 100
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

@@ -12,6 +12,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 pub mod chat_courier_fixture;
+pub mod discord_gateway_fixture;
 mod oidc_fixture;
 pub mod rasterizer_fixture;
 pub mod signald_fixture;

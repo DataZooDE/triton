@@ -442,6 +442,57 @@ async fn main() -> std::io::Result<()> {
                             }
                         }
                     }
+                    AdapterKind::Discord => {
+                        // NFR-S-4 egress allowlist: outside `local`
+                        // env the Gateway URL MUST be Discord's
+                        // canonical WSS host and the REST base
+                        // discord.com — no override that could point
+                        // the socket (carrying the bot token) or the
+                        // reply POST at an attacker host.
+                        if settings.env != "local" {
+                            if !is_canonical_url(
+                                &settings.discord_gateway_url,
+                                "wss",
+                                "gateway.discord.gg",
+                            ) {
+                                tracing::error!(
+                                    env = %settings.env,
+                                    discord_gateway_url = %settings.discord_gateway_url,
+                                    "non-`local` env MUST use TRITON_DISCORD_GATEWAY_URL=wss://gateway.discord.gg (NFR-S-4 egress allowlist)",
+                                );
+                                std::process::exit(2);
+                            }
+                            if !is_canonical_url(&settings.discord_api_base, "https", "discord.com")
+                            {
+                                tracing::error!(
+                                    env = %settings.env,
+                                    discord_api_base = %settings.discord_api_base,
+                                    "non-`local` env MUST use TRITON_DISCORD_API_BASE with host discord.com (NFR-S-4 egress allowlist)",
+                                );
+                                std::process::exit(2);
+                            }
+                        }
+                        match triton_chat_discord::DiscordGatewayAdapter::from_manifest(
+                            name,
+                            adapter,
+                            resolver.as_ref(),
+                            dispatcher.clone(),
+                            settings.discord_gateway_url.clone(),
+                            settings.discord_api_base.clone(),
+                        )
+                        .await
+                        {
+                            Ok(built) => {
+                                tracing::info!(adapter = %name, "discord gateway socket adapter wired");
+                                let h = Arc::new(built).spawn(shutdown.clone());
+                                socket_adapter_joins.push(h);
+                            }
+                            Err(e) => {
+                                tracing::error!(adapter = %name, error = %e, "discord gateway adapter build failed");
+                                std::process::exit(2);
+                            }
+                        }
+                    }
                     _ => {
                         tracing::warn!(
                             adapter = %name,

@@ -19,7 +19,7 @@ triton-rasterizer = { path = "../triton-rasterizer" }
 # Real OIDC fixture: Ed25519 keypair + JWT sign + tiny axum issuer
 # serving discovery + JWKS. No mocks per CLAUDE.md §1.
 # Multipart enabled for PR 36's FakeTelegramApi `sendPhoto` route.
-axum = { workspace = true, features = ["multipart"] }
+axum = { workspace = true, features = ["multipart", "ws"] }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 getrandom = "0.2"
