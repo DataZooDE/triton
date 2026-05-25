@@ -1,0 +1,43 @@
+# PR 33 integration manifest. Single Google Chat adapter with
+# literal credentials (dev mode only). The sender_table is
+# JSON-encoded inline so tests don't need a Vault server.
+version: "0.2"
+
+adapters:
+  google_chat:
+    kind: google_chat
+    inbound:
+      kind: webhook
+      signature: google_oidc_jwt
+      # Google Chat uses the bot's project number as the JWT `aud`
+      # claim. The integration tests sign a JWT with this exact
+      # audience and the adapter rejects anything else.
+      audience: "1234567890"
+    outbound:
+      kind: rest_api
+      # PR 33 uses the synchronous-response pattern (no outbound
+      # HTTP call); the manifest still carries a token field per the
+      # rest_api scheme's required-credentials rule, but the
+      # adapter never sends it anywhere. A literal placeholder is
+      # safe under dev mode.
+      token: unused-in-pr-33
+    identity:
+      kind: sender_table
+      # JSON: maps Google Chat sender's full `users/<id>` string
+      # to Principal claims. Tests POST a JWT for users/99.
+      table: '{"users/99":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: card_v2
+      selections: card_v2
+      forms: card_v2
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

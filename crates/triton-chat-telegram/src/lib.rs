@@ -19,6 +19,12 @@
 pub mod surface_mapper;
 pub use surface_mapper::RenderedMessage;
 
+// PR 32: numbered_prompts state machine for `Component::Form`
+// rendering. Pure logic, no I/O — tested via unit tests in the
+// module + driven end-to-end by `crates/triton-tests/tests/
+// telegram_form.rs`.
+pub mod form_state;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -112,6 +118,11 @@ pub struct TelegramAdapter {
     /// manifest `rate_limit` values so one tenant can't starve
     /// others sharing the same adapter quota.
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
+    /// PR 32: per-chat numbered-prompts state for `Component::Form`
+    /// surfaces. In-memory only (G-8). Capped per-tenant to avoid
+    /// OOM from a noisy tenant; oldest in-flight form is evicted
+    /// when the cap is hit. See `form_state::FormStateStore`.
+    form_state: form_state::FormStateStore,
 }
 
 struct CourierClient {
@@ -219,6 +230,17 @@ impl TelegramAdapter {
             adapter.rate_limit.messages_per_sec,
             adapter.rate_limit.burst,
         );
+        // PR 32: per-tenant cap on in-flight numbered-prompts
+        // forms. Production keeps the default. The integration
+        // test that exercises the LRU-eviction path drops this to
+        // 2 via `TRITON_TELEGRAM_FORM_CAP_PER_TENANT` so it doesn't
+        // need to install 100 forms to reach the eviction branch.
+        // Parsing failures fall back to the default — env vars
+        // shouldn't take the binary down.
+        let form_cap = std::env::var("TRITON_TELEGRAM_FORM_CAP_PER_TENANT")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(form_state::DEFAULT_PER_TENANT_CAP);
         Ok(Self {
             name: name.to_string(),
             secret_token,
@@ -229,6 +251,7 @@ impl TelegramAdapter {
             courier,
             rate_limit,
             per_tenant_limit,
+            form_state: form_state::FormStateStore::with_cap(form_cap),
         })
     }
 
@@ -611,6 +634,39 @@ async fn handle_webhook(
         trace_id: uuid::Uuid::new_v4().to_string(),
     };
 
+    let chat_id = message.chat.id;
+
+    // PR 32: numbered_prompts intercept. Before the normal
+    // command parser, check whether there's an active form for
+    // this (chat, sender). The intercept order is:
+    //   1. `/cancel` while a form is active → clear + ack.
+    //   2. Active form → feed the message as the next field's
+    //      value; on completion dispatch the form's submit tool.
+    //   3. No active form → fall through to `route_command`.
+    let form_key = form_state::FormKey {
+        chat_id,
+        sender_sub: claims.sub.clone(),
+    };
+    let principal_for_post = principal.clone();
+
+    // `/cancel` with active form: drop the slot and reply. No
+    // dispatch happens here — only a `phase: post` audit fires
+    // (we DO send a sendMessage so the post is real). The audit
+    // names the form's submit tool so the operator can correlate
+    // the cancel with the form that was abandoned.
+    if text.trim() == "/cancel" && adapter.form_state.has_active(&form_key) {
+        adapter.form_state.cancel(&form_key);
+        let reply = courier_reply("Form cancelled.");
+        post_back(&adapter, &principal_for_post, "form_cancel", chat_id, reply).await;
+        return StatusCode::OK.into_response();
+    }
+
+    // Active form: feed the user's message as the next field.
+    if let Some(outcome) = adapter.form_state.advance(&form_key, text) {
+        return handle_form_outcome(&adapter, principal_for_post, &form_key, chat_id, outcome)
+            .await;
+    }
+
     // PR 19 minimal command parser: `/<tool> <rest>` routes to
     // `tool` with `{ subject: rest }` (matches `narrate`'s arg
     // shape); anything else falls through to `echo` with the
@@ -620,78 +676,98 @@ async fn handle_webhook(
     // surface mapper.
     let (tool_name, args) = route_command(text);
     let tool_name: &str = tool_name;
-    let chat_id = message.chat.id;
-    let principal_for_post = principal.clone();
+    dispatch_and_render(
+        adapter,
+        principal,
+        principal_for_post,
+        tool_name.to_string(),
+        args,
+        chat_id,
+    )
+    .await
+}
+
+/// Dispatch a (tool, args) pair, then render the result back to
+/// Telegram. Shared between the normal command path and the
+/// post-form-completion path; the only difference is whether the
+/// tool name comes from `route_command` (static) or from a
+/// completed form's `submit_tool` (dynamic).
+///
+/// Owns the post-dispatch logic that PR 32 adds: if the dispatch
+/// result is a form-only Surface, intercept and install the
+/// per-chat numbered-prompts state instead of routing through the
+/// surface mapper.
+async fn dispatch_and_render(
+    adapter: Arc<TelegramAdapter>,
+    principal: Principal,
+    principal_for_post: Principal,
+    tool_name: String,
+    args: Value,
+    chat_id: i64,
+) -> Response {
     let result = adapter
         .dispatcher
-        .invoke(tool_name, args, principal, PROTOCOL)
+        .invoke(&tool_name, args, principal, PROTOCOL)
         .await;
     match result {
         Ok(dispatch) => {
+            // PR 32: form-only Surfaces install per-chat state
+            // and prompt field 1, INSTEAD of rendering as text.
+            // Mixed surfaces (form + other components) still
+            // route through `render_dispatch_result` where Form
+            // defers as the v0.2 rough edge.
+            if let Some(form_only) = surface_mapper::try_extract_form_only(&dispatch.result) {
+                return install_form_and_prompt(
+                    &adapter,
+                    &principal_for_post,
+                    &tool_name,
+                    chat_id,
+                    form_only,
+                )
+                .await;
+            }
             match render_dispatch_result(&dispatch.result, &adapter.correlation_key) {
                 Ok(rendered) => {
                     if rendered.deferred_buttons > 0 {
-                        // PR 19 doesn't render buttons (need HMAC
-                        // correlation tokens in the next PR).
-                        // Logged — counted, not silent — so the
-                        // operator sees the gap until couriers can
-                        // carry buttons through.
                         tracing::warn!(
-                            tool = tool_name,
+                            tool = %tool_name,
                             deferred_buttons = rendered.deferred_buttons,
                             "telegram surface mapper: button components deferred until correlation-token PR",
                         );
                     }
                     if rendered.deferred_selections > 0 {
-                        // PR 26 (Codex review concern): operators
-                        // need to see deferred Selection counts
-                        // alongside button counts.
                         tracing::warn!(
-                            tool = tool_name,
+                            tool = %tool_name,
                             deferred_selections = rendered.deferred_selections,
                             "telegram surface mapper: Selection components deferred (empty options or token-cap overflow)",
                         );
                     }
                     if rendered.deferred_dashboards > 0 {
-                        // PR 27: dashboards on text-first adapters
-                        // need a rasterizer (architecture §8.7).
-                        // Until that ships, we never leak the raw
-                        // tile content — operators see the count
-                        // here.
                         tracing::warn!(
-                            tool = tool_name,
+                            tool = %tool_name,
                             deferred_dashboards = rendered.deferred_dashboards,
                             "telegram surface mapper: Dashboard components deferred until rasterizer wires in",
                         );
                     }
                     if rendered.truncated {
-                        // Codex PR 19 blocker 2 follow-up: log
-                        // every truncation event so operators can
-                        // tune tool outputs before users complain.
                         tracing::warn!(
-                            tool = tool_name,
+                            tool = %tool_name,
                             cap_bytes = surface_mapper::TELEGRAM_TEXT_MAX_BYTES,
                             "telegram surface mapper: rendered text exceeded cap; truncated",
                         );
                     }
-                    post_back(&adapter, &principal_for_post, tool_name, chat_id, rendered).await;
+                    post_back(&adapter, &principal_for_post, &tool_name, chat_id, rendered).await;
                     StatusCode::OK.into_response()
                 }
                 Err(surface_mapper::RenderError::EmptyAfterRender) => {
-                    // Codex PR 19 blocker 1: empty / button-only
-                    // surface used to ship `text: ""` and let
-                    // Telegram 400. Now we refuse at the mapper
-                    // edge and audit the courier as `dropped` so
-                    // the trace is visible to the substrate audit
-                    // collector — no wasted API call, no retry.
                     tracing::warn!(
-                        tool = tool_name,
+                        tool = %tool_name,
                         "telegram surface mapper: empty surface (no renderable components); skipping post-back",
                     );
                     let provider =
                         TritonError::Provider("telegram surface mapper: empty surface".into());
                     adapter.dispatcher.record_post(
-                        tool_name,
+                        &tool_name,
                         PROTOCOL,
                         &principal_for_post,
                         0,
@@ -702,15 +778,202 @@ async fn handle_webhook(
             }
         }
         Err(e) => {
-            // Dispatcher already audited the failure. Map to a
-            // status that won't trigger Telegram retry storms for
-            // permanent app-layer failures: validation/auth-shaped
-            // errors are acked 200 (Telegram has nothing useful to
-            // retry), and only transient provider faults / open
-            // circuits earn a retryable 5xx.
             tracing::warn!(error = %e, class = %e.class(), "telegram tool dispatch failed");
             telegram_status_for(&e).into_response()
         }
+    }
+}
+
+/// Process the outcome of feeding a user message into an active
+/// form. Returns the HTTP response the webhook should send back.
+async fn handle_form_outcome(
+    adapter: &Arc<TelegramAdapter>,
+    principal_for_post: Principal,
+    form_key: &form_state::FormKey,
+    chat_id: i64,
+    outcome: form_state::AdvanceOutcome,
+) -> Response {
+    match outcome {
+        form_state::AdvanceOutcome::NeedMore => {
+            // Send the next prompt. The peek goes back into the
+            // store (the lock was released after `advance`); no
+            // other handler can race us into the slot because the
+            // (chat, sender) key is unique to this request.
+            let prompt = adapter
+                .form_state
+                .peek_prompt(form_key)
+                .unwrap_or_else(|| "(form continues)".to_string());
+            let reply = courier_reply(&prompt);
+            post_back(adapter, &principal_for_post, "form_prompt", chat_id, reply).await;
+            StatusCode::OK.into_response()
+        }
+        form_state::AdvanceOutcome::Reprompt { reason } => {
+            // Coercion / required-empty failure: tell the user
+            // what went wrong and ask the SAME field again. The
+            // state machine did NOT advance, so peek returns the
+            // same prompt.
+            let prompt = adapter
+                .form_state
+                .peek_prompt(form_key)
+                .unwrap_or_else(|| "(form continues)".to_string());
+            let body = format!("{}\n\n{}", reason, prompt);
+            let reply = courier_reply(&body);
+            post_back(
+                adapter,
+                &principal_for_post,
+                "form_reprompt",
+                chat_id,
+                reply,
+            )
+            .await;
+            StatusCode::OK.into_response()
+        }
+        form_state::AdvanceOutcome::Complete { submit_tool, args } => {
+            // All fields collected. Dispatch the submit tool with
+            // the assembled args; render the result through the
+            // normal path. Principal is rebuilt from the same
+            // claims that installed the form — the form-state
+            // store doesn't carry it (G-8: state is the minimal
+            // thing needed to continue, not a snapshot of the
+            // boot-time identity).
+            //
+            // NOTE: we re-derive principal from form_key + the
+            // sender_table. If the table changed between install
+            // and complete (manifest reload), the new claims win
+            // — the in-flight form's submission goes through with
+            // the LATEST authorisation, which is the spec-correct
+            // behaviour (the table is the source of truth).
+            let Some(claims) = adapter
+                .sender_table
+                .iter()
+                .find_map(|(_, c)| (c.sub == form_key.sender_sub).then_some(c))
+            else {
+                // Sender disappeared mid-flight (table reload).
+                // Drop the submission with a rejection audit + a
+                // user-facing notice. No dispatch happens.
+                record_rejection(
+                    adapter,
+                    &form_key.sender_sub,
+                    "-",
+                    TritonError::Auth(format!(
+                        "sender `{}` no longer in sender_table; form submission dropped",
+                        form_key.sender_sub
+                    )),
+                );
+                let reply =
+                    courier_reply("Your session is no longer authorised; form submission dropped.");
+                post_back(adapter, &principal_for_post, "form_dropped", chat_id, reply).await;
+                return StatusCode::OK.into_response();
+            };
+            let principal = Principal {
+                sub: claims.sub.clone(),
+                scopes: claims.scopes.clone(),
+                tenant: claims.tenant.clone(),
+                raw_token: String::new(),
+                trace_id: uuid::Uuid::new_v4().to_string(),
+            };
+            let principal_for_post = principal.clone();
+            dispatch_and_render(
+                adapter.clone(),
+                principal,
+                principal_for_post,
+                submit_tool,
+                args,
+                chat_id,
+            )
+            .await
+        }
+    }
+}
+
+/// Install a per-chat numbered-prompts form and send the first
+/// prompt. Called after a dispatch returns a form-only Surface.
+async fn install_form_and_prompt(
+    adapter: &Arc<TelegramAdapter>,
+    principal_for_post: &Principal,
+    dispatching_tool: &str,
+    chat_id: i64,
+    form: surface_mapper::FormOnly,
+) -> Response {
+    let key = form_state::FormKey {
+        chat_id,
+        sender_sub: principal_for_post.sub.clone(),
+    };
+    let title = form.title.clone();
+    let outcome = adapter.form_state.install(
+        key.clone(),
+        form.submit_tool,
+        form.fields,
+        principal_for_post.tenant.clone(),
+    );
+    let outcome = match outcome {
+        Ok(o) => o,
+        Err(e) => {
+            // Tool shape bug (no fields / too many / dup). Don't
+            // install; reply with a polite refusal and audit as
+            // a courier-post (no dispatch level, since the
+            // dispatcher already ran successfully — the failure
+            // is downstream of it). The operator sees the bug via
+            // tracing::warn so they can fix the tool.
+            tracing::warn!(tool = %dispatching_tool, error = %e, "telegram form install refused");
+            let reply = courier_reply(&format!(
+                "Sorry — the form returned by `{dispatching_tool}` is malformed and can't be rendered."
+            ));
+            post_back(
+                adapter,
+                principal_for_post,
+                dispatching_tool,
+                chat_id,
+                reply,
+            )
+            .await;
+            return StatusCode::OK.into_response();
+        }
+    };
+    // Per-tenant LRU eviction: audit the dropped form so a
+    // chronically-over-cap tenant shows up in the audit feed.
+    if let form_state::InstallOutcome::InstalledEvicted { evicted } = &outcome {
+        record_rejection(
+            adapter,
+            &principal_for_post.sub,
+            &principal_for_post.tenant,
+            TritonError::Validation(format!(
+                "form state per-tenant cap reached for tenant `{}`; evicted oldest form for (chat_id={}, sender={}) on adapter `{}`",
+                principal_for_post.tenant, evicted.chat_id, evicted.sender_sub, adapter.name
+            )),
+        );
+    }
+
+    let prompt = adapter
+        .form_state
+        .peek_prompt(&key)
+        .unwrap_or_else(|| "(form ready)".to_string());
+    let body = format!("{title}\n\n{prompt}");
+    let reply = courier_reply(&body);
+    post_back(
+        adapter,
+        principal_for_post,
+        dispatching_tool,
+        chat_id,
+        reply,
+    )
+    .await;
+    StatusCode::OK.into_response()
+}
+
+/// Build a `RenderedMessage` for a plain-text courier reply. Used
+/// by the form-state path (prompts, cancellation, errors) where
+/// the message body is adapter-generated, not derived from a
+/// tool's Surface.
+fn courier_reply(text: &str) -> RenderedMessage {
+    RenderedMessage {
+        text: text.to_string(),
+        parse_mode: None,
+        reply_markup: None,
+        deferred_buttons: 0,
+        deferred_selections: 0,
+        deferred_dashboards: 0,
+        truncated: false,
     }
 }
 
@@ -916,6 +1179,14 @@ fn route_command(text: &str) -> (&'static str, Value) {
             // tool (Codex PR 25 review pattern).
             #[cfg(feature = "dev-token")]
             "demo" => return ("demo_panel", json!({})),
+            // PR 32 (numbered_prompts): the `form_only_demo_multi`
+            // tool emits a form-only Surface with one String, one
+            // Integer, and one optional Boolean field. The
+            // integration test drives the per-chat state machine
+            // through this command. Same `dev-token` gate as the
+            // tool itself.
+            #[cfg(feature = "dev-token")]
+            "form_only_demo_multi" => return ("form_only_demo_multi", json!({})),
             _ => {
                 // Unknown commands fall through to echo so the
                 // user sees their raw text and knows the command

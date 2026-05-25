@@ -270,8 +270,83 @@ async fn main() -> std::io::Result<()> {
     };
 
     let mut chat_router: Option<axum::Router> = None;
+    // PR 34: Signal's I/O is a persistent socket, not an HTTP
+    // webhook — its inbound runs as a tokio task spawned at boot,
+    // not a router mount. Both shapes coexist in the same loop;
+    // each adapter dispatches on `inbound.kind`.
+    let mut socket_adapter_joins: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     if let Some(m) = &manifest {
         for (name, adapter) in &m.adapters {
+            if adapter.inbound.kind == InboundKind::Socket {
+                match adapter.kind {
+                    AdapterKind::Signal => {
+                        // NFR-S-4 egress allowlist: outside `local`
+                        // env, the operator MUST set
+                        // `TRITON_SIGNAL_SIGNALD_ADDR` to the
+                        // tailnet hostname for signald. We refuse
+                        // any default in non-`local` envs so a
+                        // misconfigured deploy can't reach an
+                        // arbitrary host. Empty == "use the address
+                        // declared in adapter.yaml verbatim"; the
+                        // env var is the substrate-side override.
+                        if settings.env != "local" && settings.signal_signald_addr.is_empty() {
+                            tracing::error!(
+                                env = %settings.env,
+                                "non-`local` env MUST set TRITON_SIGNAL_SIGNALD_ADDR \
+                                 (NFR-S-4 egress allowlist)",
+                            );
+                            std::process::exit(2);
+                        }
+                        // If the operator supplied an override, the
+                        // adapter's manifest field gets shadowed.
+                        // We do this by mutating a clone of the
+                        // adapter — the manifest itself is
+                        // immutable per FR-L-4.
+                        let mut effective = adapter.clone();
+                        if !settings.signal_signald_addr.is_empty() {
+                            effective.inbound.credentials.insert(
+                                "signald_addr".to_string(),
+                                triton_manifest::SecretField::Literal(
+                                    settings.signal_signald_addr.clone(),
+                                ),
+                            );
+                        }
+                        match triton_chat_signal::SignalAdapter::from_manifest(
+                            name,
+                            &effective,
+                            resolver.as_ref(),
+                            dispatcher.clone(),
+                        )
+                        .await
+                        {
+                            Ok(built) => {
+                                tracing::info!(
+                                    adapter = %name,
+                                    "signal socket adapter wired",
+                                );
+                                let h = Arc::new(built).spawn(shutdown.clone());
+                                socket_adapter_joins.push(h);
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    adapter = %name,
+                                    error = %e,
+                                    "signal adapter build failed",
+                                );
+                                std::process::exit(2);
+                            }
+                        }
+                    }
+                    _ => {
+                        tracing::warn!(
+                            adapter = %name,
+                            kind = ?adapter.kind,
+                            "socket-inbound adapter kind not implemented yet; skipping",
+                        );
+                    }
+                }
+                continue;
+            }
             if adapter.inbound.kind != InboundKind::Webhook {
                 continue;
             }
@@ -316,6 +391,50 @@ async fn main() -> std::io::Result<()> {
                         }
                         Err(e) => {
                             tracing::error!(adapter = %name, error = %e, "telegram adapter build failed");
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                AdapterKind::GoogleChat => {
+                    // NFR-S-4: the only host on the substrate egress
+                    // allowlist for the Google Chat adapter is the
+                    // canonical googleapis.com JWKS endpoint. Outside
+                    // `local` env we refuse any override of
+                    // `TRITON_GOOGLE_CHAT_JWKS_URI` so a misconfigured
+                    // deploy can't redirect cert fetches to an
+                    // attacker-controlled host (PR 33).
+                    const CANONICAL_JWKS_HOST: &str = "https://www.googleapis.com";
+                    if settings.env != "local"
+                        && !settings
+                            .google_chat_jwks_uri
+                            .starts_with(CANONICAL_JWKS_HOST)
+                    {
+                        tracing::error!(
+                            env = %settings.env,
+                            jwks_uri = %settings.google_chat_jwks_uri,
+                            "non-`local` env MUST use TRITON_GOOGLE_CHAT_JWKS_URI starting with {CANONICAL_JWKS_HOST} (NFR-S-4 egress allowlist)",
+                        );
+                        std::process::exit(2);
+                    }
+                    match triton_chat_googlechat::GoogleChatAdapter::from_manifest(
+                        name,
+                        adapter,
+                        resolver.as_ref(),
+                        dispatcher.clone(),
+                        settings.google_chat_jwks_uri.clone(),
+                    )
+                    .await
+                    {
+                        Ok(built) => {
+                            tracing::info!(adapter = %name, "google_chat webhook adapter wired");
+                            let r = Arc::new(built).router();
+                            chat_router = Some(match chat_router.take() {
+                                Some(acc) => acc.merge(r),
+                                None => r,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!(adapter = %name, error = %e, "google_chat adapter build failed");
                             std::process::exit(2);
                         }
                     }
@@ -382,6 +501,54 @@ async fn main() -> std::io::Result<()> {
                         }
                         Err(e) => {
                             tracing::error!(adapter = %name, error = %e, "whatsapp adapter build failed");
+                            std::process::exit(2);
+                        }
+                    }
+                }
+                AdapterKind::MsTeams => {
+                    // NFR-S-4: outside `local` env the OpenID discovery
+                    // URL MUST be the canonical Microsoft endpoint —
+                    // operators get no `TRITON_MSTEAMS_OPENID_URL`
+                    // override path that could redirect JWKS fetches
+                    // to an attacker-controlled host. The token
+                    // endpoint is hardcoded inside `token_client.rs`
+                    // for the same reason; the `serviceUrl` reply
+                    // target rides inside a JWT we just verified, so
+                    // it's trusted-by-derivation rather than allow-
+                    // listed.
+                    const CANONICAL_OPENID: &str =
+                        triton_chat_msteams::jwt_verifier::DEFAULT_OPENID_URL;
+                    if settings.env != "local" && settings.msteams_openid_url != CANONICAL_OPENID {
+                        tracing::error!(
+                            env = %settings.env,
+                            msteams_openid_url = %settings.msteams_openid_url,
+                            "non-`local` env MUST use TRITON_MSTEAMS_OPENID_URL={CANONICAL_OPENID} (NFR-S-4 egress allowlist)",
+                        );
+                        std::process::exit(2);
+                    }
+                    let overrides = triton_chat_msteams::AdapterOverrides {
+                        openid_url: Some(settings.msteams_openid_url.clone()),
+                        token_url: settings.msteams_token_url.clone(),
+                    };
+                    match triton_chat_msteams::MsTeamsAdapter::from_manifest(
+                        name,
+                        adapter,
+                        resolver.as_ref(),
+                        dispatcher.clone(),
+                        overrides,
+                    )
+                    .await
+                    {
+                        Ok(built) => {
+                            tracing::info!(adapter = %name, "msteams webhook adapter wired");
+                            let r = Arc::new(built).router();
+                            chat_router = Some(match chat_router.take() {
+                                Some(acc) => acc.merge(r),
+                                None => r,
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!(adapter = %name, error = %e, "msteams adapter build failed");
                             std::process::exit(2);
                         }
                     }
@@ -481,10 +648,26 @@ async fn main() -> std::io::Result<()> {
             }),
         };
 
+    // PR 34: socket-inbound adapters (Signal) run as standalone
+    // tokio tasks. Roll them up into one future so the drain
+    // awaits them alongside the HTTP listeners. Each task self-
+    // terminates when `shutdown` is cancelled.
+    let socket_adapters_fut = async move {
+        for j in socket_adapter_joins {
+            let _ = j.await;
+        }
+        Ok::<(), std::io::Error>(())
+    };
     let drain = async {
-        let (a, b, c, m, ch) =
-            tokio::join!(serve_mcp, serve_a2a, serve_rest, metrics_fut, chat_fut);
-        a.and(b).and(c).and(m).and(ch)
+        let (a, b, c, m, ch, sa) = tokio::join!(
+            serve_mcp,
+            serve_a2a,
+            serve_rest,
+            metrics_fut,
+            chat_fut,
+            socket_adapters_fut,
+        );
+        a.and(b).and(c).and(m).and(ch).and(sa)
     };
     let outcome = tokio::time::timeout(settings.drain_deadline, drain).await;
     let serve_result = match outcome {
@@ -519,6 +702,10 @@ fn build_registry() -> ToolRegistry {
     registry.register(Arc::new(tools::EmptySurface));
     #[cfg(feature = "dev-token")]
     registry.register(Arc::new(tools::FormOnlyDemo));
+    #[cfg(feature = "dev-token")]
+    registry.register(Arc::new(tools::FormOnlyDemoMulti));
+    #[cfg(feature = "dev-token")]
+    registry.register(Arc::new(tools::SubmittedForm));
     registry
 }
 

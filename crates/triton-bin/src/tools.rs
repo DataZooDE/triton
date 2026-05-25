@@ -330,6 +330,117 @@ impl Tool for FormOnlyDemo {
     }
 }
 
+/// Dev-only A2UI tool emitting a multi-field, form-only Surface.
+/// Used by PR 32's Telegram integration test to exercise the
+/// numbered-prompts state machine:
+///   * `name` — String (required), checks the happy passthrough,
+///   * `age` — Integer (required), exercises the parse-error +
+///     re-prompt path,
+///   * `subscribe` — Boolean (optional), exercises the
+///     yes/no/true/false/1/0 coercion table plus the
+///     optional-blank-stores-null branch.
+///
+/// The submit tool is `echo`, so the form's completion lands on
+/// the existing echo tool's `{ message: <string> }` schema — but
+/// the form args don't match that schema (we send a three-key
+/// object). On completion echo will Validation-fail, which is
+/// also fine for the test: the test inspects the `phase: dispatch`
+/// audit line for the submit tool, not echo's reply content.
+///
+/// Same `dev-token` gate as the other reference/demo tools so
+/// production builds don't reserve the route.
+#[cfg(feature = "dev-token")]
+pub struct FormOnlyDemoMulti;
+
+#[cfg(feature = "dev-token")]
+#[async_trait]
+impl Tool for FormOnlyDemoMulti {
+    fn name(&self) -> &'static str {
+        "form_only_demo_multi"
+    }
+
+    fn returns_a2ui(&self) -> bool {
+        true
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": false
+        })
+    }
+
+    async fn invoke(&self, _args: Value, _principal: &ToolPrincipal) -> Result<Value, TritonError> {
+        let surface = Surface {
+            components: vec![Component::Form {
+                title: "Quick feedback (multi)".into(),
+                fields: vec![
+                    FormField {
+                        name: "name".into(),
+                        label: "name".into(),
+                        kind: FormFieldKind::String,
+                        required: true,
+                    },
+                    FormField {
+                        name: "age".into(),
+                        label: "age".into(),
+                        kind: FormFieldKind::Integer,
+                        required: true,
+                    },
+                    FormField {
+                        name: "subscribe".into(),
+                        label: "subscribe".into(),
+                        kind: FormFieldKind::Boolean,
+                        required: false,
+                    },
+                ],
+                submit_label: "Send".into(),
+                // `submitted_form` is a dev tool that echoes back
+                // its full args as JSON; using it instead of `echo`
+                // lets the integration test assert the submit
+                // dispatched with the user-supplied values without
+                // tripping `echo`'s schema (which insists on a
+                // single `message` string field, additional-
+                // properties: false).
+                tool: "submitted_form".into(),
+            }],
+        };
+        Ok(serde_json::json!({ "surface": surface }))
+    }
+}
+
+/// Dev-only tool that echoes its entire args map back as a
+/// single-key result. Used as the submit tool for
+/// [`FormOnlyDemoMulti`] so the integration test can assert the
+/// form's collected values reached the dispatcher without having
+/// to massage the args through `echo`'s strict
+/// `additionalProperties: false` schema.
+#[cfg(feature = "dev-token")]
+pub struct SubmittedForm;
+
+#[cfg(feature = "dev-token")]
+#[async_trait]
+impl Tool for SubmittedForm {
+    fn name(&self) -> &'static str {
+        "submitted_form"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({
+            "type": "object",
+            "additionalProperties": true
+        })
+    }
+
+    async fn invoke(&self, args: Value, _principal: &ToolPrincipal) -> Result<Value, TritonError> {
+        // Serialise the args so the integration test can scan the
+        // post-back text for individual field values.
+        let s = serde_json::to_string(&args)
+            .map_err(|e| TritonError::Validation(format!("submitted_form serialise: {e}")))?;
+        Ok(serde_json::json!({ "submitted": s }))
+    }
+}
+
 #[cfg(feature = "dev-token")]
 pub struct EmptySurface;
 

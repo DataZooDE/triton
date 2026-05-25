@@ -1823,6 +1823,9 @@ dependencies = [
  "tracing-subscriber",
  "triton-adapters-http",
  "triton-chat-discord",
+ "triton-chat-googlechat",
+ "triton-chat-msteams",
+ "triton-chat-signal",
  "triton-chat-telegram",
  "triton-chat-whatsapp",
  "triton-core",
@@ -1847,6 +1850,59 @@ dependencies = [
  "tracing",
  "triton-core",
  "triton-correlation",
+ "triton-manifest",
+ "triton-secrets",
+ "uuid",
+]
+
+[[package]]
+name = "triton-chat-googlechat"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "triton-core",
+ "triton-manifest",
+ "triton-secrets",
+ "uuid",
+]
+
+[[package]]
+name = "triton-chat-msteams"
+version = "0.0.1"
+dependencies = [
+ "axum",
+ "chrono",
+ "jsonwebtoken",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "triton-core",
+ "triton-manifest",
+ "triton-secrets",
+ "uuid",
+]
+
+[[package]]
+name = "triton-chat-signal"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "triton-core",
  "triton-manifest",
  "triton-secrets",
  "uuid",

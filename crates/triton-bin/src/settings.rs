@@ -45,6 +45,30 @@ pub struct Settings {
     pub chat_webhook_port: u16,
     pub telegram_api_base: String,
     pub whatsapp_api_base: String,
+    /// JWKS URI for Google Chat inbound JWT verification. Production
+    /// stays at the canonical Google host (`https://www.googleapis.com/...`),
+    /// which is the only host on the NFR-S-4 egress allowlist for
+    /// this adapter. Integration tests override this with an in-repo
+    /// `FakeGoogleJwks` fixture.
+    pub google_chat_jwks_uri: String,
+    /// signald daemon address override for the Signal adapter
+    /// (PR 34). Empty string ⇒ use the address declared in
+    /// `adapter.yaml`. Outside `local` env this MUST be set
+    /// per NFR-S-4 egress allowlist — the binary refuses to wire
+    /// the Signal adapter when the env is non-`local` and this
+    /// override is empty.
+    pub signal_signald_addr: String,
+    /// OpenID discovery URL for Microsoft Bot Framework JWT
+    /// verification. Production stays at the canonical Microsoft
+    /// endpoint (the only `login.botframework.com` URL on the
+    /// NFR-S-4 egress allowlist for this adapter). Integration
+    /// tests override this with their `FakeBotFramework` fixture.
+    pub msteams_openid_url: String,
+    /// Optional override for the Microsoft OAuth2 token endpoint.
+    /// `None` ⇒ use the hardcoded canonical endpoint inside
+    /// `token_client.rs`. Tests set this so the fake bot framework
+    /// can mint stub access tokens.
+    pub msteams_token_url: Option<String>,
     pub courier_timeout: Duration,
     /// Comma-separated allow-list of origins that may make
     /// cross-origin requests to the HTTP trio. Empty by default —
@@ -210,6 +234,45 @@ struct Cli {
     #[arg(long, env = "TRITON_COURIER_TIMEOUT_MS", default_value_t = 10_000)]
     courier_timeout_ms: u64,
 
+    /// JWKS URI used by the Google Chat adapter to fetch the Google
+    /// service-account certificates it verifies inbound JWTs
+    /// against. Production stays at the canonical Google URL (the
+    /// only host on the NFR-S-4 egress allowlist for this adapter).
+    /// Integration tests override this to point at an in-repo
+    /// `FakeGoogleJwks`.
+    #[arg(
+        long,
+        env = "TRITON_GOOGLE_CHAT_JWKS_URI",
+        default_value = "https://www.googleapis.com/service_accounts/v1/metadata/x509/chat@system.gserviceaccount.com"
+    )]
+    google_chat_jwks_uri: String,
+
+    /// signald daemon address for the Signal adapter (PR 34).
+    /// Format: `tcp://<host>:<port>` or `unix:///path/to/sock`.
+    /// Empty default — `adapter.yaml` carries the manifest value.
+    /// Outside `local` env the operator MUST set this per NFR-S-4
+    /// egress allowlist, otherwise the binary refuses to wire the
+    /// Signal adapter.
+    #[arg(long, env = "TRITON_SIGNAL_SIGNALD_ADDR", default_value = "")]
+    signal_signald_addr: String,
+
+    /// OpenID discovery URL for the Microsoft Teams adapter. Default
+    /// is the canonical Bot Framework endpoint. Outside `local` env
+    /// the binary refuses any override (NFR-S-4 egress allowlist).
+    #[arg(
+        long,
+        env = "TRITON_MSTEAMS_OPENID_URL",
+        default_value = "https://login.botframework.com/v1/.well-known/openidconfiguration"
+    )]
+    msteams_openid_url: String,
+
+    /// Optional override for Microsoft's OAuth2 token endpoint.
+    /// `None` (the default) ⇒ the canonical hardcoded URL inside
+    /// `token_client.rs`. Tests set this so the in-repo
+    /// `FakeBotFramework` can mint stub access tokens.
+    #[arg(long, env = "TRITON_MSTEAMS_TOKEN_URL")]
+    msteams_token_url: Option<String>,
+
     /// Comma-separated CORS allow-list (e.g.
     /// `https://explorer-nonprod.tailnet.ts.net`). Default empty:
     /// no CORS layer mounted, response headers identical to v0.1.
@@ -252,6 +315,10 @@ impl From<Cli> for Settings {
             chat_webhook_port: c.chat_webhook_port,
             telegram_api_base: c.telegram_api_base,
             whatsapp_api_base: c.whatsapp_api_base,
+            google_chat_jwks_uri: c.google_chat_jwks_uri,
+            signal_signald_addr: c.signal_signald_addr,
+            msteams_openid_url: c.msteams_openid_url,
+            msteams_token_url: c.msteams_token_url,
             courier_timeout: Duration::from_millis(c.courier_timeout_ms),
             cors_allowed_origins: triton_adapters_http::cors::parse_origins(
                 &c.cors_allowed_origins,
