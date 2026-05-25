@@ -40,7 +40,10 @@
 //! instead of HTML, and components v2 (`{type:1 ActionRow,
 //! components:[{type:2 Button, …}]}`) for buttons.
 
-mod surface_mapper;
+// Exposed (pub) so triton-adapters-http's `/v1/surface/render`
+// preview route can call the same mapper the live Discord
+// interaction handler uses. No behavioural change — visibility only.
+pub mod surface_mapper;
 pub use surface_mapper::RenderedInteraction;
 
 use std::collections::HashMap;

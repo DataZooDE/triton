@@ -113,19 +113,35 @@ async fn metrics_view(State(state): State<RestState>, parts: Parts) -> Response 
 
 #[derive(Debug, Deserialize)]
 struct SurfaceRenderRequest {
-    /// Which chat-channel adapter to ask. Only `telegram` is wired
-    /// today; future adapters get their own arm in the match below.
+    /// Which chat-channel adapter to ask. One of `telegram`,
+    /// `discord`, `googlechat`, `msteams`, `signal`, `whatsapp`.
     adapter: String,
     /// Raw A2UI `result` envelope `{ "surface": {...} }` as a tool
     /// would return — the same shape `extract_surface` parses.
     result: serde_json::Value,
 }
 
+/// Adapters the preview endpoint can render. Kept in one place so
+/// the `400 unknown adapter` message and the explorer's dropdown
+/// can agree on the closed set.
+const PREVIEW_ADAPTERS: &[&str] = &[
+    "telegram",
+    "discord",
+    "googlechat",
+    "msteams",
+    "signal",
+    "whatsapp",
+];
+
 /// `POST /v1/surface/render` — runs the supplied A2UI Surface
 /// through a chat-channel surface mapper and returns what the
-/// adapter would post. Lets the explorer's A2UI diff page show
-/// the L6′ degradation alongside the v0.8 / v0.9 envelopes
-/// without the operator actually wiring Telegram for tests.
+/// adapter would post. Lets the explorer's A2UI diff page show the
+/// L6′ degradation (Telegram inline keyboards, Discord components
+/// v2, MS Teams Adaptive Cards, …) alongside the v0.8 / v0.9
+/// envelopes without the operator actually wiring a live bot.
+///
+/// Every mapper is the SAME function its live courier calls, so the
+/// preview can't drift from production rendering.
 async fn surface_render(
     State(state): State<RestState>,
     parts: Parts,
@@ -142,45 +158,145 @@ async fn surface_render(
         );
         return error_response(&e, None);
     }
-    // The mapper signs button callback_data with this key. The
-    // explorer's preview endpoint is read-only — the rendered
-    // buttons are never actually posted to Telegram — so a fixed
-    // sentinel key is fine. Tokens carrying it could not be
-    // accepted by any real adapter (every manifest entry uses a
-    // distinct key resolved through Vault), which is the right
-    // failure mode: a curious operator copying a callback id out
-    // of the preview cannot replay it against the live adapter.
+
+    // The button-bearing mappers (Telegram, Discord) sign
+    // callback_data with this key. The preview is read-only — the
+    // rendered buttons are never posted — so a fixed zero key is
+    // safe: tokens carrying it can't be replayed against any live
+    // adapter, every one of which uses a distinct vault-resolved
+    // key. Mappers without interactive callbacks ignore it.
     const PREVIEW_KEY: [u8; 32] = [0u8; 32];
-    match req.adapter.as_str() {
-        "telegram" => match triton_chat_telegram::surface_mapper::try_render_surface(
-            &req.result,
-            &PREVIEW_KEY,
-        ) {
-            None => error_response(
-                &TritonError::Validation(
-                    "result is not an A2UI surface (missing `surface` field)".into(),
-                ),
-                None,
+
+    let not_a2ui = || {
+        error_response(
+            &TritonError::Validation(
+                "result is not an A2UI surface (missing `surface` field)".into(),
             ),
-            Some(Err(_)) => Json(json!({
-                "adapter": "telegram",
-                "rendered": false,
-                "reason": "empty_after_render",
+            None,
+        )
+    };
+    let empty = |adapter: &str| {
+        Json(json!({ "adapter": adapter, "rendered": false, "reason": "empty_after_render" }))
+            .into_response()
+    };
+
+    // One arm per adapter. Each crate's `RenderedMessage` /
+    // `RenderedInteraction` is a distinct type, so we map each into
+    // the common JSON envelope explicitly. The shared keys (`text`,
+    // `deferred_*`, `truncated`) line up; adapter-specific extras
+    // (`parse_mode` + `reply_markup` for telegram, `components` for
+    // discord, `has_dashboard_raster` for the rasterising ones) are
+    // added only where they exist.
+    match req.adapter.as_str() {
+        "telegram" => {
+            match triton_chat_telegram::surface_mapper::try_render_surface(
+                &req.result,
+                &PREVIEW_KEY,
+            ) {
+                None => not_a2ui(),
+                Some(Err(_)) => empty("telegram"),
+                Some(Ok(m)) => Json(json!({
+                    "adapter": "telegram",
+                    "rendered": true,
+                    "text": m.text,
+                    "parse_mode": m.parse_mode,
+                    "reply_markup": m.reply_markup,
+                    "deferred_buttons": m.deferred_buttons,
+                    "deferred_selections": m.deferred_selections,
+                    "deferred_dashboards": m.deferred_dashboards,
+                    "truncated": m.truncated,
+                    "has_dashboard_raster": m.dashboard.is_some(),
+                }))
+                .into_response(),
+            }
+        }
+        "discord" => {
+            match triton_chat_discord::surface_mapper::try_render_surface(&req.result, &PREVIEW_KEY)
+            {
+                None => not_a2ui(),
+                Some(Err(_)) => empty("discord"),
+                Some(Ok(m)) => Json(json!({
+                    "adapter": "discord",
+                    "rendered": true,
+                    "text": m.content,
+                    "components": m.components,
+                    "deferred_buttons": m.deferred_buttons,
+                    "deferred_selections": m.deferred_selections,
+                    "deferred_forms": m.deferred_forms,
+                    "deferred_dashboards": m.deferred_dashboards,
+                    "truncated": m.truncated,
+                    "has_dashboard_raster": m.dashboard.is_some(),
+                }))
+                .into_response(),
+            }
+        }
+        "googlechat" => {
+            match triton_chat_googlechat::surface_mapper::try_render_surface(&req.result) {
+                None => not_a2ui(),
+                Some(Err(_)) => empty("googlechat"),
+                Some(Ok(m)) => Json(json!({
+                    "adapter": "googlechat",
+                    "rendered": true,
+                    "text": m.text,
+                    "deferred_buttons": m.deferred_buttons,
+                    "deferred_selections": m.deferred_selections,
+                    "deferred_forms": m.deferred_forms,
+                    "deferred_dashboards": m.deferred_dashboards,
+                    "truncated": m.truncated,
+                }))
+                .into_response(),
+            }
+        }
+        "msteams" => match triton_chat_msteams::surface_mapper::try_render_surface(&req.result) {
+            None => not_a2ui(),
+            Some(Err(_)) => empty("msteams"),
+            Some(Ok(m)) => Json(json!({
+                "adapter": "msteams",
+                "rendered": true,
+                "text": m.text,
+                "deferred_buttons": m.deferred_buttons,
+                "deferred_selections": m.deferred_selections,
+                "deferred_forms": m.deferred_forms,
+                "deferred_dashboards": m.deferred_dashboards,
+                "truncated": m.truncated,
             }))
             .into_response(),
-            Some(Ok(msg)) => Json(json!({
-                "adapter": "telegram",
+        },
+        "signal" => match triton_chat_signal::surface_mapper::try_render_surface(&req.result) {
+            None => not_a2ui(),
+            Some(Err(_)) => empty("signal"),
+            Some(Ok(m)) => Json(json!({
+                "adapter": "signal",
                 "rendered": true,
-                "text": msg.text,
-                "parse_mode": msg.parse_mode,
-                "deferred_buttons": msg.deferred_buttons,
-                "truncated": msg.truncated,
+                "text": m.text,
+                "deferred_buttons": m.deferred_buttons,
+                "deferred_selections": m.deferred_selections,
+                "deferred_forms": m.deferred_forms,
+                "deferred_dashboards": m.deferred_dashboards,
+                "truncated": m.truncated,
+            }))
+            .into_response(),
+        },
+        "whatsapp" => match triton_chat_whatsapp::surface_mapper::try_render_surface(&req.result) {
+            None => not_a2ui(),
+            Some(Err(_)) => empty("whatsapp"),
+            Some(Ok(m)) => Json(json!({
+                "adapter": "whatsapp",
+                "rendered": true,
+                "text": m.text,
+                "deferred_buttons": m.deferred_buttons,
+                "deferred_selections": m.deferred_selections,
+                "deferred_forms": m.deferred_forms,
+                "deferred_dashboards": m.deferred_dashboards,
+                "truncated": m.truncated,
+                "has_dashboard_raster": m.dashboard.is_some(),
             }))
             .into_response(),
         },
         other => error_response(
             &TritonError::Validation(format!(
-                "unknown adapter `{other}`: only `telegram` is wired today"
+                "unknown adapter `{other}`: expected one of {}",
+                PREVIEW_ADAPTERS.join(", ")
             )),
             None,
         ),
