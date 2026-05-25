@@ -777,3 +777,16 @@ a trap the next developer should not have to step in.
   values that would now fail. The RFC 8032 Test 1 Ed25519
   public key is a useful canonical value here because it's
   traceable to a public spec.
+
+- **The harness `pub` surface is the consumer-test contract,
+  not an internal artefact.** When you rename
+  `FakeVault::start_kv_v2` or change `TritonProcess::spawn_with_env`'s
+  signature, you're silently breaking every downstream app's CI
+  that depends on `triton-tests`. The Rust compiler will not tell
+  you — the downstream crates live outside this workspace, and
+  workspace CI never compiles them. Run the ADR-16 deprecation
+  cycle (one release of `#[deprecated]` before removal) for any
+  breaking change to the `pub` items listed in FR-T-2. Discovery
+  aid for later: a `cargo public-api` snapshot in CI would catch
+  accidental breakage at PR time; not wired up yet, follow-up
+  when the surface starts moving fast enough to need it.
