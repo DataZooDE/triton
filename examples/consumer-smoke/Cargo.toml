@@ -1,0 +1,40 @@
+[package]
+name = "triton-consumer-smoke"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+description = """
+ACC-13 example consumer. NOT a workspace member — deliberately
+lives outside `triton-tests`' own workspace so the harness is
+exercised as a `path` dependency from a SEPARATE Cargo
+workspace. This is what an app author's own repo would look
+like: depend on `triton-tests`, spawn `TritonProcess`, hit
+`/v1/tools` with a dev-token bearer.
+
+Run with:
+
+    cd examples/consumer-smoke && cargo test
+
+The path in `[dependencies]` reaches back into the parent
+repo's `crates/triton-tests/`; in a real downstream app you
+would either git-depend on the published commit or vendor
+the crate.
+"""
+
+# Excluded from the parent workspace: this Cargo.toml declares
+# its own `[workspace]` so `cargo` treats this as a stand-alone
+# workspace rooted here. Without this, the workspace at the
+# repo root would automatically pull this crate in.
+[workspace]
+
+[dependencies]
+triton-tests = { path = "../../crates/triton-tests" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+
+[lib]
+path = "src/lib.rs"
