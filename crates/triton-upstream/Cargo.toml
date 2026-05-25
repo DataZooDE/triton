@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 triton-core = { path = "../triton-core" }
+triton-secrets = { path = "../triton-secrets" }
 async-trait = "0.1"
 reqwest = { workspace = true }
 serde = { workspace = true }

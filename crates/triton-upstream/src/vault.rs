@@ -4,19 +4,20 @@
 use std::time::Duration;
 
 use serde::Deserialize;
+use triton_secrets::VaultToken;
 
 #[derive(Clone)]
 pub struct VaultClient {
     base: String,
-    token: String,
+    token: VaultToken,
     http: reqwest::Client,
 }
 
 impl VaultClient {
-    pub fn new(base_url: impl Into<String>, vault_token: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, token: VaultToken) -> Self {
         Self {
             base: base_url.into().trim_end_matches('/').to_string(),
-            token: vault_token.into(),
+            token,
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(3))
                 .build()
@@ -30,10 +31,15 @@ impl VaultClient {
     /// logging it.
     pub async fn mint_oidc(&self, role: &str) -> Result<String, String> {
         let url = format!("{}/v1/identity/oidc/token/{role}", self.base);
+        let vault_token = self
+            .token
+            .get()
+            .await
+            .map_err(|e| format!("vault auth: {e}"))?;
         let resp: TokenResponse = self
             .http
             .get(&url)
-            .header("X-Vault-Token", &self.token)
+            .header("X-Vault-Token", &vault_token)
             .send()
             .await
             .map_err(|e| format!("GET {url}: {e}"))?

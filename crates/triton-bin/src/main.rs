@@ -23,7 +23,7 @@ use triton_core::{Dispatcher, Metrics, RuntimeInfo, ToolRegistry, UpstreamDispat
 use triton_identity::{OidcConfig, OidcVerifier};
 use triton_manifest::{AdapterKind, InboundKind};
 use triton_rasterizer::{Client as RasterizerClient, ClientConfig as RasterizerConfig};
-use triton_secrets::{LiteralResolver, SecretResolver, VaultKvResolver};
+use triton_secrets::{LiteralResolver, SecretResolver, VaultKvResolver, VaultToken};
 use triton_upstream::{ConsulClient, UpstreamConfig, UpstreamRouter, VaultClient};
 
 mod settings;
@@ -140,28 +140,29 @@ async fn main() -> std::io::Result<()> {
     let mut dispatcher =
         Dispatcher::new(registry, settings.env.clone()).with_metrics(metrics.clone());
 
-    // Wire the upstream router if Consul + Vault are configured.
-    //
-    // Partial-wiring rules (PR 16 widened the original PR 9 rule to
-    // let Vault be configured without Consul, so the secret
-    // resolver can boot in deploys that don't need upstream
-    // routing — e.g. a chat-only Telegram gateway):
-    //   * consul + vault_url + vault_token  → upstream router on
-    //   * vault_url + vault_token, no consul → resolver only, no router
-    //   * vault_url without vault_token, or vault_token without
-    //     vault_url → fatal (auth gap)
-    //   * consul without vault_url+vault_token → fatal (router
-    //     can't mint per-call OIDC tokens without Vault)
+    // Triton's Vault auth: a static token (TRITON_VAULT_TOKEN) OR
+    // Nomad workload identity (TRITON_VAULT_JWT_PATH + _ROLE → login
+    // at auth/<mount>/login, refreshed in-process). `None` means no
+    // Vault auth is configured. Exits on a half-configured auth.
+    let vault_token_source: Option<VaultToken> = build_vault_token_source(&settings);
+
+    // Wire the upstream router if Consul + Vault (url + auth) are
+    // configured. Partial-wiring rules:
+    //   * consul + vault_url + auth  → upstream router on
+    //   * vault_url + auth, no consul → resolver only, no router
+    //   * consul without vault_url+auth → fatal (router needs Vault
+    //     for the per-call OIDC swap)
+    //   * vault_url without an auth method → fatal (auth gap)
     //   * none → in-process tools only
     match (
         &settings.consul_url,
         &settings.vault_url,
-        &settings.vault_token,
+        &vault_token_source,
     ) {
-        (Some(consul), Some(vault), Some(token)) => {
+        (Some(consul), Some(vault), Some(ts)) => {
             let router = UpstreamRouter::new(
                 ConsulClient::new(consul.clone()),
-                VaultClient::new(vault.clone(), token.clone()),
+                VaultClient::new(vault.clone(), ts.clone()),
                 UpstreamConfig {
                     circuit_open_after: settings.circuit_open_after,
                     circuit_cooldown: settings.circuit_cooldown,
@@ -179,20 +180,22 @@ async fn main() -> std::io::Result<()> {
                 "vault configured without consul; secret resolver enabled, upstream router off",
             );
         }
-        (None, None, None) => {
+        (Some(_), None, _) => {
+            tracing::error!(
+                "TRITON_CONSUL_URL requires TRITON_VAULT_URL (+ an auth method: TRITON_VAULT_TOKEN or TRITON_VAULT_JWT_PATH/_ROLE) — the upstream router needs Vault for per-call OIDC swap"
+            );
+            std::process::exit(2);
+        }
+        (_, Some(_), None) => {
+            tracing::error!(
+                "TRITON_VAULT_URL requires an auth method: set TRITON_VAULT_TOKEN, or TRITON_VAULT_JWT_PATH + TRITON_VAULT_JWT_ROLE (workload identity)"
+            );
+            std::process::exit(2);
+        }
+        (None, None, _) => {
             tracing::warn!(
                 "no upstream router configured; dispatcher serves in-process tools only"
             );
-        }
-        (Some(_), None, _) | (Some(_), _, None) => {
-            tracing::error!(
-                "TRITON_CONSUL_URL requires TRITON_VAULT_URL and TRITON_VAULT_TOKEN (upstream router needs Vault for per-call OIDC swap)"
-            );
-            std::process::exit(2);
-        }
-        (None, Some(_), None) | (None, None, Some(_)) => {
-            tracing::error!("TRITON_VAULT_URL and TRITON_VAULT_TOKEN must be set together");
-            std::process::exit(2);
         }
     }
     let dispatcher = Arc::new(dispatcher);
@@ -259,10 +262,10 @@ async fn main() -> std::io::Result<()> {
     // Vault refs is gone — a Vault ref without a configured Vault
     // is now a fatal misconfiguration (Codex called this out as a
     // PR 13 concern).
-    let resolver: Arc<dyn SecretResolver> = match (&settings.vault_url, &settings.vault_token) {
-        (Some(url), Some(token)) => {
+    let resolver: Arc<dyn SecretResolver> = match (&settings.vault_url, &vault_token_source) {
+        (Some(url), Some(ts)) => {
             tracing::info!(vault = %url, "secret resolver: vault kv v2");
-            Arc::new(VaultKvResolver::new(url.clone(), token.clone()))
+            Arc::new(VaultKvResolver::new(url.clone(), ts.clone()))
         }
         _ => {
             tracing::info!("secret resolver: literal-only (no TRITON_VAULT_URL configured)");
@@ -1065,6 +1068,61 @@ fn build_registry() -> ToolRegistry {
     #[cfg(feature = "dev-token")]
     registry.register(Arc::new(tools::SubmittedForm));
     registry
+}
+
+/// Build Triton's Vault token source from settings. Returns `None`
+/// when no Vault auth is configured; exits the process on a
+/// half-configured auth (the substrate must see a misconfig fail
+/// closed). A static `TRITON_VAULT_TOKEN` wins over the
+/// workload-identity vars if both are set.
+fn build_vault_token_source(s: &Settings) -> Option<VaultToken> {
+    match (
+        s.vault_url.as_deref(),
+        s.vault_token.as_deref(),
+        s.vault_jwt_path.as_deref(),
+        s.vault_jwt_role.as_deref(),
+    ) {
+        // No Vault at all.
+        (None, None, None, None) => None,
+        // An auth method without a Vault URL is a misconfiguration.
+        (None, _, _, _) => {
+            tracing::error!("TRITON_VAULT_TOKEN / TRITON_VAULT_JWT_* set without TRITON_VAULT_URL");
+            std::process::exit(2);
+        }
+        // Static token (wins over workload identity if both given).
+        (Some(_), Some(token), jwt_path, _) => {
+            if jwt_path.is_some() {
+                tracing::info!(
+                    "both TRITON_VAULT_TOKEN and TRITON_VAULT_JWT_PATH set; using the static token"
+                );
+            }
+            Some(VaultToken::fixed(token))
+        }
+        // Workload identity: log in with the Nomad-issued JWT.
+        (Some(url), None, Some(jwt_path), Some(role)) => {
+            tracing::info!(
+                mount = %s.vault_auth_mount,
+                role,
+                "vault auth: workload identity (jwt login)"
+            );
+            Some(VaultToken::workload_identity(
+                url,
+                jwt_path,
+                s.vault_auth_mount.clone(),
+                role,
+            ))
+        }
+        // Half-configured workload identity.
+        (Some(_), None, Some(_), None) | (Some(_), None, None, Some(_)) => {
+            tracing::error!(
+                "TRITON_VAULT_JWT_PATH and TRITON_VAULT_JWT_ROLE must be set together (workload identity)"
+            );
+            std::process::exit(2);
+        }
+        // Vault URL but no auth method — the caller decides whether
+        // that's fatal (it is, when consul or a manifest needs Vault).
+        (Some(_), None, None, None) => None,
+    }
 }
 
 /// Extract `host` from `scheme://host[:port][/path]`. Returns

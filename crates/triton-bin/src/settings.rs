@@ -34,6 +34,9 @@ pub struct Settings {
     pub consul_url: Option<String>,
     pub vault_url: Option<String>,
     pub vault_token: Option<String>,
+    pub vault_jwt_path: Option<String>,
+    pub vault_jwt_role: Option<String>,
+    pub vault_auth_mount: String,
     pub vault_oidc_role: String,
     pub circuit_open_after: u32,
     pub circuit_cooldown: Duration,
@@ -172,10 +175,33 @@ struct Cli {
     #[arg(long, env = "TRITON_VAULT_URL")]
     vault_url: Option<String>,
 
-    /// Triton's own Vault auth token (Nomad-templated at deploy
-    /// time). Used to mint per-call agent OIDC tokens.
+    /// Triton's own Vault auth token (static). Discouraged on the
+    /// substrate (workload identity below is preferred); kept for
+    /// local dev / a hand-issued token. Used to read `vault://` refs
+    /// and mint per-call agent OIDC tokens. Mutually exclusive with
+    /// the JWT (workload-identity) vars — if both are set, the static
+    /// token wins.
     #[arg(long, env = "TRITON_VAULT_TOKEN")]
     vault_token: Option<String>,
+
+    /// Workload-identity auth: path to the Nomad-issued Vault JWT
+    /// (an `identity { aud = ["vault"], file = true }` stanza writes
+    /// it, e.g. `${NOMAD_SECRETS_DIR}/nomad_vault.jwt`). When set
+    /// (with `--vault-jwt-role`) Triton logs in at
+    /// `auth/<mount>/login` and refreshes the token itself — no
+    /// static token needed.
+    #[arg(long, env = "TRITON_VAULT_JWT_PATH")]
+    vault_jwt_path: Option<String>,
+
+    /// Vault JWT-auth role to assume on login (the role's policies
+    /// must grant `kv` read on the app's branch + a capability on
+    /// `identity/oidc/token/<oidc-role>`).
+    #[arg(long, env = "TRITON_VAULT_JWT_ROLE")]
+    vault_jwt_role: Option<String>,
+
+    /// Vault JWT-auth mount path (the substrate's Nomad auth method).
+    #[arg(long, env = "TRITON_VAULT_AUTH_MOUNT", default_value = "jwt-nomad")]
+    vault_auth_mount: String,
 
     /// Vault OIDC role for the per-call swap (FR-U-2).
     #[arg(
@@ -375,6 +401,9 @@ impl From<Cli> for Settings {
             consul_url: c.consul_url,
             vault_url: c.vault_url,
             vault_token: c.vault_token,
+            vault_jwt_path: c.vault_jwt_path,
+            vault_jwt_role: c.vault_jwt_role,
+            vault_auth_mount: c.vault_auth_mount,
             vault_oidc_role: c.vault_oidc_role,
             circuit_open_after: c.circuit_open_after,
             circuit_cooldown: Duration::from_millis(c.circuit_cooldown_ms),

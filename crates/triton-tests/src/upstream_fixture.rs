@@ -95,6 +95,23 @@ impl FakeVault {
             oidc_token: Some(token.to_string()),
             kv_v2: Vec::new(),
             expected_token: None,
+            login_token: None,
+        })
+        .await
+    }
+
+    /// Workload-identity fake: serves `POST /v1/auth/<mount>/login`
+    /// issuing `issued_token`, and the OIDC swap endpoint which both
+    /// REQUIRES that token (proving Triton logged in and presented
+    /// the workload-identity token) and returns `agent_oidc_token`.
+    /// No KV route (keeps the router free of a wildcard that would
+    /// clash with the static login/oidc routes).
+    pub async fn start_workload_identity(issued_token: &str, agent_oidc_token: &str) -> Self {
+        Self::start(VaultConfig {
+            oidc_token: Some(agent_oidc_token.to_string()),
+            kv_v2: Vec::new(),
+            expected_token: Some(issued_token.to_string()),
+            login_token: Some(issued_token.to_string()),
         })
         .await
     }
@@ -120,6 +137,7 @@ impl FakeVault {
             oidc_token: None,
             kv_v2,
             expected_token: Some(expected_token.to_string()),
+            login_token: None,
         })
         .await
     }
@@ -130,13 +148,45 @@ impl FakeVault {
         let state = Arc::new(cfg);
 
         let mut router: Router = Router::new();
+        // Workload-identity login: issue `login_token` to anyone who
+        // POSTs a (non-empty) jwt. We don't verify the JWT — the test
+        // only needs to prove Triton read the file, logged in, and
+        // then USED the issued token downstream.
+        if state.login_token.is_some() {
+            let login_state = state.clone();
+            router = router.route(
+                "/v1/auth/{mount}/login",
+                axum::routing::post(move |Path(_mount): Path<String>, body: String| {
+                    let token = login_state.login_token.clone().unwrap();
+                    async move {
+                        let _ = &body;
+                        Json(json!({
+                            "auth": { "client_token": token, "lease_duration": 3600 }
+                        }))
+                    }
+                }),
+            );
+        }
         if state.oidc_token.is_some() {
             let oidc_state = state.clone();
             router = router.route(
                 "/v1/identity/oidc/token/{role}",
-                get(move |_: HeaderMap, Path(_role): Path<String>| {
-                    let token = oidc_state.oidc_token.clone().unwrap();
+                get(move |headers: HeaderMap, Path(_role): Path<String>| {
+                    let oidc_state = oidc_state.clone();
                     async move {
+                        // When configured, require the (login-issued)
+                        // token — proves the mint uses the WI token.
+                        if let Some(expected) = &oidc_state.expected_token {
+                            let presented = headers
+                                .get("x-vault-token")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            if presented != expected {
+                                return (StatusCode::FORBIDDEN, "wrong vault token")
+                                    .into_response();
+                            }
+                        }
+                        let token = oidc_state.oidc_token.clone().unwrap();
                         Json(json!({
                             "request_id": "00000000-0000-0000-0000-000000000000",
                             "lease_id": "",
@@ -151,6 +201,7 @@ impl FakeVault {
                             "warnings": null,
                             "auth": null,
                         }))
+                        .into_response()
                     }
                 }),
             );
@@ -181,6 +232,9 @@ struct VaultConfig {
     oidc_token: Option<String>,
     kv_v2: Vec<(String, Vec<(String, String)>)>,
     expected_token: Option<String>,
+    /// When set, serve `POST /v1/auth/<mount>/login` issuing this
+    /// token (workload-identity flow).
+    login_token: Option<String>,
 }
 
 async fn kv_v2_handler(

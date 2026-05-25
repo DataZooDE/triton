@@ -24,6 +24,9 @@ use async_trait::async_trait;
 use serde_json::Value;
 use triton_manifest::SecretField;
 
+mod vault_token;
+pub use vault_token::{VaultAuthError, VaultToken};
+
 /// Resolve a [`SecretField`] (literal or Vault ref) into the raw
 /// secret string the adapter will use.
 #[async_trait]
@@ -59,15 +62,15 @@ impl SecretResolver for LiteralResolver {
 /// variant rather than overloading this one.
 pub struct VaultKvResolver {
     base: String,
-    token: String,
+    token: VaultToken,
     http: reqwest::Client,
 }
 
 impl VaultKvResolver {
-    pub fn new(base_url: impl Into<String>, vault_token: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, token: VaultToken) -> Self {
         Self {
             base: base_url.into().trim_end_matches('/').to_string(),
-            token: vault_token.into(),
+            token,
             http: reqwest::Client::builder()
                 // Boot-time call; if Vault is dead, exit fast and
                 // let Nomad reschedule rather than hang for minutes.
@@ -85,10 +88,18 @@ impl SecretResolver for VaultKvResolver {
             SecretField::Literal(s) => Ok(s.clone()),
             SecretField::Vault { path, field } => {
                 let url = format!("{}/v1/{}", self.base, path);
+                let vault_token = self
+                    .token
+                    .get()
+                    .await
+                    .map_err(|e| ResolveError::Transport {
+                        url: url.clone(),
+                        detail: format!("vault auth: {e}"),
+                    })?;
                 let resp = self
                     .http
                     .get(&url)
-                    .header("X-Vault-Token", &self.token)
+                    .header("X-Vault-Token", &vault_token)
                     .send()
                     .await
                     .map_err(|e| ResolveError::Transport {
