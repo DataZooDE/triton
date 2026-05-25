@@ -143,6 +143,7 @@ sidecar service reached through the upstream router.
 | **Hand-rolled MCP JSON-RPC over axum; no `rmcp`/`tonic`.** | Rust experiment finding: simpler, faster to ship, no framework lock-in for a thin protocol layer. |
 | **Stdout audit; substrate ships it.** | No Loki/Vector/OTel exporter dependency in the binary. Matches G-S3 division of labour. |
 | **Single static Rust binary, baked into golden image.** | Matches G-S4 / Δ-4 substrate baseline. No Python runtime, no Node, no shared libs beyond libc. |
+| **Public test-harness surface, no `mock` doubles.** The same `crates/triton-tests` fixtures that drive Triton's own integration tests are the supported consumer-facing test surface. External apps depend on the crate via path/git, instantiate the real fakes (Consul / Vault / OIDC / agent), and spawn the real binary. | Mirrors CLAUDE.md §1: "no mocks" means real local servers speaking the actual wire protocol. The discipline that keeps Triton's internal tests honest also gives consumers a zero-mock test pattern by reuse. Avoids a parallel mock layer that would inevitably diverge from production behaviour. |
 
 ## 5. Building-block view
 
@@ -560,6 +561,31 @@ Nonce-based first-use-wins dedup is deferred — it needs a
 "seen" cache (per-tenant in-memory or substrate-side KV) and is
 a separate PR.
 
+### 8.8 Consumer test harness
+
+Third-party apps on the substrate hit Triton from their own CI in
+the shape `frontend → triton → app-agent`. The supported pattern
+is to depend on `crates/triton-tests` via path or git, instantiate
+the same fakes the in-repo integration tests use, and spawn the
+real binary. There is no parallel "mock Triton" library and no
+embedded-mode entry point — the binary is the contract.
+
+The default `dev-token` Cargo feature on `triton-bin` is the
+developer-experience affordance for FR-T-1. In debug builds with
+no `TRITON_OIDC_ISSUER` configured, the binary accepts a literal
+`"dev-token"` bearer and maps it to a fixed dev principal; no
+real JWT minting is needed in CI. The trade-off is paid at the
+production boundary: release builds (`--no-default-features`)
+compile the dev-token path out entirely (ADR-10), so a debug-only
+affordance cannot leak into a shipped image.
+
+The harness `pub` surface (`TritonProcess`, `TestIssuer`,
+`FakeConsul`, `FakeVault`, `FakeAgent`, chat-platform fakes) is
+governed by ADR-16: it follows a one-release deprecation cycle
+before any breaking change, so a downstream app's CI does not
+break on a routine refactor of internal tests. Consumer-facing
+walkthrough at `doc/consumer-integration-tests.md`.
+
 ## 9. Architecture decisions (ADRs, condensed)
 
 | ID | Decision | Why |
@@ -579,6 +605,7 @@ a separate PR.
 | ADR-13 (v0.2) | **Declarative YAML manifest (`adapter.yaml`) is the single source of truth for adapters, tools, identity strategies, surface mapping rules, and rate-limit budgets.** Hardcoded registries are removed in v0.2. Boot-time validation closed-checks every kind / signature / identity / degrade key against documented sets. YAML chosen over TOML because the nested adapter shape (e.g. `adapter.discord.inbound.gateway`) reads more naturally without TOML's header brackets, and YAML aligns with the surrounding ecosystem (Kubernetes, GitHub Actions, Ansible). | Replaces NFR-O-1's "no config files" stance for v0.2. Verifies M-MANIFEST-1, M-COVERAGE-1, M-SECRETS-1. Supersedes the v0.1 §8.1 stance that CLI flags and env vars are the entire configuration story. |
 | ADR-14 (v0.2) | **Identity boundary admits four resolution strategies, selected per adapter in the manifest.** OIDC bearer remains the path for the HTTP trio; chat-channel adapters select one of `sender_table`, `azure` (AAD via Bot Framework), `self_enrol` (pairing flow), or `upstream` (delegated resolver tool). Platform signature schemes form a parallel closed set: `hmac256`, `bot_framework_jwt`, `ed25519`, `google_oidc_jwt`, plus session-locality for signal-cli. | Chat platforms do not carry an OIDC bearer; identity must be derived from the platform sender id and verified through the platform's own signature scheme. Verifies M-IDENT-1, M-SIG-1, M-ENROL-1, M-LOCALITY-1. |
 | ADR-15 (v0.2) | **Two-record audit per chat-channel invocation, sharing one `trace_id`.** The dispatcher emits an `AuditPhase::Dispatch` record at receipt; the outbound courier emits an `AuditPhase::Post` record at platform-API response with `status ∈ {posted, retry, dropped}`. Signature rejections produce an `AuditPhase::Rejected` record before the dispatcher is reached. Schema otherwise identical to the v0.1 dispatcher / upstream pair. | Preserves audit symmetry across the async path: a single query keyed by `trace_id` returns the complete exchange. Verifies M-ASYNC-1. Supersedes the v0.1 FR-AU-1 wording that assumed exactly one inbound line + one upstream line per call. |
+| ADR-16 | **The `pub` surface of `crates/triton-tests` is a supported consumer-facing API, not an internal test artifact.** Public items (`TritonProcess`, `TestIssuer`, `FakeConsul`, `FakeVault`, `FakeAgent`, chat-platform fakes) MUST go through one minor-version deprecation cycle — a `#[deprecated]` warning that compiles for one release — before removal or breaking signature change. The crate is consumed via git/path dependency inside DataZoo-internal workspaces; no crates.io publication is in scope. | FR-T-2 makes consumer integration tests a first-class requirement. Letting the harness surface drift freely under "it's just tests" cover would silently break every downstream app's CI on routine refactors and erode the App-author concern in §4 (requirements). A deprecation discipline is the cheapest way to keep the surface honest without a crates.io release engineering tax. |
 
 ## 10. Quality scenarios
 

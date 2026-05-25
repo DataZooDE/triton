@@ -131,6 +131,7 @@ There is no separate "pattern" component to build.
 |---|---|
 | Substrate operator | Triton boots clean on a fresh allocation; SIGTERM drain works; audit lines parse; `/version` matches the deployed image. |
 | Agent author | Register a Nomad job with `tag:agent:<name>`, expose a tool schema, get traffic. No coupling to Triton's release cycle. |
+| App author | Spin up Triton in the app's own CI with a single `cargo add` (path/git dep) and ≤ 30 LOC of test wiring; exercise `frontend → triton → app-agent` against a real Triton process without standing up Consul, Vault, or an OIDC issuer. |
 | Client author (MCP host, A2A peer, REST caller) | One stable URL on `:443`; wire-format symmetry; A2UI version negotiation. |
 | Security reviewer | OIDC verification at the boundary; no static credentials; principal-scoped Vault tokens for upstream; no exfiltration path beyond audit + agents. |
 
@@ -422,6 +423,50 @@ on implementation details not pinned below.
   a runtime warning. Production builds MUST refuse to start on
   any literal credential. *(M-SECRETS-1; NFR-S-5.)*
 
+### 5.8 Consumer test harness (FR-T)
+
+These requirements pin the developer-experience surface a
+third-party app author depends on when writing
+`frontend → triton → app-agent` integration tests in the app's own
+CI. The capabilities themselves are not new; this section names
+them as a supported contract. See `consumer-integration-tests.md`
+for the worked walkthrough.
+
+- **FR-T-1** Triton MUST support a "minimum-viable boot" mode in
+  which no Consul, no Vault, and no OIDC issuer are reachable, the
+  manifest is empty, and the binary accepts the literal bearer
+  `"dev-token"` (mapped to `Principal{sub: "dev-user", scopes:
+  ["dev"], tenant: "dev"}`). This mode MUST be on by default in
+  debug builds via the `dev-token` Cargo feature on `triton-bin`
+  and MUST be compiled out of release builds (re-affirms ADR-10).
+  When `TRITON_OIDC_ISSUER` is configured, dev-token MUST be
+  rejected.
+- **FR-T-2** The Rust test-harness crate (currently
+  `crates/triton-tests`) MUST expose its fixtures —
+  `TritonProcess`, `TestIssuer`, `FakeConsul`, `FakeVault`,
+  `FakeAgent`, and the chat-platform fakes — as `pub` items
+  consumable from external Rust workspaces via path or git
+  dependency. The public surface follows a deprecation cycle, not
+  free refactoring (see ADR-16).
+- **FR-T-3** Each backing-service fixture MUST be self-contained:
+  binds an ephemeral loopback port, returns its base URL, requires
+  no shared filesystem state, and releases its port on `Drop`.
+  Two consumer tests running in parallel under
+  `cargo test --jobs N` MUST be able to spin independent fixtures
+  without contention.
+- **FR-T-4** A consumer integration test MUST be able to register
+  a stub upstream agent by passing `(service_name, host:port)`
+  tuples to `FakeConsul::start`; Triton's upstream router MUST
+  dispatch to the stub without any additional configuration
+  beyond pointing `TRITON_CONSUL_URL` at the fake.
+- **FR-T-5** The env-gated platform-API redirection vars
+  (`TRITON_TELEGRAM_API_BASE` and per-adapter equivalents added by
+  future PRs) MUST permit redirection to a fake endpoint when
+  `TRITON_ENV=local` and MUST be refused outside `local`, so the
+  same fake-platform fixtures the test harness ships can drive
+  consumer tests without widening NFR-S-4's egress allowlist in
+  production.
+
 ## 6. Non-functional requirements
 
 ### 6.1 Security (NFR-S)
@@ -600,6 +645,12 @@ on `nonprod` before promotion.
   adapter with a non-loopback bridge endpoint refuses at
   construction time with a documented error; `/healthz` never
   returns 200; alloc fails to start. *(M-LOCALITY-1, FR-I-9.)*
+- **ACC-13** Consumer-harness smoke. A Rust crate outside this
+  workspace, declaring `triton-tests` as a path or git dependency,
+  boots Triton with no Consul, no Vault, no OIDC issuer, and an
+  empty manifest; posts a `dev-token` bearer call to
+  `GET /v1/tools`; and receives HTTP 200 with an empty tool list.
+  *(FR-T-1, FR-T-2.)*
 
 ## 9. Hypothesis cross-reference (v0.2)
 
