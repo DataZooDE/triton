@@ -22,6 +22,7 @@ use triton_chat_telegram::{CourierConfig, TelegramAdapter};
 use triton_core::{Dispatcher, Metrics, RuntimeInfo, ToolRegistry, UpstreamDispatch};
 use triton_identity::{OidcConfig, OidcVerifier};
 use triton_manifest::{AdapterKind, InboundKind};
+use triton_rasterizer::{Client as RasterizerClient, ClientConfig as RasterizerConfig};
 use triton_secrets::{LiteralResolver, SecretResolver, VaultKvResolver};
 use triton_upstream::{ConsulClient, UpstreamConfig, UpstreamRouter, VaultClient};
 
@@ -368,9 +369,62 @@ async fn main() -> std::io::Result<()> {
                         );
                         std::process::exit(2);
                     }
+                    // PR 36 NFR-S-4: rasterizer is a network
+                    // dependency in the adapter hot path. Default
+                    // `http://127.0.0.1:9320` is fine for local
+                    // dev; outside `local` env the operator MUST
+                    // point at a tailnet-resolved hostname (any
+                    // dotted host that isn't an IP literal — a
+                    // `*.tailnet.ts.net` will do). Refusing
+                    // loopback / public-by-default values stops a
+                    // misconfigured deploy from exfiltrating
+                    // dashboard payloads to an unaudited host. We
+                    // run this check ONLY when a Telegram adapter
+                    // is actually being wired — a Triton instance
+                    // running without chat adapters has no
+                    // rasterizer egress to allowlist.
+                    if settings.env != "local" {
+                        let host = parse_host(&settings.rasterizer_url).unwrap_or("");
+                        let host_ok = !host.is_empty()
+                            && host != "127.0.0.1"
+                            && host != "localhost"
+                            && host != "0.0.0.0"
+                            && host.contains('.')
+                            && !host.chars().all(|c| c.is_ascii_digit() || c == '.');
+                        if !host_ok {
+                            tracing::error!(
+                                env = %settings.env,
+                                rasterizer_url = %settings.rasterizer_url,
+                                "non-`local` env MUST set TRITON_RASTERIZER_URL to a tailnet-resolved hostname (NFR-S-4 egress allowlist)",
+                            );
+                            std::process::exit(2);
+                        }
+                    }
                     let courier_config = CourierConfig {
                         api_base: settings.telegram_api_base.clone(),
                         timeout: settings.courier_timeout,
+                    };
+                    // PR 36: build the rasterizer client lazily —
+                    // dashboards are an opt-in feature, but the
+                    // mapper already declares `dashboard:
+                    // rasterised_png` in every manifest we ship, so
+                    // the URL is essentially always set. Boot
+                    // failure on a bad URL is fatal so dashboards
+                    // can never silently fall through to text
+                    // (M-RASTER-1).
+                    let rasterizer = match RasterizerClient::new(RasterizerConfig {
+                        base: settings.rasterizer_url.clone(),
+                        ..Default::default()
+                    }) {
+                        Ok(c) => Some(c),
+                        Err(e) => {
+                            tracing::error!(
+                                rasterizer_url = %settings.rasterizer_url,
+                                error = %e,
+                                "rasterizer client build failed"
+                            );
+                            std::process::exit(2);
+                        }
                     };
                     match TelegramAdapter::from_manifest(
                         name,
@@ -378,6 +432,7 @@ async fn main() -> std::io::Result<()> {
                         resolver.as_ref(),
                         dispatcher.clone(),
                         courier_config,
+                        rasterizer,
                     )
                     .await
                     {
@@ -707,6 +762,18 @@ fn build_registry() -> ToolRegistry {
     #[cfg(feature = "dev-token")]
     registry.register(Arc::new(tools::SubmittedForm));
     registry
+}
+
+/// Extract `host` from `scheme://host[:port][/path]`. Returns
+/// None for unparseable URLs; the caller treats `None` as "not a
+/// tailnet host" so a malformed env var fails closed.
+fn parse_host(url: &str) -> Option<&str> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    // Strip path.
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    // Strip port.
+    let host = host_port.split(':').next().unwrap_or(host_port);
+    if host.is_empty() { None } else { Some(host) }
 }
 
 fn init_tracing() {

@@ -39,6 +39,7 @@ use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use triton_core::{Dispatcher, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
+use triton_rasterizer::{Client as RasterizerClient, DashboardRequest, RasterizerError};
 use triton_secrets::{ResolveError, SecretResolver};
 
 const PROTOCOL: &str = "messenger:telegram";
@@ -108,6 +109,11 @@ pub struct TelegramAdapter {
     sender_table: HashMap<String, SenderClaims>,
     dispatcher: Arc<Dispatcher>,
     courier: CourierClient,
+    /// PR 36: optional handle to the out-of-process rasterizer
+    /// service (FR-A-11). `None` when no rasterizer URL was
+    /// configured — Dashboard components then fall back to the
+    /// pre-PR-36 deferred-text path so users still see something.
+    rasterizer: Option<RasterizerClient>,
     /// PR 24: per-adapter rate limit (NFR-P-3 first tier).
     /// Consumed BEFORE body parse or sender lookup so a noisy
     /// bot — or attacker who has the secret token — can't
@@ -135,12 +141,18 @@ impl TelegramAdapter {
     /// every declared credential through the supplied
     /// [`SecretResolver`] (literal or Vault KV v2), and produce a
     /// runnable adapter. Called once at boot per declared adapter.
+    ///
+    /// `rasterizer` (PR 36) is the optional out-of-process
+    /// dashboard renderer. `None` falls back to a deferred-text
+    /// placeholder for `Component::Dashboard` (same shape as PR
+    /// 27); `Some(client)` ships rasterised PNGs via `sendPhoto`.
     pub async fn from_manifest(
         name: &str,
         adapter: &Adapter,
         resolver: &dyn SecretResolver,
         dispatcher: Arc<Dispatcher>,
         courier_config: CourierConfig,
+        rasterizer: Option<RasterizerClient>,
     ) -> Result<Self, BuildError> {
         if adapter.kind != AdapterKind::Telegram {
             return Err(BuildError::WrongKind);
@@ -249,6 +261,7 @@ impl TelegramAdapter {
             sender_table,
             dispatcher,
             courier,
+            rasterizer,
             rate_limit,
             per_tenant_limit,
             form_state: form_state::FormStateStore::with_cap(form_cap),
@@ -274,6 +287,66 @@ impl CourierClient {
         Ok(Self {
             base: cfg.api_base.trim_end_matches('/').to_string(),
             http,
+        })
+    }
+
+    /// POST `<base>/bot{token}/sendPhoto` as multipart/form-data
+    /// carrying the rendered Dashboard PNG. Used by PR 36's
+    /// Dashboard wiring. Same `{ok: true/false}` envelope handling
+    /// as [`Self::send_message_body`]; same token-leak redaction
+    /// rules.
+    async fn send_photo(
+        &self,
+        bot_token: &str,
+        fields: surface_mapper::SendPhotoFields,
+        png: Vec<u8>,
+    ) -> Result<SendOutcome, CourierError> {
+        let url = format!("{}/bot{}/sendPhoto", self.base, bot_token);
+        let part = reqwest::multipart::Part::bytes(png)
+            .file_name("dashboard.png")
+            .mime_str("image/png")
+            .map_err(|e| CourierError::Transport(redact_url(&e.to_string(), bot_token)))?;
+        let mut form = reqwest::multipart::Form::new()
+            .text("chat_id", fields.chat_id.to_string())
+            .part("photo", part);
+        if let Some(caption) = fields.caption {
+            form = form.text("caption", caption);
+        }
+        if let Some(pm) = fields.parse_mode {
+            form = form.text("parse_mode", pm.to_string());
+        }
+        if let Some(rm) = fields.reply_markup {
+            form = form.text("reply_markup", rm);
+        }
+        let resp = self
+            .http
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| CourierError::Transport(redact_url(&e.to_string(), bot_token)))?;
+        let http_status = resp.status().as_u16();
+        let body: BotApiEnvelope = resp
+            .json()
+            .await
+            .map_err(|e| CourierError::Decode(redact_url(&e.to_string(), bot_token)))?;
+        if body.ok {
+            return Ok(SendOutcome {
+                http_status,
+                label: PostLabel::Posted,
+            });
+        }
+        let retry_after = body.parameters.and_then(|p| p.retry_after);
+        let code = body.error_code.unwrap_or(0);
+        let label = if code == 429 || retry_after.is_some() || code >= 500 {
+            PostLabel::Retry
+        } else {
+            PostLabel::Dropped
+        };
+        Err(CourierError::Application {
+            http_status,
+            label,
+            error_code: code,
         })
     }
 
@@ -973,6 +1046,7 @@ fn courier_reply(text: &str) -> RenderedMessage {
         deferred_buttons: 0,
         deferred_selections: 0,
         deferred_dashboards: 0,
+        dashboard: None,
         truncated: false,
     }
 }
@@ -1229,6 +1303,7 @@ fn render_dispatch_result(
         deferred_selections: 0,
         deferred_dashboards: 0,
         truncated: false,
+        dashboard: None,
     })
 }
 
@@ -1237,8 +1312,77 @@ async fn post_back(
     principal: &Principal,
     tool_name: &str,
     chat_id: i64,
-    msg: RenderedMessage,
+    mut msg: RenderedMessage,
 ) {
+    // PR 36: surface carries a Dashboard → call the rasterizer
+    // (architecture.md §8.7 / FR-A-11). On success we dispatch
+    // `sendPhoto` with the PNG + caption; on failure we strip the
+    // dashboard, append a deferred-text placeholder, and fall back
+    // to `sendMessage` so the user still gets SOMETHING. The
+    // rasterizer call itself emits its own `phase: post,
+    // result: rasterizer_call` audit line so the network hop is
+    // visible to operators independent of the final post outcome.
+    if let Some(dash) = msg.dashboard.take() {
+        if let Some(rasterizer) = adapter.rasterizer.as_ref() {
+            match rasterize_dashboard(adapter, principal, tool_name, rasterizer, &dash).await {
+                Ok(png) => {
+                    let fields = surface_mapper::build_send_photo_fields(chat_id, &msg);
+                    let start = std::time::Instant::now();
+                    let outcome = adapter
+                        .courier
+                        .send_photo(&adapter.bot_token, fields, png)
+                        .await;
+                    let latency_ms = start.elapsed().as_millis() as u64;
+                    record_post_outcome(adapter, tool_name, principal, latency_ms, outcome);
+                    return;
+                }
+                Err(_) => {
+                    // Rasterizer failed — fall through to the
+                    // sendMessage fallback. Append a one-line
+                    // placeholder so the user sees that a
+                    // dashboard was offered but couldn't render
+                    // (operators see the failure in audit + logs).
+                    // Title doesn't leak tile content, only the
+                    // dashboard's name.
+                    let placeholder = format!(
+                        "<i>dashboard '{title}' unavailable (rasterizer failed)</i>",
+                        title = html_escape_caption(&dash.title)
+                    );
+                    if msg.text.is_empty() {
+                        msg.text = placeholder;
+                    } else {
+                        msg.text.push_str("\n\n");
+                        msg.text.push_str(&placeholder);
+                    }
+                    if msg.parse_mode.is_none() {
+                        msg.parse_mode = Some("HTML");
+                    }
+                }
+            }
+        } else {
+            // No rasterizer configured — same deferred-text
+            // shape as the pre-PR-36 path.
+            let placeholder = format!(
+                "<i>dashboard '{title}' deferred — rasterizer not configured</i>",
+                title = html_escape_caption(&dash.title)
+            );
+            if msg.text.is_empty() {
+                msg.text = placeholder;
+            } else {
+                msg.text.push_str("\n\n");
+                msg.text.push_str(&placeholder);
+            }
+            if msg.parse_mode.is_none() {
+                msg.parse_mode = Some("HTML");
+            }
+            tracing::warn!(
+                tool = tool_name,
+                dashboard_title = %dash.title,
+                "telegram adapter: no rasterizer configured; dashboard deferred"
+            );
+        }
+    }
+
     let body = surface_mapper::build_send_message_body(chat_id, &msg);
     let start = std::time::Instant::now();
     let outcome = adapter
@@ -1246,6 +1390,16 @@ async fn post_back(
         .send_message_body(&adapter.bot_token, &body)
         .await;
     let latency_ms = start.elapsed().as_millis() as u64;
+    record_post_outcome(adapter, tool_name, principal, latency_ms, outcome);
+}
+
+fn record_post_outcome(
+    adapter: &TelegramAdapter,
+    tool_name: &str,
+    principal: &Principal,
+    latency_ms: u64,
+    outcome: Result<SendOutcome, CourierError>,
+) {
     match outcome {
         Ok(send) => {
             adapter.dispatcher.record_post(
@@ -1262,12 +1416,12 @@ async fn post_back(
             // logging + auditing it cannot leak the token per FR-AU-3.
             let label = e.label();
             let http_status = e.http_status();
-            let msg = e.message();
+            let m = e.message();
             tracing::warn!(
                 courier_label = label.as_str(),
-                "telegram courier failed: {msg}"
+                "telegram courier failed: {m}"
             );
-            let provider = TritonError::Provider(msg);
+            let provider = TritonError::Provider(m);
             adapter.dispatcher.record_post(
                 tool_name,
                 PROTOCOL,
@@ -1277,6 +1431,73 @@ async fn post_back(
             );
         }
     }
+}
+
+/// Drive the rasterizer call and audit the result. Emits the
+/// special `phase: post, result: rasterizer_call` audit line on
+/// success and `result: error:provider, status_label:
+/// rasterizer_failed` on failure (per architecture §8.7's network
+/// dependency audit shape).
+async fn rasterize_dashboard(
+    adapter: &TelegramAdapter,
+    principal: &Principal,
+    tool_name: &str,
+    rasterizer: &RasterizerClient,
+    dash: &surface_mapper::RasterDashboard,
+) -> Result<Vec<u8>, RasterizerError> {
+    // Logging discipline (spec §Constraints): NEVER log full tile
+    // contents at info level. Title + tile count only.
+    tracing::info!(
+        tool = tool_name,
+        dashboard_title = %dash.title,
+        tile_count = dash.tiles.len(),
+        "telegram adapter: calling rasterizer for dashboard"
+    );
+    let req = DashboardRequest {
+        title: dash.title.clone(),
+        tiles: dash.tiles.clone(),
+    };
+    let start = std::time::Instant::now();
+    let result = rasterizer.render(&req).await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+    match &result {
+        Ok(_) => {
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                principal,
+                latency_ms,
+                Ok((200, "rasterizer_call")),
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                tool = tool_name,
+                error = %e,
+                latency_ms,
+                "telegram adapter: rasterizer call failed"
+            );
+            let provider = TritonError::Provider(format!("rasterizer: {e}"));
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                principal,
+                latency_ms,
+                Err((&provider, 0, "rasterizer_failed")),
+            );
+        }
+    }
+    result
+}
+
+/// Minimal HTML escape for caption text — local rather than
+/// reaching into `surface_mapper::html_escape` (which is
+/// pub(crate)). The fallback placeholder is the only caller; the
+/// rest of the captioning lives in the surface mapper itself.
+fn html_escape_caption(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Map a dispatcher error to a Telegram-friendly status. We want to
