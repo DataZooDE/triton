@@ -1,0 +1,27 @@
+# EDIT: rename to your agent. This is a standalone crate, NOT a
+# member of the Triton workspace.
+[package]
+name = "my-tool-agent"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# OIDC verification of Triton's per-call bearer (references/04).
+# Pulled in only for the real-issuer path; the dev-token path needs
+# none of it.
+jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[features]
+# `dev-token` accepts the literal `Bearer dev-token` when no OIDC
+# issuer is configured — mirrors Triton's ADR-10. ON by default for
+# local/CI; build release with `--no-default-features` so the
+# affordance is compiled out and cannot ship.
+default = ["dev-token"]
+dev-token = []

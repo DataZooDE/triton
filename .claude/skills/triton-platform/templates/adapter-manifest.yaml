@@ -1,0 +1,61 @@
+# adapter.yaml fragment — hand this to the Triton operator.
+#
+# This is NOT a standalone file you deploy. It is the slice of the
+# deployment's adapter.yaml that registers YOUR tool (and, if your
+# tool's surface targets chat channels, the degrade rules for it).
+# The operator merges it into the live manifest. See references/03,
+# references/05, and crates/triton-tests/fixtures/manifest-valid.yaml.
+#
+# Two ownership zones:
+#   - `tools:`     → you drive the content (what your tool emits).
+#   - `adapters:`  → operator territory; shown here so you understand
+#                    what degrade rules your surface_components imply.
+
+version: "0.2"
+
+# ── YOU drive this ───────────────────────────────────────────────
+tools:
+  # EDIT: your tool name. Must match the Consul tag agent:<name> and
+  # the path the frontend calls (/v1/tools/<name>).
+  my-tool:
+    # Declare EXACTLY the component kinds your tool can emit. Triton
+    # closed-checks at boot that every chat adapter has a degrade rule
+    # for each of these (FR-L-5, M-COVERAGE-1) — over-declaring forces
+    # the operator to add rules you don't need; under-declaring makes
+    # a real surface get rejected at render time.
+    surface_components: [text, narration, buttons]
+
+  # A raw-JSON tool with no UI declares an empty surface.
+  my-raw-tool:
+    surface_components: []
+
+# ── OPERATOR territory (shown for context) ───────────────────────
+# If your tool's surface reaches chat channels, every adapter needs a
+# degrade rule per component type you declared above. Credentials MUST
+# be vault:// refs in production — a literal here makes prod boot fail
+# (FR-L-6, NFR-S-5). This Telegram example covers text+narration+buttons.
+adapters:
+  telegram:
+    kind: telegram
+    inbound:
+      kind: webhook
+      signature: secret_token
+      secret: vault://kv/data/apps/<co>/triton/<env>/telegram#webhook_secret
+    outbound:
+      kind: rest_api
+      token: vault://kv/data/apps/<co>/triton/<env>/telegram#bot_token
+    identity:
+      kind: sender_table
+      table: vault://kv/data/apps/<co>/triton/<env>/telegram#senders
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard       # Telegram native; ≤ 8 buttons/row
+      # Add a rule for EVERY component kind any tool declares, e.g.:
+      # selections: inline_keyboard
+      # forms: numbered_prompts
+      # dashboard: rasterised_png    # requires a configured rasteriser
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: vault://kv/data/apps/<co>/triton/<env>/telegram#correlation_key
