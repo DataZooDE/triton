@@ -3,6 +3,7 @@
 //! No mocks per CLAUDE.md §1.
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Json;
@@ -85,6 +86,7 @@ fn parse_host_port(host_port: &str) -> (String, u16) {
 /// HTTP fakes that speak the actual wire protocol" as not-mocks.
 pub struct FakeVault {
     addr: SocketAddr,
+    state: Arc<VaultConfig>,
 }
 
 impl FakeVault {
@@ -95,8 +97,67 @@ impl FakeVault {
             oidc_token: Some(token.to_string()),
             kv_v2: Vec::new(),
             expected_token: None,
+            login_token: None,
+            oidc_fail_first: false,
+            login_hits: AtomicU32::new(0),
+            oidc_hits: AtomicU32::new(0),
         })
         .await
+    }
+
+    /// Workload-identity fake: serves `POST /v1/auth/<mount>/login`
+    /// issuing `issued_token`, and the OIDC swap endpoint which both
+    /// REQUIRES that token (proving Triton logged in and presented
+    /// the workload-identity token) and returns `agent_oidc_token`.
+    /// No KV route (keeps the router free of a wildcard that would
+    /// clash with the static login/oidc routes).
+    pub async fn start_workload_identity(issued_token: &str, agent_oidc_token: &str) -> Self {
+        Self::start(VaultConfig {
+            oidc_token: Some(agent_oidc_token.to_string()),
+            kv_v2: Vec::new(),
+            expected_token: Some(issued_token.to_string()),
+            login_token: Some(issued_token.to_string()),
+            oidc_fail_first: false,
+            login_hits: AtomicU32::new(0),
+            oidc_hits: AtomicU32::new(0),
+        })
+        .await
+    }
+
+    /// Like [`start_workload_identity`], but the OIDC swap returns 403
+    /// on its FIRST call (simulating a Vault token revoked
+    /// server-side before its proactive refresh) and succeeds
+    /// afterwards. Lets a test prove the consumer invalidates the
+    /// cached token, re-logs in, and retries. Inspect [`login_hits`]
+    /// / [`oidc_hits`] to confirm the re-login happened.
+    ///
+    /// [`start_workload_identity`]: FakeVault::start_workload_identity
+    /// [`login_hits`]: FakeVault::login_hits
+    /// [`oidc_hits`]: FakeVault::oidc_hits
+    pub async fn start_workload_identity_revoke_once(
+        issued_token: &str,
+        agent_oidc_token: &str,
+    ) -> Self {
+        Self::start(VaultConfig {
+            oidc_token: Some(agent_oidc_token.to_string()),
+            kv_v2: Vec::new(),
+            expected_token: Some(issued_token.to_string()),
+            login_token: Some(issued_token.to_string()),
+            oidc_fail_first: true,
+            login_hits: AtomicU32::new(0),
+            oidc_hits: AtomicU32::new(0),
+        })
+        .await
+    }
+
+    /// Number of `auth/<mount>/login` calls served so far.
+    pub fn login_hits(&self) -> u32 {
+        self.state.login_hits.load(Ordering::SeqCst)
+    }
+
+    /// Number of OIDC-swap calls served so far.
+    pub fn oidc_hits(&self) -> u32 {
+        self.state.oidc_hits.load(Ordering::SeqCst)
     }
 
     /// KV-v2-only fake. Serves the listed `(path, fields)` pairs at
@@ -120,6 +181,10 @@ impl FakeVault {
             oidc_token: None,
             kv_v2,
             expected_token: Some(expected_token.to_string()),
+            login_token: None,
+            oidc_fail_first: false,
+            login_hits: AtomicU32::new(0),
+            oidc_hits: AtomicU32::new(0),
         })
         .await
     }
@@ -130,13 +195,54 @@ impl FakeVault {
         let state = Arc::new(cfg);
 
         let mut router: Router = Router::new();
+        // Workload-identity login: issue `login_token` to anyone who
+        // POSTs a (non-empty) jwt. We don't verify the JWT — the test
+        // only needs to prove Triton read the file, logged in, and
+        // then USED the issued token downstream.
+        if state.login_token.is_some() {
+            let login_state = state.clone();
+            router = router.route(
+                "/v1/auth/{mount}/login",
+                axum::routing::post(move |Path(_mount): Path<String>, body: String| {
+                    let login_state = login_state.clone();
+                    async move {
+                        let _ = &body;
+                        login_state.login_hits.fetch_add(1, Ordering::SeqCst);
+                        let token = login_state.login_token.clone().unwrap();
+                        Json(json!({
+                            "auth": { "client_token": token, "lease_duration": 3600 }
+                        }))
+                    }
+                }),
+            );
+        }
         if state.oidc_token.is_some() {
             let oidc_state = state.clone();
             router = router.route(
                 "/v1/identity/oidc/token/{role}",
-                get(move |_: HeaderMap, Path(_role): Path<String>| {
-                    let token = oidc_state.oidc_token.clone().unwrap();
+                get(move |headers: HeaderMap, Path(_role): Path<String>| {
+                    let oidc_state = oidc_state.clone();
                     async move {
+                        let hit = oidc_state.oidc_hits.fetch_add(1, Ordering::SeqCst) + 1;
+                        // Simulate a revoked Vault token: reject the
+                        // first swap so the consumer must invalidate,
+                        // re-login, and retry.
+                        if oidc_state.oidc_fail_first && hit == 1 {
+                            return (StatusCode::FORBIDDEN, "token revoked").into_response();
+                        }
+                        // When configured, require the (login-issued)
+                        // token — proves the mint uses the WI token.
+                        if let Some(expected) = &oidc_state.expected_token {
+                            let presented = headers
+                                .get("x-vault-token")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or("");
+                            if presented != expected {
+                                return (StatusCode::FORBIDDEN, "wrong vault token")
+                                    .into_response();
+                            }
+                        }
+                        let token = oidc_state.oidc_token.clone().unwrap();
                         Json(json!({
                             "request_id": "00000000-0000-0000-0000-000000000000",
                             "lease_id": "",
@@ -151,6 +257,7 @@ impl FakeVault {
                             "warnings": null,
                             "auth": null,
                         }))
+                        .into_response()
                     }
                 }),
             );
@@ -166,10 +273,14 @@ impl FakeVault {
             );
         }
 
+        let ret_state = state.clone();
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
-        Self { addr }
+        Self {
+            addr,
+            state: ret_state,
+        }
     }
 
     pub fn url(&self) -> String {
@@ -181,6 +292,14 @@ struct VaultConfig {
     oidc_token: Option<String>,
     kv_v2: Vec<(String, Vec<(String, String)>)>,
     expected_token: Option<String>,
+    /// When set, serve `POST /v1/auth/<mount>/login` issuing this
+    /// token (workload-identity flow).
+    login_token: Option<String>,
+    /// When true, the OIDC swap returns 403 on its first call
+    /// (simulates a revoked Vault token) then succeeds.
+    oidc_fail_first: bool,
+    login_hits: AtomicU32,
+    oidc_hits: AtomicU32,
 }
 
 async fn kv_v2_handler(

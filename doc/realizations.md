@@ -912,3 +912,20 @@ a trap the next developer should not have to step in.
     slow Telegram POST blocks unrelated Discord dashboards; too
     high and the rasterizer's own `spawn_blocking` pool saturates
     first. Will land alongside a fleet-level capacity story.
+
+- **Vault token revocation mid-lease self-heals via invalidate +
+  retry-once.** The `VaultToken` (`triton-secrets/src/vault_token.rs`)
+  refreshes *proactively* at half the lease, so normal expiry never
+  bites. For revocation *before* `refresh_at` (operator
+  `vault token revoke`, policy change, Vault restart losing the
+  lease), both consumers — the KV resolver (`triton-secrets`) and the
+  per-call OIDC mint (`triton-upstream`) — treat a 401/403 as the one
+  retryable case: they call `VaultToken::invalidate()` (clears the
+  cache), then retry once, which forces a fresh login. A second
+  401/403 is terminal. Gotcha for the next person: `invalidate()` is
+  *not* single-flight, so a burst of simultaneous 401s can each clear
+  a freshly-relogged-in token and trigger a few redundant logins —
+  acceptable under a rare revocation event, but don't assume exactly
+  one re-login. Covered by `vault_workload_identity.rs::
+  dispatch_recovers_when_vault_token_is_revoked` (FakeVault 403s the
+  first OIDC swap, then succeeds; asserts login_hits == 2).

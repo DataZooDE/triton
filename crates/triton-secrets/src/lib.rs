@@ -6,12 +6,14 @@
 //! Two impls ship today:
 //!
 //! * [`LiteralResolver`] — refuses Vault refs. Selected when the
-//!   substrate hasn't injected `TRITON_VAULT_URL` / `_TOKEN`. A
-//!   manifest carrying Vault refs against this resolver fails boot,
+//!   substrate hasn't injected `TRITON_VAULT_URL` (+ an auth method).
+//!   A manifest carrying Vault refs against this resolver fails boot,
 //!   which is the FR-L-4 / M-SECRETS-1 contract.
-//! * [`VaultKvResolver`] — calls Vault KV v2 over HTTP, presents the
-//!   stored Triton vault token in `X-Vault-Token`, decodes the
-//!   `data.data.<field>` envelope.
+//! * [`VaultKvResolver`] — calls Vault KV v2 over HTTP, presents a
+//!   [`VaultToken`] in `X-Vault-Token`, decodes the `data.data.<field>`
+//!   envelope. The token comes either from a static `TRITON_VAULT_TOKEN`
+//!   or from Nomad workload identity (the binary logs in at
+//!   `auth/<mount>/login`); see [`VaultToken`].
 //!
 //! The trait is `async` because Vault reads are HTTP; the dispatcher
 //! never needs to call this at request time — secrets are resolved
@@ -23,6 +25,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::Value;
 use triton_manifest::SecretField;
+
+mod vault_token;
+pub use vault_token::{VaultAuthError, VaultToken};
 
 /// Resolve a [`SecretField`] (literal or Vault ref) into the raw
 /// secret string the adapter will use.
@@ -59,15 +64,15 @@ impl SecretResolver for LiteralResolver {
 /// variant rather than overloading this one.
 pub struct VaultKvResolver {
     base: String,
-    token: String,
+    token: VaultToken,
     http: reqwest::Client,
 }
 
 impl VaultKvResolver {
-    pub fn new(base_url: impl Into<String>, vault_token: impl Into<String>) -> Self {
+    pub fn new(base_url: impl Into<String>, token: VaultToken) -> Self {
         Self {
             base: base_url.into().trim_end_matches('/').to_string(),
-            token: vault_token.into(),
+            token,
             http: reqwest::Client::builder()
                 // Boot-time call; if Vault is dead, exit fast and
                 // let Nomad reschedule rather than hang for minutes.
@@ -76,6 +81,67 @@ impl VaultKvResolver {
                 .expect("reqwest client"),
         }
     }
+
+    /// One KV v2 read. `Status { 401|403 }` is the retryable case
+    /// (our Vault token may be revoked) — the caller invalidates and
+    /// retries once.
+    async fn fetch_once(&self, path: &str, field: &str) -> Result<String, ResolveError> {
+        let url = format!("{}/v1/{}", self.base, path);
+        let vault_token = self
+            .token
+            .get()
+            .await
+            .map_err(|e| ResolveError::Transport {
+                url: url.clone(),
+                detail: format!("vault auth: {e}"),
+            })?;
+        let resp = self
+            .http
+            .get(&url)
+            .header("X-Vault-Token", &vault_token)
+            .send()
+            .await
+            .map_err(|e| ResolveError::Transport {
+                url: url.clone(),
+                detail: e.to_string(),
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            let code = status.as_u16();
+            return Err(ResolveError::Status {
+                url: url.clone(),
+                status: code,
+                hint: vault_status_hint(code),
+            });
+        }
+        let body: Value = resp.json().await.map_err(|e| ResolveError::Decode {
+            url: url.clone(),
+            detail: e.to_string(),
+        })?;
+        let inner = body
+            .get("data")
+            .and_then(|d| d.get("data"))
+            .ok_or_else(|| ResolveError::Shape {
+                url: url.clone(),
+                detail: "missing `data.data` envelope (KV v1 mount?)".into(),
+            })?;
+        let raw = inner.get(field).ok_or_else(|| ResolveError::MissingField {
+            url: url.clone(),
+            field: field.to_string(),
+        })?;
+        // Codex (PR 16 review) flagged: collapsing wrong-type
+        // into MissingField hides the diagnosis. A KV v2
+        // entry whose value is an object/array/null/number
+        // is a manifest bug ("you stored a JSON object where
+        // the resolver expects a string") and operators need
+        // it labelled separately from "field not stored".
+        let value = raw.as_str().ok_or_else(|| ResolveError::WrongType {
+            url: url.clone(),
+            field: field.to_string(),
+            actual: json_type(raw),
+        })?;
+        Ok(value.to_string())
+    }
 }
 
 #[async_trait]
@@ -83,55 +149,16 @@ impl SecretResolver for VaultKvResolver {
     async fn resolve(&self, field: &SecretField) -> Result<String, ResolveError> {
         match field {
             SecretField::Literal(s) => Ok(s.clone()),
-            SecretField::Vault { path, field } => {
-                let url = format!("{}/v1/{}", self.base, path);
-                let resp = self
-                    .http
-                    .get(&url)
-                    .header("X-Vault-Token", &self.token)
-                    .send()
-                    .await
-                    .map_err(|e| ResolveError::Transport {
-                        url: url.clone(),
-                        detail: e.to_string(),
-                    })?;
-                let status = resp.status();
-                if !status.is_success() {
-                    return Err(ResolveError::Status {
-                        url: url.clone(),
-                        status: status.as_u16(),
-                    });
+            SecretField::Vault { path, field } => match self.fetch_once(path, field).await {
+                // Vault rejected our token — it may have been revoked
+                // before its proactive refresh. Force a re-login and
+                // retry once.
+                Err(ResolveError::Status { status, .. }) if status == 401 || status == 403 => {
+                    self.token.invalidate().await;
+                    self.fetch_once(path, field).await
                 }
-                let body: Value = resp.json().await.map_err(|e| ResolveError::Decode {
-                    url: url.clone(),
-                    detail: e.to_string(),
-                })?;
-                let inner = body
-                    .get("data")
-                    .and_then(|d| d.get("data"))
-                    .ok_or_else(|| ResolveError::Shape {
-                        url: url.clone(),
-                        detail: "missing `data.data` envelope (KV v1 mount?)".into(),
-                    })?;
-                let raw = inner
-                    .get(field.as_str())
-                    .ok_or_else(|| ResolveError::MissingField {
-                        url: url.clone(),
-                        field: field.clone(),
-                    })?;
-                // Codex (PR 16 review) flagged: collapsing wrong-type
-                // into MissingField hides the diagnosis. A KV v2
-                // entry whose value is an object/array/null/number
-                // is a manifest bug ("you stored a JSON object where
-                // the resolver expects a string") and operators need
-                // it labelled separately from "field not stored".
-                let value = raw.as_str().ok_or_else(|| ResolveError::WrongType {
-                    url: url.clone(),
-                    field: field.clone(),
-                    actual: json_type(raw),
-                })?;
-                Ok(value.to_string())
-            }
+                other => other,
+            },
         }
     }
 }
@@ -145,8 +172,14 @@ pub enum ResolveError {
     VaultNotConfigured { ref_string: String },
     #[error("vault transport error on {url}: {detail}")]
     Transport { url: String, detail: String },
-    #[error("vault non-2xx on {url}: {status}")]
-    Status { url: String, status: u16 },
+    #[error("vault non-2xx on {url}: {status}{hint}")]
+    Status {
+        url: String,
+        status: u16,
+        /// Operator-facing diagnosis appended to the message; empty
+        /// for statuses without a known common cause.
+        hint: &'static str,
+    },
     #[error("vault response decode failed on {url}: {detail}")]
     Decode { url: String, detail: String },
     #[error("vault response shape unexpected on {url}: {detail}")]
@@ -161,6 +194,30 @@ pub enum ResolveError {
     },
 }
 
+/// Operator-facing hint appended to a Vault non-2xx error. Maps the
+/// boot-time failures we actually hit to their likely cause — most
+/// importantly the KV-path gotcha (`kv/data/...` API path in manifest
+/// refs vs `kv/...` CLI path operators seed with) and the
+/// "engine/policy not applied yet" case (a merged Terraform PR isn't
+/// an applied one).
+fn vault_status_hint(status: u16) -> &'static str {
+    match status {
+        404 => {
+            " — no secret at this path. Common causes: the `kv/` engine isn't \
+             enabled/applied on this Vault yet, the KV mount name differs, or the \
+             path is wrong. Manifest refs use the API path \
+             `vault://kv/data/<branch>#<field>`; operators seed with \
+             `vault kv put kv/<branch> ...` (no `data/` segment)."
+        }
+        401 | 403 => {
+            " — Vault rejected the token or denied the path. Check the token's \
+             policy grants read on this branch and that the (workload-identity) \
+             login succeeded."
+        }
+        _ => "",
+    }
+}
+
 fn json_type(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -169,5 +226,22 @@ fn json_type(v: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vault_status_hint;
+
+    #[test]
+    fn status_hint_diagnoses_common_boot_failures() {
+        // 404: the engine/path gotcha gets the most actionable hint.
+        let h404 = vault_status_hint(404);
+        assert!(h404.contains("kv/") && h404.contains("kv/data/"));
+        // 401/403: point at token/policy, not the path.
+        assert!(vault_status_hint(403).contains("policy"));
+        assert!(vault_status_hint(401).contains("policy"));
+        // Anything else: no hint (don't guess).
+        assert_eq!(vault_status_hint(500), "");
     }
 }
