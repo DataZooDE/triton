@@ -158,11 +158,24 @@ impl Sender {
         bytes.push(b'\n');
         let mut guard = self.inner.lock().await;
         match guard.as_mut() {
-            Some(w) => w.write_all(&bytes).await.map_err(SendError::Io),
+            // Writes to the shared socket serialise on this mutex, so
+            // a wedged signald (full kernel buffer, dead peer not yet
+            // detected) would otherwise block every other Signal
+            // post-back indefinitely. Bound the stall: on timeout we
+            // surface a retry-eligible error and let the read loop's
+            // reconnect take over.
+            Some(w) => match tokio::time::timeout(WRITE_TIMEOUT, w.write_all(&bytes)).await {
+                Ok(r) => r.map_err(SendError::Io),
+                Err(_) => Err(SendError::Timeout),
+            },
             None => Err(SendError::Disconnected),
         }
     }
 }
+
+/// Upper bound on a single signald socket write. Keeps one stuck
+/// write from serially blocking all Signal post-backs (FR-L-2).
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
@@ -170,6 +183,8 @@ pub enum SendError {
     Disconnected,
     #[error("signald: write failed: {0}")]
     Io(#[source] std::io::Error),
+    #[error("signald: write timed out")]
+    Timeout,
     #[error("signald: serialise body: {0}")]
     Encode(#[source] serde_json::Error),
 }

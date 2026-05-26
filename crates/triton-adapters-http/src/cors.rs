@@ -32,6 +32,7 @@ pub fn build_layer(origins: &[String]) -> Option<CorsLayer> {
     }
     let parsed: Vec<HeaderValue> = origins
         .iter()
+        .filter(|o| is_valid_origin(o))
         .filter_map(|o| HeaderValue::from_str(o).ok())
         .collect();
     if parsed.is_empty() {
@@ -50,6 +51,26 @@ pub fn build_layer(origins: &[String]) -> Option<CorsLayer> {
     )
 }
 
+/// A configured CORS origin must be an explicit `scheme://host[:port]`.
+/// We refuse a literal `*` (it is not honoured as a wildcard by the
+/// allow-list layer and almost always signals operator confusion) and
+/// anything without an `http(s)://` scheme. Rejected entries are
+/// dropped with a warning rather than silently mounted.
+fn is_valid_origin(origin: &str) -> bool {
+    if origin == "*" {
+        tracing::warn!(
+            "ignoring CORS origin `*`: wildcard origins are not supported; \
+             list explicit `scheme://host` origins instead"
+        );
+        return false;
+    }
+    if !(origin.starts_with("http://") || origin.starts_with("https://")) {
+        tracing::warn!(origin = %origin, "ignoring CORS origin without an http(s):// scheme");
+        return false;
+    }
+    true
+}
+
 /// Parse a comma-separated `TRITON_CORS_ALLOWED_ORIGINS` value into
 /// a clean list, trimming whitespace and dropping empty entries.
 pub fn parse_origins(raw: &str) -> Vec<String> {
@@ -58,4 +79,26 @@ pub fn parse_origins(raw: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_layer, is_valid_origin};
+
+    #[test]
+    fn rejects_wildcard_and_schemeless_origins() {
+        assert!(!is_valid_origin("*"));
+        assert!(!is_valid_origin("example.com"));
+        assert!(is_valid_origin("https://example.com"));
+        assert!(is_valid_origin(
+            "http://dz-triton-explorer.service.consul:8080"
+        ));
+    }
+
+    #[test]
+    fn build_layer_none_when_only_invalid_origins() {
+        assert!(build_layer(&["*".to_string()]).is_none());
+        assert!(build_layer(&["not-an-origin".to_string()]).is_none());
+        assert!(build_layer(&["https://ok.example".to_string()]).is_some());
+    }
 }
