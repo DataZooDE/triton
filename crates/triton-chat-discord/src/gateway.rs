@@ -305,10 +305,18 @@ impl DiscordGatewayAdapter {
                             // this session (fall back to the configured
                             // URL if absent).
                             if let Some(sid) = v.pointer("/d/session_id").and_then(Value::as_str) {
+                                // We reconnect to this URL carrying the
+                                // bot token in IDENTIFY/RESUME, so an
+                                // untrusted `resume_gateway_url` is a
+                                // credential-redirect risk. Only honour
+                                // it when it's a Discord host (or shares
+                                // the configured gateway's host, e.g. a
+                                // self-hosted/test gateway); otherwise
+                                // fall back to the configured URL.
                                 let resume_url = v
                                     .pointer("/d/resume_gateway_url")
                                     .and_then(Value::as_str)
-                                    .filter(|u| u.starts_with("ws"))
+                                    .filter(|u| resume_url_is_trusted(u, &self.gateway_url))
                                     .unwrap_or(&self.gateway_url)
                                     .to_string();
                                 *session = Some(Session {
@@ -517,6 +525,33 @@ fn is_non_resumable_close(code: u16) -> bool {
     matches!(code, 4004 | 4010 | 4011 | 4012 | 4013 | 4014)
 }
 
+/// Extract the host from a `ws://`/`wss://` URL (port/path stripped).
+/// `None` if the scheme isn't ws(s) or the host is empty.
+fn ws_host(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("wss://")
+        .or_else(|| url.strip_prefix("ws://"))?;
+    let host = rest.split(['/', ':', '?']).next().unwrap_or("");
+    (!host.is_empty()).then(|| host.to_string())
+}
+
+/// True if `resume_url` is safe to reconnect to with the bot token.
+/// Trusted when it's a Discord host (`discord.gg` / `discord.com` or a
+/// subdomain) or shares the host of the configured `gateway_url`
+/// (covers a self-hosted / test gateway). Anything else is refused so
+/// a malicious `resume_gateway_url` can't redirect our credentials to
+/// an attacker — Codex security review.
+fn resume_url_is_trusted(resume_url: &str, gateway_url: &str) -> bool {
+    let Some(host) = ws_host(resume_url) else {
+        return false;
+    };
+    let is_discord = host == "discord.gg"
+        || host == "discord.com"
+        || host.ends_with(".discord.gg")
+        || host.ends_with(".discord.com");
+    is_discord || ws_host(gateway_url).is_some_and(|g| g == host)
+}
+
 /// Append the Gateway query Discord requires. `base` is either the
 /// configured gateway URL or a session's resume URL.
 fn with_query(base: &str) -> String {
@@ -648,4 +683,40 @@ fn reply_text(result: &Value) -> String {
         }
     }
     serde_json::to_string(result).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod resume_tests {
+    use super::resume_url_is_trusted;
+
+    #[test]
+    fn trusts_discord_hosts_and_configured_host() {
+        let configured = "wss://gateway.discord.gg";
+        assert!(resume_url_is_trusted(
+            "wss://us-east1.discord.gg",
+            configured
+        ));
+        assert!(resume_url_is_trusted(
+            "wss://gateway.discord.gg",
+            configured
+        ));
+        // Self-hosted / test gateway: same host as configured.
+        assert!(resume_url_is_trusted(
+            "ws://127.0.0.1:9443",
+            "ws://127.0.0.1:8443"
+        ));
+    }
+
+    #[test]
+    fn refuses_foreign_and_malformed_resume_urls() {
+        let configured = "wss://gateway.discord.gg";
+        assert!(!resume_url_is_trusted("wss://evil.example", configured));
+        // Lookalike that merely contains the string is not a suffix match.
+        assert!(!resume_url_is_trusted(
+            "wss://discord.gg.evil.com",
+            configured
+        ));
+        assert!(!resume_url_is_trusted("https://discord.gg", configured)); // wrong scheme
+        assert!(!resume_url_is_trusted("garbage", configured));
+    }
 }

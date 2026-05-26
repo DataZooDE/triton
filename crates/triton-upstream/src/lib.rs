@@ -162,6 +162,19 @@ impl UpstreamRouter {
             .map_err(|e| TritonError::Provider(format!("consul resolve {tool}: {e}")))?
             .ok_or_else(|| TritonError::Provider(format!("no healthy agent for {tool}")))?;
 
+        // SSRF guard (NFR-S-4): a poisoned Consul catalog entry could
+        // point us at an arbitrary host while we carry a freshly
+        // minted agent bearer. Substrate agents live on the tailnet
+        // (private / 100.64-CGNAT) or are named via Consul DNS; refuse
+        // public and link-local IP targets (e.g. 169.254.169.254 cloud
+        // metadata) *before* minting a token or dialing.
+        if !endpoint_is_dispatchable(&endpoint) {
+            tracing::warn!(tool = %tool, "upstream endpoint rejected by SSRF guard");
+            return Err(TritonError::Provider(format!(
+                "upstream endpoint for {tool} is not a permitted tailnet/private target"
+            )));
+        }
+
         // FR-U-2 + NFR-S-3: per-call Vault-minted OIDC token,
         // TTL ≤ 5 min. NEVER forward the inbound raw bearer.
         let agent_token = self
@@ -343,6 +356,60 @@ fn status_for(e: &TritonError) -> u16 {
         TritonError::Tool(_) => 502,
         TritonError::Provider(_) => 502,
         TritonError::RateLimited(_) => 429,
+    }
+}
+
+/// SSRF guard for a Consul-resolved `host:port` endpoint. Hostnames
+/// (Consul DNS, e.g. `*.service.consul`) are allowed; IP literals
+/// must be loopback, RFC-1918 private, or CGNAT/Tailscale
+/// (100.64.0.0/10 v4, `fc00::/7` ULA v6). Public and link-local
+/// targets — notably `169.254.169.254` cloud metadata — are refused.
+fn endpoint_is_dispatchable(endpoint: &str) -> bool {
+    // Split off the port; tolerate a bracketed IPv6 host.
+    let host = endpoint
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(endpoint);
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    match host.parse::<std::net::IpAddr>() {
+        // Not an IP literal → a hostname; trust Consul DNS naming.
+        Err(_) => !host.is_empty(),
+        Ok(std::net::IpAddr::V4(v4)) => {
+            if v4.is_loopback() || v4.is_private() {
+                return true;
+            }
+            // CGNAT 100.64.0.0/10 — Tailscale's tailnet range.
+            let o = v4.octets();
+            o[0] == 100 && (64..=127).contains(&o[1])
+        }
+        // Loopback (::1) or unique-local (fc00::/7, which includes
+        // Tailscale's fd7a:… range). Global + link-local are refused.
+        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback() || (v6.octets()[0] & 0xfe) == 0xfc,
+    }
+}
+
+#[cfg(test)]
+mod ssrf_tests {
+    use super::endpoint_is_dispatchable;
+
+    #[test]
+    fn allows_loopback_private_tailnet_and_hostnames() {
+        assert!(endpoint_is_dispatchable("127.0.0.1:8080"));
+        assert!(endpoint_is_dispatchable("10.1.2.3:443"));
+        assert!(endpoint_is_dispatchable("192.168.0.5:80"));
+        assert!(endpoint_is_dispatchable("172.16.9.9:80"));
+        assert!(endpoint_is_dispatchable("100.96.1.2:8001")); // tailnet
+        assert!(endpoint_is_dispatchable("demo-agent.service.consul:8001"));
+        assert!(endpoint_is_dispatchable("[::1]:8080"));
+        assert!(endpoint_is_dispatchable("[fd7a:115c:a1e0::1]:8080")); // ULA
+    }
+
+    #[test]
+    fn refuses_public_and_metadata_targets() {
+        assert!(!endpoint_is_dispatchable("169.254.169.254:80")); // cloud metadata
+        assert!(!endpoint_is_dispatchable("1.2.3.4:80")); // public
+        assert!(!endpoint_is_dispatchable("8.8.8.8:53")); // public
+        assert!(!endpoint_is_dispatchable("[2606:4700:4700::1111]:443")); // public v6
     }
 }
 
