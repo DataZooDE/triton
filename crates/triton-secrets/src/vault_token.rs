@@ -82,6 +82,19 @@ impl VaultToken {
         }
     }
 
+    /// Drop any cached workload-identity token so the next [`get`]
+    /// re-authenticates. Call this when a consumer sees Vault reject
+    /// the current token (401/403) — the lease may have been revoked
+    /// server-side before its proactive refresh was due. No-op for a
+    /// fixed token (there's nothing to refresh).
+    ///
+    /// [`get`]: VaultToken::get
+    pub async fn invalidate(&self) {
+        if let Inner::Wi(wi) = &*self.inner {
+            *wi.cache.lock().await = None;
+        }
+    }
+
     /// The current Vault token, logging in / refreshing as needed.
     pub async fn get(&self) -> Result<String, VaultAuthError> {
         match &*self.inner {

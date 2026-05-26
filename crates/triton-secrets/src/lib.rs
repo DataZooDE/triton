@@ -81,6 +81,65 @@ impl VaultKvResolver {
                 .expect("reqwest client"),
         }
     }
+
+    /// One KV v2 read. `Status { 401|403 }` is the retryable case
+    /// (our Vault token may be revoked) — the caller invalidates and
+    /// retries once.
+    async fn fetch_once(&self, path: &str, field: &str) -> Result<String, ResolveError> {
+        let url = format!("{}/v1/{}", self.base, path);
+        let vault_token = self
+            .token
+            .get()
+            .await
+            .map_err(|e| ResolveError::Transport {
+                url: url.clone(),
+                detail: format!("vault auth: {e}"),
+            })?;
+        let resp = self
+            .http
+            .get(&url)
+            .header("X-Vault-Token", &vault_token)
+            .send()
+            .await
+            .map_err(|e| ResolveError::Transport {
+                url: url.clone(),
+                detail: e.to_string(),
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(ResolveError::Status {
+                url: url.clone(),
+                status: status.as_u16(),
+            });
+        }
+        let body: Value = resp.json().await.map_err(|e| ResolveError::Decode {
+            url: url.clone(),
+            detail: e.to_string(),
+        })?;
+        let inner = body
+            .get("data")
+            .and_then(|d| d.get("data"))
+            .ok_or_else(|| ResolveError::Shape {
+                url: url.clone(),
+                detail: "missing `data.data` envelope (KV v1 mount?)".into(),
+            })?;
+        let raw = inner.get(field).ok_or_else(|| ResolveError::MissingField {
+            url: url.clone(),
+            field: field.to_string(),
+        })?;
+        // Codex (PR 16 review) flagged: collapsing wrong-type
+        // into MissingField hides the diagnosis. A KV v2
+        // entry whose value is an object/array/null/number
+        // is a manifest bug ("you stored a JSON object where
+        // the resolver expects a string") and operators need
+        // it labelled separately from "field not stored".
+        let value = raw.as_str().ok_or_else(|| ResolveError::WrongType {
+            url: url.clone(),
+            field: field.to_string(),
+            actual: json_type(raw),
+        })?;
+        Ok(value.to_string())
+    }
 }
 
 #[async_trait]
@@ -88,63 +147,16 @@ impl SecretResolver for VaultKvResolver {
     async fn resolve(&self, field: &SecretField) -> Result<String, ResolveError> {
         match field {
             SecretField::Literal(s) => Ok(s.clone()),
-            SecretField::Vault { path, field } => {
-                let url = format!("{}/v1/{}", self.base, path);
-                let vault_token = self
-                    .token
-                    .get()
-                    .await
-                    .map_err(|e| ResolveError::Transport {
-                        url: url.clone(),
-                        detail: format!("vault auth: {e}"),
-                    })?;
-                let resp = self
-                    .http
-                    .get(&url)
-                    .header("X-Vault-Token", &vault_token)
-                    .send()
-                    .await
-                    .map_err(|e| ResolveError::Transport {
-                        url: url.clone(),
-                        detail: e.to_string(),
-                    })?;
-                let status = resp.status();
-                if !status.is_success() {
-                    return Err(ResolveError::Status {
-                        url: url.clone(),
-                        status: status.as_u16(),
-                    });
+            SecretField::Vault { path, field } => match self.fetch_once(path, field).await {
+                // Vault rejected our token — it may have been revoked
+                // before its proactive refresh. Force a re-login and
+                // retry once.
+                Err(ResolveError::Status { status, .. }) if status == 401 || status == 403 => {
+                    self.token.invalidate().await;
+                    self.fetch_once(path, field).await
                 }
-                let body: Value = resp.json().await.map_err(|e| ResolveError::Decode {
-                    url: url.clone(),
-                    detail: e.to_string(),
-                })?;
-                let inner = body
-                    .get("data")
-                    .and_then(|d| d.get("data"))
-                    .ok_or_else(|| ResolveError::Shape {
-                        url: url.clone(),
-                        detail: "missing `data.data` envelope (KV v1 mount?)".into(),
-                    })?;
-                let raw = inner
-                    .get(field.as_str())
-                    .ok_or_else(|| ResolveError::MissingField {
-                        url: url.clone(),
-                        field: field.clone(),
-                    })?;
-                // Codex (PR 16 review) flagged: collapsing wrong-type
-                // into MissingField hides the diagnosis. A KV v2
-                // entry whose value is an object/array/null/number
-                // is a manifest bug ("you stored a JSON object where
-                // the resolver expects a string") and operators need
-                // it labelled separately from "field not stored".
-                let value = raw.as_str().ok_or_else(|| ResolveError::WrongType {
-                    url: url.clone(),
-                    field: field.clone(),
-                    actual: json_type(raw),
-                })?;
-                Ok(value.to_string())
-            }
+                other => other,
+            },
         }
     }
 }

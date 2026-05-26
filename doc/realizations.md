@@ -913,17 +913,19 @@ a trap the next developer should not have to step in.
     high and the rasterizer's own `spawn_blocking` pool saturates
     first. Will land alongside a fleet-level capacity story.
 
-- **Vault token revocation mid-lease is not yet self-healing
-  (deferred from the workload-identity PR's codex review).** The
-  `VaultToken` (`triton-secrets/src/vault_token.rs`) refreshes
-  *proactively* at half the lease, so normal expiry never bites. But
-  if a cached token is revoked *before* `refresh_at` (operator
+- **Vault token revocation mid-lease self-heals via invalidate +
+  retry-once.** The `VaultToken` (`triton-secrets/src/vault_token.rs`)
+  refreshes *proactively* at half the lease, so normal expiry never
+  bites. For revocation *before* `refresh_at` (operator
   `vault token revoke`, policy change, Vault restart losing the
-  lease), every consumer — the KV resolver at boot and the per-call
-  OIDC mint in `triton-upstream` — keeps presenting the dead token
-  and failing with 401/403 until the timer fires. Real fix: add
-  `VaultToken::invalidate()` (or `get_fresh()`) and have the two
-  consumers retry once on an auth-status response, forcing a
-  re-login. Deferred because it needs its own no-mocks integration
-  test (FakeVault returning 403-then-200 and asserting recovery),
-  which is a separate conceptual change from "introduce WI auth".
+  lease), both consumers — the KV resolver (`triton-secrets`) and the
+  per-call OIDC mint (`triton-upstream`) — treat a 401/403 as the one
+  retryable case: they call `VaultToken::invalidate()` (clears the
+  cache), then retry once, which forces a fresh login. A second
+  401/403 is terminal. Gotcha for the next person: `invalidate()` is
+  *not* single-flight, so a burst of simultaneous 401s can each clear
+  a freshly-relogged-in token and trigger a few redundant logins —
+  acceptable under a rare revocation event, but don't assume exactly
+  one re-login. Covered by `vault_workload_identity.rs::
+  dispatch_recovers_when_vault_token_is_revoked` (FakeVault 403s the
+  first OIDC swap, then succeeds; asserts login_hits == 2).
