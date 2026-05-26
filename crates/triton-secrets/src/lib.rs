@@ -107,9 +107,11 @@ impl VaultKvResolver {
             })?;
         let status = resp.status();
         if !status.is_success() {
+            let code = status.as_u16();
             return Err(ResolveError::Status {
                 url: url.clone(),
-                status: status.as_u16(),
+                status: code,
+                hint: vault_status_hint(code),
             });
         }
         let body: Value = resp.json().await.map_err(|e| ResolveError::Decode {
@@ -170,8 +172,14 @@ pub enum ResolveError {
     VaultNotConfigured { ref_string: String },
     #[error("vault transport error on {url}: {detail}")]
     Transport { url: String, detail: String },
-    #[error("vault non-2xx on {url}: {status}")]
-    Status { url: String, status: u16 },
+    #[error("vault non-2xx on {url}: {status}{hint}")]
+    Status {
+        url: String,
+        status: u16,
+        /// Operator-facing diagnosis appended to the message; empty
+        /// for statuses without a known common cause.
+        hint: &'static str,
+    },
     #[error("vault response decode failed on {url}: {detail}")]
     Decode { url: String, detail: String },
     #[error("vault response shape unexpected on {url}: {detail}")]
@@ -186,6 +194,30 @@ pub enum ResolveError {
     },
 }
 
+/// Operator-facing hint appended to a Vault non-2xx error. Maps the
+/// boot-time failures we actually hit to their likely cause — most
+/// importantly the KV-path gotcha (`kv/data/...` API path in manifest
+/// refs vs `kv/...` CLI path operators seed with) and the
+/// "engine/policy not applied yet" case (a merged Terraform PR isn't
+/// an applied one).
+fn vault_status_hint(status: u16) -> &'static str {
+    match status {
+        404 => {
+            " — no secret at this path. Common causes: the `kv/` engine isn't \
+             enabled/applied on this Vault yet, the KV mount name differs, or the \
+             path is wrong. Manifest refs use the API path \
+             `vault://kv/data/<branch>#<field>`; operators seed with \
+             `vault kv put kv/<branch> ...` (no `data/` segment)."
+        }
+        401 | 403 => {
+            " — Vault rejected the token or denied the path. Check the token's \
+             policy grants read on this branch and that the (workload-identity) \
+             login succeeded."
+        }
+        _ => "",
+    }
+}
+
 fn json_type(v: &Value) -> &'static str {
     match v {
         Value::Null => "null",
@@ -194,5 +226,22 @@ fn json_type(v: &Value) -> &'static str {
         Value::String(_) => "string",
         Value::Array(_) => "array",
         Value::Object(_) => "object",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::vault_status_hint;
+
+    #[test]
+    fn status_hint_diagnoses_common_boot_failures() {
+        // 404: the engine/path gotcha gets the most actionable hint.
+        let h404 = vault_status_hint(404);
+        assert!(h404.contains("kv/") && h404.contains("kv/data/"));
+        // 401/403: point at token/policy, not the path.
+        assert!(vault_status_hint(403).contains("policy"));
+        assert!(vault_status_hint(401).contains("policy"));
+        // Anything else: no hint (don't guess).
+        assert_eq!(vault_status_hint(500), "");
     }
 }
