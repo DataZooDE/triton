@@ -268,12 +268,9 @@ fn a2a_error_with_trace(e: &TritonError, trace_id: &str) -> Response {
 /// status mirrors REST so operators reading raw traffic see a
 /// consistent signal across protocols (architecture.md §8.3).
 fn a2a_error_with_trace_opt(e: &TritonError, trace_id: Option<&str>) -> Response {
-    let status = match e {
-        TritonError::Auth(_) => StatusCode::UNAUTHORIZED,
-        TritonError::Validation(_) => StatusCode::BAD_REQUEST,
-        TritonError::Tool(_) | TritonError::Provider(_) => StatusCode::BAD_GATEWAY,
-        TritonError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
-    };
+    // Shared with REST + the dispatcher audit (architecture §8.3) so
+    // circuit_open → 503 and upstream timeout → 504 here too, not 502.
+    let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut metadata = json!({ "error": e.class(), "message": e.to_string() });
     if let Some(tid) = trace_id {
         metadata["trace_id"] = json!(tid);

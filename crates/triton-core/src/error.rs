@@ -67,4 +67,47 @@ impl TritonError {
     pub fn is_tool_timeout(&self) -> bool {
         matches!(self, Self::Tool(m) if m.contains("timed out"))
     }
+
+    /// Canonical HTTP status for this error (architecture §8.3).
+    /// Single source of truth so REST, A2A, and the dispatcher audit
+    /// line agree — a `circuit_open` is 503 and an upstream timeout
+    /// is 504 on every surface, not just REST.
+    pub fn http_status(&self) -> u16 {
+        if self.is_circuit_open() {
+            return 503;
+        }
+        if self.is_tool_timeout() {
+            return 504;
+        }
+        match self {
+            Self::Auth(_) => 401,
+            Self::Validation(_) => 400,
+            Self::Tool(_) | Self::Provider(_) => 502,
+            Self::RateLimited(_) => 429,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TritonError;
+
+    #[test]
+    fn http_status_mapping_matches_architecture_8_3() {
+        assert_eq!(TritonError::Auth("x".into()).http_status(), 401);
+        assert_eq!(TritonError::Validation("x".into()).http_status(), 400);
+        assert_eq!(TritonError::Provider("x".into()).http_status(), 502);
+        assert_eq!(TritonError::RateLimited("x".into()).http_status(), 429);
+        // A plain tool error is 502; the circuit/timeout sentinels
+        // (matched on the message) override to 503/504.
+        assert_eq!(TritonError::Tool("boom".into()).http_status(), 502);
+        assert_eq!(
+            TritonError::Tool("circuit_open for foo".into()).http_status(),
+            503
+        );
+        assert_eq!(
+            TritonError::Tool("upstream foo timed out".into()).http_status(),
+            504
+        );
+    }
 }

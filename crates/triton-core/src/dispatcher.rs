@@ -358,13 +358,9 @@ impl Dispatcher {
 }
 
 fn status_for(e: &TritonError) -> u16 {
-    match e {
-        TritonError::Auth(_) => 401,
-        TritonError::Validation(_) => 400,
-        TritonError::Tool(_) => 502,
-        TritonError::Provider(_) => 502,
-        TritonError::RateLimited(_) => 429,
-    }
+    // Single source of truth in TritonError so the audit status
+    // matches what REST/A2A return (circuit_open → 503, timeout → 504).
+    e.http_status()
 }
 
 /// Stable JSON envelope adapters wrap around the dispatch result.

@@ -553,17 +553,7 @@ fn error_response(e: &TritonError, trace_id: Option<&str>) -> Response {
 }
 
 fn http_status_for(e: &TritonError) -> StatusCode {
-    if e.is_circuit_open() {
-        return StatusCode::SERVICE_UNAVAILABLE;
-    }
-    if e.is_tool_timeout() {
-        return StatusCode::GATEWAY_TIMEOUT;
-    }
-    match e {
-        TritonError::Auth(_) => StatusCode::UNAUTHORIZED,
-        TritonError::Validation(_) => StatusCode::BAD_REQUEST,
-        TritonError::Tool(_) => StatusCode::BAD_GATEWAY,
-        TritonError::Provider(_) => StatusCode::BAD_GATEWAY,
-        TritonError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
-    }
+    // TritonError::http_status() is the single source of truth shared
+    // with A2A and the dispatcher audit (architecture §8.3).
+    StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::BAD_GATEWAY)
 }
