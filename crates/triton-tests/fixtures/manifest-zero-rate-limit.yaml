@@ -1,0 +1,24 @@
+# A zero `messages_per_sec` permanently closes the adapter (the
+# token bucket never admits). Boot MUST refuse rather than serve a
+# dead adapter.
+version: "0.2"
+adapters:
+  telegram:
+    kind: telegram
+    inbound:
+      kind: webhook
+      signature: secret_token
+      secret: vault://kv/x#s
+    outbound:
+      kind: rest_api
+      token: vault://kv/x#t
+    identity:
+      kind: sender_table
+      table: vault://kv/x#senders
+    degrade:
+      text: passthrough
+    rate_limit: { messages_per_sec: 0, burst: 1 }
+    correlation_key: vault://kv/x#k
+tools:
+  narrate:
+    surface_components: [text]
