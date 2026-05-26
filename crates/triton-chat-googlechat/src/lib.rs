@@ -47,7 +47,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde::Deserialize;
 use serde_json::Value;
-use triton_core::{Dispatcher, Principal, TritonError};
+use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
 use triton_secrets::{ResolveError, SecretResolver};
 
@@ -547,7 +547,7 @@ async fn handle_webhook(
                     PROTOCOL,
                     &principal_for_post,
                     0,
-                    Ok((200, "posted")),
+                    Ok((200, PostOutcome::Posted, None)),
                 );
                 (StatusCode::OK, axum::Json(body)).into_response()
             }
@@ -563,7 +563,7 @@ async fn handle_webhook(
                     PROTOCOL,
                     &principal_for_post,
                     0,
-                    Err((&provider, 0, "dropped")),
+                    Err((&provider, 0, PostOutcome::Dropped, None)),
                 );
                 // Still 200 so Google doesn't retry; empty body.
                 (
@@ -591,7 +591,7 @@ async fn handle_webhook(
                 PROTOCOL,
                 &principal_for_post,
                 0,
-                Err((&e, 0, "error_response")),
+                Err((&e, 0, PostOutcome::Dropped, Some("error_response"))),
             );
             (
                 status,

@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_util::sync::CancellationToken;
-use triton_core::{Dispatcher, Principal, TritonError};
+use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
 use triton_secrets::SecretResolver;
 
@@ -460,15 +460,15 @@ impl DiscordGatewayAdapter {
                     PROTOCOL,
                     principal,
                     latency,
-                    Ok((r.status().as_u16(), "posted")),
+                    Ok((r.status().as_u16(), PostOutcome::Posted, None)),
                 );
             }
             Ok(r) => {
                 let status = r.status().as_u16();
                 let label = if status >= 500 || status == 429 {
-                    "retry"
+                    PostOutcome::Retry
                 } else {
-                    "dropped"
+                    PostOutcome::Dropped
                 };
                 // Don't log the URL (it's channel-scoped, not secret,
                 // but keep the token-free discipline uniform).
@@ -478,7 +478,7 @@ impl DiscordGatewayAdapter {
                     PROTOCOL,
                     principal,
                     latency,
-                    Err((&provider, status, label)),
+                    Err((&provider, status, label, None)),
                 );
             }
             Err(_) => {
@@ -488,7 +488,7 @@ impl DiscordGatewayAdapter {
                     PROTOCOL,
                     principal,
                     latency,
-                    Err((&provider, 0, "retry")),
+                    Err((&provider, 0, PostOutcome::Retry, None)),
                 );
             }
         }

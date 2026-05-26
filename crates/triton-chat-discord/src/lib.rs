@@ -63,7 +63,7 @@ use axum::routing::post;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use triton_core::{Dispatcher, Principal, TritonError};
+use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
 use triton_rasterizer::{Client as RasterizerClient, DashboardRequest, RasterizerError};
 use triton_secrets::{ResolveError, SecretResolver};
@@ -622,7 +622,7 @@ async fn handle_message_component(
                             PROTOCOL,
                             &principal_for_post,
                             latency_ms,
-                            Ok((200, "modal_opened")),
+                            Ok((200, PostOutcome::Posted, Some("modal_opened"))),
                         );
                         return (StatusCode::OK, axum::Json(modal)).into_response();
                     }
@@ -659,7 +659,7 @@ async fn handle_message_component(
                         PROTOCOL,
                         &principal_for_post,
                         latency_ms,
-                        Err((&provider, 0, "dropped")),
+                        Err((&provider, 0, PostOutcome::Dropped, None)),
                     );
                     // Still respond OK so Discord doesn't retry;
                     // ephemeral content tells the user nothing was
@@ -683,7 +683,7 @@ async fn handle_message_component(
                         PROTOCOL,
                         &principal_for_post,
                         latency_ms,
-                        Ok((200, "posted")),
+                        Ok((200, PostOutcome::Posted, None)),
                     );
                     let body = json!({
                         "type": 4,
@@ -706,7 +706,7 @@ async fn handle_message_component(
                 PROTOCOL,
                 &principal_for_post,
                 latency_ms,
-                Err((&e, 0, "error_response")),
+                Err((&e, 0, PostOutcome::Dropped, Some("error_response"))),
             );
             let body = json!({
                 "type": 4,
@@ -839,7 +839,7 @@ async fn handle_application_command(
                             PROTOCOL,
                             &principal_for_post,
                             latency_ms,
-                            Ok((200, "modal_opened")),
+                            Ok((200, PostOutcome::Posted, Some("modal_opened"))),
                         );
                         return (StatusCode::OK, axum::Json(modal)).into_response();
                     }
@@ -872,7 +872,7 @@ async fn handle_application_command(
                         PROTOCOL,
                         &principal_for_post,
                         latency_ms,
-                        Err((&provider, 0, "dropped")),
+                        Err((&provider, 0, PostOutcome::Dropped, None)),
                     );
                     let body = json!({
                         "type": 4,
@@ -888,7 +888,7 @@ async fn handle_application_command(
                         PROTOCOL,
                         &principal_for_post,
                         latency_ms,
-                        Ok((200, "posted")),
+                        Ok((200, PostOutcome::Posted, None)),
                     );
                     let body = json!({
                         "type": 4,
@@ -911,7 +911,7 @@ async fn handle_application_command(
                 PROTOCOL,
                 &principal_for_post,
                 latency_ms,
-                Err((&e, 0, "error_response")),
+                Err((&e, 0, PostOutcome::Dropped, Some("error_response"))),
             );
             let body = json!({
                 "type": 4,
@@ -1143,7 +1143,7 @@ async fn handle_modal_submit(
                         PROTOCOL,
                         &principal_for_post,
                         latency_ms,
-                        Err((&provider, 0, "dropped")),
+                        Err((&provider, 0, PostOutcome::Dropped, None)),
                     );
                     let body = json!({
                         "type": 4,
@@ -1159,7 +1159,7 @@ async fn handle_modal_submit(
                         PROTOCOL,
                         &principal_for_post,
                         latency_ms,
-                        Ok((200, "posted")),
+                        Ok((200, PostOutcome::Posted, None)),
                     );
                     let body = json!({
                         "type": 4,
@@ -1176,7 +1176,7 @@ async fn handle_modal_submit(
                 PROTOCOL,
                 &principal_for_post,
                 latency_ms,
-                Err((&e, 0, "error_response")),
+                Err((&e, 0, PostOutcome::Dropped, Some("error_response"))),
             );
             let body = json!({
                 "type": 4,
@@ -1279,7 +1279,7 @@ async fn build_response_with_rasterizer(
             PROTOCOL,
             principal_for_post,
             latency_ms,
-            Ok((200, "posted")),
+            Ok((200, PostOutcome::Posted, None)),
         );
         return (StatusCode::OK, axum::Json(body)).into_response();
     };
@@ -1307,7 +1307,7 @@ async fn build_response_with_rasterizer(
             PROTOCOL,
             principal_for_post,
             latency_ms,
-            Ok((200, "posted")),
+            Ok((200, PostOutcome::Posted, None)),
         );
         return (StatusCode::OK, axum::Json(body)).into_response();
     };
@@ -1343,7 +1343,7 @@ async fn build_response_with_rasterizer(
                 PROTOCOL,
                 principal_for_post,
                 latency_ms,
-                Ok((200, "posted")),
+                Ok((200, PostOutcome::Posted, None)),
             );
             let content_type = format!("multipart/form-data; boundary={boundary}");
             (StatusCode::OK, [(header::CONTENT_TYPE, content_type)], body).into_response()
@@ -1369,7 +1369,7 @@ async fn build_response_with_rasterizer(
                 PROTOCOL,
                 principal_for_post,
                 latency_ms,
-                Ok((200, "posted")),
+                Ok((200, PostOutcome::Posted, None)),
             );
             (StatusCode::OK, axum::Json(body)).into_response()
         }
@@ -1463,7 +1463,7 @@ async fn rasterize_dashboard(
                 PROTOCOL,
                 principal,
                 latency_ms,
-                Ok((200, "rasterizer_call")),
+                Ok((200, PostOutcome::Posted, Some("rasterizer_call"))),
             );
         }
         Err(e) => {
@@ -1479,7 +1479,12 @@ async fn rasterize_dashboard(
                 PROTOCOL,
                 principal,
                 latency_ms,
-                Err((&provider, 0, "rasterizer_failed")),
+                Err((
+                    &provider,
+                    0,
+                    PostOutcome::Dropped,
+                    Some("rasterizer_failed"),
+                )),
             );
         }
     }

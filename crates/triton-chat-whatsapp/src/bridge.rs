@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UnixStream};
 use tokio_util::sync::CancellationToken;
-use triton_core::{Dispatcher, Principal, TritonError};
+use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{
     Adapter, AdapterKind, IdentityKind, InboundKind, OutboundKind, SignatureScheme,
 };
@@ -305,7 +305,7 @@ impl WhatsAppBridgeAdapter {
                         PROTOCOL,
                         &principal_for_post,
                         latency_ms,
-                        Ok((200, "posted")),
+                        Ok((200, PostOutcome::Posted, None)),
                     ),
                     Err(_) => {
                         let provider = TritonError::Provider("whatsapp bridge write failed".into());
@@ -314,7 +314,7 @@ impl WhatsAppBridgeAdapter {
                             PROTOCOL,
                             &principal_for_post,
                             latency_ms,
-                            Err((&provider, 0, "retry")),
+                            Err((&provider, 0, PostOutcome::Retry, None)),
                         );
                     }
                 }
