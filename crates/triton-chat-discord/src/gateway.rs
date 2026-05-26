@@ -525,14 +525,18 @@ fn is_non_resumable_close(code: u16) -> bool {
     matches!(code, 4004 | 4010 | 4011 | 4012 | 4013 | 4014)
 }
 
-/// Extract the host from a `ws://`/`wss://` URL (port/path stripped).
-/// `None` if the scheme isn't ws(s) or the host is empty.
+/// Extract the lowercased host from a `ws://`/`wss://` URL via a real
+/// URL parser (handles bracketed IPv6, userinfo, case, ports). `None`
+/// if the scheme isn't ws(s) or there's no host. (Codex review:
+/// hand-rolled splitting mis-parsed IPv6 and was case-sensitive.)
 fn ws_host(url: &str) -> Option<String> {
-    let rest = url
-        .strip_prefix("wss://")
-        .or_else(|| url.strip_prefix("ws://"))?;
-    let host = rest.split(['/', ':', '?']).next().unwrap_or("");
-    (!host.is_empty()).then(|| host.to_string())
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "ws" | "wss") {
+        return None;
+    }
+    parsed
+        .host_str()
+        .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
 }
 
 /// True if `resume_url` is safe to reconnect to with the bot token.
@@ -698,6 +702,11 @@ mod resume_tests {
         ));
         assert!(resume_url_is_trusted(
             "wss://gateway.discord.gg",
+            configured
+        ));
+        // Case-insensitive scheme + host (Codex LOW).
+        assert!(resume_url_is_trusted(
+            "WSS://Gateway.Discord.GG",
             configured
         ));
         // Self-hosted / test gateway: same host as configured.

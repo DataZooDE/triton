@@ -359,11 +359,15 @@ fn status_for(e: &TritonError) -> u16 {
     }
 }
 
-/// SSRF guard for a Consul-resolved `host:port` endpoint. Hostnames
-/// (Consul DNS, e.g. `*.service.consul`) are allowed; IP literals
+/// SSRF guard for a Consul-resolved `host:port` endpoint. IP literals
 /// must be loopback, RFC-1918 private, or CGNAT/Tailscale
-/// (100.64.0.0/10 v4, `fc00::/7` ULA v6). Public and link-local
-/// targets — notably `169.254.169.254` cloud metadata — are refused.
+/// (100.64.0.0/10 v4, `fc00::/7` ULA v6). Hostnames are trusted ONLY
+/// under Consul's own `.consul` domain (`*.service.consul`) — an
+/// arbitrary hostname could resolve to a public or metadata IP, and
+/// non-canonical numeric forms (octal/hex/decimal) that `IpAddr`
+/// won't parse must not slip through the hostname path either. Public
+/// and link-local targets — notably `169.254.169.254` cloud metadata
+/// — are refused. (Codex security review.)
 fn endpoint_is_dispatchable(endpoint: &str) -> bool {
     // Split off the port; tolerate a bracketed IPv6 host.
     let host = endpoint
@@ -372,8 +376,13 @@ fn endpoint_is_dispatchable(endpoint: &str) -> bool {
         .unwrap_or(endpoint);
     let host = host.trim_start_matches('[').trim_end_matches(']');
     match host.parse::<std::net::IpAddr>() {
-        // Not an IP literal → a hostname; trust Consul DNS naming.
-        Err(_) => !host.is_empty(),
+        // Not an IP literal → only trust Consul DNS names. This also
+        // rejects non-canonical IP encodings (e.g. `0177.0.0.1`,
+        // `2130706433`) that `IpAddr` refuses to parse.
+        Err(_) => {
+            let h = host.trim_end_matches('.').to_ascii_lowercase();
+            h.ends_with(".consul")
+        }
         Ok(std::net::IpAddr::V4(v4)) => {
             if v4.is_loopback() || v4.is_private() {
                 return true;
@@ -410,6 +419,23 @@ mod ssrf_tests {
         assert!(!endpoint_is_dispatchable("1.2.3.4:80")); // public
         assert!(!endpoint_is_dispatchable("8.8.8.8:53")); // public
         assert!(!endpoint_is_dispatchable("[2606:4700:4700::1111]:443")); // public v6
+    }
+
+    #[test]
+    fn refuses_arbitrary_hostnames_and_noncanonical_ip_encodings() {
+        // Codex bypass cases: an arbitrary hostname could resolve to
+        // a public/metadata IP, and non-canonical numeric encodings
+        // don't parse as an IP — neither may take the hostname path.
+        assert!(!endpoint_is_dispatchable("evil.example:80"));
+        assert!(!endpoint_is_dispatchable("metadata.google.internal:80"));
+        assert!(!endpoint_is_dispatchable("0177.0.0.1:80")); // octal 127.0.0.1
+        assert!(!endpoint_is_dispatchable("2130706433:80")); // decimal 127.0.0.1
+        assert!(!endpoint_is_dispatchable("0x7f.0.0.1:80")); // hex
+        // A `.consul`-suffixed lookalike under an attacker domain is
+        // still not a `.consul` name.
+        assert!(!endpoint_is_dispatchable("consul.evil.com:80"));
+        // Trailing-dot + mixed case Consul name is still accepted.
+        assert!(endpoint_is_dispatchable("Demo-Agent.Service.Consul.:8001"));
     }
 }
 

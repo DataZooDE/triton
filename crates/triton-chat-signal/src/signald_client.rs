@@ -166,7 +166,13 @@ impl Sender {
             // reconnect take over.
             Some(w) => match tokio::time::timeout(WRITE_TIMEOUT, w.write_all(&bytes)).await {
                 Ok(r) => r.map_err(SendError::Io),
-                Err(_) => Err(SendError::Timeout),
+                Err(_) => {
+                    // Drop the wedged writer so the read loop reconnects
+                    // and subsequent sends fail fast (Disconnected)
+                    // rather than serially timing out on a dead socket.
+                    *guard = None;
+                    Err(SendError::Timeout)
+                }
             },
             None => Err(SendError::Disconnected),
         }
