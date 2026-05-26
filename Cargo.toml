@@ -28,7 +28,7 @@ publish = false
 [workspace.dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 clap = { version = "4", features = ["derive", "env"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "process", "time", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "process", "time", "io-util", "fs"] }
 tokio-util = { version = "0.7", default-features = false }
 # WebSocket client for the Discord Gateway socket inbound (and its
 # fake-gateway test fixture). rustls keeps the static-link story

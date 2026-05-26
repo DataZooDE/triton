@@ -105,8 +105,10 @@ impl VaultToken {
 impl Wi {
     async fn login(&self) -> Result<Cached, VaultAuthError> {
         // Re-read the JWT every login — Nomad rotates the file, so a
-        // cached JWT would eventually be stale.
-        let jwt = std::fs::read_to_string(&self.jwt_path)
+        // cached JWT would eventually be stale. Async read so we never
+        // block the runtime thread (login holds the cache mutex).
+        let jwt = tokio::fs::read_to_string(&self.jwt_path)
+            .await
             .map_err(|e| VaultAuthError::JwtRead {
                 path: self.jwt_path.display().to_string(),
                 detail: e.to_string(),
@@ -179,7 +181,11 @@ struct LoginResponse {
 #[derive(Debug, Deserialize)]
 struct AuthData {
     client_token: String,
-    #[serde(default)]
+    /// Required. A well-formed Vault login always returns it; a
+    /// missing field signals a malformed envelope, so we fail the
+    /// decode rather than silently treating it as `0` (= non-expiring,
+    /// which would cache a possibly-short-lived token for an hour).
+    /// An explicit `0` still means "non-expiring" — see [`refresh_after`].
     lease_duration: u64,
 }
 
@@ -232,5 +238,21 @@ mod tests {
         assert_eq!(t.get().await.unwrap(), "static-abc");
         // Clones share the same source.
         assert_eq!(t.clone().get().await.unwrap(), "static-abc");
+    }
+
+    #[test]
+    fn auth_block_requires_lease_duration() {
+        // A well-formed Vault login always carries lease_duration;
+        // a missing one is a malformed envelope and MUST fail the
+        // decode rather than silently default to 0 (= non-expiring).
+        let missing = r#"{"client_token":"hvs.abc"}"#;
+        assert!(
+            serde_json::from_str::<AuthData>(missing).is_err(),
+            "missing lease_duration must be a decode error"
+        );
+        // An explicit 0 is legal (non-expiring token) and decodes.
+        let explicit_zero = r#"{"client_token":"hvs.abc","lease_duration":0}"#;
+        let ad: AuthData = serde_json::from_str(explicit_zero).expect("explicit 0 decodes");
+        assert_eq!(ad.lease_duration, 0);
     }
 }
