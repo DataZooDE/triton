@@ -129,9 +129,11 @@ impl OidcVerifier {
         if let Some(last) = self.last_refresh_per_kid.read().await.get(kid)
             && last.elapsed() < self.config.refresh_interval
         {
-            return Err(TritonError::Auth(format!(
-                "unknown kid {kid}; refresh rate-limited"
-            )));
+            // Keep the attacker-controlled `kid` out of the
+            // client-facing message (it's reflected back via the
+            // adapter error body); log it at debug for diagnosis.
+            tracing::debug!(kid = %kid, "JWKS refresh rate-limited for unknown kid");
+            return Err(TritonError::Auth("unknown signing key".into()));
         }
 
         // Single-flight: only one refresh in flight across the
@@ -146,9 +148,8 @@ impl OidcVerifier {
         if let Some(last) = self.last_refresh_per_kid.read().await.get(kid)
             && last.elapsed() < self.config.refresh_interval
         {
-            return Err(TritonError::Auth(format!(
-                "unknown kid {kid}; refresh rate-limited"
-            )));
+            tracing::debug!(kid = %kid, "JWKS refresh rate-limited for unknown kid");
+            return Err(TritonError::Auth("unknown signing key".into()));
         }
 
         self.last_refresh_per_kid
@@ -156,12 +157,13 @@ impl OidcVerifier {
             .await
             .insert(kid.to_string(), Instant::now());
         self.refresh_jwks().await?;
-        self.keys
-            .read()
-            .await
-            .get(kid)
-            .cloned()
-            .ok_or_else(|| TritonError::Auth(format!("unknown kid {kid}")))
+        match self.keys.read().await.get(kid).cloned() {
+            Some(k) => Ok(k),
+            None => {
+                tracing::debug!(kid = %kid, "kid not present in refreshed JWKS");
+                Err(TritonError::Auth("unknown signing key".into()))
+            }
+        }
     }
 
     async fn refresh_jwks(&self) -> Result<(), TritonError> {

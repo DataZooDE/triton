@@ -497,6 +497,7 @@ impl SignalAdapter {
                 let (label, http_status) = match &e {
                     SendError::Disconnected => (PostOutcome::Retry, 0u16),
                     SendError::Io(_) => (PostOutcome::Retry, 0u16),
+                    SendError::Timeout => (PostOutcome::Retry, 0u16),
                     SendError::Encode(_) => (PostOutcome::Dropped, 0u16),
                 };
                 tracing::warn!(

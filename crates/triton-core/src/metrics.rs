@@ -49,7 +49,7 @@ impl Metrics {
     /// exceeds [`MAX_DISTINCT_TOOL_LABELS`] — bounds memory so a
     /// burst of `/v1/tools/{random}` cannot DoS the metrics map.
     pub fn record_dispatch(&self, tool: &str, protocol: &str, result: &str) {
-        let mut g = self.dispatch.lock().unwrap();
+        let mut g = self.dispatch.lock().unwrap_or_else(|e| e.into_inner());
         let distinct_tools: std::collections::BTreeSet<&str> =
             g.keys().map(|k| k.tool.as_str()).collect();
         let label =
@@ -69,7 +69,7 @@ impl Metrics {
     /// Record one emitted audit line, broken down by phase
     /// (`dispatch` / `upstream` / `rejected`).
     pub fn record_audit(&self, phase: &str) {
-        let mut g = self.audit.lock().unwrap();
+        let mut g = self.audit.lock().unwrap_or_else(|e| e.into_inner());
         *g.entry(phase.to_string()).or_insert(0) += 1;
     }
 
@@ -82,7 +82,7 @@ impl Metrics {
 
         out.push_str("# HELP triton_dispatch_total Dispatched tool invocations.\n");
         out.push_str("# TYPE triton_dispatch_total counter\n");
-        let dispatch = self.dispatch.lock().unwrap();
+        let dispatch = self.dispatch.lock().unwrap_or_else(|e| e.into_inner());
         for (k, v) in dispatch.iter() {
             out.push_str(&format!(
                 "triton_dispatch_total{{tool=\"{}\",protocol=\"{}\",result=\"{}\"}} {v}\n",
@@ -95,7 +95,7 @@ impl Metrics {
 
         out.push_str("# HELP triton_audit_lines_total Audit lines emitted to stdout.\n");
         out.push_str("# TYPE triton_audit_lines_total counter\n");
-        let audit = self.audit.lock().unwrap();
+        let audit = self.audit.lock().unwrap_or_else(|e| e.into_inner());
         for (phase, v) in audit.iter() {
             out.push_str(&format!(
                 "triton_audit_lines_total{{phase=\"{}\"}} {v}\n",
