@@ -174,7 +174,7 @@ async fn discord_dashboard_surface_responds_with_multipart_png() {
         .iter()
         .filter(|v| {
             v["kind"] == "audit"
-                && v["status_label"] == "rasterizer_call"
+                && v["status_detail"] == "rasterizer_call"
                 && v["protocol"] == "messenger:discord"
         })
         .collect();
@@ -247,7 +247,7 @@ async fn discord_dashboard_falls_back_to_text_on_rasterizer_failure() {
     // Audit: rasterizer_failed status_label MUST appear.
     let _ = wait_for_audit(&proc, Duration::from_secs(2), |v| {
         v["kind"] == "audit"
-            && v["status_label"] == "rasterizer_failed"
+            && v["status_detail"] == "rasterizer_failed"
             && v["protocol"] == "messenger:discord"
     });
 }

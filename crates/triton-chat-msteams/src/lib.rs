@@ -32,7 +32,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde::Deserialize;
 use serde_json::Value;
-use triton_core::{Dispatcher, Principal, TritonError};
+use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, OutboundKind, SignatureScheme};
 use triton_secrets::{ResolveError, SecretResolver};
 
@@ -705,7 +705,7 @@ async fn post_reply(
                 PROTOCOL,
                 principal,
                 dispatch_latency_ms + post_started.elapsed().as_millis() as u64,
-                Err((&provider, 0, "retry")),
+                Err((&provider, 0, PostOutcome::Retry, None)),
             );
             return;
         }
@@ -727,13 +727,13 @@ async fn post_reply(
                     PROTOCOL,
                     principal,
                     latency_ms,
-                    Ok((status, "posted")),
+                    Ok((status, PostOutcome::Posted, None)),
                 );
             } else {
                 let label = if status >= 500 || status == 429 {
-                    "retry"
+                    PostOutcome::Retry
                 } else {
-                    "dropped"
+                    PostOutcome::Dropped
                 };
                 let provider =
                     TritonError::Provider(format!("msteams activities POST status {status}"));
@@ -742,7 +742,7 @@ async fn post_reply(
                     PROTOCOL,
                     principal,
                     latency_ms,
-                    Err((&provider, status, label)),
+                    Err((&provider, status, label, None)),
                 );
             }
         }
@@ -754,7 +754,7 @@ async fn post_reply(
                 PROTOCOL,
                 principal,
                 latency_ms,
-                Err((&provider, 0, "retry")),
+                Err((&provider, 0, PostOutcome::Retry, None)),
             );
         }
     }

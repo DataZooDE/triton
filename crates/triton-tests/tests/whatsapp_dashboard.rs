@@ -172,7 +172,7 @@ async fn whatsapp_dashboard_uploads_media_then_sends_image() {
         .iter()
         .filter(|v| {
             v["kind"] == "audit"
-                && v["status_label"] == "rasterizer_call"
+                && v["status_detail"] == "rasterizer_call"
                 && v["protocol"] == "messenger:whatsapp"
         })
         .collect();
@@ -238,7 +238,7 @@ async fn whatsapp_dashboard_falls_back_to_text_on_rasterizer_failure() {
 
     let _ = wait_for_audit(&proc, Duration::from_secs(2), |v| {
         v["kind"] == "audit"
-            && v["status_label"] == "rasterizer_failed"
+            && v["status_detail"] == "rasterizer_failed"
             && v["protocol"] == "messenger:whatsapp"
     });
 }

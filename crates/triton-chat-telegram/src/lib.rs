@@ -38,7 +38,7 @@ use axum::routing::post;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
-use triton_core::{Dispatcher, Principal, TritonError};
+use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
 use triton_rasterizer::{Client as RasterizerClient, DashboardRequest, RasterizerError};
 use triton_secrets::{ResolveError, SecretResolver};
@@ -587,6 +587,14 @@ impl PostLabel {
             Self::Dropped => "dropped",
         }
     }
+
+    fn to_outcome(self) -> PostOutcome {
+        match self {
+            Self::Posted => PostOutcome::Posted,
+            Self::Retry => PostOutcome::Retry,
+            Self::Dropped => PostOutcome::Dropped,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1020,7 +1028,7 @@ async fn dispatch_and_render(
                         PROTOCOL,
                         &principal_for_post,
                         0,
-                        Err((&provider, 0, "dropped")),
+                        Err((&provider, 0, PostOutcome::Dropped, None)),
                     );
                     StatusCode::OK.into_response()
                 }
@@ -1399,7 +1407,7 @@ async fn handle_callback_query(
                     PROTOCOL,
                     &principal_for_post,
                     0,
-                    Err((&provider, 0, "dropped")),
+                    Err((&provider, 0, PostOutcome::Dropped, None)),
                 );
                 StatusCode::OK.into_response()
             }
@@ -1594,7 +1602,7 @@ fn record_post_outcome(
                 PROTOCOL,
                 principal,
                 latency_ms,
-                Ok((send.http_status, send.label.as_str())),
+                Ok((send.http_status, send.label.to_outcome(), None)),
             );
         }
         Err(e) => {
@@ -1614,7 +1622,7 @@ fn record_post_outcome(
                 PROTOCOL,
                 principal,
                 latency_ms,
-                Err((&provider, http_status, label.as_str())),
+                Err((&provider, http_status, label.to_outcome(), None)),
             );
         }
     }
@@ -1654,7 +1662,7 @@ async fn rasterize_dashboard(
                 PROTOCOL,
                 principal,
                 latency_ms,
-                Ok((200, "rasterizer_call")),
+                Ok((200, PostOutcome::Posted, Some("rasterizer_call"))),
             );
         }
         Err(e) => {
@@ -1670,7 +1678,12 @@ async fn rasterize_dashboard(
                 PROTOCOL,
                 principal,
                 latency_ms,
-                Err((&provider, 0, "rasterizer_failed")),
+                Err((
+                    &provider,
+                    0,
+                    PostOutcome::Dropped,
+                    Some("rasterizer_failed"),
+                )),
             );
         }
     }

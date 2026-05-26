@@ -36,6 +36,31 @@ pub enum AuditPhase {
     Post,
 }
 
+/// Closed-set disposition of a chat post-back (FR-AU-1 v0.2). This
+/// is the *only* thing `status_label` may carry; any finer-grained
+/// reason (a modal was opened, a dashboard was rasterized) rides on
+/// the separate `status_detail` field so the substrate collector
+/// sees a uniform discriminator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PostOutcome {
+    /// The tool result reached the platform.
+    Posted,
+    /// Transient failure; the adapter will retry.
+    Retry,
+    /// Giving up — the result was not delivered.
+    Dropped,
+}
+
+impl PostOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PostOutcome::Posted => "posted",
+            PostOutcome::Retry => "retry",
+            PostOutcome::Dropped => "dropped",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditRecord<'a> {
     /// Always `"audit"` — discriminator the substrate audit
@@ -60,6 +85,11 @@ pub struct AuditRecord<'a> {
     /// uniform across the substrate audit collector.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_label: Option<&'static str>,
+    /// Optional finer-grained reason behind `status_label` (e.g.
+    /// `modal_opened`, `rasterizer_call`, `rasterizer_failed`). Not a
+    /// closed set; for dashboards/diagnosis only. Omitted when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_detail: Option<&'static str>,
     pub trace_id: &'a str,
 }
 
@@ -111,6 +141,8 @@ pub struct AuditEntry {
     pub status: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_label: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_detail: Option<&'static str>,
     pub trace_id: String,
 }
 
@@ -131,6 +163,7 @@ impl<'a> From<&AuditRecord<'a>> for AuditEntry {
             latency_ms: r.latency_ms,
             status: r.status,
             status_label: r.status_label,
+            status_detail: r.status_detail,
             trace_id: r.trace_id.to_string(),
         }
     }

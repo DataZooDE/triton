@@ -311,6 +311,15 @@ pub enum ManifestError {
         scheme: String,
         field: String,
     },
+    /// A zero `messages_per_sec` or `burst` would make the token
+    /// bucket reject every inbound (a permanently-closed adapter) and
+    /// divide-by-zero the retry-after math. Almost always a typo, so
+    /// fail the manifest rather than boot a dead adapter.
+    #[error(
+        "adapter `{adapter}` has a zero rate_limit ({field} = 0): the token bucket \
+         would refuse every message. Set a positive value (FR-L-4)"
+    )]
+    ZeroRateLimit { adapter: String, field: String },
 }
 
 // ---------- API ----------
@@ -370,6 +379,25 @@ impl Manifest {
         // enforce it here.
         for (adapter_name, adapter) in &self.adapters {
             check_required_credentials(adapter, adapter_name)?;
+        }
+
+        // A zero rate limit permanently closes the adapter (the token
+        // bucket never admits) — reject it rather than boot a dead
+        // adapter. TokenBucket::try_take relies on this guard.
+        for (adapter_name, adapter) in &self.adapters {
+            let field = if adapter.rate_limit.messages_per_sec == 0 {
+                Some("messages_per_sec")
+            } else if adapter.rate_limit.burst == 0 {
+                Some("burst")
+            } else {
+                None
+            };
+            if let Some(field) = field {
+                return Err(ManifestError::ZeroRateLimit {
+                    adapter: adapter_name.clone(),
+                    field: field.to_string(),
+                });
+            }
         }
 
         // M-SECRETS-1 / FR-L-6 / NFR-S-5: every credential field

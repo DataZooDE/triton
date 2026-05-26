@@ -112,6 +112,7 @@ impl UpstreamRouter {
             latency_ms,
             status,
             status_label: None,
+            status_detail: None,
             trace_id: &principal.trace_id,
         });
         outcome

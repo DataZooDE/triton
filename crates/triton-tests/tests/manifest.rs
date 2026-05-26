@@ -60,6 +60,25 @@ fn missing_degrade_coverage_refuses_validate() {
     );
 }
 
+#[test]
+fn zero_rate_limit_refuses_validate() {
+    // A zero messages_per_sec/burst makes the token bucket reject
+    // every inbound — a dead adapter. Validation must catch it.
+    let m = Manifest::load(&fixture("manifest-zero-rate-limit.yaml")).expect("parse");
+    let err = m
+        .validate(Env::Production)
+        .expect_err("zero rate_limit must be rejected");
+    assert!(
+        matches!(err, ManifestError::ZeroRateLimit { .. }),
+        "expected ZeroRateLimit, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("messages_per_sec") && msg.contains("telegram"),
+        "error should name the field + adapter, got: {msg}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn binary_boots_with_valid_manifest() {
     // End-to-end: spawn the real `triton` binary with

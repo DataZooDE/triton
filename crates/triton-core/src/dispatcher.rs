@@ -19,7 +19,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::audit::{AuditPhase, AuditRecord, emit, now_rfc3339};
+use crate::audit::{AuditPhase, AuditRecord, PostOutcome, emit, now_rfc3339};
 use crate::error::TritonError;
 use crate::metrics::Metrics;
 use crate::principal::Principal;
@@ -30,6 +30,16 @@ use crate::tool::{ToolDescriptor, ToolRegistry};
 /// this; tests can plug in their own implementations. The trait is
 /// the dependency-inversion seam between the core dispatcher and
 /// the per-substrate router (Consul + Vault + breaker).
+/// Outcome handed to [`Dispatcher::record_post`]. `Ok` carries
+/// `(http_status, disposition, optional detail)`; `Err` carries the
+/// error plus the same triple. The `detail` is a free-form
+/// diagnostic reason (e.g. `modal_opened`, `rasterizer_call`) that
+/// rides alongside the closed-set [`PostOutcome`].
+pub type PostResult<'a> = Result<
+    (u16, PostOutcome, Option<&'static str>),
+    (&'a TritonError, u16, PostOutcome, Option<&'static str>),
+>;
+
 #[async_trait]
 pub trait UpstreamDispatch: Send + Sync {
     async fn invoke(
@@ -192,6 +202,7 @@ impl Dispatcher {
             latency_ms: 0,
             status,
             status_label: None,
+            status_detail: None,
             trace_id,
         });
     }
@@ -214,16 +225,21 @@ impl Dispatcher {
         protocol: &str,
         principal: &Principal,
         latency_ms: u64,
-        outcome: Result<(u16, &'static str), (&TritonError, u16, &'static str)>,
+        outcome: PostResult<'_>,
     ) {
         // FR-AU-1 v0.2: chat post audit MUST carry a `status_label`
-        // from the closed set `{posted, retry, dropped}`. We keep
-        // `status` as the underlying HTTP status (`u16`, 0 for
-        // transport-level failures) for diagnosis, and add a new
-        // `status_label` field for the spec's closed-set discriminator.
-        let (result, status, status_label) = match outcome {
-            Ok((s, label)) => ("ok".to_string(), s, Some(label)),
-            Err((e, s, label)) => (format!("error:{}", e.class()), s, Some(label)),
+        // from the closed set `{posted, retry, dropped}` — enforced by
+        // the `PostOutcome` type. We keep `status` as the underlying
+        // HTTP status (`u16`, 0 for transport-level failures) for
+        // diagnosis. Any finer reason rides on `status_detail`.
+        let (result, status, status_label, detail) = match outcome {
+            Ok((s, label, detail)) => ("ok".to_string(), s, Some(label.as_str()), detail),
+            Err((e, s, label, detail)) => (
+                format!("error:{}", e.class()),
+                s,
+                Some(label.as_str()),
+                detail,
+            ),
         };
         self.metrics.record_dispatch(tool_name, protocol, &result);
         self.metrics.record_audit("post");
@@ -242,6 +258,7 @@ impl Dispatcher {
             latency_ms,
             status,
             status_label,
+            status_detail: detail,
             trace_id: &principal.trace_id,
         });
     }
@@ -311,6 +328,7 @@ impl Dispatcher {
             latency_ms,
             status: status_for(error),
             status_label: None,
+            status_detail: None,
             trace_id: &principal.trace_id,
         });
         // Reconstruct a parallel error so we can both audit and return.
@@ -352,19 +370,16 @@ impl Dispatcher {
             latency_ms,
             status,
             status_label: None,
+            status_detail: None,
             trace_id: &principal.trace_id,
         });
     }
 }
 
 fn status_for(e: &TritonError) -> u16 {
-    match e {
-        TritonError::Auth(_) => 401,
-        TritonError::Validation(_) => 400,
-        TritonError::Tool(_) => 502,
-        TritonError::Provider(_) => 502,
-        TritonError::RateLimited(_) => 429,
-    }
+    // Single source of truth in TritonError so the audit status
+    // matches what REST/A2A return (circuit_open → 503, timeout → 504).
+    e.http_status()
 }
 
 /// Stable JSON envelope adapters wrap around the dispatch result.

@@ -45,7 +45,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use triton_core::{Dispatcher, Principal, TritonError};
+use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
 use triton_secrets::{ResolveError, SecretResolver};
 
@@ -446,7 +446,7 @@ impl SignalAdapter {
                         PROTOCOL,
                         &principal_for_post,
                         0,
-                        Err((&provider, 0, "dropped")),
+                        Err((&provider, 0, PostOutcome::Dropped, None)),
                     );
                 }
             },
@@ -490,14 +490,14 @@ impl SignalAdapter {
                     // status code from the protocol. Use 200/posted
                     // to mirror the other adapters' "happy path"
                     // shape.
-                    Ok((200, "posted")),
+                    Ok((200, PostOutcome::Posted, None)),
                 );
             }
             Err(e) => {
                 let (label, http_status) = match &e {
-                    SendError::Disconnected => ("retry", 0u16),
-                    SendError::Io(_) => ("retry", 0u16),
-                    SendError::Encode(_) => ("dropped", 0u16),
+                    SendError::Disconnected => (PostOutcome::Retry, 0u16),
+                    SendError::Io(_) => (PostOutcome::Retry, 0u16),
+                    SendError::Encode(_) => (PostOutcome::Dropped, 0u16),
                 };
                 tracing::warn!(
                     adapter = %self.name,
@@ -510,7 +510,7 @@ impl SignalAdapter {
                     PROTOCOL,
                     principal,
                     latency_ms,
-                    Err((&provider, http_status, label)),
+                    Err((&provider, http_status, label, None)),
                 );
             }
         }

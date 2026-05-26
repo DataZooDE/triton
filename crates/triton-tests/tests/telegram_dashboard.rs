@@ -177,7 +177,7 @@ async fn dashboard_surface_dispatches_sendphoto_with_png() {
         .collect();
     let rasterizer_audits: Vec<&serde_json::Value> = audits
         .iter()
-        .filter(|v| v["kind"] == "audit" && v["status_label"] == "rasterizer_call")
+        .filter(|v| v["kind"] == "audit" && v["status_detail"] == "rasterizer_call")
         .collect();
     assert!(
         !rasterizer_audits.is_empty(),
@@ -253,7 +253,7 @@ async fn rasterizer_failure_falls_back_to_text() {
         .collect();
     let fails: Vec<&serde_json::Value> = audits
         .iter()
-        .filter(|v| v["kind"] == "audit" && v["status_label"] == "rasterizer_failed")
+        .filter(|v| v["kind"] == "audit" && v["status_detail"] == "rasterizer_failed")
         .collect();
     assert!(
         !fails.is_empty(),
