@@ -11,7 +11,7 @@
 //! (`task:get`, `task:cancel`) can plug in without touching the
 //! adapter signature. By construction, restart wipes the store.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;
@@ -28,12 +28,26 @@ use triton_core::{A2uiVersion, Dispatcher, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
 
+/// Upper bound on retained tasks. Every inbound A2A call records one
+/// entry; without a cap the map grows for the life of the process
+/// (Codex robustness review). Bounded FIFO: the oldest entries
+/// scroll off. Restart-clean by construction (G-8).
+const TASK_STORE_CAPACITY: usize = 1024;
+
 /// FR-A-7 task store. In-process memory; restart-clean by
 /// construction (G-8). The echo tool finishes synchronously, so
 /// every recorded task is immediately `Completed` or `Failed`.
+/// Bounded at [`TASK_STORE_CAPACITY`] with FIFO eviction.
 #[derive(Clone, Default)]
 pub struct InMemoryTaskStore {
-    inner: Arc<Mutex<HashMap<String, TaskState>>>,
+    inner: Arc<Mutex<TaskStoreInner>>,
+}
+
+#[derive(Default)]
+struct TaskStoreInner {
+    states: HashMap<String, TaskState>,
+    /// Insertion order of the keys in `states`, for FIFO eviction.
+    order: VecDeque<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -49,14 +63,21 @@ impl InMemoryTaskStore {
     }
 
     pub fn get(&self, trace_id: &str) -> Option<TaskState> {
-        self.inner.lock().unwrap().get(trace_id).copied()
+        self.inner.lock().unwrap().states.get(trace_id).copied()
     }
 
     fn record(&self, trace_id: &str, state: TaskState) {
-        self.inner
-            .lock()
-            .unwrap()
-            .insert(trace_id.to_string(), state);
+        let mut g = self.inner.lock().unwrap();
+        // Only a brand-new key extends the store; an update keeps the
+        // existing position so the FIFO order tracks first-seen.
+        if g.states.insert(trace_id.to_string(), state).is_none() {
+            g.order.push_back(trace_id.to_string());
+            while g.order.len() > TASK_STORE_CAPACITY {
+                if let Some(old) = g.order.pop_front() {
+                    g.states.remove(&old);
+                }
+            }
+        }
     }
 }
 
@@ -283,4 +304,39 @@ fn a2a_error_with_trace_opt(e: &TritonError, trace_id: Option<&str>) -> Response
         "metadata": metadata,
     });
     (status, Json(body)).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{InMemoryTaskStore, TASK_STORE_CAPACITY, TaskState};
+
+    #[test]
+    fn task_store_is_bounded_and_evicts_oldest() {
+        let store = InMemoryTaskStore::new();
+        // Record well past capacity.
+        for i in 0..(TASK_STORE_CAPACITY + 50) {
+            store.record(&format!("trace-{i}"), TaskState::Completed);
+        }
+        // The map never exceeds the cap.
+        assert_eq!(
+            store.inner.lock().unwrap().states.len(),
+            TASK_STORE_CAPACITY
+        );
+        // Oldest scrolled off; newest retained.
+        assert!(store.get("trace-0").is_none());
+        assert!(
+            store
+                .get(&format!("trace-{}", TASK_STORE_CAPACITY + 49))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn task_store_update_keeps_one_entry() {
+        let store = InMemoryTaskStore::new();
+        store.record("t", TaskState::Completed);
+        store.record("t", TaskState::Failed);
+        assert_eq!(store.inner.lock().unwrap().states.len(), 1);
+        assert_eq!(store.inner.lock().unwrap().order.len(), 1);
+    }
 }
