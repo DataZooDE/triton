@@ -1,73 +1,97 @@
-# Deploy
+# Deploy — `dz-triton-explorer`
 
-Substrate deployment artefacts for `dz-triton-explorer`. **Tailnet-only.**
+Substrate deployment artefacts for the Triton Explorer Flutter SPA.
+**Tailnet-only**, internal ingress on the DataZoo Hetzner substrate.
 
-## Files
+## Shape
 
-- `Dockerfile` — multi-stage: Flutter web build + `nginx-unprivileged`.
+- `Dockerfile` — multi-stage Flutter web build → `nginx-unprivileged`.
 - `nginx.conf` — SPA fallback + `/healthz` + `/version.json`.
-- `explorer.nomad.hcl` — Nomad service jobspec with `tags = []`
-  (no `urlprefix-`, so Fabio cannot route public traffic here).
+- `explorer.nomad.hcl` — `exposure = internal` (ADR-0010); Consul service
+  with the `intprefix-explorer.<env>.int.data-zoo.de` tag so the shared
+  `fabio-internal` ingress on `tailscale0:443` proxies to it over HTTPS.
 
-## Access pattern
+## Access
 
-The container listens on `:8080` inside the Nomad alloc. Consul
-registers the service as `dz-triton-explorer` with no Fabio tags;
-tailnet peers (operators on `tag:ops`) reach it via Consul DNS:
+After deploy, tailnet peers (operators on `tag:ops`) reach the SPA at:
 
 ```
-http://dz-triton-explorer.service.consul:8080
+https://explorer.nonprod.int.data-zoo.de
+https://explorer.prod.int.data-zoo.de
 ```
 
-This mirrors how Triton's `/metrics` listener stays locked to the
-tailnet — same idiom, different content.
+Real HTTPS, trusted cert (the per-env wildcard `*.<env>.int.data-zoo.de`
+issued by the substrate's ACME helper into Vault). No public Fabio route
+ever exists for this job; deploy gate enforces.
 
 ## CORS
 
-The SPA in this container talks to Triton's HTTP trio cross-origin.
-Triton must be running with its origin in the allow-list so the
-browser preflight passes:
+The SPA talks to Triton's HTTP trio cross-origin. Triton must allow-list
+the explorer's tailnet origin so the browser preflight passes:
 
 ```
-TRITON_CORS_ALLOWED_ORIGINS=http://dz-triton-explorer.service.consul:8080
+TRITON_CORS_ALLOWED_ORIGINS=https://explorer.nonprod.int.data-zoo.de
 ```
 
-For nonprod operators on the tailnet, the same env can include the
-local dev origins:
+Add the prod origin to Triton's prod env when promoting. The CORS layer
+itself lives in `crates/triton-adapters-http/src/cors.rs`; the wiring
+is in `triton-bin` (see PR #16).
 
-```
-TRITON_CORS_ALLOWED_ORIGINS=http://dz-triton-explorer.service.consul:8080,http://localhost:5000
-```
+## Build + push (manual today)
 
-See PR #16 for the CORS layer; PR #18 for the `/v1/runtime`
-discovery endpoint that bootstraps OIDC PKCE.
-
-## Building the image
-
-The substrate CI builds + pushes the image. For local smoke:
+The substrate's reusable `build-app-image.yml` workflow lives in
+`hetzner-agent-substrate` and triggers off `apps/<app>/**` paths inside
+that repo. The Explorer's source is in **this** repo (`triton/`), so
+until we add a per-app caller workflow here, the image is built and
+pushed by hand from a workstation with `gcloud` auth'd to
+`hetzner-agent-backplane`:
 
 ```bash
-# From the repo root:
-docker build -f apps/explorer/deploy/Dockerfile -t dz-triton-explorer:dev .
-docker run --rm -p 8080:8080 dz-triton-explorer:dev
-# Browse http://localhost:8080
+cd /path/to/triton
+
+VERSION=$(date +%Y-%m-%d)-$(git rev-parse --short HEAD)
+IMG=europe-west3-docker.pkg.dev/hetzner-agent-backplane/substrate/dz-triton-explorer
+
+docker build -f apps/explorer/deploy/Dockerfile -t $IMG:$VERSION .
+
+gcloud auth configure-docker europe-west3-docker.pkg.dev --quiet
+docker push $IMG:$VERSION
+
+# Capture the immutable digest for the manifest pin
+DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' $IMG:$VERSION)
+echo "$DIGEST"
 ```
 
-The Dockerfile copies only `apps/explorer/{lib,web,pubspec.*,
-analysis_options.yaml}` into the build stage, so changes outside
-the explorer don't bust the layer cache.
-
-## Deploy
-
-From the substrate repo (operator-side):
+Local smoke before push:
 
 ```bash
-nomad job run \
-  -var=datacenter=nonprod \
-  -var=version=2026-05-24-abc1234 \
-  -var=image=ghcr.io/datazoo/dz-triton-explorer@sha256:... \
-  deploy/explorer.nomad.hcl
+docker run --rm -p 8080:8080 $IMG:$VERSION
+curl -fsS http://localhost:8080/healthz   # → "ok"
+curl -fsS http://localhost:8080/ | head -3 # → SPA HTML
 ```
 
-`auto_promote = false` + `canary = count` gives blue/green; manually
-`/promote` once the canaries pass `/healthz`.
+## Release (operator-side)
+
+Pin in `hetzner-agent-substrate/ops/base-jobs.manifest`:
+
+```
+dz-triton-explorer.nomad.hcl   -var image=europe-west3-docker.pkg.dev/hetzner-agent-backplane/substrate/dz-triton-explorer:<sha-tag>
+```
+
+Then, from the substrate repo:
+
+```bash
+/release-app dz-triton-explorer nonprod
+```
+
+`/release-app` resolves the latest known-good tag, opens (or no-ops on)
+the manifest-bump PR, waits for merge, dispatches `/deploy-base nonprod`,
+and probes `/healthz`. See substrate-platform reference 18.
+
+## Why no per-app Tailscale sidecar
+
+Pre-ADR-0010 internal apps each ran a Tailscale sidecar that joined the
+tailnet under its own MagicDNS name. ADR-0010 retired that model in
+favour of one shared internal ingress (`fabio-internal`) per cli node,
+fronting every internal app with the per-env wildcard cert. New
+internal apps just add the `intprefix-` Consul tag — no sidecar.
