@@ -175,10 +175,17 @@ job "dz-triton-api" {
         ports = ["http"]
         // Pinning the args list verbatim against auth-portal-dz keeps
         // the SSO behaviour identical across internal apps. Notable
-        // delta from auth-portal: cookie-samesite=none (the SPA hits
-        // us cross-origin), and CORS flags so the OPTIONS preflight
-        // from triton-explorer.* clears at the sidecar before Triton
-        // even sees the request.
+        // deltas:
+        //   * cookie-samesite=none — the SPA hits us cross-origin
+        //     and the session cookie must survive that.
+        //   * skip-auth-preflight=true — let OPTIONS preflights from
+        //     triton-explorer.* bypass auth at the sidecar so they
+        //     reach Triton's own tower-http CORS layer (which already
+        //     emits Allow-Origin + Allow-Credentials per
+        //     TRITON_CORS_ALLOWED_ORIGINS). oauth2-proxy v7.6.0 has
+        //     no first-class --cors-* flags; CORS handling moved
+        //     into the alpha-config YAML only in later releases.
+        //     See substrate PR #268 + #272.
         args = [
           "--http-address=0.0.0.0:4180",
           "--upstream=http://127.0.0.1:8003",
@@ -199,11 +206,10 @@ job "dz-triton-api" {
           // to carry the session cookie. Browsers also require
           // Secure (above) on a None cookie.
           "--cookie-samesite=none",
-          // The SPA at triton-explorer.<env>.int.data-zoo.de calls us
-          // cross-origin. Echo its origin + Allow-Credentials so the
-          // preflight clears.
-          "--cors-allow-origin=${local.explorer_origin}",
-          "--cors-allow-credentials=true",
+          // OPTIONS preflights bypass auth → Triton's tower-http
+          // CORS layer responds with the correct Allow-Origin /
+          // Allow-Credentials.
+          "--skip-auth-preflight=true",
         ]
       }
 
