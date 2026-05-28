@@ -202,32 +202,49 @@ async fn main() -> std::io::Result<()> {
 
     // Build the OIDC verifier if the substrate injected an issuer.
     // When unset we fall back to the cfg-gated dev-token path.
-    let identity = Arc::new(IdentityProvider::new(
-        match (&settings.oidc_issuer, &settings.oidc_audience) {
-            (Some(issuer), Some(aud)) => {
-                tracing::info!(issuer, aud, "OIDC verifier enabled");
-                Some(Arc::new(OidcVerifier::new(OidcConfig::new(
-                    issuer.clone(),
-                    aud.clone(),
-                ))))
-            }
-            (Some(_), None) | (None, Some(_)) => {
-                tracing::error!("TRITON_OIDC_ISSUER and TRITON_OIDC_AUDIENCE must be set together");
-                std::process::exit(2);
-            }
-            (None, None) => {
-                #[cfg(feature = "dev-token")]
-                tracing::warn!(
-                    "no OIDC issuer configured; dev-token fallback in effect (dev builds only)"
-                );
-                #[cfg(not(feature = "dev-token"))]
-                tracing::error!(
-                    "no OIDC issuer configured and dev-token disabled at build time; \
-                     every bearer will be rejected"
-                );
-                None
-            }
-        },
+    let oidc_verifier = match (&settings.oidc_issuer, &settings.oidc_audience) {
+        (Some(issuer), Some(aud)) => {
+            tracing::info!(issuer, aud, "OIDC verifier enabled");
+            Some(Arc::new(OidcVerifier::new(OidcConfig::new(
+                issuer.clone(),
+                aud.clone(),
+            ))))
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            tracing::error!("TRITON_OIDC_ISSUER and TRITON_OIDC_AUDIENCE must be set together");
+            std::process::exit(2);
+        }
+        (None, None) => {
+            #[cfg(feature = "dev-token")]
+            tracing::warn!(
+                "no OIDC issuer configured; dev-token fallback in effect (dev builds only)"
+            );
+            #[cfg(not(feature = "dev-token"))]
+            tracing::error!(
+                "no OIDC issuer configured and dev-token disabled at build time; \
+                 every bearer will be rejected"
+            );
+            None
+        }
+    };
+    // Issue #67 — only honour X-Forwarded-Email when both the
+    // operator-explicit flag is set AND OIDC is OFF (real Bearer/
+    // PKCE end-to-end is the source of truth when OIDC is live).
+    if settings.trust_forwarded_auth && oidc_verifier.is_some() {
+        tracing::warn!(
+            "TRITON_TRUST_FORWARDED_AUTH=true but OIDC is also configured — \
+             forwarded-auth fast-path is DISABLED; OIDC Bearer wins (ADR-10)."
+        );
+    } else if settings.trust_forwarded_auth {
+        tracing::warn!(
+            "TRITON_TRUST_FORWARDED_AUTH=true — admitting requests carrying \
+             X-Forwarded-Email from a co-located oauth2-proxy sidecar. \
+             ONLY safe when Triton binds loopback (issue #67)."
+        );
+    }
+    let identity = Arc::new(IdentityProvider::with_forwarded_auth(
+        oidc_verifier,
+        settings.trust_forwarded_auth,
     ));
 
     let manifest_arc = manifest.as_ref().map(|m| Arc::new(m.clone()));

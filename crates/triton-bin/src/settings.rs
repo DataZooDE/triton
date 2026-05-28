@@ -104,6 +104,15 @@ pub struct Settings {
     /// this env; the discovery endpoint returns null and the SPA
     /// shows an "ask an operator" message.
     pub explorer_client_id: Option<String>,
+    /// Trust `X-Forwarded-Email` from a co-located oauth2-proxy
+    /// sidecar (ADR-0011 / auth-portal-dz idiom). Issue #67: with
+    /// this off, the SPA has to send a `Bearer` token even though
+    /// the operator already authenticated at the sidecar. Default
+    /// `false` for production parity — only safe to enable when the
+    /// HTTP listeners are bound to loopback inside a Nomad alloc
+    /// (so the only thing that can set the header is the sidecar in
+    /// the shared netns).
+    pub trust_forwarded_auth: bool,
 }
 
 impl Settings {
@@ -374,6 +383,14 @@ struct Cli {
     #[arg(long, env = "TRITON_EXPLORER_CLIENT_ID")]
     explorer_client_id: Option<String>,
 
+    /// Trust `X-Forwarded-Email` from a co-located oauth2-proxy
+    /// sidecar instead of requiring an `Authorization: Bearer` on
+    /// every request. Default `false`. Issue #67. ONLY safe when
+    /// Triton binds loopback inside a Nomad alloc so the only thing
+    /// that can set the header is the sidecar in the shared netns.
+    #[arg(long, env = "TRITON_TRUST_FORWARDED_AUTH", default_value_t = false)]
+    trust_forwarded_auth: bool,
+
     /// PR 36: dashboard rasterizer service URL (FR-A-11).
     /// Default points at the in-repo `triton-rasterizer` binary
     /// running on its 12-factor default port. Outside `local` env
@@ -434,6 +451,7 @@ impl From<Cli> for Settings {
             ),
             explorer_client_id: c.explorer_client_id,
             rasterizer_url: c.rasterizer_url,
+            trust_forwarded_auth: c.trust_forwarded_auth,
         }
     }
 }

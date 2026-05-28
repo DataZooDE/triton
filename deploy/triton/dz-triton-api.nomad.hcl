@@ -149,6 +149,15 @@ job "dz-triton-api" {
         TRITON_ENV                   = local.env
         TRITON_CORS_ALLOWED_ORIGINS  = local.explorer_origin
         TRITON_DRAIN_DEADLINE_SECS   = "10"
+        // Issue #67: trust X-Forwarded-Email from the co-located
+        // oauth2-proxy sidecar (above). Triton listens on 0.0.0.0 here
+        // but only the sidecar in the shared netns ever reaches REST
+        // (4180 → upstream 127.0.0.1:8003), so the header can only
+        // be set by the sidecar — which authenticated the operator
+        // against Vault's ops realm. Without this flag the SPA also
+        // has to send a Bearer (today: dev-token), even though SSO
+        // already happened.
+        TRITON_TRUST_FORWARDED_AUTH  = "true"
         RUST_LOG                     = "info"
       }
 
