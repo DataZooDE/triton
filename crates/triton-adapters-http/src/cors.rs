@@ -26,6 +26,15 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 /// Headers: `authorization`, `content-type`, `accept` — the three
 /// the SPA actually sends. Max-age 10 minutes so the browser caches
 /// preflights instead of probing per call.
+///
+/// Credentials: `Access-Control-Allow-Credentials: true` is emitted
+/// so a browser fetch with `credentials: "include"` (or Dio's web
+/// `withCredentials = true`) can carry the oauth2-proxy session
+/// cookie cross-origin to Triton — the wire shape the upcoming
+/// internal-SSO sidecar deployment uses (SPA at one FQDN, REST
+/// adapter at another, shared cookie-domain). Browsers refuse this
+/// header in combination with `Allow-Origin: *`, which is why
+/// `is_valid_origin` rejects `*` outright.
 pub fn build_layer(origins: &[String]) -> Option<CorsLayer> {
     if origins.is_empty() {
         return None;
@@ -47,6 +56,7 @@ pub fn build_layer(origins: &[String]) -> Option<CorsLayer> {
                 HeaderName::from_static("content-type"),
                 HeaderName::from_static("accept"),
             ])
+            .allow_credentials(true)
             .max_age(Duration::from_secs(600)),
     )
 }
