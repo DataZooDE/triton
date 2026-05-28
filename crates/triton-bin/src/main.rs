@@ -1019,7 +1019,12 @@ async fn main() -> std::io::Result<()> {
         }
         Ok::<(), std::io::Error>(())
     };
-    let drain = async {
+    // Run the listeners + ancillary futures forever, then on signal
+    // receipt bound the post-shutdown drain by `drain_deadline`. The
+    // earlier shape wrapped the whole join in
+    // `tokio::time::timeout(drain_deadline, ...)`, which capped total
+    // uptime at `drain_deadline` regardless of signal — issue #65.
+    let serve = async {
         let (a, b, c, m, ch, sa) = tokio::join!(
             serve_mcp,
             serve_a2a,
@@ -1030,15 +1035,30 @@ async fn main() -> std::io::Result<()> {
         );
         a.and(b).and(c).and(m).and(ch).and(sa)
     };
-    let outcome = tokio::time::timeout(settings.drain_deadline, drain).await;
-    let serve_result = match outcome {
-        Ok(r) => r,
-        Err(_) => {
-            tracing::warn!(
-                deadline_secs = settings.drain_deadline.as_secs(),
-                "drain deadline exceeded; in-flight connections aborted"
-            );
-            Ok(())
+    tokio::pin!(serve);
+
+    let serve_result = tokio::select! {
+        // A listener returning early (e.g. axum::serve hit an
+        // unexpected error) is an exit reason in itself — propagate
+        // its result without starting the drain timer (nothing left
+        // to drain).
+        res = &mut serve => res,
+
+        // Signal receipt → start the bounded drain. `signal_task`
+        // cancels `shutdown`, which resolves every listener's
+        // `with_graceful_shutdown(shutdown.cancelled_owned())` and
+        // lets `serve` complete in-flight requests.
+        _ = shutdown.cancelled() => {
+            match tokio::time::timeout(settings.drain_deadline, &mut serve).await {
+                Ok(res) => res,
+                Err(_) => {
+                    tracing::warn!(
+                        deadline_secs = settings.drain_deadline.as_secs(),
+                        "drain deadline exceeded; in-flight connections aborted"
+                    );
+                    Ok(())
+                }
+            }
         }
     };
 
