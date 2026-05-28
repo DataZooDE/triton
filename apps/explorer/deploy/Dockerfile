@@ -1,23 +1,27 @@
 # Multi-stage build for the Triton Explorer Flutter web app.
 #
-# Stage 1 — `flutter build web --release`. We pin to a specific
-# Flutter SDK image SHA at deploy time (substrate doctrine: NEVER
-# `:latest`). The placeholder `cirrusci/flutter:3.24.5` below is
-# replaced by the substrate repo's CI when it produces the deploy
-# image SHA. Use `--web-renderer canvaskit` so SVG/Material icons
-# render consistently across browsers.
+# Stage 1 — `flutter build web --release`. We pin to a specific Flutter
+# SDK image tag (substrate doctrine: NEVER `:latest`). `ghcr.io/cirruslabs`
+# is the maintained mirror of the old cirrusci/flutter images. The tag
+# must match the workstation's Flutter / Dart pair — `pubspec.yaml`
+# requires Dart ^3.12.0 (Flutter 3.44.0), so we pin 3.44.0 here too.
 #
-# Stage 2 — `nginxinc/nginx-unprivileged` serves the compiled assets
-# on :8080. The Flutter SPA talks to Triton cross-origin; Triton's
-# CORS layer (PR #16) clears the preflight when this explorer's
-# tailnet FQDN is in TRITON_CORS_ALLOWED_ORIGINS.
+# Stage 2 — `nginxinc/nginx-unprivileged` serves the compiled assets on
+# :8080. Plain HTTP — fabio-internal terminates TLS upstream with the
+# `*.<env>.int.data-zoo.de` wildcard cert (ADR-0010).
+#
+# Image target (GAR — substrate-platform reference 18):
+#   europe-west3-docker.pkg.dev/hetzner-agent-backplane/substrate/dz-triton-explorer:<sha>
+#
+# The Dockerfile copies only `apps/explorer/{lib,web,pubspec.*,
+# analysis_options.yaml}` into the build stage so changes outside the
+# explorer don't bust the layer cache.
 
 # ----- stage 1: build -----
-FROM cirrusci/flutter:3.24.5 AS build
+FROM ghcr.io/cirruslabs/flutter:3.44.0 AS build
 WORKDIR /src
 
-# Copy only what the build needs so changes outside apps/explorer/
-# don't bust the layer cache.
+# Copy only what the build needs (cache-stable).
 COPY apps/explorer/pubspec.yaml apps/explorer/pubspec.lock* ./
 RUN flutter pub get
 
@@ -25,7 +29,7 @@ COPY apps/explorer/lib ./lib
 COPY apps/explorer/web ./web
 COPY apps/explorer/analysis_options.yaml ./
 
-RUN flutter build web --release --web-renderer canvaskit --base-href=/
+RUN flutter build web --release --base-href=/
 
 # ----- stage 2: runtime -----
 FROM nginxinc/nginx-unprivileged:1.27-alpine
