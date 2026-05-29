@@ -49,6 +49,26 @@ class _PlaygroundPageState extends ConsumerState<PlaygroundPage> {
     });
   }
 
+  /// Invoked when the user interacts with a rendered A2UI surface —
+  /// taps a Button, picks a Selection, or submits a Form. This is the
+  /// stateless re-invocation loop (FR-D-3): the action carries the
+  /// tool + args to fire next. We keep [_a2uiVersion] so the response
+  /// re-renders interactively, letting chained round-trips work (e.g.
+  /// narrate's Refresh button → narrate again).
+  Future<void> _onA2uiAction(String tool, Map<String, dynamic> args) async {
+    setState(() {
+      _invoking = true;
+      _lastResult = null;
+    });
+    final client = ref.read(restClientProvider);
+    final r = await client.invoke(tool, args, a2uiVersion: _a2uiVersion);
+    if (!mounted) return;
+    setState(() {
+      _lastResult = r;
+      _invoking = false;
+    });
+  }
+
   void _onAcceptChanged(String? v) {
     setState(() => _a2uiVersion = v);
   }
@@ -82,6 +102,7 @@ class _PlaygroundPageState extends ConsumerState<PlaygroundPage> {
           result: _lastResult,
           a2uiVersion: _a2uiVersion,
           onAcceptChanged: _onAcceptChanged,
+          onA2uiAction: _onA2uiAction,
         ),
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Padding(
@@ -110,6 +131,7 @@ class _PlaygroundBody extends StatelessWidget {
     required this.result,
     required this.a2uiVersion,
     required this.onAcceptChanged,
+    required this.onA2uiAction,
   });
 
   final List<ToolDescriptor> tools;
@@ -121,6 +143,7 @@ class _PlaygroundBody extends StatelessWidget {
   final InvocationResult? result;
   final String? a2uiVersion;
   final ValueChanged<String?> onAcceptChanged;
+  final void Function(String tool, Map<String, dynamic> args) onA2uiAction;
 
   @override
   Widget build(BuildContext context) {
@@ -168,6 +191,7 @@ class _PlaygroundBody extends StatelessWidget {
                   result: result,
                   a2uiVersion: a2uiVersion,
                   onAcceptChanged: onAcceptChanged,
+                  onA2uiAction: onA2uiAction,
                 ),
         ),
       ],
@@ -184,6 +208,7 @@ class _ToolDetail extends StatelessWidget {
     required this.result,
     required this.a2uiVersion,
     required this.onAcceptChanged,
+    required this.onA2uiAction,
   });
 
   final ToolDescriptor tool;
@@ -193,6 +218,7 @@ class _ToolDetail extends StatelessWidget {
   final InvocationResult? result;
   final String? a2uiVersion;
   final ValueChanged<String?> onAcceptChanged;
+  final void Function(String tool, Map<String, dynamic> args) onA2uiAction;
 
   @override
   Widget build(BuildContext context) {
@@ -276,7 +302,11 @@ class _ToolDetail extends StatelessWidget {
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(12),
-                  child: A2UIRenderer(envelope: result!.raw),
+                  child: A2UIRenderer(
+                    envelope: result!.raw,
+                    version: a2uiVersion,
+                    onAction: onA2uiAction,
+                  ),
                 ),
               ),
             const SizedBox(height: 8),

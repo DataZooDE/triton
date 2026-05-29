@@ -49,6 +49,11 @@ class A2aClient {
         statusCode: r.statusCode ?? 0,
         elapsed: sw.elapsed,
         traceId: (data['metadata']?['trace_id'] as String?),
+        // FR-A-7: the A2A task store echoes the terminal state on
+        // success. Errors carry `metadata.{error,message}` instead —
+        // the failed state stays internal to the store — so this is
+        // null on the error path below.
+        taskState: (data['metadata']?['task_state'] as String?),
       );
     } on DioException catch (e) {
       sw.stop();

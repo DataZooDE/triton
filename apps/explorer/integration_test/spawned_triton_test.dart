@@ -18,10 +18,12 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
 import 'package:triton_explorer/api/rest_client.dart';
+import 'package:triton_explorer/widgets/a2ui/a2ui_renderer.dart';
 
 const _kBinaryPathEnv = 'TRITON_BIN_PATH';
 
@@ -110,6 +112,41 @@ void main() {
       expect(r.statusCode, 200);
       expect(r.traceId, isNotNull);
     });
+
+    // End-to-end guard for the A2UI envelope shape: the real backend
+    // nests the stream under `result` and carries no `version` field,
+    // so the renderer must unwrap + take the negotiated version. A
+    // synthetic unit test can't catch a drift in that wire contract;
+    // this renders the live demo_panel surface through the production
+    // A2UIRenderer and asserts real content (not the "unknown version"
+    // fallback) for BOTH negotiated versions.
+    for (final version in const ['0.8', '0.9']) {
+      testWidgets('demo_panel renders through A2UIRenderer (v$version)',
+          (tester) async {
+        final client = RestClient(
+          Dio(),
+          baseUrl: 'http://127.0.0.1:$restPort',
+          token: 'dev-token',
+        );
+        final r = await client.invoke('demo_panel', const {},
+            a2uiVersion: version);
+        expect(r.ok, isTrue, reason: 'demo_panel should succeed: ${r.error}');
+
+        await tester.pumpWidget(MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(
+              child: A2UIRenderer(envelope: r.raw, version: version),
+            ),
+          ),
+        ));
+        await tester.pumpAndSettle();
+
+        expect(find.text('Triton demo panel'), findsOneWidget,
+            reason: 'the live A2UI surface must render real components');
+        expect(find.textContaining('Unknown A2UI version'), findsNothing,
+            reason: 'the result-nested envelope must be unwrapped');
+      });
+    }
   });
 }
 

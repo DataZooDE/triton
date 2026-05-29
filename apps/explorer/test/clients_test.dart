@@ -94,6 +94,54 @@ void main() {
       expect(adapter.calls.first.method, 'POST');
       expect(adapter.calls.first.data['method'], 'tools/list');
     });
+
+    test('initialize negotiates protocol + parses serverInfo', () async {
+      final dio = Dio();
+      final adapter = _RecordingAdapter();
+      adapter.responder = (req) => ResponseBody.fromString(
+            '{"jsonrpc":"2.0","id":1,"result":{'
+            '"protocolVersion":"2025-06-18",'
+            '"capabilities":{"tools":{},"resources":{}},'
+            '"serverInfo":{"name":"triton","version":"0.0.1"}}}',
+            200,
+            headers: {
+              Headers.contentTypeHeader: ['application/json'],
+            },
+          );
+      dio.httpClientAdapter = adapter;
+      final client = McpClient(dio, baseUrl: 'http://t');
+      final info = await client.initialize();
+      expect(info.protocolVersion, '2025-06-18');
+      expect(info.serverName, 'triton');
+      expect(info.serverVersion, '0.0.1');
+      expect(info.capabilities.keys, containsAll(['tools', 'resources']));
+      expect(adapter.calls.first.data['method'], 'initialize');
+      expect(adapter.calls.first.data['params']['protocolVersion'],
+          '2025-06-18');
+    });
+
+    test('readResource parses contents[0]', () async {
+      final dio = Dio();
+      final adapter = _RecordingAdapter();
+      adapter.responder = (req) => ResponseBody.fromString(
+            '{"jsonrpc":"2.0","id":1,"result":{"contents":[{'
+            '"uri":"ui://triton/runtime.html",'
+            '"mimeType":"text/html","text":"<html></html>"}]}}',
+            200,
+            headers: {
+              Headers.contentTypeHeader: ['application/json'],
+            },
+          );
+      dio.httpClientAdapter = adapter;
+      final client = McpClient(dio, baseUrl: 'http://t');
+      final res = await client.readResource('ui://triton/runtime.html');
+      expect(res.uri, 'ui://triton/runtime.html');
+      expect(res.mimeType, 'text/html');
+      expect(res.text, '<html></html>');
+      expect(adapter.calls.first.data['method'], 'resources/read');
+      expect(adapter.calls.first.data['params']['uri'],
+          'ui://triton/runtime.html');
+    });
   });
 
   group('A2aClient', () {
@@ -117,6 +165,23 @@ void main() {
       final body = adapter.calls.first.data as Map<String, dynamic>;
       expect(body['parts'][0]['data']['tool'], 'echo');
       expect(body['metadata']['a2ui_version'], 'v0.8');
+    });
+
+    test('invoke surfaces metadata.task_state on success', () async {
+      final dio = Dio();
+      final adapter = _RecordingAdapter();
+      adapter.responder = (req) => ResponseBody.fromString(
+            '{"parts":[{"data":{"result":{"ok":true}}}],'
+            '"metadata":{"trace_id":"t-3","task_state":"completed"}}',
+            200,
+            headers: {
+              Headers.contentTypeHeader: ['application/json'],
+            },
+          );
+      dio.httpClientAdapter = adapter;
+      final client = A2aClient(dio, baseUrl: 'http://t');
+      final r = await client.invoke('echo', const {});
+      expect(r.taskState, 'completed');
     });
   });
 }

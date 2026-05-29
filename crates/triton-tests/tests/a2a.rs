@@ -48,6 +48,16 @@ async fn message_send_routes_echo_through_dispatcher() {
         .to_string();
     assert!(!trace_id.is_empty());
 
+    // FR-A-7: the in-process task store records this trace as
+    // Completed and echoes the terminal state in the response
+    // metadata. The explorer's Adapters page surfaces this as the
+    // "task: completed" chip — A2A is the only protocol carrying a
+    // task lifecycle, so pin the wire shape it depends on.
+    assert_eq!(
+        body["metadata"]["task_state"], "completed",
+        "expected metadata.task_state=completed: {body}"
+    );
+
     // FR-AU-1 audit line must arrive with protocol=a2a.
     let audit = wait_for_audit_matching(&proc, Duration::from_secs(2), |v| {
         v["kind"] == "audit" && v["trace_id"] == trace_id
@@ -55,6 +65,36 @@ async fn message_send_routes_echo_through_dispatcher() {
     assert_eq!(audit["protocol"], "a2a");
     assert_eq!(audit["tool"], "echo");
     assert_eq!(audit["result"], "ok");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn message_send_failure_omits_task_state_from_error_envelope() {
+    // The task store records a failed invocation as Failed internally,
+    // but the A2A *error* envelope carries `metadata.{error,message}`
+    // (+ trace_id) only — never a task_state. The explorer relies on
+    // this: the "task" chip shows on success and stays absent on
+    // error, where the error card carries the detail instead.
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), HashMap::new()).await;
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{}/message:send", proc.a2a_addr))
+        .bearer_auth("dev-token")
+        .json(&json!({
+            "parts": [{ "data": { "tool": "__missing__", "args": {} } }]
+        }))
+        .send()
+        .await
+        .expect("POST unknown tool");
+    assert!(!resp.status().is_success(), "expected non-2xx");
+    let body: serde_json::Value = resp.json().await.expect("decode");
+    assert!(
+        body["metadata"]["task_state"].is_null(),
+        "error envelope must not carry task_state: {body}"
+    );
+    assert!(
+        body["metadata"]["error"].is_string(),
+        "error envelope carries an error class: {body}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

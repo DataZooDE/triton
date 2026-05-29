@@ -34,6 +34,8 @@ class InvocationResult {
     required this.elapsed,
     this.traceId,
     this.error,
+    this.errorCode,
+    this.taskState,
   });
 
   final Map<String, dynamic> raw;
@@ -42,5 +44,74 @@ class InvocationResult {
   final String? traceId;
   final String? error;
 
+  /// MCP JSON-RPC error code (e.g. -32602 validation, -32001 auth).
+  /// MCP signals tool/auth/validation failures inside an HTTP-200
+  /// envelope, so `statusCode` alone can't convey them — the
+  /// error-taxonomy view reads this. REST/A2A leave it null (their
+  /// taxonomy rides the HTTP status).
+  final int? errorCode;
+
+  /// A2A only. The A2A adapter tracks `trace_id → {completed|failed}`
+  /// in its in-process task store (FR-A-7) and echoes the terminal
+  /// state in `metadata.task_state` on success. REST/MCP leave this
+  /// null — the field exists so the Adapters page can show that A2A
+  /// carries task lifecycle the other two protocols don't.
+  final String? taskState;
+
   bool get ok => error == null && statusCode >= 200 && statusCode < 300;
+}
+
+/// MCP `initialize` handshake result. Triton negotiates a protocol
+/// version from its supported set and advertises which capabilities
+/// (tools, resources) it serves.
+class McpServerInfo {
+  McpServerInfo({
+    required this.protocolVersion,
+    required this.serverName,
+    required this.serverVersion,
+    required this.capabilities,
+  });
+
+  final String protocolVersion;
+  final String serverName;
+  final String serverVersion;
+  final Map<String, dynamic> capabilities;
+
+  factory McpServerInfo.fromResult(Map<String, dynamic> result) {
+    final info = (result['serverInfo'] as Map?)?.cast<String, dynamic>() ??
+        const <String, dynamic>{};
+    return McpServerInfo(
+      protocolVersion: (result['protocolVersion'] as String?) ?? '',
+      serverName: (info['name'] as String?) ?? '',
+      serverVersion: (info['version'] as String?) ?? '',
+      capabilities: (result['capabilities'] as Map?)?.cast<String, dynamic>() ??
+          const <String, dynamic>{},
+    );
+  }
+}
+
+/// A single content item from MCP `resources/read`. Triton serves a
+/// runtime-discovery stub at `ui://triton/runtime.html`.
+class McpResource {
+  McpResource({
+    required this.uri,
+    required this.mimeType,
+    required this.text,
+  });
+
+  final String uri;
+  final String mimeType;
+  final String text;
+
+  factory McpResource.fromResult(Map<String, dynamic> result) {
+    final contents = ((result['contents'] as List?) ?? const []).cast<Map>();
+    final first = contents.isEmpty
+        ? const <String, dynamic>{}
+        : contents.first.cast<String, dynamic>();
+    return McpResource(
+      uri: (first['uri'] as String?) ?? '',
+      mimeType: (first['mimeType'] as String?) ?? '',
+      text: (first['text'] as String?) ?? '',
+    );
+  }
 }
