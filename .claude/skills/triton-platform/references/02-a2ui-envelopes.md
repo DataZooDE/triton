@@ -57,8 +57,7 @@ label, kind, required}` where `kind ∈ {string, integer, boolean}`.
   `PlatformMessage` per the adapter's `degrade` rules (→
   `references/05`).
 
-The **v0.9** wire shape (what a REST `;version=0.9` caller sees), for
-reference only — Triton produces this from your `surface`:
+The **v0.9 A2UI envelope** Triton builds from your `surface` is:
 
 ```json
 { "version": "0.9", "stream": [
@@ -71,6 +70,34 @@ Note the wire form flattens and renames (`kind`→`type`,
 `value`→`text`, inline `action`). **Do not emit this yourself** —
 emit the canonical `{surface:{components:[…]}}` and let the builder
 flatten it. The two differ on purpose (`crates/triton-core/src/a2ui/v09.rs`).
+
+### Where the envelope lives in the transport — read this
+
+A caller never sees that envelope at the top level. It is always
+**nested under a `result` key** inside the dispatcher envelope
+`{ latency_ms, trace_id, result }`, and each protocol wraps it once
+more:
+
+| Protocol | Path to the `{version, stream}` envelope | Trace id |
+|---|---|---|
+| REST `POST /v1/tools/<tool>` | `body.result` | `body.trace_id` |
+| MCP `tools/call` | `result.structuredContent.result` | `result._meta.trace_id` |
+| A2A `POST /message:send` | `parts[0].data.result` | `metadata.trace_id` |
+
+So a REST `;version=0.9` response is:
+
+```json
+{ "latency_ms": 7, "trace_id": "…",
+  "result": { "version": "0.9", "stream": [ … ] } }
+```
+
+A client that reads top-level `version`/`stream` finds neither and
+mis-renders (this exact bug shipped once in the Flutter explorer —
+`apps/explorer/lib/widgets/a2ui/a2ui_renderer.dart`). **Unwrap `result`
+first.** Because `version` rides *inside* `result`, you can dispatch on
+`result.version` rather than tracking the `Accept` you sent. v0.8 is
+the same shape, but each stream entry is a PascalCase
+`{ "Component": { "Text": {…} } }` wrapper instead of a flat `type`.
 
 ## Which version to target
 

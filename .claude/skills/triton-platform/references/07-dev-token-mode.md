@@ -58,6 +58,17 @@ ACC-13 pins this exact path: an external crate depending on
 that does precisely this. Copy its shape; it's the smallest possible
 "is my wiring right?" check.
 
+## Sibling: forwarded-auth sidecar mode
+
+dev-token is one of two issuer-less auth modes. The other is the
+**oauth2-proxy sidecar** path: with `TRITON_TRUST_FORWARDED_AUTH=true`
+(and still no OIDC issuer), Triton trusts an `X-Forwarded-Email` header
+from a co-located sidecar instead of a bearer (ADR-0011 / issue #67).
+That's the path the substrate demo deploys behind real SSO; dev-token
+is the path for local/CI with no sidecar. Both are disabled the moment
+`TRITON_OIDC_ISSUER` is set. Full client-side detail is in
+`references/06` → "Auth — three inbound modes".
+
 ## Don't ship it
 
 - Never set the `dev-token` feature on a release build.
