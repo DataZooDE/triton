@@ -170,5 +170,48 @@ void main() {
       ));
       expect(find.textContaining('Unknown A2UI version: 0.99'), findsOneWidget);
     });
+
+    testWidgets('unwraps result-nested envelope with explicit version',
+        (tester) async {
+      // The real wire shape: stream under `result`, no version field.
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(
+          body: A2UIRenderer(
+            version: '0.9',
+            envelope: {
+              'latency_ms': 0,
+              'result': {
+                'stream': [
+                  {'type': 'text', 'text': 'nested-v9'},
+                ],
+              },
+            },
+          ),
+        ),
+      ));
+      expect(find.text('nested-v9'), findsOneWidget);
+    });
+
+    testWidgets('sniffs v0.8 from Component wrapper when version absent',
+        (tester) async {
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(
+          body: A2UIRenderer(
+            envelope: {
+              'result': {
+                'stream': [
+                  {
+                    'Component': {
+                      'Text': {'text': 'sniffed-v8'},
+                    }
+                  },
+                ],
+              },
+            },
+          ),
+        ),
+      ));
+      expect(find.text('sniffed-v8'), findsOneWidget);
+    });
   });
 }

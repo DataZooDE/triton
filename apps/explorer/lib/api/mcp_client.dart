@@ -40,6 +40,28 @@ class McpClient {
     return r.data!;
   }
 
+  /// `initialize` — the MCP handshake. Triton negotiates a protocol
+  /// version from its supported set (rejecting unknown ones) and
+  /// advertises its `tools`/`resources` capabilities. We pin the
+  /// latest spec revision the gateway knows.
+  Future<McpServerInfo> initialize({
+    String protocolVersion = '2025-06-18',
+  }) async {
+    final resp = await _rpc('initialize', {'protocolVersion': protocolVersion});
+    final result =
+        (resp['result'] as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
+    return McpServerInfo.fromResult(result);
+  }
+
+  /// `resources/read` — Triton serves a runtime-discovery stub at
+  /// `ui://triton/runtime.html`.
+  Future<McpResource> readResource(String uri) async {
+    final resp = await _rpc('resources/read', {'uri': uri});
+    final result =
+        (resp['result'] as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
+    return McpResource.fromResult(result);
+  }
+
   /// `tools/list` — MCP returns tools in camelCase shape. We
   /// translate to the same `ToolDescriptor` the REST client emits so
   /// the playground code is wire-agnostic.
@@ -81,12 +103,14 @@ class McpClient {
               ?.cast<String, dynamic>() ??
           <String, dynamic>{};
       final traceId = (result['_meta']?['trace_id'] as String?);
+      final err = (resp['error'] as Map?)?.cast<String, dynamic>();
       return InvocationResult(
         raw: structured,
         statusCode: 200,
         elapsed: sw.elapsed,
         traceId: traceId,
-        error: (resp['error'] as Map?)?['message'] as String?,
+        error: err?['message'] as String?,
+        errorCode: err?['code'] as int?,
       );
     } on DioException catch (e) {
       sw.stop();
