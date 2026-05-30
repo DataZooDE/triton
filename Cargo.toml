@@ -15,6 +15,7 @@ members = [
     "crates/triton-upstream",
     "crates/triton-adapters-http",
     "crates/triton-bin",
+    "crates/triton-embed",
     "crates/triton-rasterizer",
     "crates/triton-tests",
 ]
