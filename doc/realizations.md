@@ -957,3 +957,22 @@ a trap the next developer should not have to step in.
   `upstream_fixture::FakeConsul`/`FakeVault` as standalone bins
   (`crates/triton-tests/src/bin/fake-{consul,vault}`) and pointing
   Triton's upstream router at them — no Triton code change needed.
+
+- **`Router::nest("/mcp", r)` where `r` has a root `/` route answers
+  `/mcp` but 404s `/mcp/`.** axum 0.8 nest semantics: the inner `/`
+  route matches the prefix exactly (`/mcp`), not the trailing-slash
+  variant. This bit the single-port embed host (issue #75): the
+  Explorer's MCP client unconditionally POSTed `"$baseUrl/"`, harmless
+  when `baseUrl` is a bare origin (path normalises to `/`, MCP on its
+  own port) but `/mcp/` -> 404 once `/v1/runtime` advertised
+  `mcp_base=/mcp` and the base carried that mount path. Fix is
+  client-side: the MCP endpoint *is* `baseUrl` -- only append `/` when
+  the base has no path. **Invisible to curl smoke-tests** (you naturally
+  curl `/mcp`, which works); it only surfaces when the real SPA drives
+  the wire. Caught by a Chrome-DevTools-MCP click-through of the embedded
+  Explorer where REST+A2A were 200 and MCP alone was 404 -- concrete
+  payoff for CLAUDE.md section 8's "verify in a real browser". To make
+  the host tolerant of trailing slashes from other MCP clients, mount the
+  (Clone, Arc-backed) `McpState` router at both `/mcp` and `/mcp/`, or add
+  a `NormalizePathLayer`; but the contract is that clients POST the
+  advertised endpoint verbatim.
