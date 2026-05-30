@@ -24,6 +24,39 @@ class ToolDescriptor {
       );
 }
 
+/// The exact HTTP frame a protocol client would send for one tool call
+/// — surfaced so the Console can show it, let the operator edit it, and
+/// send precisely what they typed (message injection / small
+/// corrections). `body` is the editable JSON: for REST it is the raw
+/// args object; for MCP the full JSON-RPC frame; for A2A the
+/// `Message{parts, metadata}`. `headers` carries only the non-secret
+/// headers (Accept, Content-Type) — the Authorization bearer is added at
+/// send time and never shown.
+class WireRequest {
+  WireRequest({
+    required this.protocol,
+    required this.method,
+    required this.url,
+    required this.headers,
+    required this.body,
+  });
+
+  /// 'REST' | 'MCP' | 'A2A'.
+  final String protocol;
+  final String method;
+  final String url;
+  final Map<String, String> headers;
+  final Map<String, dynamic> body;
+
+  WireRequest withBody(Map<String, dynamic> newBody) => WireRequest(
+        protocol: protocol,
+        method: method,
+        url: url,
+        headers: headers,
+        body: newBody,
+      );
+}
+
 /// Result of a tool invocation as seen by the SPA. The dispatcher
 /// returns `{result, trace_id, returns_a2ui, ...}`; we keep the raw
 /// JSON around for the playground's raw-response tab.

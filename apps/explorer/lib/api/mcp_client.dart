@@ -80,23 +80,48 @@ class McpClient {
         .toList(growable: false);
   }
 
-  /// `tools/call` — same surface as REST `POST /v1/tools/:name`.
-  Future<InvocationResult> invoke(
+  /// The exact MCP frame for a tool call: a full JSON-RPC 2.0
+  /// `tools/call` envelope. The editable body is the whole frame —
+  /// `jsonrpc`/`id`/`method`/`params` — so the Console can show and
+  /// correct the protocol framing itself, not just the args.
+  WireRequest buildRequest(
     String name,
     Map<String, dynamic> args, {
     String? a2uiVersion,
-  }) async {
+  }) {
+    final params = <String, dynamic>{
+      'name': name,
+      'arguments': args,
+    };
+    if (a2uiVersion != null) {
+      params['_meta'] = {'a2ui_version': 'v$a2uiVersion'};
+    }
+    return WireRequest(
+      protocol: 'MCP',
+      method: 'POST',
+      url: '$baseUrl/',
+      headers: const {'Content-Type': 'application/json'},
+      body: {
+        'jsonrpc': '2.0',
+        'id': _nextId(),
+        'method': 'tools/call',
+        'params': params,
+      },
+    );
+  }
+
+  /// Send a (possibly hand-edited) JSON-RPC frame exactly as given and
+  /// unwrap the `structuredContent` result.
+  Future<InvocationResult> sendRaw(WireRequest req) async {
     final sw = Stopwatch()..start();
     try {
-      final params = <String, dynamic>{
-        'name': name,
-        'arguments': args,
-      };
-      if (a2uiVersion != null) {
-        params['_meta'] = {'a2ui_version': 'v$a2uiVersion'};
-      }
-      final resp = await _rpc('tools/call', params);
+      final r = await _dio.post<Map<String, dynamic>>(
+        req.url,
+        data: req.body,
+        options: _opts(),
+      );
       sw.stop();
+      final resp = r.data!;
       final result = (resp['result'] as Map?)?.cast<String, dynamic>() ??
           <String, dynamic>{};
       final structured = (result['structuredContent'] as Map?)
@@ -122,4 +147,12 @@ class McpClient {
       );
     }
   }
+
+  /// `tools/call` — same surface as REST `POST /v1/tools/:name`.
+  Future<InvocationResult> invoke(
+    String name,
+    Map<String, dynamic> args, {
+    String? a2uiVersion,
+  }) =>
+      sendRaw(buildRequest(name, args, a2uiVersion: a2uiVersion));
 }

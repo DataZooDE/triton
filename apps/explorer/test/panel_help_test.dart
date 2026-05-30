@@ -1,9 +1,8 @@
-// The Playground per-tool guide copy and the shared PanelHelp banner.
+// The per-tool guide copy and the shared PanelHelp banner.
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:triton_explorer/api/models.dart';
-import 'package:triton_explorer/ui/features/playground/playground_page.dart';
 import 'package:triton_explorer/widgets/panel_help.dart';
 
 ToolDescriptor _tool(String name,
@@ -18,7 +17,7 @@ void main() {
     test('curated copy for bundled demo tools', () {
       final demo = toolGuide(_tool('demo_panel', a2ui: true));
       expect(demo.what, contains('component vocabulary'));
-      expect(demo.how, contains('Invoke'));
+      expect(demo.how, contains('Send'));
 
       final echo = toolGuide(_tool('echo'));
       expect(echo.what.toLowerCase(), contains('simplest'));
