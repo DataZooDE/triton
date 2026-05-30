@@ -82,14 +82,19 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, 'Invoke'));
     await tester.pumpAndSettle();
 
-    expect(adapter.narrateCalls, 1);
-    // The rendered Button must be live and re-invoke on tap.
+    // The Playground also renders ChatChannelPreviews for A2UI tools,
+    // which fetches the canonical surface with its own plain invoke — so
+    // the invoke count after rendering is not just the one Invoke. Guard
+    // the round-trip by the *delta* a Button tap causes, not an absolute
+    // count, so the test stays honest about what it proves: tapping the
+    // rendered Button re-invokes the tool (FR-D-3).
+    final beforeTap = adapter.narrateCalls;
     final refresh = find.widgetWithText(FilledButton, 'Refresh');
     expect(refresh, findsOneWidget);
     await tester.tap(refresh);
     await tester.pumpAndSettle();
 
-    expect(adapter.narrateCalls, 2,
+    expect(adapter.narrateCalls, greaterThan(beforeTap),
         reason: 'tapping the A2UI Button should re-invoke narrate');
   });
 }

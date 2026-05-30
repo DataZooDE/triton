@@ -8,6 +8,7 @@ import '../../../api/rest_client.dart';
 import '../../../providers/api_provider.dart';
 import '../../../providers/runtime_provider.dart';
 import '../../../widgets/json_viewer.dart';
+import '../../../widgets/panel_help.dart';
 
 /// Side-by-side comparison: fires the same {tool, args} against
 /// REST, MCP, and A2A in parallel via Future.wait, then shows each
@@ -71,6 +72,14 @@ class _AdaptersPageState extends ConsumerState<AdaptersPage> {
         ),
         data: (list) => Column(
           children: [
+            const PanelHelp(
+              what: 'Sends the same tool call to all three protocol adapters '
+                  '— REST, MCP, and A2A — at once, so you can confirm Triton '
+                  'returns the same result through each (parity).',
+              how: "Pick a tool and press 'Fire all three'. Expand 'MCP "
+                  "handshake' for the initialize/resources calls, and 'Error "
+                  "taxonomy' to see how one failure maps to each protocol.",
+            ),
             Padding(
               padding: const EdgeInsets.all(16),
               child: Row(

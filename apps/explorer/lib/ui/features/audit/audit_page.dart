@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../providers/api_provider.dart';
 import '../../../widgets/json_viewer.dart';
+import '../../../widgets/panel_help.dart';
 
 /// Live audit tail. Reads the dispatcher's in-process ring buffer
 /// over `GET /v1/audit`. Filter by trace_id; tap any row to expand
@@ -44,6 +45,14 @@ class _AuditPageState extends ConsumerState<AuditPage> {
       ),
       body: Column(
         children: [
+          const PanelHelp(
+            what: "Triton's audit trail: one line per dispatch (and per "
+                'rejected call) — who called what, over which protocol, with '
+                'a shared trace_id.',
+            how: 'Press Refresh to pull the latest; paste a trace_id to '
+                'filter; tap a row to expand the full JSON. The in-process '
+                'buffer clears on restart.',
+          ),
           Padding(
             padding: const EdgeInsets.all(16),
             child: Row(
