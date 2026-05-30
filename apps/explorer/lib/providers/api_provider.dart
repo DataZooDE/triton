@@ -63,22 +63,47 @@ String _swapPort(String base, int port) {
   return uri.replace(port: port).toString();
 }
 
+/// Resolve the MCP/A2A base. If `/v1/runtime` advertised an override
+/// (`mcp_base`/`a2a_base` — set by the single-port embed host, e.g.
+/// `/mcp`), use it (absolute URL as-is, or joined onto the REST origin).
+/// Otherwise fall back to the dev port-swap (`:8003 → devPort`).
+String _resolveBase(String base, String? override, int devPort) {
+  if (override != null && override.isNotEmpty) {
+    if (override.startsWith('http')) return override;
+    final b = base.endsWith('/') ? base.substring(0, base.length - 1) : base;
+    final o = override.startsWith('/') ? override : '/$override';
+    return '$b$o';
+  }
+  return base.contains(':8003') ? _swapPort(base, devPort) : base;
+}
+
 final mcpClientProvider = Provider<McpClient>((ref) {
   final dio = ref.watch(dioProvider);
   final base = ref.watch(tritonBaseUrlProvider);
   final token = ref.watch(effectiveTokenProvider);
-  // Heuristic for dev: if base ends with :8003 (REST), MCP is :8001.
-  final mcpBase = base.contains(':8003') ? _swapPort(base, 8001) : base;
-  return McpClient(dio, baseUrl: mcpBase, token: token);
+  final cfg = ref.watch(runtimeConfigProvider).valueOrNull;
+  return McpClient(
+    dio,
+    baseUrl: _resolveBase(base, cfg?.mcpBase, 8001),
+    token: token,
+  );
 });
 
 final a2aClientProvider = Provider<A2aClient>((ref) {
   final dio = ref.watch(dioProvider);
   final base = ref.watch(tritonBaseUrlProvider);
   final token = ref.watch(effectiveTokenProvider);
-  final a2aBase = base.contains(':8003') ? _swapPort(base, 8002) : base;
-  return A2aClient(dio, baseUrl: a2aBase, token: token);
+  final cfg = ref.watch(runtimeConfigProvider).valueOrNull;
+  return A2aClient(
+    dio,
+    baseUrl: _resolveBase(base, cfg?.a2aBase, 8002),
+    token: token,
+  );
 });
+
+/// The `trace_id` the user last invoked (set by the Console) — pre-fills
+/// the Trace page so "see the timeline of that call" is one click.
+final selectedTraceProvider = StateProvider<String?>((ref) => null);
 
 /// Auto-refreshed list of tools from `/v1/tools`. The Playground page
 /// binds to this; refreshing pulls the latest registry without a
@@ -105,11 +130,14 @@ final metricsProvider = FutureProvider<String>((ref) async {
 /// Family provider for the audit endpoint: cache key is
 /// `(limit, traceIdFilter)` so the Audit page can swap filters
 /// without losing the most recent fetch for the other key.
-final auditTailProvider = FutureProvider.family<List<Map<String, dynamic>>,
-    AuditQuery>((ref, q) async {
-  final client = ref.watch(restClientProvider);
-  return client.auditTail(limit: q.limit, traceId: q.traceId);
-});
+final auditTailProvider =
+    FutureProvider.family<List<Map<String, dynamic>>, AuditQuery>((
+      ref,
+      q,
+    ) async {
+      final client = ref.watch(restClientProvider);
+      return client.auditTail(limit: q.limit, traceId: q.traceId);
+    });
 
 class AuditQuery {
   const AuditQuery({required this.limit, this.traceId});

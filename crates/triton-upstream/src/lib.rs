@@ -19,9 +19,11 @@ use triton_core::audit::{AuditPhase, AuditRecord, emit, now_rfc3339};
 use triton_core::{Principal, TritonError};
 
 pub mod consul;
+pub mod static_upstream;
 pub mod vault;
 
 pub use consul::ConsulClient;
+pub use static_upstream::StaticUpstream;
 pub use vault::VaultClient;
 
 /// Knobs the operator can tune via `TRITON_*` env vars (see

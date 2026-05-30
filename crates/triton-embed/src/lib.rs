@@ -102,6 +102,10 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         oidc_issuer: None,
         oidc_audience: None,
         oidc_client_id: None,
+        // Single-port host: MCP/A2A are nested under these paths, so the
+        // SPA reaches the whole trio same-origin (no port-swap).
+        mcp_base: Some("/mcp".to_string()),
+        a2a_base: Some("/a2a".to_string()),
     });
 
     let rest_state = RestState {
@@ -130,6 +134,12 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
     #[cfg(feature = "explorer-assets")]
     {
         app = app.merge(explorer::router());
+    }
+
+    // Dev body-capture for the Trace view (feature-gated, never release).
+    #[cfg(feature = "capture")]
+    {
+        app = triton_adapters_http::capture::apply(app);
     }
 
     if let Some(layer) = cors::build_layer(&opts.cors_origins) {

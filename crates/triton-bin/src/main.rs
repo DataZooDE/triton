@@ -133,6 +133,10 @@ async fn main() -> std::io::Result<()> {
         oidc_issuer: settings.oidc_issuer.clone(),
         oidc_audience: settings.oidc_audience.clone(),
         oidc_client_id: settings.explorer_client_id.clone(),
+        // The standalone binary serves MCP/A2A on their own ports; the SPA
+        // uses its dev port-swap. (triton-embed sets these for one-port.)
+        mcp_base: None,
+        a2a_base: None,
     });
 
     let metrics = Arc::new(Metrics::new());
@@ -193,9 +197,33 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(2);
         }
         (None, None, _) => {
-            tracing::warn!(
-                "no upstream router configured; dispatcher serves in-process tools only"
-            );
+            match std::env::var("TRITON_STATIC_UPSTREAMS")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
+                Some(spec) => {
+                    // Dev "standalone sidecar" (issue #75, Mode 2): front a
+                    // fixed agent endpoint with no Consul/Vault.
+                    let token = std::env::var("TRITON_STATIC_UPSTREAM_TOKEN")
+                        .unwrap_or_else(|_| "dev-token".to_string());
+                    let su = triton_upstream::StaticUpstream::from_spec(
+                        &spec,
+                        token,
+                        settings.upstream_timeout,
+                    );
+                    tracing::warn!(
+                        spec = %spec,
+                        "TRITON_STATIC_UPSTREAMS set (dev): dispatching by name, no Consul/Vault"
+                    );
+                    dispatcher =
+                        dispatcher.with_upstream(Arc::new(su) as Arc<dyn UpstreamDispatch>);
+                }
+                None => {
+                    tracing::warn!(
+                        "no upstream router configured; dispatcher serves in-process tools only"
+                    );
+                }
+            }
         }
     }
     let dispatcher = Arc::new(dispatcher);

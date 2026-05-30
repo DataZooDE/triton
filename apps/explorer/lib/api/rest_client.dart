@@ -77,6 +77,17 @@ class RestClient {
         .cast<Map<String, dynamic>>();
   }
 
+  /// `GET /v1/trace/{trace_id}` — one communication as a timeline:
+  /// `{ trace_id, entries: [audit…], bodies: [captured…] }`. `bodies` is
+  /// empty unless Triton was built with the dev `capture` feature.
+  Future<Map<String, dynamic>> trace(String traceId) async {
+    final r = await _dio.get<Map<String, dynamic>>(
+      '$baseUrl/v1/trace/$traceId',
+      options: _opts().copyWith(responseType: ResponseType.json),
+    );
+    return r.data!;
+  }
+
   Future<Map<String, dynamic>> healthz() async {
     final r = await _dio.get<Map<String, dynamic>>(
       '$baseUrl/healthz',
@@ -160,6 +171,5 @@ class RestClient {
     String name,
     Map<String, dynamic> args, {
     String? a2uiVersion,
-  }) =>
-      sendRaw(buildRequest(name, args, a2uiVersion: a2uiVersion));
+  }) => sendRaw(buildRequest(name, args, a2uiVersion: a2uiVersion));
 }

@@ -212,6 +212,9 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
     final req = _buildFor(p, const {}).withBody(body);
     final r = await _sendFrame(p, req);
     if (!mounted) return;
+    if (r.traceId != null) {
+      ref.read(selectedTraceProvider.notifier).state = r.traceId;
+    }
     setState(() {
       _results[p] = r;
       _args = _argsFromBody(p, body);
@@ -349,7 +352,10 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                             title: Text(t.name),
                             subtitle: tag == null
                                 ? null
-                                : Text(tag, style: const TextStyle(fontSize: 11)),
+                                : Text(
+                                    tag,
+                                    style: const TextStyle(fontSize: 11),
+                                  ),
                             selected: _selected?.name == t.name,
                             onTap: () => _selectTool(t),
                           );

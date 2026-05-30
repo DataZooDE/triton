@@ -7,6 +7,7 @@ import '../features/dashboard/dashboard_page.dart';
 import '../features/manifest/manifest_page.dart';
 import '../features/metrics/metrics_page.dart';
 import '../features/settings/settings_page.dart';
+import '../features/trace/trace_page.dart';
 
 /// Top-level navigation rail + IndexedStack — same pattern as
 /// `heron/lib/ui/focus_layout.dart`. Wide screens get the rail;
@@ -24,6 +25,7 @@ class AppShell extends StatefulWidget {
 enum _Pane {
   dashboard,
   console,
+  trace,
   a2uiDiff,
   manifest,
   audit,
@@ -36,17 +38,33 @@ class _AppShellState extends State<AppShell> {
 
   static const _items = <_NavItem>[
     _NavItem(_Pane.dashboard, Icons.home_outlined, Icons.home, 'Dashboard'),
-    _NavItem(_Pane.console, Icons.terminal_outlined, Icons.terminal,
-        'Console'),
-    _NavItem(_Pane.a2uiDiff, Icons.compare_outlined, Icons.compare,
-        'A2UI diff'),
-    _NavItem(_Pane.manifest, Icons.description_outlined, Icons.description,
-        'Manifest'),
+    _NavItem(_Pane.console, Icons.terminal_outlined, Icons.terminal, 'Console'),
+    _NavItem(_Pane.trace, Icons.timeline_outlined, Icons.timeline, 'Trace'),
+    _NavItem(
+      _Pane.a2uiDiff,
+      Icons.compare_outlined,
+      Icons.compare,
+      'A2UI diff',
+    ),
+    _NavItem(
+      _Pane.manifest,
+      Icons.description_outlined,
+      Icons.description,
+      'Manifest',
+    ),
     _NavItem(_Pane.audit, Icons.list_alt_outlined, Icons.list_alt, 'Audit'),
-    _NavItem(_Pane.metrics, Icons.query_stats_outlined, Icons.query_stats,
-        'Metrics'),
-    _NavItem(_Pane.settings, Icons.settings_outlined, Icons.settings,
-        'Settings'),
+    _NavItem(
+      _Pane.metrics,
+      Icons.query_stats_outlined,
+      Icons.query_stats,
+      'Metrics',
+    ),
+    _NavItem(
+      _Pane.settings,
+      Icons.settings_outlined,
+      Icons.settings,
+      'Settings',
+    ),
   ];
 
   @override
@@ -57,6 +75,7 @@ class _AppShellState extends State<AppShell> {
       children: const [
         DashboardPage(),
         ConsolePage(),
+        TracePage(),
         A2uiDiffPage(),
         ManifestPage(),
         AuditPage(),

@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod principal;
 pub mod ratelimit;
 pub mod tool;
+pub mod trace;
 
 pub use audit::PostOutcome;
 pub use dispatcher::{Dispatch, Dispatcher, UpstreamDispatch, envelope};

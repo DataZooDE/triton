@@ -134,3 +134,55 @@ async fn healthz_and_tools_at_root() {
         "echo listed: {tools}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trace_endpoint_correlates_one_call() {
+    let base = boot().await;
+    let http = reqwest::Client::new();
+
+    // One call → grab its trace_id.
+    let rest: Value = http
+        .post(format!("{base}/v1/tools/echo"))
+        .bearer_auth("dev-token")
+        .json(&json!({ "marker": "trace-me" }))
+        .send()
+        .await
+        .expect("REST")
+        .json()
+        .await
+        .expect("json");
+    let trace_id = rest["trace_id"].as_str().expect("trace_id").to_string();
+
+    // The Trace timeline for that id.
+    let trace: Value = http
+        .get(format!("{base}/v1/trace/{trace_id}"))
+        .bearer_auth("dev-token")
+        .send()
+        .await
+        .expect("trace")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(trace["trace_id"], trace_id);
+    let entries = trace["entries"].as_array().expect("entries");
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["trace_id"] == trace_id && e["protocol"] == "rest"),
+        "timeline has the rest dispatch: {trace}"
+    );
+
+    // With the `capture` feature, the request/response bodies are present
+    // and the captured request carries our marker (and never a token).
+    #[cfg(feature = "capture")]
+    {
+        let bodies = trace["bodies"].as_array().expect("bodies");
+        assert!(!bodies.is_empty(), "capture on → bodies present: {trace}");
+        let blob = trace.to_string();
+        assert!(blob.contains("trace-me"), "captured request body: {trace}");
+        assert!(
+            !blob.to_lowercase().contains("dev-token"),
+            "captured bodies must not contain the bearer: {trace}"
+        );
+    }
+}

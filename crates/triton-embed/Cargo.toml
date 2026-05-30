@@ -33,6 +33,9 @@ dev-token = ["triton-adapters-http/dev-token"]
 # Serve the compiled Explorer SPA at /explorer (requires
 # `apps/explorer/build/web` to exist — run `flutter build web` first).
 explorer-assets = ["dep:rust-embed", "dep:mime_guess"]
+# Dev-only request/response body capture feeding the Trace view. Never in
+# release.
+capture = ["triton-adapters-http/capture"]
 
 [dev-dependencies]
 serde_json = "1"
