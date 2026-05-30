@@ -20,24 +20,45 @@ class A2aClient {
         },
       );
 
-  Future<InvocationResult> invoke(
+  /// The exact A2A frame: a `Message{parts:[{data:{tool,args}}],
+  /// metadata}`. The editable body is the whole Message, so the Console
+  /// can show and correct the agent-to-agent envelope itself.
+  WireRequest buildRequest(
     String name,
     Map<String, dynamic> args, {
     String? a2uiVersion,
-  }) async {
-    final sw = Stopwatch()..start();
-    try {
-      final body = <String, dynamic>{
+  }) {
+    return WireRequest(
+      protocol: 'A2A',
+      method: 'POST',
+      url: '$baseUrl/message:send',
+      headers: const {'Content-Type': 'application/json'},
+      body: <String, dynamic>{
         'parts': [
           {
             'data': {'tool': name, 'args': args},
           }
         ],
         if (a2uiVersion != null) 'metadata': {'a2ui_version': 'v$a2uiVersion'},
-      };
+      },
+    );
+  }
+
+  Future<InvocationResult> invoke(
+    String name,
+    Map<String, dynamic> args, {
+    String? a2uiVersion,
+  }) =>
+      sendRaw(buildRequest(name, args, a2uiVersion: a2uiVersion));
+
+  /// Send a (possibly hand-edited) A2A Message exactly as given and
+  /// unwrap `parts[0].data`.
+  Future<InvocationResult> sendRaw(WireRequest req) async {
+    final sw = Stopwatch()..start();
+    try {
       final r = await _dio.post<Map<String, dynamic>>(
-        '$baseUrl/message:send',
-        data: body,
+        req.url,
+        data: req.body,
         options: _opts(),
       );
       sw.stop();

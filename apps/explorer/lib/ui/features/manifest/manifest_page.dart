@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../providers/api_provider.dart';
 import '../../../widgets/json_viewer.dart';
+import '../../../widgets/panel_help.dart';
 
 /// Renders the loaded `adapter.yaml`. The endpoint returns
 /// credentials redacted (vault refs are echoed verbatim; literal
@@ -24,7 +25,25 @@ class ManifestPage extends ConsumerWidget {
           ),
         ],
       ),
-      body: manifest.when(
+      body: Column(
+        children: [
+          const PanelHelp(
+            what: 'Shows the loaded adapter.yaml — the chat-channel adapters, '
+                'their tools and degrade rules — exactly as Triton parsed it, '
+                'with credentials redacted.',
+            how: 'Read-only. If it says no manifest, Triton is in v0.1 '
+                '(HTTP-trio) mode; set TRITON_MANIFEST_PATH to an adapter.yaml '
+                'to enable chat adapters.',
+          ),
+          Expanded(child: _body(context, ref, manifest)),
+        ],
+      ),
+    );
+  }
+
+  Widget _body(BuildContext context, WidgetRef ref,
+      AsyncValue<Map<String, dynamic>> manifest) {
+    return manifest.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Padding(
           padding: const EdgeInsets.all(24),
@@ -74,7 +93,6 @@ class ManifestPage extends ConsumerWidget {
             ],
           );
         },
-      ),
     );
   }
 

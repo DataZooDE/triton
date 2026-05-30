@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../providers/api_provider.dart';
+import '../../../widgets/panel_help.dart';
 import '../../../widgets/prometheus_parser.dart';
 
 /// Live Prometheus view backed by `GET /v1/metrics`. The substrate
@@ -25,19 +26,30 @@ class MetricsPage extends ConsumerWidget {
           ),
         ],
       ),
-      body: body.when(
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => Padding(
-          padding: const EdgeInsets.all(24),
-          child: Card(
-            color: Theme.of(context).colorScheme.errorContainer,
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text('Could not load /v1/metrics: $e'),
-            ),
+      body: Column(
+        children: [
+          const PanelHelp(
+            what: 'Live Prometheus metrics from /v1/metrics — dispatch '
+                'counters by tool/protocol/result and latency histograms.',
+            how: 'Press Refresh to re-scrape. Metrics are grouped by family; '
+                'the substrate scrapes the same registry on the tailnet-only '
+                ':9090 listener.',
           ),
-        ),
-        data: (text) {
+          Expanded(
+            child: body.when(
+              loading: () =>
+                  const Center(child: CircularProgressIndicator()),
+              error: (e, _) => Padding(
+                padding: const EdgeInsets.all(24),
+                child: Card(
+                  color: Theme.of(context).colorScheme.errorContainer,
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Text('Could not load /v1/metrics: $e'),
+                  ),
+                ),
+              ),
+              data: (text) {
           final exp = parsePrometheus(text);
           if (exp.families.isEmpty) {
             return const Center(
@@ -53,9 +65,12 @@ class MetricsPage extends ConsumerWidget {
             separatorBuilder: (_, _) => const SizedBox(height: 12),
             itemBuilder: (context, i) => _FamilyCard(family: exp.families[i]),
           );
-        },
-      ),
-    );
+                },
+              ),
+            ),
+          ],
+        ),
+      );
   }
 }
 
