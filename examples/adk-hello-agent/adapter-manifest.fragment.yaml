@@ -1,0 +1,47 @@
+# adapter.yaml fragment for the `hello` tool — hand this to the Triton
+# operator. This is NOT a standalone file you deploy; it is the slice of
+# the deployment's adapter.yaml that registers this tool and (if its
+# surface reaches chat channels) the degrade rules for it. The operator
+# merges it into the live manifest. See references/03 and references/05.
+#
+# The HTTP trio (REST/MCP/A2A) needs none of this — Triton discovers the
+# agent via the Consul tag `agent:hello` and dispatches by tool name. This
+# fragment matters only when you want the greeting to reach a CHAT channel,
+# where Triton boot-checks that every component the tool emits has a
+# degrade rule on every chat adapter (FR-L-5, M-COVERAGE-1).
+
+version: "0.2"
+
+# ── YOU drive this ───────────────────────────────────────────────────
+tools:
+  hello:
+    # The `hello` tool emits exactly these two component kinds (see
+    # src/main.rs): a narration carrying the greeting and a button that
+    # re-invokes the tool. Declare exactly these — over-declaring forces
+    # the operator to add degrade rules you don't need.
+    surface_components: [narration, buttons]
+
+# ── OPERATOR territory (shown for context) ───────────────────────────
+# A worked Telegram example covering narration + buttons. Credentials
+# MUST be vault:// refs in production — a literal here makes prod boot
+# fail (FR-L-6, NFR-S-5).
+adapters:
+  telegram:
+    kind: telegram
+    inbound:
+      kind: webhook
+      signature: secret_token
+      secret: vault://kv/data/apps/<co>/triton/<env>/telegram#webhook_secret
+    outbound:
+      kind: rest_api
+      token: vault://kv/data/apps/<co>/triton/<env>/telegram#bot_token
+    identity:
+      kind: sender_table
+      table: vault://kv/data/apps/<co>/triton/<env>/telegram#senders
+    degrade:
+      narration: passthrough
+      buttons: inline_keyboard # Telegram native; ≤ 8 buttons/row
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: vault://kv/data/apps/<co>/triton/<env>/telegram#correlation_key
