@@ -13,6 +13,9 @@ publish = false
 # accepted identity — ADR-10, FR-I-5.
 default = ["dev-token"]
 dev-token = []
+# Dev-only: capture request/response bodies per trace_id for the Explorer
+# Trace view (issue #75). Never enable in release.
+capture = ["triton-core/capture"]
 
 [dependencies]
 triton-core = { path = "../triton-core" }

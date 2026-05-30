@@ -12,12 +12,11 @@ class RestClient {
   final String baseUrl;
   final String? token;
 
-  Options _opts({String? accept}) {
+  Options _opts() {
     final headers = <String, String>{};
     if (token != null && token!.isNotEmpty) {
       headers['Authorization'] = 'Bearer $token';
     }
-    if (accept != null) headers['Accept'] = accept;
     return Options(headers: headers);
   }
 
@@ -78,6 +77,17 @@ class RestClient {
         .cast<Map<String, dynamic>>();
   }
 
+  /// `GET /v1/trace/{trace_id}` — one communication as a timeline:
+  /// `{ trace_id, entries: [audit…], bodies: [captured…] }`. `bodies` is
+  /// empty unless Triton was built with the dev `capture` feature.
+  Future<Map<String, dynamic>> trace(String traceId) async {
+    final r = await _dio.get<Map<String, dynamic>>(
+      '$baseUrl/v1/trace/$traceId',
+      options: _opts().copyWith(responseType: ResponseType.json),
+    );
+    return r.data!;
+  }
+
   Future<Map<String, dynamic>> healthz() async {
     final r = await _dio.get<Map<String, dynamic>>(
       '$baseUrl/healthz',
@@ -96,23 +106,42 @@ class RestClient {
     return tools.map(ToolDescriptor.fromJson).toList(growable: false);
   }
 
-  /// `POST /v1/tools/:name`. Optional `a2uiVersion` opts the response
-  /// into A2UI v0.8 or v0.9 via the `Accept` header.
-  Future<InvocationResult> invoke(
+  /// The exact REST frame for a tool call: `POST /v1/tools/:name` with
+  /// the args as the JSON body and an optional A2UI `Accept` header. The
+  /// editable body IS the args object — REST has no envelope wrapper.
+  WireRequest buildRequest(
     String name,
     Map<String, dynamic> args, {
     String? a2uiVersion,
-  }) async {
-    final sw = Stopwatch()..start();
-    String? accept;
+  }) {
+    final headers = <String, String>{'Content-Type': 'application/json'};
     if (a2uiVersion != null) {
-      accept = 'application/json+a2ui; version=$a2uiVersion';
+      headers['Accept'] = 'application/json+a2ui; version=$a2uiVersion';
     }
+    return WireRequest(
+      protocol: 'REST',
+      method: 'POST',
+      url: '$baseUrl/v1/tools/$name',
+      headers: headers,
+      body: args,
+    );
+  }
+
+  /// Send a (possibly hand-edited) REST frame exactly as given.
+  Future<InvocationResult> sendRaw(WireRequest req) async {
+    final sw = Stopwatch()..start();
     try {
       final r = await _dio.post<Map<String, dynamic>>(
-        '$baseUrl/v1/tools/$name',
-        data: args,
-        options: _opts(accept: accept).copyWith(responseType: ResponseType.json),
+        req.url,
+        data: req.body,
+        options: Options(
+          responseType: ResponseType.json,
+          headers: {
+            ...req.headers,
+            if (token != null && token!.isNotEmpty)
+              'Authorization': 'Bearer $token',
+          },
+        ),
       );
       sw.stop();
       return InvocationResult(
@@ -135,4 +164,12 @@ class RestClient {
       );
     }
   }
+
+  /// `POST /v1/tools/:name`. Optional `a2uiVersion` opts the response
+  /// into A2UI v0.8 or v0.9 via the `Accept` header.
+  Future<InvocationResult> invoke(
+    String name,
+    Map<String, dynamic> args, {
+    String? a2uiVersion,
+  }) => sendRaw(buildRequest(name, args, a2uiVersion: a2uiVersion));
 }

@@ -1,6 +1,6 @@
 ---
 name: triton-platform
-version: 0.1.0
+version: 0.2.0
 description: Use when developing an application that integrates with the DataZoo Triton agent-ingress gateway — either an upstream agent Triton dispatches into (registered in Consul as `tag:agent:<name>`) or a frontend/client that calls Triton's HTTP trio (REST/MCP/A2A). Provides the upstream-agent wire contract, A2UI envelope shapes, the `adapter.yaml` manifest fragment, the OIDC verification recipe, the `crates/triton-tests` consumer test harness, and ready-to-fork templates. Triggers on phrases like "agent for Triton", "tool that Triton calls", "A2UI envelope", "adapter.yaml entry", "TritonProcess test", "verify Triton's bearer", "register a new tool", "chat-channel surface", "render_a2ui_to_png". DO NOT use for Triton-internal work (writing adapters, the dispatcher, the surface mapper, the identity boundary) — that is work inside the Triton repo itself, not consumer-facing.
 ---
 

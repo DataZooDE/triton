@@ -13,6 +13,8 @@ class RuntimeConfig {
     this.oidcIssuer,
     this.oidcAudience,
     this.oidcClientId,
+    this.mcpBase,
+    this.a2aBase,
   });
 
   final String env;
@@ -23,6 +25,13 @@ class RuntimeConfig {
   final String? oidcAudience;
   final String? oidcClientId;
 
+  /// Base path/URL for the MCP and A2A surfaces when they are NOT on the
+  /// dev ports. The single-port embedded host (triton-embed) sets these to
+  /// `/mcp` and `/a2a`; absent → the SPA uses its `:8003→:8001/:8002`
+  /// port-swap. See `RuntimeDiscovery` in rest.rs.
+  final String? mcpBase;
+  final String? a2aBase;
+
   /// When true, the operator hasn't enabled the explorer for this
   /// env — show an "ask an operator to register me" message rather
   /// than failing PKCE opaquely.
@@ -30,14 +39,16 @@ class RuntimeConfig {
       oidcIssuer != null && oidcAudience != null && oidcClientId != null;
 
   factory RuntimeConfig.fromJson(Map<String, dynamic> json) => RuntimeConfig(
-        env: json['env'] as String,
-        imageSha: json['image_sha'] as String?,
-        packageVersion: json['package_version'] as String,
-        binarySha: json['binary_sha'] as String,
-        oidcIssuer: json['oidc_issuer'] as String?,
-        oidcAudience: json['oidc_audience'] as String?,
-        oidcClientId: json['oidc_client_id'] as String?,
-      );
+    env: json['env'] as String,
+    imageSha: json['image_sha'] as String?,
+    packageVersion: json['package_version'] as String,
+    binarySha: json['binary_sha'] as String,
+    oidcIssuer: json['oidc_issuer'] as String?,
+    oidcAudience: json['oidc_audience'] as String?,
+    oidcClientId: json['oidc_client_id'] as String?,
+    mcpBase: json['mcp_base'] as String?,
+    a2aBase: json['a2a_base'] as String?,
+  );
 
   /// Fetch from the canonical anonymous endpoint. `baseUrl` is the
   /// REST adapter root (`http://localhost:8003` in dev, the public

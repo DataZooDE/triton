@@ -31,37 +31,58 @@ impl FakeConsul {
             .map(|(k, v)| (k.to_string(), v.clone()))
             .collect();
         let table = Arc::new(table);
+        let table_cat = table.clone();
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
         let addr = listener.local_addr().unwrap();
 
-        let router = Router::new().route(
-            "/v1/health/service/{service}",
-            get(move |Path(service): Path<String>| {
-                let table = table.clone();
-                async move {
-                    let matches: Vec<Value> = table
-                        .iter()
-                        .filter(|(name, _)| name == &service)
-                        .map(|(name, host_port)| {
-                            let (host, port) = parse_host_port(host_port);
-                            json!({
-                                "Node": { "Address": host, "Node": "test" },
-                                "Service": {
-                                    "ID": format!("{name}-1"),
-                                    "Service": name,
-                                    "Address": host,
-                                    "Port": port,
-                                    "Tags": [format!("agent:{name}")],
-                                },
-                                "Checks": []
+        let router = Router::new()
+            .route(
+                "/v1/health/service/{service}",
+                get(move |Path(service): Path<String>| {
+                    let table = table.clone();
+                    async move {
+                        let matches: Vec<Value> = table
+                            .iter()
+                            .filter(|(name, _)| name == &service)
+                            .map(|(name, host_port)| {
+                                let (host, port) = parse_host_port(host_port);
+                                json!({
+                                    "Node": { "Address": host, "Node": "test" },
+                                    "Service": {
+                                        "ID": format!("{name}-1"),
+                                        "Service": name,
+                                        "Address": host,
+                                        "Port": port,
+                                        "Tags": [format!("agent:{name}")],
+                                    },
+                                    "Checks": []
+                                })
                             })
-                        })
-                        .collect();
-                    Json(Value::Array(matches))
-                }
-            }),
-        );
+                            .collect();
+                        Json(Value::Array(matches))
+                    }
+                }),
+            )
+            // Consul catalog: `{ "<service>": ["<tag>", ...] }`. Each
+            // registered service carries its `agent:<name>` tag, which is
+            // what `ConsulClient::list_agent_tools` filters on.
+            .route(
+                "/v1/catalog/services",
+                get(move || {
+                    let table = table_cat.clone();
+                    async move {
+                        let mut map = serde_json::Map::new();
+                        for (name, _) in table.iter() {
+                            map.insert(
+                                name.clone(),
+                                Value::Array(vec![json!(format!("agent:{name}"))]),
+                            );
+                        }
+                        Json(Value::Object(map))
+                    }
+                }),
+            );
 
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;

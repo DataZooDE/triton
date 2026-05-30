@@ -2,33 +2,34 @@
 // (REST/MCP/A2A trio, /v1/tools, /v1/manifest, A2UI v0.8/v0.9 builders).
 //
 // exposure = internal (ADR-0010 / substrate-platform reference 15). A normal
-// Consul service with an `intprefix-` route tag: the shared `fabio-internal`
-// ingress (tailscale0:443) terminates TLS with the per-env wildcard cert
-// `*.<env>.int.data-zoo.de` and proxies to this nginx alloc on :8080. NO
-// per-app Tailscale sidecar, NO public Fabio route, NO operator auth. Tailnet
-// peers (operators on tag:ops) reach the SPA at
-// https://explorer.<env>.int.data-zoo.de.
+// Consul service fronted by the shared `fabio-internal` ingress
+// (tailscale0:443) which terminates TLS with the per-env wildcard cert
+// `*.<env>.int.data-zoo.de`. NO per-app Tailscale sidecar, NO public Fabio
+// route. Tailnet peers (operators on tag:ops) reach the SPA at
+// https://triton-explorer.<env>.int.data-zoo.de (canonical) — the legacy
+// `intprefix-explorer.*` tag stays for one cycle so existing bookmarks
+// don't break before consumers migrate.
 //
 // Browser-served session cookies need HTTPS; plain HTTP via Consul DNS
 // silently drops `Secure` cookies, so an internal SPA MUST be fronted by
 // fabio-internal — not addressed via `<svc>.service.consul:8080`.
 //
+// Operator-SSO via oauth2-proxy sidecar (ADR-0011 / same idiom as
+// auth-portal-dz). The sidecar authenticates the operator against Vault's
+// `ops` realm; the SPA itself is unchanged. A login here also covers the
+// paired triton-api.<env>.int.data-zoo.de (shared cookie domain).
+//
+// Pre-flight: substrate Terraform must have provisioned the
+// `ops-triton-explorer` internal OIDC client (`identity/oidc/client/`,
+// `kv/data/internal-sso/clients/ops-triton-explorer`, jwt-nomad role
+// `internal-sso-ops-triton-explorer`). See
+// hetzner-agent-substrate/infra/env/<env>.tfvars `internal_oidc_clients`.
+//
 // Image lives in GAR (substrate-platform reference 18 — GAR-only registry):
 //   europe-west3-docker.pkg.dev/hetzner-agent-backplane/substrate/dz-triton-explorer
-// The reusable substrate `build-app-image.yml` workflow lives in the
-// hetzner-agent-substrate repo; the triton repo currently builds + pushes
-// manually (see apps/explorer/deploy/README.md). The substrate's
-// `ops/base-jobs.manifest` pins the SHA tag.
 //
 // Deploy (operator-side, from substrate repo):
 //   /release-app dz-triton-explorer nonprod
-//   # or, manually:
-//   nomad job run \
-//     -var datacenter=nonprod \
-//     -var env=nonprod \
-//     -var version=2026-05-28-<sha> \
-//     -var image=europe-west3-docker.pkg.dev/hetzner-agent-backplane/substrate/dz-triton-explorer:<sha> \
-//     nomad/dz-triton-explorer.nomad.hcl
 
 variable "datacenter" {
   type        = string
@@ -53,15 +54,21 @@ variable "image" {
 }
 
 locals {
-  env  = var.env != "" ? var.env : var.datacenter
-  fqdn = "explorer.${local.env}.int.data-zoo.de"
+  env         = var.env != "" ? var.env : var.datacenter
+  fqdn        = "triton-explorer.${local.env}.int.data-zoo.de"
+  legacy_fqdn = "explorer.${local.env}.int.data-zoo.de"
+  sso_realm   = "ops"
+  sso_client  = "ops-triton-explorer"
+  oidc_issuer = "http://${local.env}-srv-1:8200/v1/identity/oidc/provider/${local.sso_realm}"
 }
 
 job "dz-triton-explorer" {
   type        = "service"
   datacenters = [var.datacenter]
+  namespace   = "default"
 
   meta {
+    env = local.env
     // exposure=internal (ADR-0010): routed by fabio-internal via the
     // intprefix- tag below; never on the public LB. Enforced by
     // ops/scripts/check-exposure.sh inside /deploy-base.
@@ -84,8 +91,12 @@ job "dz-triton-explorer" {
 
     network {
       mode = "bridge"
+      // The exposed `http` port is the oauth2-proxy SIDECAR (4180);
+      // fabio-internal routes here. nginx (the SPA) listens on
+      // 127.0.0.1:8080 in the shared netns, only reachable via the
+      // sidecar.
       port "http" {
-        to = 8080
+        to = 4180
       }
     }
 
@@ -94,14 +105,20 @@ job "dz-triton-explorer" {
       port     = "http"
       provider = "consul"
 
-      // intprefix- → fabio-internal at https://explorer.<env>.int.data-zoo.de.
-      // No urlprefix- (that would be the PUBLIC Fabio); deploy gate rejects
-      // a mismatch with meta.exposure.
-      tags = ["intprefix-${local.fqdn}"]
+      // Canonical name + legacy alias for one migration cycle. Both
+      // intprefix- tags route to the same oauth2-proxy. No urlprefix-
+      // (that would be the PUBLIC Fabio); deploy gate rejects a
+      // mismatch with meta.exposure.
+      tags = [
+        "intprefix-${local.fqdn}",
+        "intprefix-${local.legacy_fqdn}",
+      ]
 
+      // oauth2-proxy's health endpoint (no auth). Same idiom as
+      // auth-portal's /ping.
       check {
         type     = "http"
-        path     = "/healthz"
+        path     = "/ping"
         interval = "10s"
         timeout  = "2s"
       }
@@ -112,12 +129,14 @@ job "dz-triton-explorer" {
 
       config {
         image = var.image
-        ports = ["http"]
+        // No host port: nginx listens on 127.0.0.1:8080 in the shared
+        // netns; only the oauth2-proxy sidecar reaches it.
       }
 
       // /version.json rendered by Nomad's template stanza so the SPA's
       // Dashboard footer can show the deployed Nomad job version + image
-      // SHA. Mounted from `local/` into the container's nginx docroot.
+      // SHA. Mounted from `local/` into the container via the alias in
+      // nginx.conf.
       template {
         destination = "local/version.json"
         change_mode = "noop"
@@ -134,10 +153,73 @@ job "dz-triton-explorer" {
       }
 
       resources {
-        // nginx + a few hundred KB of Flutter web assets — the substrate's
-        // 200 MHz / 128 MiB defaults are comfortable for an internal tool.
         cpu    = 200
         memory = 128
+      }
+    }
+
+    task "oauth2-proxy" {
+      driver = "docker"
+
+      config {
+        image = "quay.io/oauth2-proxy/oauth2-proxy:v7.6.0"
+        ports = ["http"]
+        // Mirrors auth-portal-dz's sidecar verbatim except: cookie-samesite=none
+        // so cross-origin XHR from the SPA to triton-api.* carries the
+        // session cookie; CORS flags so OPTIONS preflights from
+        // triton-api.* clear at the sidecar.
+        args = [
+          "--http-address=0.0.0.0:4180",
+          "--upstream=http://127.0.0.1:8080",
+          "--reverse-proxy=true",
+          "--provider=oidc",
+          "--provider-display-name=DataZoo Vault",
+          "--oidc-issuer-url=${local.oidc_issuer}",
+          "--scope=openid ${local.sso_realm}-profile",
+          "--email-domain=*",
+          "--skip-provider-button=true",
+          "--pass-user-headers=true",
+          "--set-xauthrequest=true",
+          "--redirect-url=https://${local.fqdn}/oauth2/callback",
+          "--cookie-domain=.${local.env}.int.data-zoo.de",
+          "--whitelist-domain=.${local.env}.int.data-zoo.de",
+          "--cookie-secure=true",
+          "--cookie-samesite=none",
+          "--cors-allow-origin=https://triton-api.${local.env}.int.data-zoo.de",
+          "--cors-allow-credentials=true",
+        ]
+      }
+
+      identity {
+        name        = "vault"
+        aud         = ["vault"]
+        file        = true
+        change_mode = "noop"
+        ttl         = "5m"
+      }
+
+      vault {
+        role = "internal-sso-${local.sso_client}"
+      }
+
+      template {
+        destination = "secrets/oauth2.env"
+        env         = true
+        change_mode = "restart"
+        data        = <<-EOH
+          {{ with secret "kv/data/internal-sso/clients/${local.sso_client}" -}}
+          OAUTH2_PROXY_CLIENT_ID={{ .Data.data.client_id }}
+          OAUTH2_PROXY_CLIENT_SECRET={{ .Data.data.client_secret }}
+          {{- end }}
+          {{ with secret "kv/data/internal-sso/cookie-secret" -}}
+          OAUTH2_PROXY_COOKIE_SECRET={{ .Data.data.cookie_secret }}
+          {{- end }}
+        EOH
+      }
+
+      resources {
+        cpu    = 100
+        memory = 64
       }
     }
   }

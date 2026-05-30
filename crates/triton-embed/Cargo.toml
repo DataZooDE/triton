@@ -1,0 +1,44 @@
+[package]
+name = "triton-embed"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+version = "0.0.1"
+description = """
+Embed Triton's REST/MCP/A2A trio (and optionally the Explorer dev
+console) in-process, on a single port, from a `ToolRegistry`. Lets a Rust
+agent serve `cargo run` → trio + /explorer with no Consul/Vault. Mirrors
+triton-bin's wiring as a library (issue #75, Mode 1).
+"""
+
+[dependencies]
+triton-core = { path = "../triton-core" }
+# default-features = false so `--no-default-features` on this crate also
+# disables dev-token downstream (ADR-10: never in release).
+triton-adapters-http = { path = "../triton-adapters-http", default-features = false }
+axum = { workspace = true }
+tokio = { workspace = true }
+anyhow = "1"
+
+# `explorer-assets`: embed the built Flutter SPA and serve it at /explorer.
+rust-embed = { version = "8", optional = true }
+mime_guess = { version = "2", optional = true }
+
+[features]
+default = ["dev-token"]
+# Accept `Bearer dev-token` when no OIDC issuer is configured. Mirrors
+# triton-adapters-http; compiled out in release (`--no-default-features`).
+dev-token = ["triton-adapters-http/dev-token"]
+# Serve the compiled Explorer SPA at /explorer (requires
+# `apps/explorer/build/web` to exist — run `flutter build web` first).
+explorer-assets = ["dep:rust-embed", "dep:mime_guess"]
+# Dev-only request/response body capture feeding the Trace view. Never in
+# release.
+capture = ["triton-adapters-http/capture"]
+
+[dev-dependencies]
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { workspace = true }
+async-trait = "0.1"

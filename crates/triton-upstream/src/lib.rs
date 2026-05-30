@@ -19,9 +19,11 @@ use triton_core::audit::{AuditPhase, AuditRecord, emit, now_rfc3339};
 use triton_core::{Principal, TritonError};
 
 pub mod consul;
+pub mod static_upstream;
 pub mod vault;
 
 pub use consul::ConsulClient;
+pub use static_upstream::StaticUpstream;
 pub use vault::VaultClient;
 
 /// Knobs the operator can tune via `TRITON_*` env vars (see
@@ -64,6 +66,19 @@ impl UpstreamDispatch for UpstreamRouter {
         principal: &Principal,
     ) -> Result<Value, TritonError> {
         UpstreamRouter::invoke(self, tool, args, principal).await
+    }
+
+    /// List discoverable `agent:<name>` services for `GET /v1/tools`.
+    /// Degrades to empty on any Consul error — discovery is best-effort
+    /// and must never fail the listing endpoint.
+    async fn list_agents(&self) -> Vec<String> {
+        match self.consul.list_agent_tools().await {
+            Ok(tools) => tools,
+            Err(e) => {
+                tracing::warn!(error = %e, "consul agent listing failed; omitting upstream tools");
+                Vec::new()
+            }
+        }
     }
 }
 

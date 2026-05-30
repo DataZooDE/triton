@@ -929,3 +929,50 @@ a trap the next developer should not have to step in.
   one re-login. Covered by `vault_workload_identity.rs::
   dispatch_recovers_when_vault_token_is_revoked` (FakeVault 403s the
   first OIDC swap, then succeeds; asserts login_hits == 2).
+
+- **A consumer agent built with `adk-rust` must REPLACE its A2A server,
+  not add one.** `examples/adk-hello-agent` runs a real adk-rust
+  `LlmAgent` but Triton is its only front door, so it depends on the
+  adk-rust *library* crates (`agents`/`models`/`anthropic`/`runner`/
+  `sessions`) and explicitly NOT `server` — adk-rust's own `POST /awp/a2a`
+  is exactly the interface Triton supersedes. Gotchas met building it:
+  (1) it's a **standalone Cargo workspace** (own `[workspace]`) so
+  adk-rust's ~25-crate tree never enters Triton's build; (2) adk-rust
+  0.9's `RunnerConfig` is `#[non_exhaustive]` — construct the runner via
+  `Runner::builder()`; the struct-literal form the docs show won't
+  compile; (3) put the LLM behind a tiny `Brain` trait with a
+  deterministic `StaticBrain` default so the no-mock spawned-binary e2e
+  stays hermetic — "no mocks" governs the wire/backends under test (real
+  HTTP, real Consul/Vault fakes), not the model provider, which is
+  neither Triton's concern nor on the wire.
+
+- **The Explorer can't list an upstream agent's tool from `/v1/tools`.**
+  That endpoint returns only the in-process `ToolRegistry::descriptors()`
+  (`build_registry()` in `triton-bin`); upstream tools are an
+  invoke-by-name *fallback* in the dispatcher and never appear there, and
+  the manifest's `tools:` block doesn't add descriptors either. So the
+  reengineered Console grew a **custom-tool-name** entry to target a tool
+  that isn't listed (e.g. the `hello` agent). For the local browser demo
+  the harness reaches the agent by spawning the existing
+  `upstream_fixture::FakeConsul`/`FakeVault` as standalone bins
+  (`crates/triton-tests/src/bin/fake-{consul,vault}`) and pointing
+  Triton's upstream router at them — no Triton code change needed.
+
+- **`Router::nest("/mcp", r)` where `r` has a root `/` route answers
+  `/mcp` but 404s `/mcp/`.** axum 0.8 nest semantics: the inner `/`
+  route matches the prefix exactly (`/mcp`), not the trailing-slash
+  variant. This bit the single-port embed host (issue #75): the
+  Explorer's MCP client unconditionally POSTed `"$baseUrl/"`, harmless
+  when `baseUrl` is a bare origin (path normalises to `/`, MCP on its
+  own port) but `/mcp/` -> 404 once `/v1/runtime` advertised
+  `mcp_base=/mcp` and the base carried that mount path. Fix is
+  client-side: the MCP endpoint *is* `baseUrl` -- only append `/` when
+  the base has no path. **Invisible to curl smoke-tests** (you naturally
+  curl `/mcp`, which works); it only surfaces when the real SPA drives
+  the wire. Caught by a Chrome-DevTools-MCP click-through of the embedded
+  Explorer where REST+A2A were 200 and MCP alone was 404 -- concrete
+  payoff for CLAUDE.md section 8's "verify in a real browser". To make
+  the host tolerant of trailing slashes from other MCP clients, mount the
+  (Clone, Arc-backed) `McpState` router at both `/mcp` and `/mcp/`, or add
+  a `NormalizePathLayer`; but the contract is that clients POST the
+  advertised endpoint verbatim.

@@ -1,4 +1,5 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -39,10 +40,25 @@ Future<String> loadInitialBaseUrl(String fallback) async {
 }
 
 final dioProvider = Provider<Dio>((ref) {
-  return Dio(BaseOptions(
+  final dio = Dio(BaseOptions(
     connectTimeout: const Duration(seconds: 5),
     receiveTimeout: const Duration(seconds: 10),
   ));
+  if (kIsWeb) {
+    // The deployed shape (apps/explorer/deploy/explorer.nomad.hcl) puts
+    // an oauth2-proxy sidecar in front of each FQDN with a shared
+    // cookie-domain `.<env>.int.data-zoo.de`. Cross-origin XHRs from
+    // the SPA (`triton-explorer.<env>.int.data-zoo.de`) to the API
+    // (`triton-api.<env>.int.data-zoo.de`) only carry the session
+    // cookie when the request is "credentialed". Dio's web adapter
+    // (`BrowserHttpClientAdapter`) gates this via a `withCredentials`
+    // field; setting it via a `dynamic` cast keeps this file
+    // cross-platform-safe — the integration test in
+    // `integration_test/spawned_triton_test.dart` runs on the Dart VM
+    // where `kIsWeb` is false, so the dynamic dispatch never executes.
+    (dio.httpClientAdapter as dynamic).withCredentials = true;
+  }
+  return dio;
 });
 
 /// Loads `/v1/runtime` once at boot. The whole app blocks on this —

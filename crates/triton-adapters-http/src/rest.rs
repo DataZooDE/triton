@@ -42,6 +42,15 @@ pub struct RuntimeDiscovery {
     pub oidc_issuer: Option<String>,
     pub oidc_audience: Option<String>,
     pub oidc_client_id: Option<String>,
+    /// Base path/URL for the MCP and A2A surfaces, when they are NOT on
+    /// the conventional dev ports (8001/8002). The embedded single-port
+    /// host (triton-embed) sets these to `/mcp` and `/a2a` so the SPA can
+    /// reach the trio same-origin; `triton-bin` leaves them `null` and the
+    /// SPA falls back to its `:8003→:8001/:8002` port-swap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mcp_base: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub a2a_base: Option<String>,
 }
 
 /// Shared state owned by the binary, cloned into every handler via
@@ -72,6 +81,7 @@ pub fn router(state: RestState) -> Router {
         .route("/v1/tools", get(list_tools))
         .route("/v1/tools/{name}", post(invoke_tool))
         .route("/v1/audit", get(audit_tail))
+        .route("/v1/trace/{trace_id}", get(trace_view))
         .route("/v1/manifest", get(manifest_view))
         .route("/v1/metrics", get(metrics_view))
         .route("/v1/surface/render", post(surface_render))
@@ -380,6 +390,38 @@ async fn audit_tail(
     .into_response()
 }
 
+/// `GET /v1/trace/{trace_id}` — the one communication as a timeline: all
+/// audit phases for `trace_id` in chronological order (inbound → dispatch
+/// → upstream → post). Authenticated like `/v1/audit`. The `bodies` field
+/// is populated only when the dev `capture` feature is compiled in
+/// (request/response/surface payloads); otherwise it is empty.
+async fn trace_view(
+    State(state): State<RestState>,
+    Path(trace_id): Path<String>,
+    parts: Parts,
+) -> Response {
+    if let Err(e) = state.identity.verify(&parts).await {
+        state.dispatcher.record_rejection(
+            "v1/trace",
+            "rest",
+            "-",
+            "-",
+            &uuid::Uuid::new_v4().to_string(),
+            &e,
+        );
+        return error_response(&e, None);
+    }
+    let mut entries = AuditBuffer::recent(AUDIT_LIMIT_MAX, Some(&trace_id));
+    entries.reverse(); // chronological for a timeline
+    let bodies = triton_core::trace::captured(&trace_id);
+    Json(json!({
+        "trace_id": trace_id,
+        "entries": entries,
+        "bodies": bodies,
+    }))
+    .into_response()
+}
+
 async fn healthz() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
@@ -411,7 +453,7 @@ async fn list_tools(State(state): State<RestState>, parts: Parts) -> Response {
         );
         return error_response(&e, None);
     }
-    Json(json!({ "tools": state.dispatcher.descriptors() })).into_response()
+    Json(json!({ "tools": state.dispatcher.descriptors_all().await })).into_response()
 }
 
 async fn invoke_tool(

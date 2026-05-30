@@ -24,8 +24,9 @@ use std::time::Duration;
 
 use reqwest::Method;
 use reqwest::header::{
-    ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
-    ACCESS_CONTROL_REQUEST_HEADERS, ACCESS_CONTROL_REQUEST_METHOD, ORIGIN,
+    ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+    ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_REQUEST_HEADERS, ACCESS_CONTROL_REQUEST_METHOD,
+    ORIGIN,
 };
 use triton_tests::TritonProcess;
 
@@ -90,6 +91,15 @@ async fn preflight_allowed_origin_passes_on_all_three_adapters() {
         assert!(
             allow_headers.contains("content-type"),
             "Access-Control-Allow-Headers on {url} must include content-type, got `{allow_headers}`"
+        );
+        let allow_credentials = resp
+            .headers()
+            .get(ACCESS_CONTROL_ALLOW_CREDENTIALS)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            allow_credentials, "true",
+            "Access-Control-Allow-Credentials on {url} must be `true` so the SPA can carry the oauth2-proxy session cookie cross-origin, got `{allow_credentials}`"
         );
     }
 }

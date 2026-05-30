@@ -133,6 +133,10 @@ async fn main() -> std::io::Result<()> {
         oidc_issuer: settings.oidc_issuer.clone(),
         oidc_audience: settings.oidc_audience.clone(),
         oidc_client_id: settings.explorer_client_id.clone(),
+        // The standalone binary serves MCP/A2A on their own ports; the SPA
+        // uses its dev port-swap. (triton-embed sets these for one-port.)
+        mcp_base: None,
+        a2a_base: None,
     });
 
     let metrics = Arc::new(Metrics::new());
@@ -193,41 +197,82 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(2);
         }
         (None, None, _) => {
-            tracing::warn!(
-                "no upstream router configured; dispatcher serves in-process tools only"
-            );
+            match std::env::var("TRITON_STATIC_UPSTREAMS")
+                .ok()
+                .filter(|s| !s.is_empty())
+            {
+                Some(spec) => {
+                    // Dev "standalone sidecar" (issue #75, Mode 2): front a
+                    // fixed agent endpoint with no Consul/Vault.
+                    let token = std::env::var("TRITON_STATIC_UPSTREAM_TOKEN")
+                        .unwrap_or_else(|_| "dev-token".to_string());
+                    let su = triton_upstream::StaticUpstream::from_spec(
+                        &spec,
+                        token,
+                        settings.upstream_timeout,
+                    );
+                    tracing::warn!(
+                        spec = %spec,
+                        "TRITON_STATIC_UPSTREAMS set (dev): dispatching by name, no Consul/Vault"
+                    );
+                    dispatcher =
+                        dispatcher.with_upstream(Arc::new(su) as Arc<dyn UpstreamDispatch>);
+                }
+                None => {
+                    tracing::warn!(
+                        "no upstream router configured; dispatcher serves in-process tools only"
+                    );
+                }
+            }
         }
     }
     let dispatcher = Arc::new(dispatcher);
 
     // Build the OIDC verifier if the substrate injected an issuer.
     // When unset we fall back to the cfg-gated dev-token path.
-    let identity = Arc::new(IdentityProvider::new(
-        match (&settings.oidc_issuer, &settings.oidc_audience) {
-            (Some(issuer), Some(aud)) => {
-                tracing::info!(issuer, aud, "OIDC verifier enabled");
-                Some(Arc::new(OidcVerifier::new(OidcConfig::new(
-                    issuer.clone(),
-                    aud.clone(),
-                ))))
-            }
-            (Some(_), None) | (None, Some(_)) => {
-                tracing::error!("TRITON_OIDC_ISSUER and TRITON_OIDC_AUDIENCE must be set together");
-                std::process::exit(2);
-            }
-            (None, None) => {
-                #[cfg(feature = "dev-token")]
-                tracing::warn!(
-                    "no OIDC issuer configured; dev-token fallback in effect (dev builds only)"
-                );
-                #[cfg(not(feature = "dev-token"))]
-                tracing::error!(
-                    "no OIDC issuer configured and dev-token disabled at build time; \
-                     every bearer will be rejected"
-                );
-                None
-            }
-        },
+    let oidc_verifier = match (&settings.oidc_issuer, &settings.oidc_audience) {
+        (Some(issuer), Some(aud)) => {
+            tracing::info!(issuer, aud, "OIDC verifier enabled");
+            Some(Arc::new(OidcVerifier::new(OidcConfig::new(
+                issuer.clone(),
+                aud.clone(),
+            ))))
+        }
+        (Some(_), None) | (None, Some(_)) => {
+            tracing::error!("TRITON_OIDC_ISSUER and TRITON_OIDC_AUDIENCE must be set together");
+            std::process::exit(2);
+        }
+        (None, None) => {
+            #[cfg(feature = "dev-token")]
+            tracing::warn!(
+                "no OIDC issuer configured; dev-token fallback in effect (dev builds only)"
+            );
+            #[cfg(not(feature = "dev-token"))]
+            tracing::error!(
+                "no OIDC issuer configured and dev-token disabled at build time; \
+                 every bearer will be rejected"
+            );
+            None
+        }
+    };
+    // Issue #67 — only honour X-Forwarded-Email when both the
+    // operator-explicit flag is set AND OIDC is OFF (real Bearer/
+    // PKCE end-to-end is the source of truth when OIDC is live).
+    if settings.trust_forwarded_auth && oidc_verifier.is_some() {
+        tracing::warn!(
+            "TRITON_TRUST_FORWARDED_AUTH=true but OIDC is also configured — \
+             forwarded-auth fast-path is DISABLED; OIDC Bearer wins (ADR-10)."
+        );
+    } else if settings.trust_forwarded_auth {
+        tracing::warn!(
+            "TRITON_TRUST_FORWARDED_AUTH=true — admitting requests carrying \
+             X-Forwarded-Email from a co-located oauth2-proxy sidecar. \
+             ONLY safe when Triton binds loopback (issue #67)."
+        );
+    }
+    let identity = Arc::new(IdentityProvider::with_forwarded_auth(
+        oidc_verifier,
+        settings.trust_forwarded_auth,
     ));
 
     let manifest_arc = manifest.as_ref().map(|m| Arc::new(m.clone()));
@@ -1019,7 +1064,12 @@ async fn main() -> std::io::Result<()> {
         }
         Ok::<(), std::io::Error>(())
     };
-    let drain = async {
+    // Run the listeners + ancillary futures forever, then on signal
+    // receipt bound the post-shutdown drain by `drain_deadline`. The
+    // earlier shape wrapped the whole join in
+    // `tokio::time::timeout(drain_deadline, ...)`, which capped total
+    // uptime at `drain_deadline` regardless of signal — issue #65.
+    let serve = async {
         let (a, b, c, m, ch, sa) = tokio::join!(
             serve_mcp,
             serve_a2a,
@@ -1030,15 +1080,30 @@ async fn main() -> std::io::Result<()> {
         );
         a.and(b).and(c).and(m).and(ch).and(sa)
     };
-    let outcome = tokio::time::timeout(settings.drain_deadline, drain).await;
-    let serve_result = match outcome {
-        Ok(r) => r,
-        Err(_) => {
-            tracing::warn!(
-                deadline_secs = settings.drain_deadline.as_secs(),
-                "drain deadline exceeded; in-flight connections aborted"
-            );
-            Ok(())
+    tokio::pin!(serve);
+
+    let serve_result = tokio::select! {
+        // A listener returning early (e.g. axum::serve hit an
+        // unexpected error) is an exit reason in itself — propagate
+        // its result without starting the drain timer (nothing left
+        // to drain).
+        res = &mut serve => res,
+
+        // Signal receipt → start the bounded drain. `signal_task`
+        // cancels `shutdown`, which resolves every listener's
+        // `with_graceful_shutdown(shutdown.cancelled_owned())` and
+        // lets `serve` complete in-flight requests.
+        _ = shutdown.cancelled() => {
+            match tokio::time::timeout(settings.drain_deadline, &mut serve).await {
+                Ok(res) => res,
+                Err(_) => {
+                    tracing::warn!(
+                        deadline_secs = settings.drain_deadline.as_secs(),
+                        "drain deadline exceeded; in-flight connections aborted"
+                    );
+                    Ok(())
+                }
+            }
         }
     };
 

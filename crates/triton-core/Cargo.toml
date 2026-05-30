@@ -6,6 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Dev-only: hold token-stripped request/response bodies per trace_id in
+# memory for the Explorer Trace view (issue #75). Off by default; never in
+# release. Enabled transitively by triton-adapters-http/capture.
+capture = []
+
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }

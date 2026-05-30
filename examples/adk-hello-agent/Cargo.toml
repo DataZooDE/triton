@@ -1,0 +1,67 @@
+# A "hello world" upstream agent for Triton, built with adk-rust.
+#
+# This is a STANDALONE workspace (note the empty `[workspace]` below),
+# deliberately *not* a member of the Triton workspace: adk-rust pulls a
+# large dependency tree and we keep it out of the gateway's build. It is
+# what a real agent author's repo looks like — depend on adk-rust for the
+# brains, expose Triton's `POST /` upstream contract, and depend on
+# `triton-tests` (path, dev-only) to prove the round-trip end to end.
+[package]
+name = "adk-hello-agent"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+description = """
+A minimal upstream agent for Triton built on adk-rust. It runs a real
+adk-rust LlmAgent (Anthropic Claude) as its brain but REPLACES adk-rust's
+own A2A server with Triton's `POST /` upstream contract: Triton becomes
+the agent's REST / MCP / A2A / chat front door. Returns a canonical A2UI
+surface so every Triton frontend can render it.
+"""
+
+# Standalone workspace — see the module comment above.
+[workspace]
+
+[[bin]]
+name = "adk-hello-agent"
+path = "src/main.rs"
+
+[dependencies]
+# The brains. We use adk-rust's *library* crates (agents/models/runner/
+# sessions) and explicitly NOT its `server` feature — Triton is the front
+# door, so adk-rust's own A2A/REST server is exactly what we replace.
+adk-rust = { version = "0.9", default-features = false, features = [
+    "agents",
+    "models",
+    "anthropic",
+    "runner",
+    "sessions",
+] }
+
+# The Triton upstream contract surface: a tiny axum service on `POST /`.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+axum = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+anyhow = "1"
+
+# OIDC verification of Triton's per-call bearer (references/04). Only the
+# real-issuer path uses these; the dev-token path needs none of it.
+jsonwebtoken = "9"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[features]
+# `dev-token` accepts the literal `Bearer dev-token` when no OIDC issuer
+# is configured — mirrors Triton's ADR-10. ON by default for local/CI;
+# build release with `--no-default-features` so the affordance is
+# compiled out and cannot ship.
+default = ["dev-token"]
+dev-token = []
+
+[dev-dependencies]
+triton-tests = { path = "../../crates/triton-tests" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

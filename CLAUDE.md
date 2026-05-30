@@ -107,3 +107,39 @@ When you believe a task is done:
 4. Commit (Co-Authored-By trailer), push, open PR, paste the
    integration-test output in the PR body.
 5. Mark the TaskCreate task `completed`. Move to the next task.
+
+## 8. Browser verification of the Explorer (rodney)
+
+The `apps/explorer` SPA (Flutter Web, **CanvasKit** renderer) is
+checked in a real browser with **rodney**
+(https://github.com/simonw/rodney — a Go CLI driving persistent
+headless Chrome). The harness lives at
+`deploy/local-e2e/explorer-rodney.sh`: it builds + serves the SPA,
+boots a local Triton (dev-token), walks every page taking screenshots
+(`deploy/local-e2e/.rodney-out/`, gitignored), and exercises the A2UI
+round-trip. Run it after explorer changes:
+
+```bash
+deploy/local-e2e/explorer-rodney.sh          # headless, builds web
+deploy/local-e2e/explorer-rodney.sh --show --no-build   # visible, reuse build
+```
+
+Gotchas (CanvasKit paints into a `<canvas>`):
+
+- rodney's CSS `click`/`text`/`exists` **cannot see Flutter widgets**.
+  Drive and assert through the DOM **semantics tree** instead.
+- Enable it first by clicking the injected
+  `flt-semantics-placeholder` ("Enable accessibility").
+- Tappable widgets are `flt-semantics[role=button]` / `[flt-tappable]`
+  — click them by `textContent` (nav labels read "Playground Tab 2 of
+  8", etc.). Dropdown-menu items render in an overlay that is *not*
+  semantics-tappable; avoid driving those.
+- Assert **rendered content** via `rodney ax-tree | grep`, NOT a
+  `flt-semantics` querySelector: Flutter only keeps the semantics DOM
+  fresh for newly-rendered subtrees while an a11y client is actively
+  reading, and `ax-tree` (a CDP fetch) is that client. Poll — content
+  appears a beat after paint and after `/v1/*` calls resolve.
+- Seed auth before the app boots past the login gate: set
+  `localStorage['flutter.triton.bearer']` and `['flutter.triton.baseUrl']`
+  (shared_preferences web = JSON-encoded values under `flutter.`-keys),
+  then reload.

@@ -5,6 +5,7 @@ import '../../../api/models.dart';
 import '../../../providers/api_provider.dart';
 import '../../../widgets/a2ui/a2ui_renderer.dart';
 import '../../../widgets/json_viewer.dart';
+import '../../../widgets/panel_help.dart';
 
 /// Three-column comparison: the same tool rendered through the A2UI
 /// v0.8 builder, the v0.9 builder, and a selectable chat-channel
@@ -100,7 +101,11 @@ class _A2uiDiffPageState extends ConsumerState<A2uiDiffPage> {
   /// shape the mappers expect. v0.9 is structurally close: each
   /// stream entry has `type`, `text`, `label`, etc.
   Map<String, dynamic> _streamToSurface(Map<String, dynamic> envelope) {
-    final stream = (envelope['stream'] as List?) ?? const [];
+    // The wire envelope nests the stream under `result`.
+    final inner = (envelope['result'] is Map)
+        ? (envelope['result'] as Map).cast<String, dynamic>()
+        : envelope;
+    final stream = (inner['stream'] as List?) ?? const [];
     final components = <Map<String, dynamic>>[];
     for (final raw in stream) {
       if (raw is! Map) continue;
@@ -181,6 +186,14 @@ class _A2uiDiffPageState extends ConsumerState<A2uiDiffPage> {
           }
           return Column(
             children: [
+              const PanelHelp(
+                what: "Shows one tool's A2UI surface rendered three ways side "
+                    'by side: the v0.8 builder, the v0.9 builder, and a '
+                    'chat-channel surface mapper (e.g. Telegram).',
+                how: 'Pick an A2UI-returning tool and press Invoke. Switch the '
+                    'chat adapter on the right to compare how each platform '
+                    'degrades the surface.',
+              ),
               Padding(
                 padding: const EdgeInsets.all(16),
                 child: Row(
@@ -243,7 +256,18 @@ class _A2uiDiffPageState extends ConsumerState<A2uiDiffPage> {
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(12),
-                  child: A2UIRenderer(envelope: result.raw),
+                  // Intentionally no onAction: this page compares how
+                  // the same surface renders across v0.8 / v0.9 / chat
+                  // channels. Driving a live round-trip belongs in the
+                  // Playground; here interactivity would conflate
+                  // "compare renderings" with "drive a session".
+                  // `label` is 'v0.8'/'v0.9' — strip the leading 'v' to
+                  // tell the renderer which version this column holds
+                  // (the wire envelope carries no version field).
+                  child: A2UIRenderer(
+                    envelope: result.raw,
+                    version: label.replaceFirst('v', ''),
+                  ),
                 ),
               ),
               const SizedBox(height: 12),
