@@ -180,8 +180,11 @@ mod explorer {
     use axum::routing::get;
     use rust_embed::RustEmbed;
 
+    // Path is resolved relative to this crate's CARGO_MANIFEST_DIR by
+    // rust-embed; `apps/explorer/build/web` must be built first
+    // (`flutter build web --base-href /explorer/`).
     #[derive(RustEmbed)]
-    #[folder = "$CARGO_MANIFEST_DIR/../../apps/explorer/build/web"]
+    #[folder = "../../apps/explorer/build/web"]
     struct Assets;
 
     pub fn router() -> Router {
