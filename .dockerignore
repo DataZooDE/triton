@@ -1,0 +1,15 @@
+# Keep the Docker build context small. The gateway Dockerfile does
+# `COPY . .` (it needs the whole Cargo workspace), so without this the
+# context would include multi-GB build artifacts and the git history.
+**/target/
+.git/
+.github/
+# Flutter explorer build artifacts (its own Dockerfile copies what it needs)
+apps/explorer/build/
+apps/explorer/.dart_tool/
+# Local/editor/agent state
+.claude/
+.codex-delegate/
+# Docs/scaffolding not needed inside the image
+doc/
+deploy/local-e2e/

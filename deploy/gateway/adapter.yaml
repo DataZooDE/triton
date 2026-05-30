@@ -1,0 +1,57 @@
+# Triton demo manifest (substrate, nonprod, tailnet-only).
+#
+# One Telegram adapter using the `long_poll` inbound (FR-A-1.v0.2): a
+# worker polls api.telegram.org outbound, so NO public webhook is
+# needed — the right fit for a tailnet-only deploy. The `secret` field
+# is required by the schema but unused in long-poll mode.
+#
+# `TRITON_ENV=nonprod` runs manifest validation in PRODUCTION mode, so
+# every credential MUST be a `vault://` reference (literals are
+# rejected, FR-L-6 / NFR-S-5). Triton resolves these at boot via its
+# own VaultKvResolver (TRITON_VAULT_URL + TRITON_VAULT_TOKEN). Seed
+# them first — see deploy/README.md:
+#   vault kv put kv/apps/dz/triton/nonprod/telegram \
+#     bot_token=<BotFather token> webhook_secret=unused \
+#     senders='{"<your-tg-id>":{"sub":"demo","scopes":["chat"],"tenant":"demo"}}' \
+#     correlation_key=<32+ random bytes>
+version: "0.2"
+
+adapters:
+  telegram:
+    kind: telegram
+    inbound:
+      kind: long_poll
+      signature: secret_token
+      secret: vault://kv/data/apps/dz/triton/nonprod/telegram#webhook_secret
+    outbound:
+      kind: rest_api
+      token: vault://kv/data/apps/dz/triton/nonprod/telegram#bot_token
+    identity:
+      kind: sender_table
+      table: vault://kv/data/apps/dz/triton/nonprod/telegram#senders
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: vault://kv/data/apps/dz/triton/nonprod/telegram#correlation_key
+
+# Tool surface declarations (M-COVERAGE-1: every declared component
+# kind must have a degrade rule in each chat adapter above).
+#   echo / narrate are in-process; demo-stats is the upstream agent
+#   (Consul tag:agent:demo-stats). NB: a `dashboard` rendered to the
+#   Telegram leg needs a rasterizer (TRITON_RASTERIZER_URL); the demo
+#   exercises demo-stats via MCP/explorer (native v0.9 dashboard), not
+#   over Telegram.
+tools:
+  echo:
+    surface_components: []
+  narrate:
+    surface_components: [text, narration, buttons]
+  demo-stats:
+    surface_components: [text, narration, dashboard]
