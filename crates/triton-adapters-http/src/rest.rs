@@ -411,7 +411,7 @@ async fn list_tools(State(state): State<RestState>, parts: Parts) -> Response {
         );
         return error_response(&e, None);
     }
-    Json(json!({ "tools": state.dispatcher.descriptors() })).into_response()
+    Json(json!({ "tools": state.dispatcher.descriptors_all().await })).into_response()
 }
 
 async fn invoke_tool(

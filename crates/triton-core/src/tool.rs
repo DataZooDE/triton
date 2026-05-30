@@ -60,6 +60,13 @@ pub struct ToolDescriptor {
     pub name: String,
     pub input_schema: Value,
     pub returns_a2ui: bool,
+    /// `true` for tools that aren't in the in-process registry but are
+    /// reachable via the upstream router (a Consul `agent:<name>`
+    /// service). Triton doesn't know their input schema, so `input_schema`
+    /// is empty and `returns_a2ui` is assumed `true` (agents typically
+    /// emit surfaces). Lets the Explorer tag them and still call them.
+    #[serde(default)]
+    pub upstream: bool,
 }
 
 /// Registry of tools the dispatcher knows about. Sorted by name so
@@ -98,6 +105,7 @@ impl ToolRegistry {
                 name: t.name().to_string(),
                 input_schema: t.input_schema(),
                 returns_a2ui: t.returns_a2ui(),
+                upstream: false,
             })
             .collect()
     }

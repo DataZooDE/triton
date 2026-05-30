@@ -65,6 +65,19 @@ impl UpstreamDispatch for UpstreamRouter {
     ) -> Result<Value, TritonError> {
         UpstreamRouter::invoke(self, tool, args, principal).await
     }
+
+    /// List discoverable `agent:<name>` services for `GET /v1/tools`.
+    /// Degrades to empty on any Consul error — discovery is best-effort
+    /// and must never fail the listing endpoint.
+    async fn list_agents(&self) -> Vec<String> {
+        match self.consul.list_agent_tools().await {
+            Ok(tools) => tools,
+            Err(e) => {
+                tracing::warn!(error = %e, "consul agent listing failed; omitting upstream tools");
+                Vec::new()
+            }
+        }
+    }
 }
 
 impl UpstreamRouter {

@@ -1,0 +1,108 @@
+//! `GET /v1/tools` and MCP `tools/list` surface Consul `agent:*`
+//! services, so a client (the Explorer) can discover upstream agents
+//! that aren't in Triton's in-process registry. No mocks: a real
+//! `triton` binary against the in-repo Consul/Vault fakes.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use serde_json::{Value, json};
+use triton_tests::{
+    TritonProcess,
+    upstream_fixture::{FakeAgent, FakeConsul, FakeVault},
+};
+
+fn upstream_env(consul: &FakeConsul, vault: &FakeVault) -> HashMap<String, String> {
+    HashMap::from([
+        ("TRITON_ENV".into(), "nonprod".into()),
+        ("TRITON_CONSUL_URL".into(), consul.url()),
+        ("TRITON_VAULT_URL".into(), vault.url()),
+        ("TRITON_VAULT_TOKEN".into(), "triton-vault-token".into()),
+        ("TRITON_VAULT_OIDC_ROLE".into(), "agent-oidc-swap".into()),
+    ])
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_v1_tools_lists_upstream_agents() {
+    let agent = FakeAgent::start_echoing().await;
+    let consul = FakeConsul::start(&[("hello", agent.host_port())]).await;
+    let vault = FakeVault::start_minting("vault-token").await;
+    let triton =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), upstream_env(&consul, &vault)).await;
+
+    let body: Value = reqwest::Client::new()
+        .get(triton.rest_url("/v1/tools"))
+        .bearer_auth("dev-token")
+        .send()
+        .await
+        .expect("GET /v1/tools")
+        .json()
+        .await
+        .expect("json");
+    let tools = body["tools"].as_array().expect("tools array");
+
+    let hello = tools
+        .iter()
+        .find(|t| t["name"] == "hello")
+        .expect("the upstream agent `hello` should be listed in /v1/tools");
+    assert_eq!(
+        hello["upstream"],
+        json!(true),
+        "upstream agents must be flagged so the UI can tag them"
+    );
+
+    // In-process tools are still listed, and NOT flagged upstream.
+    let echo = tools
+        .iter()
+        .find(|t| t["name"] == "echo")
+        .expect("in-process `echo` still listed");
+    assert_eq!(echo["upstream"], json!(false));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_tools_list_includes_upstream_agents() {
+    let agent = FakeAgent::start_echoing().await;
+    let consul = FakeConsul::start(&[("hello", agent.host_port())]).await;
+    let vault = FakeVault::start_minting("vault-token").await;
+    let triton =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), upstream_env(&consul, &vault)).await;
+
+    let body: Value = reqwest::Client::new()
+        .post(triton.mcp_url("/"))
+        .bearer_auth("dev-token")
+        .json(&json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}))
+        .send()
+        .await
+        .expect("POST / tools/list")
+        .json()
+        .await
+        .expect("json");
+    let tools = body["result"]["tools"].as_array().expect("tools array");
+    let hello = tools
+        .iter()
+        .find(|t| t["name"] == "hello")
+        .expect("`hello` should appear in MCP tools/list");
+    assert_eq!(hello["x-triton"]["upstream"], json!(true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listing_degrades_when_no_upstream_configured() {
+    // Dev-token mode, no Consul/Vault: /v1/tools still works, just the
+    // in-process tools, none flagged upstream.
+    let triton = TritonProcess::spawn().await;
+    let body: Value = reqwest::Client::new()
+        .get(triton.rest_url("/v1/tools"))
+        .bearer_auth("dev-token")
+        .send()
+        .await
+        .expect("GET /v1/tools")
+        .json()
+        .await
+        .expect("json");
+    let tools = body["tools"].as_array().expect("tools array");
+    assert!(!tools.is_empty(), "in-process tools still listed");
+    assert!(
+        tools.iter().all(|t| t["upstream"] == json!(false)),
+        "no upstream agents without Consul"
+    );
+}

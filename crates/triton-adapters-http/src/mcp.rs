@@ -179,7 +179,10 @@ async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes) -> Respon
     // Step 5: method dispatch.
     let resp_factory: Box<dyn FnOnce(Value) -> Response> = match method.as_str() {
         "initialize" => Box::new(move |id| initialize_response(id, &params, &state)),
-        "tools/list" => Box::new(move |id| tools_list_response(id, &state)),
+        "tools/list" => {
+            let response = tools_list_response(id.clone(), &state).await;
+            return maybe_respond(id_present, id, |_| response);
+        }
         "tools/call" => {
             let response = tools_call(id.clone(), params, principal, &state).await;
             return maybe_respond(id_present, id, |_| response);
@@ -265,20 +268,21 @@ fn initialize_response(id: Value, params: &Value, _state: &McpState) -> Response
     )
 }
 
-fn tools_list_response(id: Value, state: &McpState) -> Response {
+async fn tools_list_response(id: Value, state: &McpState) -> Response {
     // MCP's tool descriptor uses camelCase (`inputSchema`) — we
-    // translate from `ToolDescriptor` here. `returns_a2ui` is
-    // Triton-specific and isn't part of MCP's spec, so we expose
-    // it under a vendor extension `x-triton`.
+    // translate from `ToolDescriptor` here. `returns_a2ui` and the
+    // upstream flag are Triton-specific and not part of MCP's spec, so
+    // we expose them under a vendor extension `x-triton`.
     let tools: Vec<Value> = state
         .dispatcher
-        .descriptors()
+        .descriptors_all()
+        .await
         .into_iter()
         .map(|d| {
             json!({
                 "name": d.name,
                 "inputSchema": d.input_schema,
-                "x-triton": { "returns_a2ui": d.returns_a2ui },
+                "x-triton": { "returns_a2ui": d.returns_a2ui, "upstream": d.upstream },
             })
         })
         .collect();

@@ -48,6 +48,16 @@ pub trait UpstreamDispatch: Send + Sync {
         args: Value,
         principal: &Principal,
     ) -> Result<Value, TritonError>;
+
+    /// Tool names of upstream agents discoverable right now (Consul
+    /// `agent:<name>` services). Surfaced by `GET /v1/tools` so clients
+    /// can discover agents that aren't in the in-process registry. The
+    /// default returns nothing; the real router queries Consul and
+    /// degrades to empty on error (listing must never fail the
+    /// endpoint).
+    async fn list_agents(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug)]
@@ -109,6 +119,34 @@ impl Dispatcher {
     /// between adapters and tool-state.
     pub fn descriptors(&self) -> Vec<ToolDescriptor> {
         self.registry.descriptors()
+    }
+
+    /// Like [`Self::descriptors`], but also folds in upstream agents
+    /// discoverable via the router (Consul `agent:<name>` services),
+    /// flagged `upstream: true`. In-process tools win on a name clash.
+    /// Upstream discovery degrades to "just the in-process tools" if the
+    /// router/Consul is unavailable — listing never fails. Result is
+    /// name-sorted for a stable `GET /v1/tools` order.
+    pub async fn descriptors_all(&self) -> Vec<ToolDescriptor> {
+        let mut out = self.registry.descriptors();
+        if let Some(upstream) = &self.upstream {
+            let known: std::collections::HashSet<String> =
+                out.iter().map(|d| d.name.clone()).collect();
+            for name in upstream.list_agents().await {
+                if !known.contains(&name) {
+                    out.push(ToolDescriptor {
+                        name,
+                        input_schema: json!({}),
+                        // Triton can't know an agent's schema; assume it
+                        // may emit a surface so the UI offers A2UI.
+                        returns_a2ui: true,
+                        upstream: true,
+                    });
+                }
+            }
+            out.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        out
     }
 
     /// Top-level entry point for adapters that receive a raw body
