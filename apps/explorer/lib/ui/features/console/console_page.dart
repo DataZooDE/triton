@@ -63,6 +63,11 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   final _envelopeController = TextEditingController();
   String? _envelopeError;
 
+  /// Lets you target a tool that isn't in `/v1/tools` — e.g. an upstream
+  /// agent Triton dispatches into by Consul tag (the `hello` adk-rust
+  /// agent), which the in-process registry doesn't list.
+  final _customController = TextEditingController();
+
   final Map<_Protocol, InvocationResult?> _results = {
     _Protocol.rest: null,
     _Protocol.mcp: null,
@@ -74,7 +79,18 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   @override
   void dispose() {
     _envelopeController.dispose();
+    _customController.dispose();
     super.dispose();
+  }
+
+  /// Select an arbitrary tool name (not necessarily in `/v1/tools`). We
+  /// assume it may return an A2UI surface so the version selector shows.
+  void _useCustomTool() {
+    final name = _customController.text.trim();
+    if (name.isEmpty) return;
+    _selectTool(
+      ToolDescriptor(name: name, inputSchema: const {}, returnsA2ui: true),
+    );
   }
 
   // ── client + frame helpers ──────────────────────────────────────────
@@ -289,22 +305,58 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
             children: [
               SizedBox(
                 width: 240,
-                child: ListView.builder(
-                  itemCount: list.length,
-                  itemBuilder: (context, i) {
-                    final t = list[i];
-                    return ListTile(
-                      title: Text(t.name),
-                      subtitle: t.returnsA2ui
-                          ? const Text(
-                              'returns A2UI',
-                              style: TextStyle(fontSize: 11),
-                            )
-                          : null,
-                      selected: _selected?.name == t.name,
-                      onTap: () => _selectTool(t),
-                    );
-                  },
+                child: Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          TextField(
+                            key: const Key('custom-tool-field'),
+                            controller: _customController,
+                            decoration: const InputDecoration(
+                              isDense: true,
+                              border: OutlineInputBorder(),
+                              labelText: 'Tool name',
+                              hintText: 'e.g. hello (upstream agent)',
+                              helperText: 'Target a tool not in /v1/tools',
+                            ),
+                            onSubmitted: (_) => _useCustomTool(),
+                          ),
+                          const SizedBox(height: 6),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: TextButton.icon(
+                              icon: const Icon(Icons.add, size: 18),
+                              label: const Text('Use tool'),
+                              onPressed: _useCustomTool,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1),
+                    Expanded(
+                      child: ListView.builder(
+                        itemCount: list.length,
+                        itemBuilder: (context, i) {
+                          final t = list[i];
+                          return ListTile(
+                            title: Text(t.name),
+                            subtitle: t.returnsA2ui
+                                ? const Text(
+                                    'returns A2UI',
+                                    style: TextStyle(fontSize: 11),
+                                  )
+                                : null,
+                            selected: _selected?.name == t.name,
+                            onTap: () => _selectTool(t),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
                 ),
               ),
               const VerticalDivider(width: 1),
