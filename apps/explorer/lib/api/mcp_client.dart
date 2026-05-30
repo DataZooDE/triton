@@ -76,6 +76,7 @@ class McpClient {
                   (t['inputSchema'] as Map?)?.cast<String, dynamic>() ??
                       <String, dynamic>{},
               returnsA2ui: (t['x-triton']?['returns_a2ui'] as bool?) ?? false,
+              upstream: (t['x-triton']?['upstream'] as bool?) ?? false,
             ))
         .toList(growable: false);
   }

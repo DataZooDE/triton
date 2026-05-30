@@ -7,11 +7,17 @@ class ToolDescriptor {
     required this.name,
     required this.inputSchema,
     required this.returnsA2ui,
+    this.upstream = false,
   });
 
   final String name;
   final Map<String, dynamic> inputSchema;
   final bool returnsA2ui;
+
+  /// True for an upstream agent Triton dispatches into (a Consul
+  /// `agent:<name>` service) rather than an in-process tool. Triton
+  /// doesn't know its schema, so [inputSchema] is empty.
+  final bool upstream;
 
   factory ToolDescriptor.fromJson(Map<String, dynamic> json) => ToolDescriptor(
         name: json['name'] as String,
@@ -21,6 +27,7 @@ class ToolDescriptor {
         inputSchema: (json['input_schema'] as Map?)?.cast<String, dynamic>() ??
             <String, dynamic>{},
         returnsA2ui: (json['returns_a2ui'] as bool?) ?? false,
+        upstream: (json['upstream'] as bool?) ?? false,
       );
 }
 

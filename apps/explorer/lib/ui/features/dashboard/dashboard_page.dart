@@ -26,9 +26,10 @@ class DashboardPage extends ConsumerWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Pick a feature from the rail. New tools shipped to Triton '
-              'appear under Playground without UI work — the explorer reads '
-              "Triton's /v1/tools surface directly.",
+              'Pick a feature from the rail. Tools shipped to Triton — '
+              'in-process or upstream agents (☁) — appear in the Console '
+              "without UI work; the explorer reads Triton's /v1/tools surface "
+              'directly.',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                     color: ExplorerTheme.onSurfaceVariant,
                   ),
@@ -155,6 +156,9 @@ class _ToolsCard extends StatelessWidget {
                     for (final t in list.take(8))
                       Chip(
                         label: Text(t.name as String),
+                        avatar: (t.upstream as bool)
+                            ? const Icon(Icons.cloud_outlined, size: 14)
+                            : null,
                         visualDensity: VisualDensity.compact,
                       ),
                     if (list.length > 8)

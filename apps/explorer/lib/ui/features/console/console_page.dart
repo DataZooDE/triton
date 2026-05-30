@@ -342,14 +342,14 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                         itemCount: list.length,
                         itemBuilder: (context, i) {
                           final t = list[i];
+                          final tag = t.upstream
+                              ? 'upstream agent'
+                              : (t.returnsA2ui ? 'returns A2UI' : null);
                           return ListTile(
                             title: Text(t.name),
-                            subtitle: t.returnsA2ui
-                                ? const Text(
-                                    'returns A2UI',
-                                    style: TextStyle(fontSize: 11),
-                                  )
-                                : null,
+                            subtitle: tag == null
+                                ? null
+                                : Text(tag, style: const TextStyle(fontSize: 11)),
                             selected: _selected?.name == t.name,
                             onTap: () => _selectTool(t),
                           );
