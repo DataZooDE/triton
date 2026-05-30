@@ -17,6 +17,16 @@ class McpClient {
 
   int _nextId() => ++_id;
 
+  /// The MCP POST target. When `baseUrl` is a bare origin (port-mode:
+  /// MCP at root on its own port) the path is `/`. When `/v1/runtime`
+  /// advertised a mount path (single-port embed, `mcp_base=/mcp`) the
+  /// base already carries it — appending `/` would yield `/mcp/`, which
+  /// 404s against the nested router, so use the base verbatim.
+  String get _endpoint {
+    final p = Uri.parse(baseUrl).path;
+    return (p.isEmpty || p == '/') ? '$baseUrl/' : baseUrl;
+  }
+
   Options _opts() => Options(
         responseType: ResponseType.json,
         headers: {
@@ -33,7 +43,7 @@ class McpClient {
       'params': params,
     };
     final r = await _dio.post<Map<String, dynamic>>(
-      '$baseUrl/',
+      _endpoint,
       data: body,
       options: _opts(),
     );
@@ -100,7 +110,7 @@ class McpClient {
     return WireRequest(
       protocol: 'MCP',
       method: 'POST',
-      url: '$baseUrl/',
+      url: _endpoint,
       headers: const {'Content-Type': 'application/json'},
       body: {
         'jsonrpc': '2.0',

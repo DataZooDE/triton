@@ -73,6 +73,31 @@ void main() {
   });
 
   group('McpClient', () {
+    test('posts to the advertised endpoint — bare origin gets /, '
+        'mount-path base is used as-is (single-port embed /mcp)', () async {
+      // Port-mode: base is an origin, MCP lives at root → path `/`.
+      final dioRoot = Dio()..httpClientAdapter = _RecordingAdapter();
+      final atRoot = dioRoot.httpClientAdapter as _RecordingAdapter;
+      await McpClient(dioRoot, baseUrl: 'http://t:8001').listTools();
+      expect(atRoot.calls.first.path, 'http://t:8001/');
+
+      // Single-port embed: `/v1/runtime` advertised mcp_base=/mcp, so the
+      // base carries a mount path. Appending `/` would yield `/mcp/`,
+      // which 404s against the nested router — post to `/mcp` exactly.
+      final dioMount = Dio()..httpClientAdapter = _RecordingAdapter();
+      final atMount = dioMount.httpClientAdapter as _RecordingAdapter;
+      await McpClient(dioMount, baseUrl: 'http://t:8089/mcp').listTools();
+      expect(atMount.calls.first.path, 'http://t:8089/mcp');
+
+      // The editable Console envelope shows the same endpoint.
+      expect(
+        McpClient(Dio(), baseUrl: 'http://t:8089/mcp')
+            .buildRequest('echo', const {})
+            .url,
+        'http://t:8089/mcp',
+      );
+    });
+
     test('listTools translates camelCase + x-triton extension', () async {
       final dio = Dio();
       final adapter = _RecordingAdapter();
