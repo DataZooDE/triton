@@ -36,7 +36,33 @@ Future<void> setTritonBaseUrl(WidgetRef ref, String url) async {
 /// when nothing has been saved. Called once at app start.
 Future<String> loadInitialBaseUrl(String fallback) async {
   final prefs = await SharedPreferences.getInstance();
-  return prefs.getString(_kPrefsBaseUrlKey) ?? fallback;
+  final saved = prefs.getString(_kPrefsBaseUrlKey);
+  if (saved != null && saved.isNotEmpty) {
+    return saved;
+  }
+
+  if (kIsWeb) {
+    try {
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 2),
+        receiveTimeout: const Duration(seconds: 2),
+      ));
+      final versionUrl = Uri.base
+          .replace(path: 'version.json', query: null, fragment: null)
+          .toString();
+      final resp = await dio.get<Map<String, dynamic>>(versionUrl);
+      if (resp.statusCode == 200 && resp.data != null) {
+        final apiUrl = resp.data!['api_url'] as String?;
+        if (apiUrl != null && apiUrl.isNotEmpty) {
+          return apiUrl;
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed to discover baseUrl from version.json: $e');
+    }
+  }
+
+  return fallback;
 }
 
 final dioProvider = Provider<Dio>((ref) {
