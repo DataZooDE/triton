@@ -209,6 +209,7 @@ impl UpstreamRouter {
             .http
             .post(&url)
             .bearer_auth(&agent_token)
+            .header("X-Triton-Tool", tool)
             .json(&args)
             .send()
             .await

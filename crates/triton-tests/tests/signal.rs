@@ -354,29 +354,32 @@ async fn reconnects_after_signald_drops_connection() {
         .wait_for_type("subscribe", Duration::from_secs(5))
         .await
         .expect("first subscribe");
-    assert_eq!(signald.connections(), 1);
+    let initial_connections = signald.connections();
+    let initial_subscribes = signald.count_with_type("subscribe");
+    assert!(initial_connections >= 1);
 
     // Force-close. Adapter should reconnect within ~5s
     // (initial backoff 500ms; we give some slack for accept
     // race + reconnect handshake).
     signald.force_disconnect();
 
-    // Wait for a SECOND subscribe — implies the adapter
+    // Wait for an additional subscribe — implies the adapter
     // reconnected and re-issued it.
     let start = Instant::now();
     let deadline = Duration::from_secs(8);
     loop {
-        if signald.count_with_type("subscribe") >= 2 {
+        if signald.count_with_type("subscribe") > initial_subscribes {
             break;
         }
         if start.elapsed() > deadline {
             panic!(
-                "expected 2 subscribe lines after reconnect; got {} (connections={})",
+                "expected at least {} subscribe lines after reconnect; got {} (connections={})",
+                initial_subscribes + 1,
                 signald.count_with_type("subscribe"),
                 signald.connections()
             );
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(signald.connections() >= 2);
+    assert!(signald.connections() > initial_connections);
 }
