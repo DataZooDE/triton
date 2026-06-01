@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -44,6 +46,11 @@ enum _Protocol {
   final String label;
 }
 
+enum _InputMode {
+  form,
+  json,
+}
+
 class ConsolePage extends ConsumerStatefulWidget {
   const ConsolePage({super.key});
 
@@ -55,6 +62,13 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   ToolDescriptor? _selected;
   _Protocol _protocol = _Protocol.rest;
   String? _a2uiVersion;
+
+  _InputMode _inputMode = kIsWeb ? _InputMode.form : _InputMode.json;
+  final Map<String, TextEditingController> _controllers = {};
+  bool _isOnline = true;
+  Timer? _reloadTimer;
+  bool _autoReRun = true;
+  bool _hasInvokedAtLeastOnce = false;
 
   /// The canonical args, kept as the source of truth so switching
   /// protocol re-frames the *same* call rather than resetting it.
@@ -77,9 +91,54 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   bool _sending = false;
 
   @override
+  void initState() {
+    super.initState();
+    if (kIsWeb) {
+      _reloadTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
+        final rest = ref.read(restClientProvider);
+        try {
+          final snap = await rest.healthz();
+          final ok = snap['status'] == 'ok';
+          if (ok) {
+            if (!_isOnline) {
+              if (mounted) {
+                setState(() {
+                  _isOnline = true;
+                });
+                ref.invalidate(toolsProvider);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('⚡ Agent hot-reloaded successfully!'),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+                if (_autoReRun && _selected != null && _hasInvokedAtLeastOnce) {
+                  _send();
+                }
+              }
+            }
+          } else {
+            if (_isOnline) {
+              setState(() => _isOnline = false);
+            }
+          }
+        } catch (_) {
+          if (_isOnline) {
+            setState(() => _isOnline = false);
+          }
+        }
+      });
+    }
+  }
+
+  @override
   void dispose() {
+    _reloadTimer?.cancel();
     _envelopeController.dispose();
     _customController.dispose();
+    for (final ctrl in _controllers.values) {
+      ctrl.dispose();
+    }
     super.dispose();
   }
 
@@ -163,8 +222,57 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
       _args = const {};
       _results.updateAll((_, _) => null);
       _a2uiVersion = t.returnsA2ui ? _a2uiVersion : null;
+      _hasInvokedAtLeastOnce = false;
+
+      for (final ctrl in _controllers.values) {
+        ctrl.dispose();
+      }
+      _controllers.clear();
+
+      final schema = t.inputSchema;
+      final props = schema['properties'] as Map?;
+      if (props != null) {
+        final newArgs = <String, dynamic>{};
+        props.forEach((key, val) {
+          final propVal = val as Map;
+          final type = propVal['type'] as String?;
+          if (type == 'boolean') {
+            newArgs[key] = false;
+          } else {
+            final ctrl = TextEditingController();
+            _controllers[key] = ctrl;
+            newArgs[key] = '';
+          }
+        });
+        _args = newArgs;
+      }
       _reseedEnvelope();
     });
+  }
+
+  void _setInputMode(_InputMode mode) {
+    if (mode == _InputMode.form) {
+      try {
+        final body = (jsonDecode(_envelopeController.text) as Map)
+            .cast<String, dynamic>();
+        final parsedArgs = _argsFromBody(_protocol, body);
+        setState(() {
+          _args = parsedArgs;
+          _envelopeError = null;
+          _args.forEach((key, val) {
+            final ctrl = _controllers[key];
+            if (ctrl != null) {
+              ctrl.text = val?.toString() ?? '';
+            }
+          });
+          _inputMode = mode;
+        });
+      } catch (_) {
+        setState(() => _inputMode = mode);
+      }
+    } else {
+      setState(() => _inputMode = mode);
+    }
   }
 
   void _setProtocol(_Protocol p) {
@@ -219,6 +327,7 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
       _results[p] = r;
       _args = _argsFromBody(p, body);
       _sending = false;
+      _hasInvokedAtLeastOnce = true;
     });
   }
 
@@ -246,6 +355,7 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
         _results[e.key] = e.value;
       }
       _sending = false;
+      _hasInvokedAtLeastOnce = true;
     });
   }
 
@@ -259,7 +369,85 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
     setState(() {
       _results[p] = r;
       _sending = false;
+      _hasInvokedAtLeastOnce = true;
     });
+  }
+
+  Widget _buildFormFields(ToolDescriptor tool) {
+    final schema = tool.inputSchema;
+    final props = schema['properties'] as Map?;
+    if (props == null || props.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(16),
+            child: Text(
+              'This tool requires no input arguments.',
+              style: TextStyle(fontStyle: FontStyle.italic),
+            ),
+          ),
+        ),
+      );
+    }
+
+    final children = <Widget>[];
+    props.forEach((key, val) {
+      final propVal = val as Map;
+      final type = propVal['type'] as String?;
+      final desc = propVal['description'] as String?;
+
+      if (type == 'boolean') {
+        final currentVal = _args[key] as bool? ?? false;
+        children.add(
+          SwitchListTile(
+            title: Text(key),
+            subtitle: desc != null ? Text(desc) : null,
+            value: currentVal,
+            onChanged: (v) {
+              setState(() {
+                _args = Map<String, dynamic>.from(_args)..[key] = v;
+                _reseedEnvelope();
+              });
+            },
+          ),
+        );
+      } else {
+        final ctrl = _controllers[key];
+        if (ctrl != null) {
+          children.add(
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: TextField(
+                controller: ctrl,
+                decoration: InputDecoration(
+                  labelText: key,
+                  helperText: desc,
+                  border: const OutlineInputBorder(),
+                ),
+                onChanged: (text) {
+                  dynamic parsedVal = text;
+                  if (type == 'integer') {
+                    parsedVal = int.tryParse(text) ?? text;
+                  } else if (type == 'number') {
+                    parsedVal = double.tryParse(text) ?? text;
+                  }
+                  _args = Map<String, dynamic>.from(_args)..[key] = parsedVal;
+                  final frame = _buildFor(_protocol, _args);
+                  _envelopeController.text = _pretty(frame.body);
+                  _envelopeError = null;
+                },
+              ),
+            ),
+          );
+        }
+      }
+    });
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: children,
+    );
   }
 
   // ── build ───────────────────────────────────────────────────────────
@@ -303,6 +491,23 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
               ),
             );
           }
+
+          if (_selected == null && kIsWeb) {
+            final initial = list.firstWhere((t) => t.upstream, orElse: () => list.first);
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted && _selected == null) {
+                _selectTool(initial);
+              }
+            });
+          }
+
+          final sortedList = List<ToolDescriptor>.from(list)
+            ..sort((a, b) {
+              if (a.upstream && !b.upstream) return -1;
+              if (!a.upstream && b.upstream) return 1;
+              return a.name.compareTo(b.name);
+            });
+
           return Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
@@ -342,14 +547,20 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                     const Divider(height: 1),
                     Expanded(
                       child: ListView.builder(
-                        itemCount: list.length,
+                        itemCount: sortedList.length,
                         itemBuilder: (context, i) {
-                          final t = list[i];
+                          final t = sortedList[i];
                           final tag = t.upstream
                               ? 'upstream agent'
                               : (t.returnsA2ui ? 'returns A2UI' : null);
                           return ListTile(
-                            title: Text(t.name),
+                            title: Row(
+                              children: [
+                                Expanded(child: Text(t.name)),
+                                if (t.upstream)
+                                  const Icon(Icons.star, color: Colors.amber, size: 16),
+                              ],
+                            ),
                             subtitle: tag == null
                                 ? null
                                 : Text(
@@ -388,6 +599,31 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          if (!_isOnline) ...[
+            Card(
+              color: Theme.of(context).colorScheme.errorContainer,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(
+                  children: [
+                    SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        '⚡ Reconnecting to Agent... (Rust binary compiling & restarting)',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+          ],
           Text(tool.name, style: Theme.of(context).textTheme.headlineSmall),
           PanelHelp(
             what: '$_consoleWhat\n\n${guide.what}',
@@ -435,14 +671,49 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                     ),
                   ],
                 ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Checkbox(
+                    value: _autoReRun,
+                    onChanged: (v) {
+                      setState(() {
+                        _autoReRun = v ?? true;
+                      });
+                    },
+                  ),
+                  const Text('Auto-run last query on reload', style: TextStyle(fontSize: 12)),
+                ],
+              ),
             ],
           ),
           const SizedBox(height: 16),
 
-          // The editable wire frame.
-          Text(
-            'Request envelope',
-            style: Theme.of(context).textTheme.titleMedium,
+          // Mode switch selector: Form vs JSON.
+          Row(
+            children: [
+              Text(
+                'Request envelope',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const Spacer(),
+              SegmentedButton<_InputMode>(
+                segments: const [
+                  ButtonSegment(
+                    value: _InputMode.form,
+                    icon: Icon(Icons.edit_note),
+                    label: Text('Form builder'),
+                  ),
+                  ButtonSegment(
+                    value: _InputMode.json,
+                    icon: Icon(Icons.code),
+                    label: Text('Raw JSON'),
+                  ),
+                ],
+                selected: {_inputMode},
+                onSelectionChanged: (s) => _setInputMode(s.first),
+              ),
+            ],
           ),
           const SizedBox(height: 4),
           SelectableText(
@@ -451,22 +722,24 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
             style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
           ),
           const SizedBox(height: 8),
-          TextField(
-            key: const Key('envelope-editor'),
-            controller: _envelopeController,
-            minLines: 6,
-            maxLines: 18,
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-            decoration: InputDecoration(
-              border: const OutlineInputBorder(),
-              isDense: true,
-              errorText: _envelopeError,
-              helperText:
-                  'Edit the JSON body, then Send — this is the exact '
-                  'frame posted to Triton.',
-            ),
-            onChanged: _onEnvelopeChanged,
-          ),
+          _inputMode == _InputMode.form
+              ? _buildFormFields(tool)
+              : TextField(
+                  key: const Key('envelope-editor'),
+                  controller: _envelopeController,
+                  minLines: 6,
+                  maxLines: 18,
+                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
+                  decoration: InputDecoration(
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                    errorText: _envelopeError,
+                    helperText:
+                        'Edit the JSON body, then Send — this is the exact '
+                        'frame posted to Triton.',
+                  ),
+                  onChanged: _onEnvelopeChanged,
+                ),
           const SizedBox(height: 12),
           Row(
             children: [
