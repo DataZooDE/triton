@@ -1,0 +1,85 @@
+name: build-dz-triton
+
+# Self-contained image build for the Triton agent-ingress gateway → GAR
+# substrate/dz-triton. Built here (not the substrate's reusable
+# build-app-image.yml) because that workflow's cross-repo reuse is disabled
+# (access=none); this mirrors DataZooDE/datazoo-agent-template's
+# build-agent-template.yml. We do NOT open the manifest-bump PR (cross-repo
+# write); `/release-app dz-triton-api <env>` resolves the latest :main SHA
+# from GAR and opens the manifest PR against the substrate repo.
+#
+# Operator prerequisites (one-time):
+#   - the GCP workload-identity provider must TRUST this repo (DataZooDE/triton)
+#     and its SA must have artifactregistry.writer (add "triton" to the
+#     bootstrap `github_repos_additional`, then terraform apply — like #285).
+#   - set repo/org Actions variables GCP_WORKLOAD_IDENTITY_PROVIDER +
+#     GCP_SERVICE_ACCOUNT (the substrate values).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deploy/triton/Dockerfile"
+      - ".github/workflows/build-dz-triton.yml"
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: build-dz-triton-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  id-token: write # WIF auth to GCP
+  contents: read
+
+jobs:
+  build:
+    name: build + push dz-triton
+    runs-on: ubuntu-latest
+    # cargo build --release -p triton-bin from scratch; 60m gives margin.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Authenticate to GCP via WIF
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure docker for Artifact Registry
+        run: gcloud auth configure-docker europe-west3-docker.pkg.dev --quiet
+
+      - name: Compute tags
+        id: tags
+        run: |
+          set -euo pipefail
+          GAR="europe-west3-docker.pkg.dev/hetzner-agent-backplane/substrate/dz-triton"
+          SHORT="${GITHUB_SHA::12}"
+          TAGS="${GAR}:${SHORT}"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},${GAR}:main"
+          fi
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            TAGS="${TAGS},${GAR}:${GITHUB_REF_NAME}"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "Pushing: ${TAGS}"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/triton/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          provenance: false
