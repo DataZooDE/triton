@@ -141,7 +141,7 @@ job "dz-triton-explorer" {
         destination = "local/version.json"
         change_mode = "noop"
         data        = <<-EOT
-          { "version": "${var.version}", "image": "${var.image}" }
+          { "version": "${var.version}", "image": "${var.image}", "api_url": "https://triton-api.${local.env}.int.data-zoo.de" }
         EOT
       }
 
