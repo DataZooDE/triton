@@ -49,8 +49,10 @@ class TritonExplorerApp extends ConsumerWidget {
     final auth = ref.watch(authProvider);
     final manualToken = ref.watch(tokenProvider);
     final hasManualToken = manualToken != null && manualToken.isNotEmpty;
-    final unlocked =
-        auth.status == AuthStatus.loggedIn || hasManualToken;
+    final runtime = ref.watch(runtimeConfigProvider);
+    final unlocked = auth.status == AuthStatus.loggedIn ||
+        hasManualToken ||
+        (runtime.hasValue && runtime.value!.env.isNotEmpty);
     return MaterialApp(
       title: 'Triton Explorer',
       debugShowCheckedModeBanner: false,
