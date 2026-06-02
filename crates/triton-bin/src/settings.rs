@@ -420,9 +420,11 @@ struct Cli {
     )]
     rasterizer_url: String,
 
-    /// RSA private key PEM signing static-upstream JWTs (workload→workload auth
-    /// without Vault). With `--static-upstream-issuer` + `--jwt-jwks`, Triton
-    /// mints a per-call OIDC token instead of the static bearer and serves JWKS.
+    /// RSA private key signing static-upstream JWTs (workload→workload auth
+    /// without Vault): a raw PEM, or base64-encoded PEM (so a multi-line key
+    /// rides a single env var / Kamal env-file line). With
+    /// `--static-upstream-issuer` and `--jwt-jwks`, Triton mints a per-call
+    /// OIDC token instead of the static bearer and serves JWKS.
     #[arg(long, env = "TRITON_JWT_SIGNING_KEY")]
     jwt_signing_key: Option<String>,
 
