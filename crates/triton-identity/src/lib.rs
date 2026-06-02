@@ -15,6 +15,9 @@ use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
 use triton_core::{Principal, TritonError};
 
+pub mod signer;
+pub use signer::JwtSigner;
+
 /// Algorithm allowlist per FR-I-3. `none` and any HS* are absent
 /// by construction.
 const ALLOWED_ALGS: &[Algorithm] = &[

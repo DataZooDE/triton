@@ -150,6 +150,49 @@ async fn main() -> std::io::Result<()> {
     // Vault auth is configured. Exits on a half-configured auth.
     let vault_token_source: Option<VaultToken> = build_vault_token_source(&settings);
 
+    // Static-upstream OIDC signer: when a signing key + issuer + JWKS are all
+    // configured, Triton mints a per-call RS256 JWT to agents (workload→workload
+    // auth WITHOUT Vault) and serves discovery/JWKS (rest.rs). Shared (Arc) with
+    // RestState below so the same key signs and is served. All-or-nothing.
+    let static_signer: Option<Arc<triton_identity::JwtSigner>> = match (
+        &settings.jwt_signing_key,
+        &settings.static_upstream_issuer,
+        &settings.jwt_jwks,
+    ) {
+        (Some(pem), Some(issuer), Some(jwks_str)) => {
+            let kid = settings
+                .jwt_kid
+                .clone()
+                .unwrap_or_else(|| "triton-static".to_string());
+            let jwks: serde_json::Value = serde_json::from_str(jwks_str).unwrap_or_else(|e| {
+                tracing::error!(error = %e, "TRITON_JWT_JWKS is not valid JSON");
+                std::process::exit(2);
+            });
+            match triton_identity::JwtSigner::from_rsa_pem(
+                pem.as_bytes(),
+                kid,
+                issuer.clone(),
+                jwks,
+            ) {
+                Ok(s) => {
+                    tracing::info!(issuer, "static-upstream OIDC signer enabled (RS256 + JWKS)");
+                    Some(Arc::new(s))
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to build static-upstream OIDC signer");
+                    std::process::exit(2);
+                }
+            }
+        }
+        (None, None, None) => None,
+        _ => {
+            tracing::error!(
+                "static-upstream signing requires TRITON_JWT_SIGNING_KEY + TRITON_SELF_ISSUER + TRITON_JWT_JWKS together"
+            );
+            std::process::exit(2);
+        }
+    };
+
     // Wire the upstream router if Consul + Vault (url + auth) are
     // configured. Partial-wiring rules:
     //   * consul + vault_url + auth  → upstream router on
@@ -211,10 +254,26 @@ async fn main() -> std::io::Result<()> {
                         token,
                         settings.upstream_timeout,
                     );
-                    tracing::warn!(
-                        spec = %spec,
-                        "TRITON_STATIC_UPSTREAMS set (dev): dispatching by name, no Consul/Vault"
-                    );
+                    // When a signer is configured, mint per-call RS256 JWTs
+                    // (production agents verify these) instead of the static
+                    // dev-token bearer.
+                    let su = if let Some(signer) = &static_signer {
+                        let aud = settings
+                            .static_upstream_aud
+                            .clone()
+                            .unwrap_or_else(|| format!("agents-{}", settings.env));
+                        tracing::warn!(
+                            spec = %spec, aud = %aud,
+                            "TRITON_STATIC_UPSTREAMS set: dispatching by name with signed RS256 JWTs (no Consul/Vault)"
+                        );
+                        su.with_signer(signer.clone(), aud)
+                    } else {
+                        tracing::warn!(
+                            spec = %spec,
+                            "TRITON_STATIC_UPSTREAMS set (dev): dispatching by name with the static bearer, no Consul/Vault"
+                        );
+                        su
+                    };
                     dispatcher =
                         dispatcher.with_upstream(Arc::new(su) as Arc<dyn UpstreamDispatch>);
                 }
@@ -283,6 +342,7 @@ async fn main() -> std::io::Result<()> {
         identity: identity.clone(),
         manifest: manifest_arc,
         metrics: metrics.clone(),
+        oidc_signer: static_signer.clone(),
     };
     let a2a_state = A2aState {
         dispatcher: dispatcher.clone(),

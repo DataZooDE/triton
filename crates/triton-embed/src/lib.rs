@@ -115,6 +115,8 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         identity: identity.clone(),
         manifest: None,
         metrics,
+        // The embedded single-port host doesn't do static-upstream signing.
+        oidc_signer: None,
     };
     let mcp_state = McpState {
         dispatcher: dispatcher.clone(),

@@ -71,12 +71,25 @@ pub struct RestState {
     /// `TRITON_METRICS_PORT`; the REST route here is the
     /// authenticated CORS-friendly path the explorer uses.
     pub metrics: Arc<triton_core::Metrics>,
+    /// OIDC signer for static-upstream dispatch. When set, Triton acts as the
+    /// issuer for the JWTs it mints to agents: it serves discovery + JWKS at the
+    /// `/.well-known/*` routes below so agents verify those tokens. `None`
+    /// outside static-signing mode (Consul/Vault path, or unsigned static mode).
+    pub oidc_signer: Option<Arc<triton_identity::JwtSigner>>,
 }
 
 pub fn router(state: RestState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/version", get(version))
+        // OIDC issuer surface for the JWTs Triton mints in static-upstream mode
+        // (agents fetch these via AGENT_OIDC_ISSUER). Unauthenticated, like any
+        // OIDC discovery/JWKS endpoint. 404 when not signing.
+        .route(
+            "/.well-known/openid-configuration",
+            get(openid_configuration),
+        )
+        .route("/.well-known/jwks.json", get(jwks))
         .route("/v1/runtime", get(runtime_discovery))
         .route("/v1/tools", get(list_tools))
         .route("/v1/tools/{name}", post(invoke_tool))
@@ -86,6 +99,24 @@ pub fn router(state: RestState) -> Router {
         .route("/v1/metrics", get(metrics_view))
         .route("/v1/surface/render", post(surface_render))
         .with_state(state)
+}
+
+/// `GET /.well-known/openid-configuration` — OIDC discovery for Triton's
+/// static-upstream signing key. 404 when Triton isn't signing.
+async fn openid_configuration(State(state): State<RestState>) -> Response {
+    match &state.oidc_signer {
+        Some(signer) => Json(signer.discovery()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// `GET /.well-known/jwks.json` — public keys for verifying the JWTs Triton
+/// mints to agents in static-upstream mode. 404 when Triton isn't signing.
+async fn jwks(State(state): State<RestState>) -> Response {
+    match &state.oidc_signer {
+        Some(signer) => Json(signer.jwks().clone()).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// `GET /v1/metrics` — returns the same Prometheus text exposition

@@ -113,6 +113,24 @@ pub struct Settings {
     /// (so the only thing that can set the header is the sidecar in
     /// the shared netns).
     pub trust_forwarded_auth: bool,
+    /// RSA private key PEM that signs the JWTs Triton mints to agents in
+    /// static-upstream mode (no Vault). When set together with
+    /// `static_upstream_issuer` and `jwt_jwks`, Triton signs per-call OIDC
+    /// tokens instead of sending the static bearer, and serves JWKS so agents
+    /// verify them. A shared key across instances keeps the served JWKS
+    /// consistent behind a load balancer.
+    pub jwt_signing_key: Option<String>,
+    /// Public JWKS JSON (matching `jwt_signing_key`, same `kid`) served at
+    /// `/.well-known/jwks.json` so agents can verify Triton's minted tokens.
+    pub jwt_jwks: Option<String>,
+    /// `kid` set in minted token headers; must match the key in `jwt_jwks`.
+    pub jwt_kid: Option<String>,
+    /// Issuer URL Triton advertises (token `iss` + discovery `issuer`). Agents
+    /// set `AGENT_OIDC_ISSUER` to this and reach it for discovery/JWKS.
+    pub static_upstream_issuer: Option<String>,
+    /// `aud` claim for minted static-upstream tokens — the agent's expected
+    /// audience. Defaults to `agents-<env>` when unset.
+    pub static_upstream_aud: Option<String>,
 }
 
 impl Settings {
@@ -401,6 +419,31 @@ struct Cli {
         default_value = "http://127.0.0.1:9320"
     )]
     rasterizer_url: String,
+
+    /// RSA private key PEM signing static-upstream JWTs (workload→workload auth
+    /// without Vault). With `--static-upstream-issuer` + `--jwt-jwks`, Triton
+    /// mints a per-call OIDC token instead of the static bearer and serves JWKS.
+    #[arg(long, env = "TRITON_JWT_SIGNING_KEY")]
+    jwt_signing_key: Option<String>,
+
+    /// Public JWKS JSON matching `--jwt-signing-key` (same `kid`), served at
+    /// `/.well-known/jwks.json`.
+    #[arg(long, env = "TRITON_JWT_JWKS")]
+    jwt_jwks: Option<String>,
+
+    /// `kid` for minted token headers; must match the key in `--jwt-jwks`.
+    #[arg(long, env = "TRITON_JWT_KID")]
+    jwt_kid: Option<String>,
+
+    /// Issuer URL Triton advertises for the JWTs it mints (token `iss` +
+    /// discovery `issuer`). Agents set `AGENT_OIDC_ISSUER` to this.
+    #[arg(long, env = "TRITON_SELF_ISSUER")]
+    static_upstream_issuer: Option<String>,
+
+    /// `aud` for minted static-upstream tokens (the agent's expected audience).
+    /// Defaults to `agents-<env>` when unset.
+    #[arg(long, env = "TRITON_STATIC_UPSTREAM_AUD")]
+    static_upstream_aud: Option<String>,
 }
 
 impl From<Cli> for Settings {
@@ -452,6 +495,11 @@ impl From<Cli> for Settings {
             explorer_client_id: c.explorer_client_id,
             rasterizer_url: c.rasterizer_url,
             trust_forwarded_auth: c.trust_forwarded_auth,
+            jwt_signing_key: c.jwt_signing_key,
+            jwt_jwks: c.jwt_jwks,
+            jwt_kid: c.jwt_kid,
+            static_upstream_issuer: c.static_upstream_issuer,
+            static_upstream_aud: c.static_upstream_aud,
         }
     }
 }

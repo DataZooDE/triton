@@ -17,3 +17,11 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
 
+[dev-dependencies]
+# Test-only: generate a throwaway RSA keypair + build its JWKS to verify the
+# signer mints tokens the OIDC verifier accepts. Not used by the signer itself
+# (production supplies the key + JWKS via config), so it stays out of the build.
+rsa = "0.9"
+rand = "0.8"
+base64 = "0.22"
+
