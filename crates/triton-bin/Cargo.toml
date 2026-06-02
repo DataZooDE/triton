@@ -22,6 +22,7 @@ dev-token = [
 ]
 
 [dependencies]
+base64 = "0.22"
 triton-core = { path = "../triton-core" }
 triton-identity = { path = "../triton-identity" }
 triton-upstream = { path = "../triton-upstream" }

@@ -159,7 +159,7 @@ async fn main() -> std::io::Result<()> {
         &settings.static_upstream_issuer,
         &settings.jwt_jwks,
     ) {
-        (Some(pem), Some(issuer), Some(jwks_str)) => {
+        (Some(key), Some(issuer), Some(jwks_str)) => {
             let kid = settings
                 .jwt_kid
                 .clone()
@@ -168,12 +168,22 @@ async fn main() -> std::io::Result<()> {
                 tracing::error!(error = %e, "TRITON_JWT_JWKS is not valid JSON");
                 std::process::exit(2);
             });
-            match triton_identity::JwtSigner::from_rsa_pem(
-                pem.as_bytes(),
-                kid,
-                issuer.clone(),
-                jwks,
-            ) {
+            // The signing key is accepted either as a raw PEM or base64-encoded
+            // PEM. Multi-line PEM can't ride a single env var / Kamal env-file
+            // line, so deployments base64 it; raw PEM still works for a file or
+            // local dev. Detect by the PEM header after an optional decode.
+            let pem_bytes: Vec<u8> = if key.trim_start().starts_with("-----BEGIN") {
+                key.as_bytes().to_vec()
+            } else {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD
+                    .decode(key.trim().as_bytes())
+                    .unwrap_or_else(|e| {
+                        tracing::error!(error = %e, "TRITON_JWT_SIGNING_KEY is neither PEM nor valid base64");
+                        std::process::exit(2);
+                    })
+            };
+            match triton_identity::JwtSigner::from_rsa_pem(&pem_bytes, kid, issuer.clone(), jwks) {
                 Ok(s) => {
                     tracing::info!(issuer, "static-upstream OIDC signer enabled (RS256 + JWKS)");
                     Some(Arc::new(s))
