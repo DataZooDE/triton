@@ -29,8 +29,11 @@ pub struct StaticUpstream {
     /// When set, each call's bearer is a freshly-signed RS256 JWT (aud =
     /// `audience`, sub = the caller principal) instead of the static `token`.
     signer: Option<Arc<JwtSigner>>,
-    /// `aud` claim for minted JWTs — the agent's expected audience
-    /// (e.g. `agents-nonprod`). Ignored when `signer` is None.
+    /// `aud` claim for minted JWTs. May be a comma-separated list to name
+    /// several intended recipients in one token (e.g.
+    /// `agents-nonprod,escurel-nonprod` — the agent verifies `agents-nonprod`
+    /// and forwards the same token to escurel, which verifies `escurel-nonprod`).
+    /// Ignored when `signer` is None.
     audience: String,
 }
 
@@ -71,9 +74,18 @@ impl StaticUpstream {
     /// the static token.
     fn bearer(&self, principal: &Principal) -> Result<String, TritonError> {
         match &self.signer {
-            Some(s) => s
-                .sign(&self.audience, &principal.sub, TOKEN_TTL)
-                .map_err(|e| TritonError::Tool(format!("mint upstream token: {e}"))),
+            Some(s) => {
+                // Comma-separated audiences → a multi-aud token (each hop pins
+                // its own). Trimmed; empties dropped.
+                let auds: Vec<&str> = self
+                    .audience
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|a| !a.is_empty())
+                    .collect();
+                s.sign(&auds, &principal.sub, TOKEN_TTL)
+                    .map_err(|e| TritonError::Tool(format!("mint upstream token: {e}")))
+            }
             None => Ok(self.token.clone()),
         }
     }

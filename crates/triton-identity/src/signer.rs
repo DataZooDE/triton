@@ -77,9 +77,15 @@ impl JwtSigner {
     }
 
     /// Mint a short-lived RS256 JWT for an upstream call: `iss` = this issuer,
-    /// `aud` = the agent's expected audience, `sub` = the caller principal.
-    /// `ttl` is clamped to [`MAX_TTL`].
-    pub fn sign(&self, audience: &str, subject: &str, ttl: Duration) -> Result<String, String> {
+    /// `aud` = the intended audience(s), `sub` = the caller principal. `ttl` is
+    /// clamped to [`MAX_TTL`].
+    ///
+    /// `audiences` is a slice so one token can name several intended recipients
+    /// — e.g. the agent (`agents-<env>`) AND a downstream the agent forwards it
+    /// to (`escurel-<env>`). Each verifier pins its own audience and matches if
+    /// it appears in the array; this keeps every hop a *named* audience rather
+    /// than replaying an agent-scoped token to a different service.
+    pub fn sign(&self, audiences: &[&str], subject: &str, ttl: Duration) -> Result<String, String> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?
@@ -87,7 +93,7 @@ impl JwtSigner {
         let exp = now + ttl.min(MAX_TTL).as_secs();
         let claims = json!({
             "iss": self.issuer,
-            "aud": audience,
+            "aud": audiences,
             "sub": subject,
             "iat": now,
             "exp": exp,
@@ -139,25 +145,41 @@ mod tests {
         let signer = JwtSigner::from_rsa_pem(pem.as_bytes(), kid, issuer, jwks.clone())
             .expect("build signer");
 
+        // Multi-audience: one token names both the agent and the downstream
+        // (escurel) the agent forwards it to.
         let token = signer
-            .sign("agents-nonprod", "dz-triton-api", Duration::from_secs(300))
+            .sign(
+                &["agents-nonprod", "escurel-nonprod"],
+                "dz-triton-api",
+                Duration::from_secs(300),
+            )
             .expect("sign");
-
-        // Verify the way the agent does (see datazoo-agent-template verify_oidc).
-        assert_eq!(decode_header(&token).unwrap().kid.as_deref(), Some(kid));
-        let set: JwkSet = serde_json::from_value(jwks).unwrap();
-        let key = set.find(kid).expect("kid in jwks");
-        let decoding = DecodingKey::from_jwk(key).expect("decoding key");
-        let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_issuer(&[issuer]);
-        validation.set_audience(&["agents-nonprod"]);
 
         #[derive(Deserialize)]
         struct Claims {
             sub: String,
         }
-        let data = decode::<Claims>(&token, &decoding, &validation).expect("verify");
-        assert_eq!(data.claims.sub, "dz-triton-api");
+        let set: JwkSet = serde_json::from_value(jwks).unwrap();
+        let key = set.find(kid).expect("kid in jwks");
+        let decoding = DecodingKey::from_jwk(key).expect("decoding key");
+        assert_eq!(decode_header(&token).unwrap().kid.as_deref(), Some(kid));
+
+        // Each hop pins ITS OWN audience and still accepts the multi-aud token:
+        // the agent (verify_oidc, aud=agents-nonprod) and escurel (aud=escurel-nonprod).
+        for aud in ["agents-nonprod", "escurel-nonprod"] {
+            let mut validation = Validation::new(Algorithm::RS256);
+            validation.set_issuer(&[issuer]);
+            validation.set_audience(&[aud]);
+            let data =
+                decode::<Claims>(&token, &decoding, &validation).expect("verify for audience");
+            assert_eq!(data.claims.sub, "dz-triton-api");
+        }
+
+        // A verifier pinning a DIFFERENT audience must reject it.
+        let mut wrong = Validation::new(Algorithm::RS256);
+        wrong.set_issuer(&[issuer]);
+        wrong.set_audience(&["someone-else"]);
+        assert!(decode::<Claims>(&token, &decoding, &wrong).is_err());
     }
 
     #[test]
