@@ -35,6 +35,10 @@ pub struct StaticUpstream {
     /// and forwards the same token to escurel, which verifies `escurel-nonprod`).
     /// Ignored when `signer` is None.
     audience: String,
+    /// `tenant` claim for minted JWTs (a forwarded-to downstream like Escurel
+    /// may key its tenant off it). Empty → no `tenant` claim. Ignored when
+    /// `signer` is None.
+    tenant: String,
 }
 
 impl StaticUpstream {
@@ -58,15 +62,23 @@ impl StaticUpstream {
             http,
             signer: None,
             audience: String::new(),
+            tenant: String::new(),
         }
     }
 
     /// Attach a JWT signer: every dispatch now carries a freshly-minted RS256
-    /// token with `aud = audience`, instead of the static bearer. Pair with
-    /// serving the signer's JWKS so agents can verify (see `triton-bin`).
-    pub fn with_signer(mut self, signer: Arc<JwtSigner>, audience: impl Into<String>) -> Self {
+    /// token with `aud = audience` and (when non-empty) `tenant`, instead of
+    /// the static bearer. Pair with serving the signer's JWKS so agents can
+    /// verify (see `triton-bin`).
+    pub fn with_signer(
+        mut self,
+        signer: Arc<JwtSigner>,
+        audience: impl Into<String>,
+        tenant: impl Into<String>,
+    ) -> Self {
         self.signer = Some(signer);
         self.audience = audience.into();
+        self.tenant = tenant.into();
         self
     }
 
@@ -83,7 +95,7 @@ impl StaticUpstream {
                     .map(str::trim)
                     .filter(|a| !a.is_empty())
                     .collect();
-                s.sign(&auds, &principal.sub, TOKEN_TTL)
+                s.sign(&auds, &principal.sub, &self.tenant, TOKEN_TTL)
                     .map_err(|e| TritonError::Tool(format!("mint upstream token: {e}")))
             }
             None => Ok(self.token.clone()),

@@ -272,11 +272,12 @@ async fn main() -> std::io::Result<()> {
                             .static_upstream_aud
                             .clone()
                             .unwrap_or_else(|| format!("agents-{}", settings.env));
+                        let tenant = settings.static_upstream_tenant.clone().unwrap_or_default();
                         tracing::warn!(
-                            spec = %spec, aud = %aud,
+                            spec = %spec, aud = %aud, tenant = %tenant,
                             "TRITON_STATIC_UPSTREAMS set: dispatching by name with signed RS256 JWTs (no Consul/Vault)"
                         );
-                        su.with_signer(signer.clone(), aud)
+                        su.with_signer(signer.clone(), aud, tenant)
                     } else {
                         tracing::warn!(
                             spec = %spec,

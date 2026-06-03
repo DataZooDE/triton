@@ -131,6 +131,10 @@ pub struct Settings {
     /// `aud` claim for minted static-upstream tokens — the agent's expected
     /// audience. Defaults to `agents-<env>` when unset.
     pub static_upstream_aud: Option<String>,
+    /// `tenant` claim for minted static-upstream tokens. A downstream the agent
+    /// forwards the token to (e.g. Escurel) may key its tenant off this claim;
+    /// unset → no `tenant` claim is added.
+    pub static_upstream_tenant: Option<String>,
 }
 
 impl Settings {
@@ -446,6 +450,11 @@ struct Cli {
     /// Defaults to `agents-<env>` when unset.
     #[arg(long, env = "TRITON_STATIC_UPSTREAM_AUD")]
     static_upstream_aud: Option<String>,
+
+    /// `tenant` claim for minted static-upstream tokens (a forwarded-to
+    /// downstream like Escurel may key its tenant off it). Unset → no claim.
+    #[arg(long, env = "TRITON_STATIC_UPSTREAM_TENANT")]
+    static_upstream_tenant: Option<String>,
 }
 
 impl From<Cli> for Settings {
@@ -460,6 +469,7 @@ impl From<Cli> for Settings {
             image_sha: c.image_sha,
             oidc_issuer: c.oidc_issuer,
             oidc_audience: c.oidc_audience,
+            static_upstream_tenant: c.static_upstream_tenant,
             consul_url: c.consul_url,
             vault_url: c.vault_url,
             vault_token: c.vault_token,
