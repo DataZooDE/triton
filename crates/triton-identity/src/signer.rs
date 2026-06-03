@@ -85,19 +85,31 @@ impl JwtSigner {
     /// to (`escurel-<env>`). Each verifier pins its own audience and matches if
     /// it appears in the array; this keeps every hop a *named* audience rather
     /// than replaying an agent-scoped token to a different service.
-    pub fn sign(&self, audiences: &[&str], subject: &str, ttl: Duration) -> Result<String, String> {
+    ///
+    /// `tenant`, when non-empty, is added as a `tenant` claim — a forwarded-to
+    /// downstream (e.g. Escurel) may key its tenant off it. Empty → omitted.
+    pub fn sign(
+        &self,
+        audiences: &[&str],
+        subject: &str,
+        tenant: &str,
+        ttl: Duration,
+    ) -> Result<String, String> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?
             .as_secs();
         let exp = now + ttl.min(MAX_TTL).as_secs();
-        let claims = json!({
+        let mut claims = json!({
             "iss": self.issuer,
             "aud": audiences,
             "sub": subject,
             "iat": now,
             "exp": exp,
         });
+        if !tenant.is_empty() {
+            claims["tenant"] = json!(tenant);
+        }
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(self.kid.clone());
         jsonwebtoken::encode(&header, &claims, &self.encoding_key)
@@ -151,6 +163,7 @@ mod tests {
             .sign(
                 &["agents-nonprod", "escurel-nonprod"],
                 "dz-triton-api",
+                "default",
                 Duration::from_secs(300),
             )
             .expect("sign");
@@ -158,6 +171,7 @@ mod tests {
         #[derive(Deserialize)]
         struct Claims {
             sub: String,
+            tenant: String,
         }
         let set: JwkSet = serde_json::from_value(jwks).unwrap();
         let key = set.find(kid).expect("kid in jwks");
@@ -173,6 +187,7 @@ mod tests {
             let data =
                 decode::<Claims>(&token, &decoding, &validation).expect("verify for audience");
             assert_eq!(data.claims.sub, "dz-triton-api");
+            assert_eq!(data.claims.tenant, "default");
         }
 
         // A verifier pinning a DIFFERENT audience must reject it.
