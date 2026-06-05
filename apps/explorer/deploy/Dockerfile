@@ -10,8 +10,8 @@
 # :8080. Plain HTTP — fabio-internal terminates TLS upstream with the
 # `*.<env>.int.data-zoo.de` wildcard cert (ADR-0010).
 #
-# Image target (GAR — substrate-platform reference 18):
-#   europe-west3-docker.pkg.dev/hetzner-agent-backplane/substrate/dz-triton-explorer:<sha>
+# Image target (ghcr — GAR retired, Phase 5):
+#   ghcr.io/datazoode/dz-triton-explorer:<sha>
 #
 # The Dockerfile copies only `apps/explorer/{lib,web,pubspec.*,
 # analysis_options.yaml}` into the build stage so changes outside the
@@ -36,4 +36,6 @@ FROM nginxinc/nginx-unprivileged:1.27-alpine
 COPY --from=build /src/build/web /usr/share/nginx/html
 COPY apps/explorer/deploy/nginx.conf /etc/nginx/conf.d/default.conf
 EXPOSE 8080
+# Kamal `service` label (published to ghcr directly; GAR retired, Phase 5).
+LABEL service="dz-triton-explorer"
 USER nginx
