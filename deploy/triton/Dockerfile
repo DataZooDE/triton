@@ -10,8 +10,8 @@
 # those without the bigger debian image. No shell, no package
 # manager, runs as the nonroot user (uid 65532).
 #
-# Image target (GAR — substrate-platform reference 18):
-#   europe-west3-docker.pkg.dev/hetzner-agent-backplane/substrate/dz-triton:<sha>
+# Image target (ghcr — GAR retired, Phase 5):
+#   ghcr.io/datazoode/dz-triton:<sha>
 
 # ----- stage 1: build -----
 FROM rust:1.95-slim AS build
@@ -39,4 +39,8 @@ COPY --from=build /src/target/release/triton /usr/local/bin/triton
 USER nonroot
 # REST, MCP, A2A. /metrics stays on 127.0.0.1:9090 (internal-only).
 EXPOSE 8001 8002 8003
+# Kamal asserts a `service` label matching the deploy service before booting a
+# prebuilt image. The GAR→ghcr mirror used to stamp it; we publish to ghcr
+# directly now (GAR retired, Phase 5), so bake it here.
+LABEL service="dz-triton"
 ENTRYPOINT ["/usr/local/bin/triton"]
