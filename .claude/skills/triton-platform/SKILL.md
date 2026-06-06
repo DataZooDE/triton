@@ -4,6 +4,25 @@ version: 0.2.0
 description: Use when developing an application that integrates with the DataZoo Triton agent-ingress gateway — either an upstream agent Triton dispatches into (registered in Consul as `tag:agent:<name>`) or a frontend/client that calls Triton's HTTP trio (REST/MCP/A2A). Provides the upstream-agent wire contract, A2UI envelope shapes, the `adapter.yaml` manifest fragment, the OIDC verification recipe, the `crates/triton-tests` consumer test harness, and ready-to-fork templates. Triggers on phrases like "agent for Triton", "tool that Triton calls", "A2UI envelope", "adapter.yaml entry", "TritonProcess test", "verify Triton's bearer", "register a new tool", "chat-channel surface", "render_a2ui_to_png". DO NOT use for Triton-internal work (writing adapters, the dispatcher, the surface mapper, the identity boundary) — that is work inside the Triton repo itself, not consumer-facing.
 ---
 
+> ## ⚠️ Substrate is now Kamal (ADR-0013) — the discovery/deploy model below is the ARCHIVED stack
+>
+> Triton runs the same, but on the DataZoo substrate **agents are no longer
+> discovered via Consul `tag:agent:<name>`, deployed as Nomad jobs, or handed
+> Vault-minted bearers.** When deploying against the Kamal substrate:
+> - **Discovery/dispatch:** Triton uses a **StaticUpstream** — the agent's URL is
+>   configured by env (`TRITON_STATIC_UPSTREAM_*`), not a Consul tag. There is no Consul.
+> - **Your agent is a Kamal app**, not a Nomad job: a container + `kamal/<app>/deploy.yml`
+>   + a row in the substrate's `apps/registry.yml` (the `agent.nomad.hcl` template is archived).
+> - **OIDC bearer:** Triton signs an **RS256 JWT** (key in GCP Secret Manager,
+>   `aud=<agents-env>`, optional `tenant` claim) and serves `/.well-known/openid-configuration`
+>   + `/jwks.json`; your agent verifies against the JWKS. No Vault, no per-call Vault mint.
+> - **Images:** private **ghcr.io** (pulled with a `read:packages` token), not GAR.
+>
+> The wire contract, A2UI envelopes, OIDC *verification* recipe, and the consumer
+> test harness below are still accurate. The Consul-tag / Nomad-job / Vault-mint
+> *registration + deploy* references are pre-migration and pending a Kamal rewrite —
+> see the `substrate-platform` skill and `DataZooDE/hetzner-agent-substrate` CLAUDE.md §11.
+
 # triton-platform — build apps that integrate with Triton
 
 You are helping someone build an **application that talks to Triton**,
