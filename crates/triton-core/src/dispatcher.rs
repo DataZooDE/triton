@@ -193,7 +193,11 @@ impl Dispatcher {
             .registry
             .get(tool_name)
             .map(|t| t.returns_a2ui())
-            .unwrap_or(false);
+            // Upstream agents aren't in the in-process registry. A successful
+            // dispatch with no in-process tool of this name went upstream, and
+            // agents are assumed to emit a surface (mirrors `descriptors_all`),
+            // so A2UI version mapping (surface → stream) applies to them too.
+            .unwrap_or(self.upstream.is_some());
         outcome.map(|result| Dispatch {
             result,
             trace_id: principal.trace_id,
@@ -429,4 +433,70 @@ pub fn envelope(dispatch: &Dispatch) -> Value {
         "trace_id": dispatch.trace_id,
         "latency_ms": dispatch.latency_ms,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An upstream that returns a surface, like a real agent.
+    struct SurfaceUpstream;
+
+    #[async_trait]
+    impl UpstreamDispatch for SurfaceUpstream {
+        async fn invoke(
+            &self,
+            _tool: &str,
+            _args: Value,
+            _principal: &Principal,
+        ) -> Result<Value, TritonError> {
+            Ok(json!({ "surface": { "components": [] } }))
+        }
+        async fn list_agents(&self) -> Vec<String> {
+            vec!["assistant".to_string()]
+        }
+    }
+
+    fn test_principal() -> Principal {
+        Principal {
+            sub: "tester".into(),
+            scopes: Vec::new(),
+            tenant: "default".into(),
+            raw_token: String::new(),
+            trace_id: "trace-test".into(),
+        }
+    }
+
+    /// An upstream agent isn't in the in-process registry, but its surface
+    /// must still be A2UI-mapped (surface → versioned stream) — so a
+    /// successful upstream dispatch reports `returns_a2ui = true`, mirroring
+    /// `descriptors_all`. Regression for the blank rendered-surface bug:
+    /// before the fix the flag defaulted to `false` and the renderer got the
+    /// raw surface instead of a stream.
+    #[tokio::test]
+    async fn upstream_dispatch_reports_returns_a2ui() {
+        let dispatcher = Dispatcher::new(Arc::new(ToolRegistry::new()), "test")
+            .with_upstream(Arc::new(SurfaceUpstream));
+        let dispatch = dispatcher
+            .invoke("assistant", json!({}), test_principal(), "rest")
+            .await
+            .expect("upstream dispatch succeeds");
+        assert!(
+            dispatch.returns_a2ui,
+            "upstream agent dispatch must report returns_a2ui=true so Triton maps its surface to an A2UI stream",
+        );
+    }
+
+    /// Guard the seam: with no upstream configured, a successful in-process
+    /// dispatch is unaffected and a name miss still errors (never fabricates
+    /// `returns_a2ui`). Here the registry is empty and there's no upstream, so
+    /// the unknown tool is a genuine error, not a silent a2ui=true.
+    #[tokio::test]
+    async fn missing_tool_without_upstream_errors() {
+        let dispatcher = Dispatcher::new(Arc::new(ToolRegistry::new()), "test");
+        let result = dispatcher
+            .invoke("nope", json!({}), test_principal(), "rest")
+            .await;
+        assert!(result.is_err(), "unknown tool with no upstream must error");
+    }
 }
