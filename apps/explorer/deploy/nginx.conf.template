@@ -1,0 +1,62 @@
+# nginx config (envsubst TEMPLATE) for the Triton Explorer SPA.
+#
+# The base `nginxinc/nginx-unprivileged` entrypoint renders
+# /etc/nginx/templates/*.template → /etc/nginx/conf.d/ at container start,
+# substituting ${TRITON_UPSTREAM}. The Dockerfile sets
+# NGINX_ENVSUBST_FILTER=^TRITON_ so ONLY TRITON_* are substituted and nginx's
+# own $variables (e.g. $uri, $request_uri) are preserved.
+#
+# SAME-ORIGIN with Triton: this server reverse-proxies the REST API (/v1/*) to
+# the Triton gateway, so the SPA's default same-origin base URL (Uri.base)
+# works with NO manual base-URL entry and NO CORS — the browser only ever
+# talks to this one origin. ${TRITON_UPSTREAM} is the Triton vhost
+# (kamal-proxy routes by Host), set per-env in kamal/dz-triton-explorer/deploy.yml.
+#
+# Note: only the REST trio (/v1/*) is proxied. The Explorer's MCP/A2A tabs
+# rely on Triton's :8001/:8002 ports, which kamal-proxy does not expose on the
+# Triton host — so those remain unavailable in this topology (REST is the
+# primary surface; the `assistant` tool is REST).
+
+server {
+    listen 8080 default_server;
+    server_name _;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Reverse-proxy Triton's REST trio so the SPA is same-origin with the
+    # gateway. Variable proxy_pass + resolver → DNS resolved per-request, so
+    # nginx still starts if the upstream is briefly unresolvable (e.g. a
+    # `docker run` smoke test off the tailnet). 127.0.0.11 is Docker's
+    # embedded resolver on the (user-defined) kamal network, which forwards
+    # *.<env>.int.data-zoo.de to the host's tailnet DNS.
+    location /v1/ {
+        resolver 127.0.0.11 ipv6=off valid=30s;
+        set $triton_up "${TRITON_UPSTREAM}";
+        proxy_pass http://$triton_up$request_uri;
+        proxy_set_header Host "${TRITON_UPSTREAM}";
+        proxy_http_version 1.1;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 120s;
+    }
+
+    # SPA fallback: anything not on disk → /index.html (Flutter Navigator).
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # /healthz is what the kamal-proxy healthcheck pings.
+    location = /healthz {
+        access_log off;
+        return 200 'ok';
+        add_header Content-Type text/plain;
+    }
+
+    # /version.json — optional build metadata (absent → 404, fine).
+    location = /version.json {
+        alias /local/version.json;
+        default_type application/json;
+        add_header Cache-Control 'no-cache';
+    }
+}
