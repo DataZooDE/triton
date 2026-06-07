@@ -83,9 +83,17 @@ async fn main() -> std::io::Result<()> {
     let a2a_addr: SocketAddr = (settings.host, settings.a2a_port).into();
     let rest_addr: SocketAddr = (settings.host, settings.rest_port).into();
 
-    let mcp_listener = TcpListener::bind(mcp_addr).await?;
-    let a2a_listener = TcpListener::bind(a2a_addr).await?;
     let rest_listener = TcpListener::bind(rest_addr).await?;
+    // Single-port mode nests MCP at `/mcp` and A2A at `/a2a` on the REST
+    // listener, so their own ports are never bound. In the three-port
+    // default each gets its own listener.
+    let (mcp_listener, a2a_listener) = if settings.single_port {
+        (None, None)
+    } else {
+        let mcp = TcpListener::bind(mcp_addr).await?;
+        let a2a = TcpListener::bind(a2a_addr).await?;
+        (Some(mcp), Some(a2a))
+    };
     // FR-O-3 / G-7: /metrics binds on the tailnet interface,
     // never on the public REST port. `port = 0` disables it.
     let metrics_listener = if settings.metrics_port != 0 {
@@ -96,9 +104,12 @@ async fn main() -> std::io::Result<()> {
         None
     };
     tracing::info!(
-        mcp = %mcp_addr,
-        a2a = %a2a_addr,
+        // In single-port mode MCP/A2A are nested on the REST listener, so
+        // only the REST addr is bound; report it for both via `?`.
+        mcp = ?mcp_listener.as_ref().map(|_| mcp_addr),
+        a2a = ?a2a_listener.as_ref().map(|_| a2a_addr),
         rest = %rest_addr,
+        single_port = settings.single_port,
         metrics = ?metrics_listener.as_ref().map(|(a, _)| a),
         env = %settings.env,
         binary_sha = BINARY_SHA,
@@ -133,10 +144,12 @@ async fn main() -> std::io::Result<()> {
         oidc_issuer: settings.oidc_issuer.clone(),
         oidc_audience: settings.oidc_audience.clone(),
         oidc_client_id: settings.explorer_client_id.clone(),
-        // The standalone binary serves MCP/A2A on their own ports; the SPA
-        // uses its dev port-swap. (triton-embed sets these for one-port.)
-        mcp_base: None,
-        a2a_base: None,
+        // Three-port default: MCP/A2A live on their own ports and the SPA
+        // uses its dev port-swap, so both bases are None. Single-port mode
+        // nests the trio under these paths (like triton-embed), so the SPA
+        // reaches the whole trio same-origin.
+        mcp_base: settings.single_port.then(|| "/mcp".to_string()),
+        a2a_base: settings.single_port.then(|| "/a2a".to_string()),
     });
 
     let metrics = Arc::new(Metrics::new());
@@ -1064,24 +1077,80 @@ async fn main() -> std::io::Result<()> {
     let mcp_router = triton_adapters_http::mcp::router(mcp_state);
     let a2a_router = triton_adapters_http::a2a::router(a2a_state);
     let rest_router = triton_adapters_http::rest::router(rest_state);
-    let mcp_router = match &cors_layer {
-        Some(l) => mcp_router.layer(l.clone()),
-        None => mcp_router,
+
+    // Boxed serve-future type shared by all three HTTP listeners so the
+    // `tokio::join!` shape is identical whether we bind three ports or one
+    // (mirrors `metrics_fut`/`chat_fut` below).
+    type ServeFut =
+        std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>>;
+
+    // A no-op serve future for an unbound listener: it just awaits the
+    // shutdown signal and returns Ok, keeping the join shape valid.
+    fn noop_serve(token: CancellationToken) -> ServeFut {
+        Box::pin(async move {
+            token.cancelled_owned().await;
+            Ok(())
+        })
+    }
+
+    let (serve_mcp, serve_a2a, serve_rest): (ServeFut, ServeFut, ServeFut) = if settings.single_port
+    {
+        use std::future::IntoFuture;
+        // Single-port: compose REST at root + MCP at `/mcp` + A2A at `/a2a`
+        // into one router (like triton-embed, but with the production
+        // states). CORS, if any, wraps the COMBINED router; MCP and A2A
+        // get no-op serve-futures since their ports are never bound.
+        let mut combined = rest_router
+            .nest("/mcp", mcp_router)
+            .nest("/a2a", a2a_router);
+        if let Some(l) = &cors_layer {
+            combined = combined.layer(l.clone());
+        }
+        let serve_rest: ServeFut = Box::pin(
+            axum::serve(rest_listener, combined)
+                .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+                .into_future(),
+        );
+        (
+            noop_serve(shutdown.clone()),
+            noop_serve(shutdown.clone()),
+            serve_rest,
+        )
+    } else {
+        use std::future::IntoFuture;
+        // Three-port default: each surface gets its own CORS-wrapped router
+        // on its own listener (byte-for-byte the prior behavior).
+        let mcp_router = match &cors_layer {
+            Some(l) => mcp_router.layer(l.clone()),
+            None => mcp_router,
+        };
+        let a2a_router = match &cors_layer {
+            Some(l) => a2a_router.layer(l.clone()),
+            None => a2a_router,
+        };
+        let rest_router = match &cors_layer {
+            Some(l) => rest_router.layer(l.clone()),
+            None => rest_router,
+        };
+        let mcp_listener = mcp_listener.expect("mcp listener bound in three-port mode");
+        let a2a_listener = a2a_listener.expect("a2a listener bound in three-port mode");
+        let serve_mcp: ServeFut = Box::pin(
+            axum::serve(mcp_listener, mcp_router)
+                .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+                .into_future(),
+        );
+        let serve_a2a: ServeFut = Box::pin(
+            axum::serve(a2a_listener, a2a_router)
+                .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+                .into_future(),
+        );
+        let serve_rest: ServeFut = Box::pin(
+            axum::serve(rest_listener, rest_router)
+                .with_graceful_shutdown(shutdown.clone().cancelled_owned())
+                .into_future(),
+        );
+        (serve_mcp, serve_a2a, serve_rest)
     };
-    let a2a_router = match &cors_layer {
-        Some(l) => a2a_router.layer(l.clone()),
-        None => a2a_router,
-    };
-    let rest_router = match &cors_layer {
-        Some(l) => rest_router.layer(l.clone()),
-        None => rest_router,
-    };
-    let serve_mcp = axum::serve(mcp_listener, mcp_router)
-        .with_graceful_shutdown(shutdown.clone().cancelled_owned());
-    let serve_a2a = axum::serve(a2a_listener, a2a_router)
-        .with_graceful_shutdown(shutdown.clone().cancelled_owned());
-    let serve_rest = axum::serve(rest_listener, rest_router)
-        .with_graceful_shutdown(shutdown.clone().cancelled_owned());
 
     // Optional fourth listener for tailnet-only `/metrics`. Lives
     // outside the public-routed listeners so Fabio cannot leak it
