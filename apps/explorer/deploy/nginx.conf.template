@@ -6,16 +6,17 @@
 # NGINX_ENVSUBST_FILTER=^TRITON_ so ONLY TRITON_* are substituted and nginx's
 # own $variables (e.g. $uri, $request_uri) are preserved.
 #
-# SAME-ORIGIN with Triton: this server reverse-proxies the REST API (/v1/*) to
-# the Triton gateway, so the SPA's default same-origin base URL (Uri.base)
-# works with NO manual base-URL entry and NO CORS — the browser only ever
-# talks to this one origin. ${TRITON_UPSTREAM} is the Triton vhost
-# (kamal-proxy routes by Host), set per-env in kamal/dz-triton-explorer/deploy.yml.
+# SAME-ORIGIN with Triton: this server reverse-proxies the full HTTP trio —
+# REST (/v1/*), MCP (/mcp) and A2A (/a2a/*) — to the Triton gateway, so the
+# SPA's default same-origin base URL (Uri.base) works for ALL three protocols
+# with NO manual base-URL entry and NO CORS — the browser only ever talks to
+# this one origin. ${TRITON_UPSTREAM} is the Triton vhost (kamal-proxy routes
+# by Host), set per-env in kamal/dz-triton-explorer/deploy.yml.
 #
-# Note: only the REST trio (/v1/*) is proxied. The Explorer's MCP/A2A tabs
-# rely on Triton's :8001/:8002 ports, which kamal-proxy does not expose on the
-# Triton host — so those remain unavailable in this topology (REST is the
-# primary surface; the `assistant` tool is REST).
+# This requires Triton in SINGLE-PORT mode (TRITON_SINGLE_PORT=true), where it
+# serves /v1 + /mcp + /a2a path-based on one port and advertises mcp_base=/mcp,
+# a2a_base=/a2a in /v1/runtime — so the SPA targets <origin>/mcp and
+# <origin>/a2a (no port-swap). With multi-port Triton, MCP/A2A aren't reachable.
 
 server {
     listen 8080 default_server;
@@ -24,13 +25,18 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
-    # Reverse-proxy Triton's REST trio so the SPA is same-origin with the
-    # gateway. Variable proxy_pass + resolver → DNS resolved per-request, so
-    # nginx still starts if the upstream is briefly unresolvable (e.g. a
-    # `docker run` smoke test off the tailnet). 127.0.0.11 is Docker's
-    # embedded resolver on the (user-defined) kamal network, which forwards
-    # *.<env>.int.data-zoo.de to the host's tailnet DNS.
-    location /v1/ {
+    # Reverse-proxy Triton's full HTTP trio (REST /v1, MCP /mcp, A2A /a2a) so
+    # the SPA is same-origin with the gateway for all three protocols. One
+    # regex location covers them: `(/|$)` so /mcp (no trailing slash, the SPA's
+    # exact POST target) and /v1/… both match, but /v1foo doesn't. Variable
+    # proxy_pass + resolver → DNS resolved per-request, so nginx still starts if
+    # the upstream is briefly unresolvable (e.g. a `docker run` smoke test off
+    # the tailnet). 127.0.0.11 is Docker's embedded resolver on the (user-
+    # defined) kamal network, which forwards *.<env>.int.data-zoo.de to the
+    # host's tailnet DNS. Regex locations outrank the `/` SPA fallback and lose
+    # to the exact `= /healthz` / `= /version.json` below — exactly the order
+    # we want.
+    location ~ ^/(v1|mcp|a2a)(/|$) {
         resolver 127.0.0.11 ipv6=off valid=30s;
         set $triton_up "${TRITON_UPSTREAM}";
         proxy_pass http://$triton_up$request_uri;
@@ -39,6 +45,8 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_read_timeout 120s;
+        # MCP may stream (SSE); don't buffer so events flush promptly.
+        proxy_buffering off;
     }
 
     # SPA fallback: anything not on disk → /index.html (Flutter Navigator).

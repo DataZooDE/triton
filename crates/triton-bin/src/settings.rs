@@ -113,6 +113,13 @@ pub struct Settings {
     /// (so the only thing that can set the header is the sidecar in
     /// the shared netns).
     pub trust_forwarded_auth: bool,
+    /// Single-port serving mode. When `true`, `triton-bin` serves the full
+    /// HTTP trio on the REST port path-based — REST at root, MCP nested at
+    /// `/mcp`, A2A nested at `/a2a` — and advertises `mcp_base`/`a2a_base`
+    /// in `/v1/runtime` so the SPA reaches the whole trio same-origin. The
+    /// MCP and A2A listeners are not bound in this mode. Default `false`
+    /// keeps the three-separate-ports behavior byte-for-byte unchanged.
+    pub single_port: bool,
     /// RSA private key PEM that signs the JWTs Triton mints to agents in
     /// static-upstream mode (no Vault). When set together with
     /// `static_upstream_issuer` and `jwt_jwks`, Triton signs per-call OIDC
@@ -413,6 +420,13 @@ struct Cli {
     #[arg(long, env = "TRITON_TRUST_FORWARDED_AUTH", default_value_t = false)]
     trust_forwarded_auth: bool,
 
+    /// Serve the whole HTTP trio on the single REST port (REST at root,
+    /// MCP at `/mcp`, A2A at `/a2a`) instead of three separate ports.
+    /// Accepts `true`/`1` (case-insensitive) as on; anything else is off.
+    /// Default off — three-port behavior is unchanged.
+    #[arg(long, env = "TRITON_SINGLE_PORT", default_value = "false")]
+    single_port: String,
+
     /// PR 36: dashboard rasterizer service URL (FR-A-11).
     /// Default points at the in-repo `triton-rasterizer` binary
     /// running on its 12-factor default port. Outside `local` env
@@ -507,6 +521,10 @@ impl From<Cli> for Settings {
             explorer_client_id: c.explorer_client_id,
             rasterizer_url: c.rasterizer_url,
             trust_forwarded_auth: c.trust_forwarded_auth,
+            single_port: matches!(
+                c.single_port.trim().to_ascii_lowercase().as_str(),
+                "true" | "1"
+            ),
             jwt_signing_key: c.jwt_signing_key,
             jwt_jwks: c.jwt_jwks,
             jwt_kid: c.jwt_kid,
