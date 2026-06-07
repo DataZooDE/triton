@@ -46,11 +46,15 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
-    # /healthz is what the kamal-proxy healthcheck pings.
+    # /healthz: JSON so the Explorer's 2s connectivity poll — which does
+    # GET <origin>/healthz and expects {"status":"ok"} — reads "online"
+    # (otherwise it decodes plain "ok" as JSON, throws, and shows the dev-only
+    # "Rust binary compiling & restarting" banner on a loop). kamal-proxy's
+    # healthcheck only cares about the 200 status, so this satisfies both.
     location = /healthz {
         access_log off;
-        return 200 'ok';
-        add_header Content-Type text/plain;
+        default_type application/json;
+        return 200 '{"status":"ok"}';
     }
 
     # /version.json — optional build metadata (absent → 404, fine).
