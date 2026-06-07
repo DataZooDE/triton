@@ -34,7 +34,17 @@ RUN flutter build web --release --base-href=/
 # ----- stage 2: runtime -----
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 COPY --from=build /src/build/web /usr/share/nginx/html
-COPY apps/explorer/deploy/nginx.conf /etc/nginx/conf.d/default.conf
+# nginx.conf is an envsubst TEMPLATE: the base image entrypoint renders
+# /etc/nginx/templates/*.template → /etc/nginx/conf.d/ at start, substituting
+# ${TRITON_UPSTREAM} (the Triton host this SPA reverse-proxies /v1/* to, set
+# per-env in kamal/dz-triton-explorer/deploy.yml). NGINX_ENVSUBST_FILTER limits
+# substitution to TRITON_* so nginx's own $variables survive.
+COPY apps/explorer/deploy/nginx.conf.template /etc/nginx/templates/default.conf.template
+ENV NGINX_ENVSUBST_FILTER=^TRITON_
+# Default so `docker run` smoke tests start; overridden per-env at deploy. The
+# /v1 upstream is resolved lazily per-request, so an unreachable default here
+# does not block nginx startup.
+ENV TRITON_UPSTREAM=triton.nonprod.int.data-zoo.de
 EXPOSE 8080
 # Kamal `service` label (published to ghcr directly; GAR retired, Phase 5).
 LABEL service="dz-triton-explorer"
