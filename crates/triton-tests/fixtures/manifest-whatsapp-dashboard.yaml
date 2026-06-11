@@ -5,7 +5,7 @@ version: "0.2"
 
 adapters:
   whatsapp:
-    kind: whatsapp_web
+    kind: whatsapp_cloud
     inbound:
       kind: webhook
       signature: hmac256

@@ -1,4 +1,8 @@
-//! v0.2 PR 31 — WhatsApp Cloud API adapter.
+//! WhatsApp Cloud API adapter (`kind: whatsapp_cloud`).
+//!
+//! The B2B-compliant WhatsApp transport — a verified Business number on
+//! Meta's Graph API or an EU aggregator — distinct from the Baileys-
+//! style Web socket bridge in [`bridge`] (`kind: whatsapp_web`).
 //!
 //! Mirrors the Telegram adapter's three-phase pipeline:
 //!
@@ -133,7 +137,7 @@ impl WhatsAppAdapter {
         courier_config: CourierConfig,
         rasterizer: Option<RasterizerClient>,
     ) -> Result<Self, BuildError> {
-        if adapter.kind != AdapterKind::WhatsappWeb {
+        if adapter.kind != AdapterKind::WhatsappCloud {
             return Err(BuildError::WrongKind);
         }
         if adapter.inbound.signature != SignatureScheme::Hmac256 {
@@ -471,7 +475,7 @@ fn redact(s: &str, token: &str) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
-    #[error("adapter is not declared `kind: whatsapp_web`")]
+    #[error("adapter is not declared `kind: whatsapp_cloud`")]
     WrongKind,
     #[error("PR 31 limitation: {0}")]
     Unsupported(String),
