@@ -403,6 +403,12 @@ async fn main() -> std::io::Result<()> {
     };
 
     let mut chat_router: Option<axum::Router> = None;
+    // #95: adapters that support agent-initiated proactive sends are
+    // also inserted here, keyed by manifest adapter name, so the
+    // `/v1/outbound` endpoint can resolve a courier without going
+    // through the inbound webhook.
+    let mut outbound_couriers: triton_adapters_http::outbound::CourierRegistry =
+        std::collections::HashMap::new();
     // PR 34: Signal's I/O is a persistent socket, not an HTTP
     // webhook — its inbound runs as a tokio task spawned at boot,
     // not a router mount. Both shapes coexist in the same loop;
@@ -936,7 +942,14 @@ async fn main() -> std::io::Result<()> {
                     {
                         Ok(built) => {
                             tracing::info!(adapter = %name, "whatsapp webhook adapter wired");
-                            let r = Arc::new(built).router();
+                            // Keep an Arc for the outbound courier registry
+                            // (#95) before `router()` consumes one.
+                            let built = Arc::new(built);
+                            outbound_couriers.insert(
+                                name.to_string(),
+                                built.clone() as Arc<dyn triton_core::OutboundCourier>,
+                            );
+                            let r = built.router();
                             chat_router = Some(match chat_router.take() {
                                 Some(acc) => acc.merge(r),
                                 None => r,
@@ -1074,9 +1087,47 @@ async fn main() -> std::io::Result<()> {
             "CORS layer mounted on REST/MCP/A2A"
         );
     }
+    // #95: build the agent-initiated outbound surface. Its bearer must
+    // carry the DEDICATED outbound audience (a second OIDC verifier),
+    // so a token minted for the HTTP trio cannot drive proactive sends.
+    // When OIDC is on but no outbound audience is configured the
+    // endpoint stays unmounted (fail closed); in the no-OIDC dev path
+    // it reuses the trio's dev-token identity for parity.
+    let outbound_couriers = Arc::new(outbound_couriers);
+    let outbound_state: Option<triton_adapters_http::outbound::OutboundState> =
+        match (&settings.oidc_issuer, &settings.outbound_audience) {
+            (Some(issuer), Some(aud)) => {
+                tracing::info!(issuer, aud, "outbound OIDC verifier enabled (/v1/outbound)");
+                let verifier = Arc::new(OidcVerifier::new(OidcConfig::new(
+                    issuer.clone(),
+                    aud.clone(),
+                )));
+                Some(triton_adapters_http::outbound::OutboundState {
+                    identity: Arc::new(IdentityProvider::new(Some(verifier))),
+                    dispatcher: dispatcher.clone(),
+                    couriers: outbound_couriers.clone(),
+                })
+            }
+            (Some(_), None) => {
+                tracing::warn!(
+                    "OIDC configured but TRITON_OUTBOUND_AUDIENCE unset; /v1/outbound disabled"
+                );
+                None
+            }
+            (None, _) => Some(triton_adapters_http::outbound::OutboundState {
+                identity: identity.clone(),
+                dispatcher: dispatcher.clone(),
+                couriers: outbound_couriers.clone(),
+            }),
+        };
+
     let mcp_router = triton_adapters_http::mcp::router(mcp_state);
     let a2a_router = triton_adapters_http::a2a::router(a2a_state);
     let rest_router = triton_adapters_http::rest::router(rest_state);
+    let rest_router = match outbound_state {
+        Some(os) => rest_router.merge(triton_adapters_http::outbound::router(os)),
+        None => rest_router,
+    };
 
     // Boxed serve-future type shared by all three HTTP listeners so the
     // `tokio::join!` shape is identical whether we bind three ports or one

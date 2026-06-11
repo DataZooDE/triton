@@ -613,7 +613,7 @@ fn parse_a2ui_accept(parts: &Parts) -> Result<Option<A2uiVersion>, TritonError> 
     Ok(found)
 }
 
-fn error_response(e: &TritonError, trace_id: Option<&str>) -> Response {
+pub(crate) fn error_response(e: &TritonError, trace_id: Option<&str>) -> Response {
     let status = http_status_for(e);
     let mut body = json!({
         "error": e.class(),

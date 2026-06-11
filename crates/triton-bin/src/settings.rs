@@ -31,6 +31,11 @@ pub struct Settings {
     pub image_sha: Option<String>,
     pub oidc_issuer: Option<String>,
     pub oidc_audience: Option<String>,
+    /// Dedicated `aud` claim for the agent-initiated outbound surface
+    /// (`POST /v1/outbound`, #95). Distinct from `oidc_audience` so a
+    /// token minted for the HTTP trio cannot drive proactive sends.
+    /// When OIDC is on but this is unset, `/v1/outbound` is disabled.
+    pub outbound_audience: Option<String>,
     pub consul_url: Option<String>,
     pub vault_url: Option<String>,
     pub vault_token: Option<String>,
@@ -202,6 +207,13 @@ struct Cli {
     /// other audience are rejected.
     #[arg(long, env = "TRITON_OIDC_AUDIENCE")]
     oidc_audience: Option<String>,
+
+    /// Dedicated `aud` for the agent-initiated outbound surface
+    /// (`POST /v1/outbound`, #95). Mirrors the `agent-oidc-swap`
+    /// audience pattern in the other direction; required to enable the
+    /// endpoint when OIDC is configured.
+    #[arg(long, env = "TRITON_OUTBOUND_AUDIENCE")]
+    outbound_audience: Option<String>,
 
     /// Consul HTTP base URL (e.g. `http://127.0.0.1:8500`). When
     /// unset the upstream router is disabled and the dispatcher
@@ -483,6 +495,7 @@ impl From<Cli> for Settings {
             image_sha: c.image_sha,
             oidc_issuer: c.oidc_issuer,
             oidc_audience: c.oidc_audience,
+            outbound_audience: c.outbound_audience,
             static_upstream_tenant: c.static_upstream_tenant,
             consul_url: c.consul_url,
             vault_url: c.vault_url,

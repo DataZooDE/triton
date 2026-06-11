@@ -15,6 +15,7 @@ dev-token = []
 
 [dependencies]
 triton-core = { path = "../triton-core" }
+async-trait = "0.1"
 triton-correlation = { path = "../triton-correlation" }
 triton-manifest = { path = "../triton-manifest" }
 triton-rasterizer = { path = "../triton-rasterizer" }

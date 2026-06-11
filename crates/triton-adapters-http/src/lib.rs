@@ -20,4 +20,5 @@ pub mod cors;
 pub mod identity;
 pub mod mcp;
 pub mod metrics;
+pub mod outbound;
 pub mod rest;
