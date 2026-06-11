@@ -1,0 +1,44 @@
+# #94 — WhatsApp Cloud API adapter with message templates. Literal
+# credentials (dev mode only). `templates` maps a category hint the
+# upstream agent supplies to the Meta-approved template name+language
+# Triton actually sends — template selection lives in Triton, the agent
+# only hints the category and supplies the body variables.
+version: "0.2"
+
+adapters:
+  whatsapp:
+    kind: whatsapp_cloud
+    inbound:
+      kind: webhook
+      signature: hmac256
+      secret: whatsapp-app-secret-for-test
+      verify_token: meta-verify-token-for-test
+    outbound:
+      kind: rest_api
+      token: whatsapp-access-token-for-test
+      phone_number_id: "100200300"
+    identity:
+      kind: sender_table
+      table: '{"491701234567":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    templates:
+      utility:
+        name: carl_reminder
+        language: en
+      marketing:
+        name: carl_digest
+        language: en
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: whatsapp-correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

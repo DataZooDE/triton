@@ -47,6 +47,38 @@ pub struct Adapter {
     pub rate_limit: RateLimit,
     /// Per-adapter 32-byte HMAC key (Vault reference in prod).
     pub correlation_key: SecretField,
+    /// #94: WhatsApp Cloud API message templates, keyed by the
+    /// category the upstream agent hints. Template **selection** lives
+    /// in Triton (it owns the platform surface + credentials); the
+    /// agent only supplies the category + body variables. Empty for
+    /// adapters that don't model templates.
+    #[serde(default)]
+    pub templates: BTreeMap<TemplateCategory, TemplateDecl>,
+}
+
+/// WhatsApp Cloud API template category (Meta's closed set). The agent
+/// hints one of these; Triton maps it to a Meta-approved template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TemplateCategory {
+    Utility,
+    Marketing,
+    Authentication,
+}
+
+/// A Meta-approved template the operator declares in `adapter.yaml`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TemplateDecl {
+    /// The template name as registered with Meta / the aggregator.
+    pub name: String,
+    /// BCP-47 language code (e.g. `en`, `de`). Defaults to `en`.
+    #[serde(default = "default_template_language")]
+    pub language: String,
+}
+
+fn default_template_language() -> String {
+    "en".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

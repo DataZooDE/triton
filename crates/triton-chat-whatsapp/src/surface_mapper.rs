@@ -316,6 +316,36 @@ pub fn build_messages_body(to: &str, msg: &RenderedMessage) -> Value {
     })
 }
 
+/// Build a WhatsApp Cloud API `type: template` body (#94). Used for
+/// proactive sends outside the 24-hour service window, where free-form
+/// text is rejected by Meta. `name`/`language` come from the manifest's
+/// `templates` map (Triton owns template selection); `variables` are the
+/// ordered body parameters the agent supplied, substituted into the
+/// template's `{{1}}, {{2}}, …` placeholders. An empty `variables` omits
+/// the `components` array (templates with no body parameters).
+pub fn build_template_body(to: &str, name: &str, language: &str, variables: &[String]) -> Value {
+    let mut template = serde_json::Map::new();
+    template.insert("name".into(), Value::String(name.to_string()));
+    template.insert("language".into(), json!({ "code": language }));
+    if !variables.is_empty() {
+        let parameters: Vec<Value> = variables
+            .iter()
+            .map(|v| json!({ "type": "text", "text": v }))
+            .collect();
+        template.insert(
+            "components".into(),
+            json!([{ "type": "body", "parameters": parameters }]),
+        );
+    }
+    json!({
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "template",
+        "template": Value::Object(template),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

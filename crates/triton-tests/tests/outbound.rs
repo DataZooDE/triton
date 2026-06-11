@@ -18,10 +18,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
+use sha2::Sha256;
 use triton_tests::chat_courier_fixture::FakeWhatsAppApi;
 use triton_tests::{TestIssuer, TritonProcess};
 
+const APP_SECRET: &str = "whatsapp-app-secret-for-test";
 const ACCESS_TOKEN: &str = "whatsapp-access-token-for-test";
 const PHONE_NUMBER_ID: &str = "100200300";
 const KNOWN_WA_ID: &str = "491701234567";
@@ -78,6 +81,15 @@ async fn outbound_send_renders_and_couriers_to_platform() {
     let proc =
         TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &whatsapp)).await;
 
+    // Open the recipient's 24-hour service window with an inbound
+    // message so a free-form (non-template) proactive reply is allowed
+    // (#94). The inbound also couriers one echo reply.
+    open_service_window(&proc, KNOWN_WA_ID).await;
+    let _reply = wait_for(Duration::from_secs(2), || {
+        let v = whatsapp.captured();
+        (!v.is_empty()).then_some(v)
+    });
+
     let token = token_with_aud(&issuer, OUTBOUND_AUDIENCE);
     let resp = reqwest::Client::new()
         .post(proc.rest_url("/v1/outbound"))
@@ -103,29 +115,30 @@ async fn outbound_send_renders_and_couriers_to_platform() {
         .expect("response carries trace_id")
         .to_string();
 
-    // The courier actually POSTed to the platform with the resolved
-    // bearer + the rendered text body.
-    let captured = wait_for(Duration::from_secs(2), || {
-        let v = whatsapp.captured();
-        (!v.is_empty()).then_some(v)
+    // The courier actually POSTed the proactive message to the platform
+    // with the resolved bearer + the rendered text body (alongside the
+    // earlier echo reply from the window-opening inbound).
+    let sent = wait_for(Duration::from_secs(2), || {
+        whatsapp
+            .captured()
+            .into_iter()
+            .find(|m| m.body["text"]["body"] == "Proactive hello from Carl")
     });
-    assert_eq!(captured.len(), 1, "exactly one outbound send");
-    assert_eq!(captured[0].phone_number_id, PHONE_NUMBER_ID);
-    assert_eq!(captured[0].authorization, format!("Bearer {ACCESS_TOKEN}"));
-    assert_eq!(captured[0].body["type"], "text");
-    assert_eq!(captured[0].body["to"], KNOWN_WA_ID);
-    assert_eq!(
-        captured[0].body["text"]["body"],
-        "Proactive hello from Carl"
-    );
+    assert_eq!(sent.phone_number_id, PHONE_NUMBER_ID);
+    assert_eq!(sent.authorization, format!("Bearer {ACCESS_TOKEN}"));
+    assert_eq!(sent.body["type"], "text");
+    assert_eq!(sent.body["to"], KNOWN_WA_ID);
 
-    // The audit post record shares the response trace_id (FR-AU-1
-    // two-record model; ADR-6 single audit pivot).
+    // The proactive send's audit post record shares the response
+    // trace_id (FR-AU-1 two-record model; ADR-6 single audit pivot) —
+    // distinct from the echo reply's post line.
     let post = wait_for_audit(&proc, Duration::from_secs(2), |v| {
-        v["kind"] == "audit" && v["phase"] == "post" && v["protocol"] == "messenger:whatsapp"
+        v["kind"] == "audit"
+            && v["phase"] == "post"
+            && v["protocol"] == "messenger:whatsapp"
+            && v["trace_id"] == trace_id.as_str()
     });
     assert_eq!(post["status_label"], "posted");
-    assert_eq!(post["trace_id"], trace_id);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -180,6 +193,34 @@ async fn unknown_adapter_is_not_found() {
         .await
         .expect("POST /v1/outbound");
     assert_eq!(resp.status(), 404);
+}
+
+/// Post a signed inbound webhook so the recipient's 24-hour service
+/// window opens (#94), allowing a subsequent free-form proactive send.
+async fn open_service_window(proc: &TritonProcess, wa_id: &str) {
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener bound");
+    let envelope = json!({
+        "object": "whatsapp_business_account",
+        "entry": [{ "id": "0", "changes": [{ "value": {
+            "messaging_product": "whatsapp",
+            "metadata": { "display_phone_number": "15555555555", "phone_number_id": PHONE_NUMBER_ID },
+            "messages": [{ "from": wa_id, "id": "wamid.X", "timestamp": "1700000000",
+                "type": "text", "text": { "body": "hi" } }]
+        }, "field": "messages" }] }]
+    });
+    let body = serde_json::to_vec(&envelope).unwrap();
+    let mut mac = Hmac::<Sha256>::new_from_slice(APP_SECRET.as_bytes()).expect("hmac key");
+    mac.update(&body);
+    let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/whatsapp/webhook"))
+        .header("X-Hub-Signature-256", &sig)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST inbound webhook");
+    assert!(resp.status().is_success());
 }
 
 // ---- local copies of the poll helpers used across the chat tests ----

@@ -58,7 +58,9 @@ use subtle::ConstantTimeEq;
 use triton_core::{
     Dispatcher, OutboundCourier, OutboundRequest, PostOutcome, Principal, TritonError,
 };
-use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
+use triton_manifest::{
+    Adapter, AdapterKind, IdentityKind, SignatureScheme, TemplateCategory, TemplateDecl,
+};
 use triton_rasterizer::{Client as RasterizerClient, DashboardRequest, RasterizerError};
 use triton_secrets::{ResolveError, SecretResolver};
 
@@ -121,7 +123,23 @@ pub struct WhatsAppAdapter {
     /// PNG to WhatsApp's media endpoint and sends an `image`
     /// message carrying the returned media_id.
     rasterizer: Option<RasterizerClient>,
+    /// #94: Meta-approved message templates, keyed by category, from
+    /// the manifest's `templates` map. Triton owns template selection;
+    /// proactive sends outside the service window resolve a template
+    /// here from the agent's category hint.
+    templates: HashMap<TemplateCategory, TemplateDecl>,
+    /// #94: in-memory 24-hour service-window tracker, keyed by `wa_id`,
+    /// stamped on every inbound message. A proactive send inside the
+    /// window may be free-form; outside it MUST use a template. In
+    /// memory only — stateless across restarts (G-8); a cold start
+    /// simply treats every recipient as window-closed until they
+    /// message in again, which is the safe default.
+    service_window: std::sync::Mutex<HashMap<String, std::time::Instant>>,
 }
+
+/// WhatsApp's documented customer-service window: free-form messages are
+/// allowed only within 24 h of the user's last inbound message.
+const SERVICE_WINDOW: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
 struct CourierClient {
     base: String,
@@ -231,6 +249,10 @@ impl WhatsAppAdapter {
             adapter.rate_limit.messages_per_sec,
             adapter.rate_limit.burst,
         );
+        // #94: templates are copied from the manifest at boot — Triton
+        // owns selection, the agent only hints the category.
+        let templates: HashMap<TemplateCategory, TemplateDecl> =
+            adapter.templates.clone().into_iter().collect();
         Ok(Self {
             name: name.to_string(),
             app_secret,
@@ -243,6 +265,8 @@ impl WhatsAppAdapter {
             rate_limit,
             per_tenant_limit,
             rasterizer,
+            templates,
+            service_window: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -261,24 +285,50 @@ impl WhatsAppAdapter {
 /// so this names the proactive surface instead.
 const OUTBOUND_TOOL: &str = "outbound";
 
+impl WhatsAppAdapter {
+    /// Open (or refresh) the 24-h service window for `wa_id`.
+    fn stamp_service_window(&self, wa_id: &str) {
+        if let Ok(mut map) = self.service_window.lock() {
+            map.insert(wa_id.to_string(), std::time::Instant::now());
+        }
+    }
+
+    /// Whether `wa_id` is currently inside the 24-h service window.
+    fn is_within_window(&self, wa_id: &str) -> bool {
+        self.service_window
+            .lock()
+            .ok()
+            .and_then(|m| m.get(wa_id).map(|t| t.elapsed() < SERVICE_WINDOW))
+            .unwrap_or(false)
+    }
+}
+
 #[async_trait]
 impl OutboundCourier for WhatsAppAdapter {
     fn protocol(&self) -> &'static str {
         PROTOCOL
     }
 
-    /// Render the agent-supplied result through the SAME surface mapper
-    /// + courier the inbound reply leg uses, then post it. Audit stays
-    /// in the dispatcher via `post_back` → `record_post` (ADR-6).
+    /// Deliver an agent-initiated send. With a `category` hint, Triton
+    /// resolves the manifest template and posts a `type: template` body
+    /// (the only thing Meta accepts outside the 24-h service window).
+    /// Without a category, the recipient MUST be inside the window for a
+    /// free-form text send; otherwise the send is refused. Audit stays
+    /// in the dispatcher via `post_back` / `record_post` (ADR-6).
     async fn deliver(
         &self,
         req: &OutboundRequest,
         principal: &Principal,
     ) -> Result<(), TritonError> {
-        // `category` is accepted here but only consumed once Cloud-API
-        // templates land (#94); free-form sends inside the 24-h service
-        // window ignore it.
-        let _ = &req.category;
+        if let Some(category) = req.category.as_deref() {
+            return self.deliver_template(req, principal, category).await;
+        }
+        if !self.is_within_window(&req.to) {
+            return Err(TritonError::Validation(format!(
+                "recipient {} is outside the 24-hour service window; a template `category` is required",
+                req.to
+            )));
+        }
         let rendered = match render_dispatch_result(&req.result) {
             Ok(r) => r,
             Err(surface_mapper::RenderError::EmptyAfterRender) => {
@@ -289,6 +339,46 @@ impl OutboundCourier for WhatsAppAdapter {
         };
         log_deferrals(OUTBOUND_TOOL, &rendered);
         post_back(self, principal, OUTBOUND_TOOL, &req.to, rendered).await;
+        Ok(())
+    }
+}
+
+impl WhatsAppAdapter {
+    /// Resolve the agent's category hint to a manifest template and post
+    /// a `type: template` body. Selection lives here (Triton owns the
+    /// platform surface); the agent supplied only the category +
+    /// ordered body variables.
+    async fn deliver_template(
+        &self,
+        req: &OutboundRequest,
+        principal: &Principal,
+        category: &str,
+    ) -> Result<(), TritonError> {
+        let parsed: TemplateCategory =
+            serde_json::from_value(Value::String(category.to_string())).map_err(|_| {
+                TritonError::Validation(format!(
+                    "unknown template category `{category}` (expected utility|marketing|authentication)"
+                ))
+            })?;
+        let Some(decl) = self.templates.get(&parsed) else {
+            return Err(TritonError::Validation(format!(
+                "no template configured for category `{category}` on adapter `{}`",
+                self.name
+            )));
+        };
+        let body = surface_mapper::build_template_body(
+            &req.to,
+            &decl.name,
+            &decl.language,
+            &req.variables,
+        );
+        let start = std::time::Instant::now();
+        let outcome = self
+            .courier
+            .send_message(&self.access_token, &self.phone_number_id, &body)
+            .await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        record_post_outcome(self, OUTBOUND_TOOL, principal, latency_ms, outcome);
         Ok(())
     }
 }
@@ -660,6 +750,10 @@ async fn process_message(
         );
         return Err((StatusCode::UNAUTHORIZED, "unknown sender").into_response());
     };
+
+    // #94: a verified inbound message opens this recipient's 24-hour
+    // service window, so a later proactive send may go free-form.
+    adapter.stamp_service_window(sender_key);
 
     // NFR-P-3 second tier: per-tenant fair-share, keyed by the
     // verified tenant id, not the platform `wa_id`.
