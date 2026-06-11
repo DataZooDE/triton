@@ -306,9 +306,8 @@ on implementation details not pinned below.
   - `secret_token` — Telegram `X-Telegram-Bot-Api-Secret-Token`
     header equality (constant-time).
   - `hmac256` — HMAC-SHA256 over the body under an app secret
-    (e.g. WhatsApp Cloud API if/when added as an alternative
-    WhatsApp adapter; not used by the canonical Baileys-style
-    WhatsApp adapter).
+    (the WhatsApp Cloud API adapter, `kind: whatsapp_cloud`, #94;
+    not used by the canonical Baileys-style `whatsapp_web` adapter).
   - `bot_framework_jwt` — Bot Framework JWT validated against the
     published OpenID metadata (MS Teams).
   - `ed25519` — Ed25519 signature over `(timestamp || body)` under
@@ -574,11 +573,16 @@ for the worked walkthrough.
   if needed).
 - HA / multi-region. Single-region scope per `SPEC.md §4`.
 - Native renderers, A2UI builders for versions beyond v0.8 and v0.9.
-- **WhatsApp Business Cloud API** (v0.2). The canonical WhatsApp
-  adapter in v0.2 uses the persistent WhatsApp Web socket
-  (Baileys-style transport). Operators with B2B compliance
-  requirements MAY add a second `whatsapp-cloud` adapter under the
-  same manifest schema; the spec does not deliver it.
+- ~~**WhatsApp Business Cloud API** (v0.2).~~ **Delivered (#94).**
+  The canonical dev/nonprod WhatsApp adapter remains the persistent
+  WhatsApp Web socket (Baileys-style, `kind: whatsapp_web`).
+  Operators with B2B compliance requirements add a second
+  `kind: whatsapp_cloud` adapter (Meta Graph / EU aggregator) with
+  `hmac256` inbound, the `/v18.0/{id}/messages` courier, message
+  templates (utility/marketing/authentication) for sends outside the
+  24-hour service window, and interactive buttons/lists. Proactive
+  sends ride the agent-initiated outbound API (#95). Inbound
+  `interactive`-reply routing is deferred.
 - **Card v2 surface for Google Chat** (v0.2). Google Chat's
   protocol-level Card v2 admits a richer surface; the v0.2 adapter
   exposes only text + media + threads + reactions, mirroring

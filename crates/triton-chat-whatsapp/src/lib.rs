@@ -135,6 +135,10 @@ pub struct WhatsAppAdapter {
     /// simply treats every recipient as window-closed until they
     /// message in again, which is the safe default.
     service_window: std::sync::Mutex<HashMap<String, std::time::Instant>>,
+    /// #94: per-adapter HMAC key signing interactive button/list `id`s
+    /// so a future inbound `interactive`-reply handler can route a tap
+    /// back to its `(tool, args)`.
+    correlation_key: Vec<u8>,
 }
 
 /// WhatsApp's documented customer-service window: free-form messages are
@@ -227,13 +231,14 @@ impl WhatsAppAdapter {
         let sender_table: HashMap<String, SenderClaims> =
             serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
 
-        // FR-L-6 / NFR-S-5: resolve at boot even though PR 31 doesn't
-        // use the correlation_key yet (interactive primitives PR 32
-        // will). A bad Vault ref must fail closed at startup.
-        resolver
+        // FR-L-6 / NFR-S-5: resolve at boot; a bad Vault ref must fail
+        // closed at startup. #94 uses this key to sign the interactive
+        // button/list `id`s the surface mapper emits.
+        let correlation_key = resolver
             .resolve(&adapter.correlation_key)
             .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?;
+            .map_err(|e| BuildError::Resolve("correlation_key", e))?
+            .into_bytes();
 
         let courier = CourierClient::new(courier_config)?;
         // 10x headroom rationale matches Telegram PR 28.
@@ -267,6 +272,7 @@ impl WhatsAppAdapter {
             rasterizer,
             templates,
             service_window: std::sync::Mutex::new(HashMap::new()),
+            correlation_key,
         })
     }
 
@@ -329,7 +335,7 @@ impl OutboundCourier for WhatsAppAdapter {
                 req.to
             )));
         }
-        let rendered = match render_dispatch_result(&req.result) {
+        let rendered = match render_dispatch_result(&req.result, &self.correlation_key) {
             Ok(r) => r,
             Err(surface_mapper::RenderError::EmptyAfterRender) => {
                 return Err(TritonError::Validation(
@@ -797,7 +803,7 @@ async fn process_message(
         .invoke(tool_name, args, principal, PROTOCOL)
         .await;
     match result {
-        Ok(dispatch) => match render_dispatch_result(&dispatch.result) {
+        Ok(dispatch) => match render_dispatch_result(&dispatch.result, &adapter.correlation_key) {
             Ok(rendered) => {
                 log_deferrals(tool_name, &rendered);
                 post_back(adapter, &principal_for_post, tool_name, &to, rendered).await;
@@ -890,8 +896,9 @@ fn route_command(text: &str) -> (&'static str, Value) {
 
 fn render_dispatch_result(
     result: &serde_json::Value,
+    correlation_key: &[u8],
 ) -> Result<RenderedMessage, surface_mapper::RenderError> {
-    if let Some(r) = surface_mapper::try_render_surface(result) {
+    if let Some(r) = surface_mapper::try_render_surface(result, correlation_key) {
         return r;
     }
     let text = if let Some(obj) = result.as_object()
@@ -915,6 +922,7 @@ fn render_dispatch_result(
         deferred_dashboards: 0,
         truncated: false,
         dashboard: None,
+        interactive: None,
     })
 }
 
@@ -1019,7 +1027,12 @@ async fn post_back(
         }
     }
 
-    let body = surface_mapper::build_messages_body(to, &msg);
+    // #94: an interactive surface (Buttons/Selection) ships as a
+    // `type: interactive` message; otherwise plain text.
+    let body = match &msg.interactive {
+        Some(interactive) => surface_mapper::build_interactive_body(to, interactive),
+        None => surface_mapper::build_messages_body(to, &msg),
+    };
     let start = std::time::Instant::now();
     let outcome = adapter
         .courier
