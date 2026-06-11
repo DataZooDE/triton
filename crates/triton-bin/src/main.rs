@@ -436,7 +436,9 @@ async fn main() -> std::io::Result<()> {
                     a.inbound.kind == InboundKind::Webhook
                         && matches!(
                             a.kind,
-                            AdapterKind::Telegram | AdapterKind::Discord | AdapterKind::WhatsappWeb
+                            AdapterKind::Telegram
+                                | AdapterKind::Discord
+                                | AdapterKind::WhatsappCloud
                         )
                 })
             })
@@ -902,7 +904,7 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                 }
-                AdapterKind::WhatsappWeb => {
+                AdapterKind::WhatsappCloud => {
                     // NFR-S-4 v0.2: only `graph.facebook.com` is on
                     // the substrate ACL allowlist. Outside `local`
                     // env we refuse any `TRITON_WHATSAPP_API_BASE`

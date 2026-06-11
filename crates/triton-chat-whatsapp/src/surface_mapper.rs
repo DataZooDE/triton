@@ -1,21 +1,21 @@
-//! v0.2 PR 31 — L6' surface mapper for WhatsApp Cloud API.
+//! L6' surface mapper for WhatsApp Cloud API.
 //!
 //! Takes the canonical `triton_core::a2ui::Surface` and renders it
-//! into a WhatsApp `messages` body. PR 31's scope is intentionally
-//! narrow: text + narration only. Buttons, Selection, Form, and
-//! Dashboard components are counted into per-category `deferred_*`
-//! fields so the operator can see the gap via `tracing::warn`, but
-//! they are NOT rendered through interactive primitives — that
-//! lands in PR 32.
+//! into a WhatsApp `messages` body.
 //!
 //! Output discipline:
 //!   * text → plain text (WhatsApp doesn't speak HTML/Markdown in
-//!     the same parse-mode way Telegram does; we keep it simple
-//!     until PR 32 introduces native primitives).
+//!     the same parse-mode way Telegram does).
 //!   * narration → `_<text>_` (WhatsApp's documented italic markup;
 //!     applied client-side only, no risk of breaking parsing if it
 //!     fails to render).
-//!   * buttons/selection/form/dashboard → deferred.
+//!   * buttons → Cloud API `interactive` reply buttons (#94); the
+//!     first selection → an `interactive` list. Each `id` is a signed
+//!     correlation token, never the tool/args. Overflow + forms +
+//!     additional selections defer (counted in `deferred_*`).
+//!   * dashboard → surfaced for rasterisation (PR 38). A dashboard in
+//!     the surface takes the image route and defers interactive
+//!     primitives (an image message carries no action).
 //!
 //! Truncation strategy mirrors Telegram's: cut between components
 //! first, raw-text-budget fallback for a single oversized chunk.
@@ -62,7 +62,22 @@ pub struct RenderedMessage {
     /// returned `media_id`. Mirrors Telegram PR 36's
     /// `RenderedMessage::dashboard` slot.
     pub dashboard: Option<RasterDashboard>,
+    /// #94: a prebuilt Cloud API `interactive` object (reply `button`
+    /// or `list`) rendered from `Button` / `Selection` components. When
+    /// `Some`, the adapter posts a `type: interactive` message instead
+    /// of plain text; [`Self::text`] holds the same `body.text` for
+    /// preview parity. Built only when no dashboard is present (an
+    /// interactive message carries no media).
+    pub interactive: Option<Value>,
 }
+
+/// WhatsApp Cloud API interactive limits (Meta-documented).
+const MAX_REPLY_BUTTONS: usize = 3;
+const MAX_LIST_ROWS: usize = 10;
+const BUTTON_TITLE_MAX: usize = 20;
+const LIST_ROW_TITLE_MAX: usize = 24;
+const LIST_MENU_LABEL_MAX: usize = 20;
+const INTERACTIVE_BODY_MAX: usize = 1024;
 
 /// Dashboard payload the caller passes to the rasterizer. Local to
 /// the adapter — each chat adapter owns its own L6′ rendering
@@ -84,20 +99,31 @@ pub enum RenderError {
 /// when the result isn't an A2UI surface — caller falls back to
 /// the bare-text path. Returns `Some(Err(...))` when the result IS
 /// an A2UI surface but renders to nothing usable.
-pub fn try_render_surface(result: &Value) -> Option<Result<RenderedMessage, RenderError>> {
+pub fn try_render_surface(
+    result: &Value,
+    correlation_key: &[u8],
+) -> Option<Result<RenderedMessage, RenderError>> {
     let surface = extract_surface(result).ok()?;
-    Some(render(&surface))
+    Some(render(&surface, correlation_key))
 }
 
 /// Render a [`Surface`] into a `RenderedMessage` or a
 /// `RenderError`. Public so the in-crate unit tests can exercise
-/// the mapper without spinning the whole binary.
-pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
+/// the mapper without spinning the whole binary. `correlation_key`
+/// signs the interactive `id`s (#94) so a future inbound handler can
+/// route a tap back to its `(tool, args)`.
+pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessage, RenderError> {
     let mut chunks: Vec<String> = Vec::new();
     let mut deferred_buttons = 0usize;
     let mut deferred_selections = 0usize;
     let mut deferred_forms = 0usize;
     let mut deferred_dashboards = 0usize;
+    // #94: interactive primitives collected in source order. `Button`s
+    // become reply buttons; the FIRST `Selection` becomes a list. Each
+    // id is a signed correlation token — the tool/args MUST NOT leak as
+    // plain text the user could retype.
+    let mut buttons: Vec<InteractiveChoice> = Vec::new();
+    let mut selection: Option<InteractiveSelection> = None;
     // PR 38: first Dashboard surfaced to the caller for rasterisation.
     // WhatsApp image messages carry one media attachment, so any
     // subsequent dashboards bump `deferred_dashboards`.
@@ -124,15 +150,51 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
                     raw: text.clone(),
                 }));
             }
-            Component::Button { .. } => {
-                // PR 31 scope-limit: interactive primitives defer
-                // until PR 32. The Button's tool/args MUST NOT leak
-                // into the text body — that would let the user
-                // re-execute by typing.
-                deferred_buttons += 1;
+            Component::Button { label, tool, args } => {
+                // #94: render as a Cloud API reply button. The id is a
+                // signed correlation token (NOT the tool/args), so the
+                // user can't re-execute by typing. Defer on encode
+                // failure (token over cap).
+                match triton_correlation::encode(tool, args, correlation_key) {
+                    Ok(token) => buttons.push(InteractiveChoice {
+                        title: truncate_chars(label, BUTTON_TITLE_MAX),
+                        id: token,
+                    }),
+                    Err(_) => deferred_buttons += 1,
+                }
             }
-            Component::Selection { .. } => {
-                deferred_selections += 1;
+            Component::Selection {
+                prompt,
+                options,
+                tool,
+                args_key,
+            } => {
+                // #94: the FIRST Selection becomes a Cloud API list;
+                // additional selections defer (one list per message).
+                if selection.is_some() {
+                    deferred_selections += 1;
+                    continue;
+                }
+                let mut rows = Vec::new();
+                for opt in options {
+                    let args = json!({ args_key.as_str(): &opt.value });
+                    // Skip individual over-cap options; the rest of the
+                    // list still ships.
+                    if let Ok(token) = triton_correlation::encode(tool, &args, correlation_key) {
+                        rows.push(InteractiveChoice {
+                            title: truncate_chars(&opt.label, LIST_ROW_TITLE_MAX),
+                            id: token,
+                        });
+                    }
+                }
+                if rows.is_empty() {
+                    deferred_selections += 1;
+                } else {
+                    selection = Some(InteractiveSelection {
+                        prompt: prompt.clone(),
+                        rows,
+                    });
+                }
             }
             Component::Form { .. } => {
                 deferred_forms += 1;
@@ -163,6 +225,47 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
         }
     }
 
+    // #94: render interactive primitives. A Selection wins (renders as
+    // a list, deferring any buttons); otherwise Buttons render as reply
+    // buttons (capped at 3, overflow deferred). Skipped when a dashboard
+    // is present — that message ships as an image, which carries no
+    // interactive action.
+    let interactive = if first_dashboard.is_some() {
+        deferred_buttons += buttons.len();
+        if selection.is_some() {
+            deferred_selections += 1;
+        }
+        None
+    } else if let Some(sel) = selection.take() {
+        deferred_buttons += buttons.len();
+        Some(build_list_interactive(
+            &interactive_body_text(&chunks),
+            &sel,
+        ))
+    } else if !buttons.is_empty() {
+        let overflow = buttons.len().saturating_sub(MAX_REPLY_BUTTONS);
+        deferred_buttons += overflow;
+        buttons.truncate(MAX_REPLY_BUTTONS);
+        Some(build_button_interactive(
+            &interactive_body_text(&chunks),
+            &buttons,
+        ))
+    } else {
+        None
+    };
+    if let Some(interactive) = interactive {
+        return Ok(RenderedMessage {
+            text: interactive_body_text(&chunks),
+            deferred_buttons,
+            deferred_selections,
+            deferred_forms,
+            deferred_dashboards,
+            truncated: false,
+            dashboard: None,
+            interactive: Some(interactive),
+        });
+    }
+
     // PR 38: a dashboard-only surface is legitimate — WhatsApp's
     // image messages don't require a caption, so we can ship a
     // photo with no text. Only refuse when there's literally
@@ -181,6 +284,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             deferred_dashboards,
             truncated: false,
             dashboard: first_dashboard,
+            interactive: None,
         });
     }
 
@@ -210,6 +314,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             deferred_dashboards,
             truncated: true,
             dashboard: first_dashboard,
+            interactive: None,
         });
     }
 
@@ -249,7 +354,91 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
         deferred_dashboards,
         truncated: true,
         dashboard: first_dashboard,
+        interactive: None,
     })
+}
+
+/// One reply button / list row: a display title + the signed
+/// correlation token that goes in the Cloud API `id`.
+struct InteractiveChoice {
+    title: String,
+    id: String,
+}
+
+/// The first `Selection` collected from a surface, ready to render as a
+/// Cloud API list.
+struct InteractiveSelection {
+    prompt: String,
+    rows: Vec<InteractiveChoice>,
+}
+
+/// Mandatory `interactive.body.text` — joined chunks, capped, with a
+/// non-empty fallback (Cloud API rejects an empty interactive body).
+fn interactive_body_text(chunks: &[String]) -> String {
+    let joined = chunks.join("\n\n");
+    let joined = if joined.is_empty() {
+        "Please choose:".to_string()
+    } else {
+        joined
+    };
+    budget_raw(&joined, INTERACTIVE_BODY_MAX).to_string()
+}
+
+/// Build a Cloud API `interactive` reply-button object.
+fn build_button_interactive(body_text: &str, buttons: &[InteractiveChoice]) -> Value {
+    let buttons: Vec<Value> = buttons
+        .iter()
+        .map(|b| json!({ "type": "reply", "reply": { "id": b.id, "title": b.title } }))
+        .collect();
+    json!({
+        "type": "button",
+        "body": { "text": body_text },
+        "action": { "buttons": buttons },
+    })
+}
+
+/// Build a Cloud API `interactive` list object.
+fn build_list_interactive(body_text: &str, sel: &InteractiveSelection) -> Value {
+    let menu = if sel.prompt.is_empty() {
+        "Choose".to_string()
+    } else {
+        truncate_chars(&sel.prompt, LIST_MENU_LABEL_MAX)
+    };
+    let rows: Vec<Value> = sel
+        .rows
+        .iter()
+        .take(MAX_LIST_ROWS)
+        .map(|r| json!({ "id": r.id, "title": r.title }))
+        .collect();
+    json!({
+        "type": "list",
+        "body": { "text": body_text },
+        "action": {
+            "button": menu,
+            "sections": [ { "title": "Options", "rows": rows } ],
+        },
+    })
+}
+
+/// Build the WhatsApp `messages` body for a prebuilt `interactive`
+/// object (#94).
+pub fn build_interactive_body(to: &str, interactive: &Value) -> Value {
+    json!({
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "interactive",
+        "interactive": interactive,
+    })
+}
+
+/// Truncate `s` to at most `max` characters (not bytes), on a char
+/// boundary — WhatsApp counts interactive titles in characters.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    s.chars().take(max).collect()
 }
 
 /// Build the WhatsApp `messages` body for an `image` message
@@ -316,9 +505,42 @@ pub fn build_messages_body(to: &str, msg: &RenderedMessage) -> Value {
     })
 }
 
+/// Build a WhatsApp Cloud API `type: template` body (#94). Used for
+/// proactive sends outside the 24-hour service window, where free-form
+/// text is rejected by Meta. `name`/`language` come from the manifest's
+/// `templates` map (Triton owns template selection); `variables` are the
+/// ordered body parameters the agent supplied, substituted into the
+/// template's `{{1}}, {{2}}, …` placeholders. An empty `variables` omits
+/// the `components` array (templates with no body parameters).
+pub fn build_template_body(to: &str, name: &str, language: &str, variables: &[String]) -> Value {
+    let mut template = serde_json::Map::new();
+    template.insert("name".into(), Value::String(name.to_string()));
+    template.insert("language".into(), json!({ "code": language }));
+    if !variables.is_empty() {
+        let parameters: Vec<Value> = variables
+            .iter()
+            .map(|v| json!({ "type": "text", "text": v }))
+            .collect();
+        template.insert(
+            "components".into(),
+            json!([{ "type": "body", "parameters": parameters }]),
+        );
+    }
+    json!({
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": to,
+        "type": "template",
+        "template": Value::Object(template),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Deterministic correlation key for the unit tests.
+    const KEY: [u8; 32] = [7u8; 32];
     use triton_core::a2ui::{Component, Surface};
 
     #[test]
@@ -333,7 +555,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, &KEY).expect("renders");
         assert_eq!(r.text, "hello\n\n_a footnote_");
         assert_eq!(r.deferred_buttons, 0);
         assert!(!r.truncated);
@@ -388,7 +610,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, &KEY).expect("renders");
         // None of the interactive components contribute to text.
         assert_eq!(r.text, "preamble");
         assert_eq!(r.deferred_buttons, 1);
@@ -422,7 +644,7 @@ mod tests {
         let s = Surface {
             components: vec![make_dash("first"), make_dash("second")],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, &KEY).expect("renders");
         let dash = r.dashboard.expect("first surfaced");
         assert_eq!(dash.title, "first");
         assert_eq!(r.deferred_dashboards, 1);
@@ -445,7 +667,7 @@ mod tests {
                 }],
             }],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, &KEY).expect("renders");
         assert!(r.text.is_empty());
         assert!(r.dashboard.is_some());
     }
@@ -453,14 +675,17 @@ mod tests {
     #[test]
     fn empty_surface_is_a_render_error() {
         let s = Surface { components: vec![] };
-        assert!(matches!(render(&s), Err(RenderError::EmptyAfterRender)));
+        assert!(matches!(
+            render(&s, &KEY),
+            Err(RenderError::EmptyAfterRender)
+        ));
     }
 
     #[test]
-    fn button_only_surface_defers_to_empty_after_render() {
-        // No text-bearing components → nothing to ship via WhatsApp's
-        // text channel. PR 32 will rewire this through interactive
-        // primitives; for now it's an explicit drop.
+    fn button_only_surface_renders_interactive_with_fallback_body() {
+        // #94: a button-only surface now renders an interactive reply
+        // button. Cloud API requires a non-empty body, so a synthetic
+        // fallback is used. The tool/args MUST NOT leak as text.
         use serde_json::json;
         let s = Surface {
             components: vec![Component::Button {
@@ -469,7 +694,38 @@ mod tests {
                 args: json!({}),
             }],
         };
-        assert!(matches!(render(&s), Err(RenderError::EmptyAfterRender)));
+        let r = render(&s, &KEY).expect("renders");
+        let i = r.interactive.expect("interactive built");
+        assert_eq!(i["type"], "button");
+        assert!(i["body"]["text"].as_str().is_some_and(|s| !s.is_empty()));
+        assert_eq!(i["action"]["buttons"][0]["reply"]["title"], "Click");
+        assert!(!serde_json::to_string(&i).unwrap().contains("narrate"));
+    }
+
+    #[test]
+    fn buttons_over_cap_defer_the_overflow() {
+        // WhatsApp reply-button messages carry at most 3 buttons.
+        use serde_json::json;
+        let button = |label: &str| Component::Button {
+            label: label.into(),
+            tool: "narrate".into(),
+            args: json!({ "subject": label }),
+        };
+        let s = Surface {
+            components: vec![
+                Component::Text {
+                    value: "pick".into(),
+                },
+                button("a"),
+                button("b"),
+                button("c"),
+                button("d"),
+            ],
+        };
+        let r = render(&s, &KEY).expect("renders");
+        let i = r.interactive.expect("interactive built");
+        assert_eq!(i["action"]["buttons"].as_array().unwrap().len(), 3);
+        assert_eq!(r.deferred_buttons, 1);
     }
 
     #[test]
@@ -478,7 +734,7 @@ mod tests {
         let s = Surface {
             components: vec![Component::Text { value: big }],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, &KEY).expect("renders");
         assert!(r.truncated);
         assert!(r.text.len() <= WHATSAPP_TEXT_MAX_BYTES);
         assert!(r.text.ends_with(TRUNCATION_SENTINEL));
@@ -492,7 +748,7 @@ mod tests {
                 value: fourbyte.repeat(2000),
             }],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, &KEY).expect("renders");
         assert!(r.truncated);
         // The String type guarantees valid UTF-8; spot-check char
         // boundaries don't panic when iterated.
@@ -507,7 +763,7 @@ mod tests {
         let s = Surface {
             components: vec![Component::Narration { text: big }],
         };
-        let r = render(&s).expect("renders");
+        let r = render(&s, &KEY).expect("renders");
         assert!(r.truncated);
         // The italic wrapper must remain matched: one opener + one
         // closer in the body. We tolerate raw text that itself
@@ -526,6 +782,7 @@ mod tests {
             deferred_dashboards: 0,
             truncated: false,
             dashboard: None,
+            interactive: None,
         };
         let body = build_messages_body("491234567", &msg);
         assert_eq!(body["messaging_product"], "whatsapp");

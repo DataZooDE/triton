@@ -318,7 +318,10 @@ async fn surface_render(
             }))
             .into_response(),
         },
-        "whatsapp" => match triton_chat_whatsapp::surface_mapper::try_render_surface(&req.result) {
+        "whatsapp" => match triton_chat_whatsapp::surface_mapper::try_render_surface(
+            &req.result,
+            &PREVIEW_KEY,
+        ) {
             None => not_a2ui(),
             Some(Err(_)) => empty("whatsapp"),
             Some(Ok(m)) => Json(json!({

@@ -365,10 +365,11 @@ production deployment can avoid by knowing about it.
   community-maintained and breaks under platform changes
   periodically; pin the protocol-fragment version per adapter,
   treat live-test failure as a flag for protocol re-validation.
-  Operators with B2B compliance requirements can add a second
-  `whatsapp-cloud` adapter under the same manifest schema; the
-  spec does not deliver it (deferred §7). Source: messenger
-  paper §5 (WhatsApp); §7 deferred list.
+  Operators with B2B compliance requirements add a second
+  `kind: whatsapp_cloud` adapter under the same manifest schema —
+  delivered in #94 (templates + interactive buttons/lists), distinct
+  from the `whatsapp_web` socket kind. Source: messenger paper §5
+  (WhatsApp).
 
 - **Closed-set boot validation catches misconfiguration before
   socket I/O.** Three Phase-A checks gate the gateway boot:
@@ -976,3 +977,31 @@ a trap the next developer should not have to step in.
   (Clone, Arc-backed) `McpState` router at both `/mcp` and `/mcp/`, or add
   a `NormalizePathLayer`; but the contract is that clients POST the
   advertised endpoint verbatim.
+
+- **The agent-initiated outbound surface needs its OWN OIDC audience,
+  not the HTTP trio's.** `POST /v1/outbound` (#95) must reject a bearer
+  minted for the trio audience and vice-versa, so per-surface
+  authorisation actually means something. The `OidcVerifier` validates a
+  single `aud`, so build a SECOND verifier/`IdentityProvider` from
+  `TRITON_OUTBOUND_AUDIENCE` and mount the outbound router with it —
+  don't try to teach one verifier two audiences (it would accept either
+  token on either surface). Fail closed: if OIDC is on but the outbound
+  audience is unset, leave `/v1/outbound` unmounted.
+
+- **WhatsApp's 24-hour service window is per-recipient runtime state, so
+  it lives in memory only (G-8).** A free-form proactive send to a
+  recipient who hasn't messaged in 24 h is rejected by Meta; the adapter
+  decides free-form-vs-template from an in-memory `HashMap<wa_id,
+  Instant>` stamped on every inbound. A cold start treats everyone as
+  window-closed until they message in again — the safe default, and the
+  reason proactive sends should prefer templates. Watch for: introducing
+  the window rule (#94) tightened the #95 free-form happy-path test,
+  which now has to open the window with an inbound first.
+
+- **The Cloud-API adapter was hiding inside `kind: whatsapp_web`.** Until
+  #94, the Baileys socket bridge and the Cloud-API webhook adapter both
+  answered to `AdapterKind::WhatsappWeb`, disambiguated only by
+  `inbound.kind`. Splitting `whatsapp_cloud` out is mostly mechanical, but
+  note the two `match adapter.kind` loops in `triton-bin` (socket vs
+  webhook) and the manifest `phone_number_id` rule all keyed off the old
+  kind — grep for every `WhatsappWeb` before assuming the split is done.

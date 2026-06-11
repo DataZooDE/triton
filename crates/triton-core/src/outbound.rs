@@ -26,9 +26,13 @@ pub struct OutboundRequest {
     pub result: Value,
     /// Optional template-category hint for platforms that require a
     /// template outside their service window (e.g. WhatsApp Cloud API
-    /// utility / marketing / authentication). Wired in #94; ignored by
-    /// adapters that don't model a service window.
+    /// utility / marketing / authentication). When present, the adapter
+    /// sends a template rather than free-form text. Ignored by adapters
+    /// that don't model a service window.
     pub category: Option<String>,
+    /// Ordered body variables substituted into the resolved template's
+    /// placeholders ({{1}}, {{2}}, …). Only meaningful with `category`.
+    pub variables: Vec<String>,
 }
 
 /// A chat adapter that can deliver an agent-initiated outbound message.
