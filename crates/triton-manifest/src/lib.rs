@@ -47,6 +47,38 @@ pub struct Adapter {
     pub rate_limit: RateLimit,
     /// Per-adapter 32-byte HMAC key (Vault reference in prod).
     pub correlation_key: SecretField,
+    /// #94: WhatsApp Cloud API message templates, keyed by the
+    /// category the upstream agent hints. Template **selection** lives
+    /// in Triton (it owns the platform surface + credentials); the
+    /// agent only supplies the category + body variables. Empty for
+    /// adapters that don't model templates.
+    #[serde(default)]
+    pub templates: BTreeMap<TemplateCategory, TemplateDecl>,
+}
+
+/// WhatsApp Cloud API template category (Meta's closed set). The agent
+/// hints one of these; Triton maps it to a Meta-approved template.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TemplateCategory {
+    Utility,
+    Marketing,
+    Authentication,
+}
+
+/// A Meta-approved template the operator declares in `adapter.yaml`.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TemplateDecl {
+    /// The template name as registered with Meta / the aggregator.
+    pub name: String,
+    /// BCP-47 language code (e.g. `en`, `de`). Defaults to `en`.
+    #[serde(default = "default_template_language")]
+    pub language: String,
+}
+
+fn default_template_language() -> String {
+    "en".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -96,7 +128,14 @@ pub struct ToolDecl {
 #[non_exhaustive]
 pub enum AdapterKind {
     Telegram,
+    /// Baileys-style persistent WhatsApp **Web** socket (community
+    /// bridge daemon; `inbound.kind: socket`). The canonical dev/nonprod
+    /// WhatsApp transport.
     WhatsappWeb,
+    /// WhatsApp **Cloud API** (Meta Graph / EU aggregator;
+    /// `inbound.kind: webhook`, `signature: hmac256`). The B2B-compliant
+    /// transport: verified Business number + message templates (#94).
+    WhatsappCloud,
     Signal,
     MsTeams,
     Discord,
@@ -483,21 +522,20 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
         }
     }
 
-    // PR 31: WhatsApp Cloud API addresses the per-bot sender by
+    // #94: WhatsApp Cloud API addresses the per-bot sender by
     // `phone_number_id` embedded in the outbound URL path
     // (`/v18.0/{phone_number_id}/messages`). Without it the courier
     // has no target; the manifest must carry it next to `token`.
-    // Telegram puts its routing id in the bot token itself, so this
-    // rule only fires for `kind: whatsapp_web`. The WhatsApp **Web
-    // bridge** (inbound.kind=socket) replies over the bridge socket,
-    // not the Graph API, so phone_number_id does not apply there.
-    if adapter.kind == AdapterKind::WhatsappWeb
-        && adapter.inbound.kind != InboundKind::Socket
+    // Telegram puts its routing id in the bot token itself, and the
+    // WhatsApp **Web bridge** (`kind: whatsapp_web`) replies over the
+    // bridge socket, not the Graph API — so this rule fires only for
+    // `kind: whatsapp_cloud`.
+    if adapter.kind == AdapterKind::WhatsappCloud
         && !adapter.outbound.credentials.contains_key("phone_number_id")
     {
         return Err(ManifestError::MissingSchemeCredential {
             adapter: name.to_string(),
-            scheme: "kind=whatsapp_web".to_string(),
+            scheme: "kind=whatsapp_cloud".to_string(),
             field: "phone_number_id".to_string(),
         });
     }

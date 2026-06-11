@@ -59,11 +59,19 @@ struct OutboundBody {
     adapter: String,
     /// Platform recipient id (e.g. WhatsApp `wa_id`).
     to: String,
-    /// Content to render — the same shape a tool returns.
+    /// Content to render — the same shape a tool returns. Optional when
+    /// a template `category` is supplied (the template body is driven by
+    /// `variables` instead).
+    #[serde(default)]
     result: serde_json::Value,
-    /// Optional template-category hint (#94).
+    /// Optional template-category hint (#94). When set, the adapter
+    /// sends a template rather than free-form text.
     #[serde(default)]
     category: Option<String>,
+    /// Ordered template body variables (#94). Only meaningful with
+    /// `category`.
+    #[serde(default)]
+    variables: Vec<String>,
 }
 
 async fn outbound_send(
@@ -106,6 +114,7 @@ async fn outbound_send(
         to: body.to,
         result: body.result,
         category: body.category,
+        variables: body.variables,
     };
     match courier.deliver(&req, &principal).await {
         Ok(()) => (StatusCode::ACCEPTED, Json(json!({ "trace_id": trace_id }))).into_response(),
