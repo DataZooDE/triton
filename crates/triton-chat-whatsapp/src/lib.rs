@@ -39,6 +39,7 @@ pub use bridge::WhatsAppBridgeAdapter;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -50,7 +51,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
+use triton_core::{
+    Dispatcher, OutboundCourier, OutboundRequest, PostOutcome, Principal, TritonError,
+};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
 use triton_rasterizer::{Client as RasterizerClient, DashboardRequest, RasterizerError};
 use triton_secrets::{ResolveError, SecretResolver};
@@ -246,6 +249,43 @@ impl WhatsAppAdapter {
         Router::new()
             .route(&path, get(handle_verify).post(handle_webhook))
             .with_state(self)
+    }
+}
+
+/// Synthetic tool label for the audit `what`/`tool` field on an
+/// agent-initiated proactive send — there's no inbound tool dispatch,
+/// so this names the proactive surface instead.
+const OUTBOUND_TOOL: &str = "outbound";
+
+#[async_trait]
+impl OutboundCourier for WhatsAppAdapter {
+    fn protocol(&self) -> &'static str {
+        PROTOCOL
+    }
+
+    /// Render the agent-supplied result through the SAME surface mapper
+    /// + courier the inbound reply leg uses, then post it. Audit stays
+    /// in the dispatcher via `post_back` → `record_post` (ADR-6).
+    async fn deliver(
+        &self,
+        req: &OutboundRequest,
+        principal: &Principal,
+    ) -> Result<(), TritonError> {
+        // `category` is accepted here but only consumed once Cloud-API
+        // templates land (#94); free-form sends inside the 24-h service
+        // window ignore it.
+        let _ = &req.category;
+        let rendered = match render_dispatch_result(&req.result) {
+            Ok(r) => r,
+            Err(surface_mapper::RenderError::EmptyAfterRender) => {
+                return Err(TritonError::Validation(
+                    "outbound surface rendered to nothing".into(),
+                ));
+            }
+        };
+        log_deferrals(OUTBOUND_TOOL, &rendered);
+        post_back(self, principal, OUTBOUND_TOOL, &req.to, rendered).await;
+        Ok(())
     }
 }
 

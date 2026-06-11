@@ -18,6 +18,7 @@ pub mod audit;
 pub mod dispatcher;
 pub mod error;
 pub mod metrics;
+pub mod outbound;
 pub mod principal;
 pub mod ratelimit;
 pub mod tool;
@@ -27,6 +28,7 @@ pub use audit::PostOutcome;
 pub use dispatcher::{Dispatch, Dispatcher, UpstreamDispatch, envelope};
 pub use error::TritonError;
 pub use metrics::Metrics;
+pub use outbound::{OutboundCourier, OutboundRequest};
 pub use principal::{Principal, ToolPrincipal};
 pub use tool::{Tool, ToolDescriptor, ToolRegistry};
 
