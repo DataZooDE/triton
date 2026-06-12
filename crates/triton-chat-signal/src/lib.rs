@@ -525,9 +525,10 @@ impl SignalAdapter {
 /// Same shape as Telegram's `route_command`: a leading `/` is the
 /// command marker; the first whitespace-separated token names the
 /// tool; the rest is the argument shape (`subject` for `narrate`,
-/// `message` for `echo`). Unknown commands fall through to `echo`
-/// so the user sees their raw text echoed back, which makes the
-/// "command not recognised" path observable rather than silent.
+/// `message` for `echo`). Unknown commands fall through to the
+/// manifest-configured default tool so the user sees their raw text
+/// answered, which makes the "command not recognised" path
+/// observable rather than silent.
 fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     if let Some(rest) = text.strip_prefix('/') {
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
