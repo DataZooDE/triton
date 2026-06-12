@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../providers/api_provider.dart';
 import '../../../widgets/json_viewer.dart';
 import '../../../widgets/panel_help.dart';
+import '../../../api/friendly_error.dart';
 
 /// Live audit tail. Reads the dispatcher's in-process ring buffer
 /// over `GET /v1/audit`. Filter by trace_id; tap any row to expand
@@ -93,7 +94,7 @@ class _AuditPageState extends ConsumerState<AuditPage> {
               loading: () => const Center(child: CircularProgressIndicator()),
               error: (e, _) => Padding(
                 padding: const EdgeInsets.all(24),
-                child: Text('Could not load /v1/audit: $e'),
+                child: Text(friendlyApiError('Could not load /v1/audit', e)),
               ),
               data: (rows) {
                 if (rows.isEmpty) {

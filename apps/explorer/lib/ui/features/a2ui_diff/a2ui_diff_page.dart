@@ -6,6 +6,7 @@ import '../../../providers/api_provider.dart';
 import '../../../widgets/a2ui/a2ui_renderer.dart';
 import '../../../widgets/json_viewer.dart';
 import '../../../widgets/panel_help.dart';
+import '../../../api/friendly_error.dart';
 
 /// Three-column comparison: the same tool rendered through the A2UI
 /// v0.8 builder, the v0.9 builder, and a selectable chat-channel
@@ -168,7 +169,7 @@ class _A2uiDiffPageState extends ConsumerState<A2uiDiffPage> {
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => Padding(
           padding: const EdgeInsets.all(24),
-          child: Text('Could not load tools: $e'),
+          child: Text(friendlyApiError('Could not load tools', e)),
         ),
         data: (list) {
           final a2uiTools = list.where((t) => t.returnsA2ui).toList();

@@ -47,34 +47,44 @@ Future<void> setTritonBaseUrl(WidgetRef ref, String url) async {
   }
 }
 
-/// Read the persisted base URL, falling back to the supplied default
-/// when nothing has been saved. Called once at app start.
-Future<String> loadInitialBaseUrl(String fallback) async {
+/// Same-origin version.json, fetched once at boot. It doubles as the
+/// SPA's deployment-config channel: the serving layer can inject
+/// `api_url` (base URL discovery) and, for dev stacks, `dev_token`
+/// (bearer seed — see `seedDevToken`). Returns null off-web or when
+/// the fetch fails; every consumer treats null as "no config".
+Future<Map<String, dynamic>?> fetchVersionJson() async {
+  if (!kIsWeb) return null;
+  try {
+    final dio = Dio(BaseOptions(
+      connectTimeout: const Duration(seconds: 2),
+      receiveTimeout: const Duration(seconds: 2),
+    ));
+    final versionUrl = Uri.base
+        .replace(path: 'version.json', query: null, fragment: null)
+        .toString();
+    final resp = await dio.get<Map<String, dynamic>>(versionUrl);
+    if (resp.statusCode == 200) {
+      return resp.data;
+    }
+  } catch (e) {
+    debugPrint('Failed to fetch version.json: $e');
+  }
+  return null;
+}
+
+/// Read the persisted base URL, falling back to version.json's
+/// `api_url` and then the supplied default. Called once at app start.
+Future<String> loadInitialBaseUrl(String fallback,
+    {Map<String, dynamic>? versionJson}) async {
   final prefs = await SharedPreferences.getInstance();
   final saved = normalizeBaseUrl(prefs.getString(_kPrefsBaseUrlKey) ?? '');
   if (saved.isNotEmpty) {
     return saved;
   }
 
-  if (kIsWeb) {
-    try {
-      final dio = Dio(BaseOptions(
-        connectTimeout: const Duration(seconds: 2),
-        receiveTimeout: const Duration(seconds: 2),
-      ));
-      final versionUrl = Uri.base
-          .replace(path: 'version.json', query: null, fragment: null)
-          .toString();
-      final resp = await dio.get<Map<String, dynamic>>(versionUrl);
-      if (resp.statusCode == 200 && resp.data != null) {
-        final apiUrl = normalizeBaseUrl(resp.data!['api_url'] as String? ?? '');
-        if (apiUrl.isNotEmpty) {
-          return apiUrl;
-        }
-      }
-    } catch (e) {
-      debugPrint('Failed to discover baseUrl from version.json: $e');
-    }
+  final apiUrl = normalizeBaseUrl(versionJson?['api_url'] as String? ?? '');
+  if (apiUrl.isNotEmpty) {
+    return apiUrl;
   }
 
   return normalizeBaseUrl(fallback);

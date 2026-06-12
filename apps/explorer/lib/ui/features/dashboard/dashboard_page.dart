@@ -5,6 +5,7 @@ import '../../../api/runtime_config.dart';
 import '../../../providers/api_provider.dart';
 import '../../../providers/runtime_provider.dart';
 import '../../../theme/app_theme.dart';
+import '../../../api/friendly_error.dart';
 
 class DashboardPage extends ConsumerWidget {
   const DashboardPage({super.key});
@@ -80,7 +81,7 @@ class _RuntimeCard extends StatelessWidget {
               child: Center(child: CircularProgressIndicator()),
             ),
             error: (e, _) => Text(
-              'Could not reach Triton: $e\n\nSet the base URL in Settings.',
+              friendlyApiError('Could not reach Triton', e),
               style: const TextStyle(color: ExplorerTheme.onErrorContainer),
             ),
             data: (cfg) => Column(
@@ -128,7 +129,7 @@ class _ToolsCard extends StatelessWidget {
               height: 120,
               child: Center(child: CircularProgressIndicator()),
             ),
-            error: (e, _) => Text('Could not load /v1/tools: $e'),
+            error: (e, _) => Text(friendlyApiError('Could not load /v1/tools', e)),
             data: (list) => Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [

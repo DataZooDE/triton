@@ -15,6 +15,7 @@ import '../../../widgets/a2ui/a2ui_renderer.dart';
 import '../../../widgets/chat_channel_previews.dart';
 import '../../../widgets/json_viewer.dart';
 import '../../../widgets/panel_help.dart';
+import '../../../api/friendly_error.dart';
 
 /// The Console — one place to understand the protocols, inject messages,
 /// and make small corrections against a live tool.
@@ -474,7 +475,7 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
             color: Theme.of(context).colorScheme.errorContainer,
             child: Padding(
               padding: const EdgeInsets.all(16),
-              child: Text('Could not load /v1/tools: $e'),
+              child: Text(friendlyApiError('Could not load /v1/tools', e)),
             ),
           ),
         ),

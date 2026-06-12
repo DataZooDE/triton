@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../api/friendly_error.dart';
 import '../providers/runtime_provider.dart';
 import '../theme/app_theme.dart';
 import 'auth_manager.dart';
@@ -102,7 +103,7 @@ class _BootstrapErrorPanelState extends ConsumerState<_BootstrapErrorPanel> {
                 color: Theme.of(context).colorScheme.error, size: 40),
           ),
           const SizedBox(height: 12),
-          Text('Could not reach Triton: ${widget.error}'),
+          Text(friendlyApiError('Could not reach Triton', widget.error)),
           const SizedBox(height: 16),
           const Text(
             'Check the Triton base URL below — it must be the REST '
