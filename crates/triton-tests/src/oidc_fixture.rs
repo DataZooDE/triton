@@ -29,6 +29,21 @@ pub struct TestIssuer {
 
 impl TestIssuer {
     pub async fn start() -> Self {
+        Self::start_inner(true).await
+    }
+
+    /// JWKS-only variant: serves `/jwks.json` but **no**
+    /// `/.well-known/openid-configuration`. Models the mirror-image
+    /// upstream-agent issuer of #100 — an agent that publishes its
+    /// public keys on its internal FQDN without running a full OIDC
+    /// discovery endpoint. A verifier configured with an explicit
+    /// JWKS URL must work against this; one that insists on
+    /// discovery must fail.
+    pub async fn start_jwks_only() -> Self {
+        Self::start_inner(false).await
+    }
+
+    async fn start_inner(serve_discovery: bool) -> Self {
         let signing_key = generate_ed25519_signing_key();
         let pem = signing_key
             .to_pkcs8_pem(LineEnding::LF)
@@ -60,21 +75,22 @@ impl TestIssuer {
             }]
         });
 
-        let router = Router::new()
-            .route(
+        let mut router = Router::new().route(
+            "/jwks.json",
+            get(move || {
+                let j = jwks.clone();
+                async move { Json(j) }
+            }),
+        );
+        if serve_discovery {
+            router = router.route(
                 "/.well-known/openid-configuration",
                 get(move || {
                     let d = discovery.clone();
                     async move { Json(d) }
                 }),
-            )
-            .route(
-                "/jwks.json",
-                get(move || {
-                    let j = jwks.clone();
-                    async move { Json(j) }
-                }),
             );
+        }
 
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
@@ -89,6 +105,12 @@ impl TestIssuer {
 
     pub fn issuer_url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    /// Direct URL of the served JWKS document, for wiring
+    /// `TRITON_OUTBOUND_JWKS_URL` without discovery (#100).
+    pub fn jwks_url(&self) -> String {
+        format!("http://{}/jwks.json", self.addr)
     }
 
     /// Sign a JWT with the issuer's private key. `claims` is whatever

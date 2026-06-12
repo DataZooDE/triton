@@ -1092,18 +1092,34 @@ async fn main() -> std::io::Result<()> {
     // #95: build the agent-initiated outbound surface. Its bearer must
     // carry the DEDICATED outbound audience (a second OIDC verifier),
     // so a token minted for the HTTP trio cannot drive proactive sends.
-    // When OIDC is on but no outbound audience is configured the
-    // endpoint stays unmounted (fail closed); in the no-OIDC dev path
-    // it reuses the trio's dev-token identity for parity.
+    // #100: the verifier may also trust a DEDICATED issuer
+    // (TRITON_OUTBOUND_ISSUER, falling back to the trio's) — the
+    // mirror image of static-upstream signing: the registered agent
+    // signs its own short-TTL outbound tokens and serves JWKS on its
+    // internal FQDN (TRITON_OUTBOUND_JWKS_URL skips OIDC discovery).
+    // When an issuer is known but no outbound audience is configured
+    // the endpoint stays unmounted (fail closed); in the no-OIDC dev
+    // path it reuses the trio's dev-token identity for parity.
     let outbound_couriers = Arc::new(outbound_couriers);
+    let outbound_issuer = settings
+        .outbound_issuer
+        .as_ref()
+        .or(settings.oidc_issuer.as_ref());
     let outbound_state: Option<triton_adapters_http::outbound::OutboundState> =
-        match (&settings.oidc_issuer, &settings.outbound_audience) {
+        match (outbound_issuer, &settings.outbound_audience) {
             (Some(issuer), Some(aud)) => {
-                tracing::info!(issuer, aud, "outbound OIDC verifier enabled (/v1/outbound)");
-                let verifier = Arc::new(OidcVerifier::new(OidcConfig::new(
-                    issuer.clone(),
-                    aud.clone(),
-                )));
+                tracing::info!(
+                    issuer,
+                    aud,
+                    jwks_url = settings.outbound_jwks_url.as_deref(),
+                    dedicated_issuer = settings.outbound_issuer.is_some(),
+                    "outbound OIDC verifier enabled (/v1/outbound)"
+                );
+                let mut config = OidcConfig::new(issuer.clone(), aud.clone());
+                if let Some(jwks_url) = &settings.outbound_jwks_url {
+                    config = config.with_jwks_url(jwks_url.clone());
+                }
+                let verifier = Arc::new(OidcVerifier::new(config));
                 Some(triton_adapters_http::outbound::OutboundState {
                     identity: Arc::new(IdentityProvider::new(Some(verifier))),
                     dispatcher: dispatcher.clone(),

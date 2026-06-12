@@ -36,6 +36,19 @@ pub struct Settings {
     /// token minted for the HTTP trio cannot drive proactive sends.
     /// When OIDC is on but this is unset, `/v1/outbound` is disabled.
     pub outbound_audience: Option<String>,
+    /// Dedicated issuer for the outbound surface (#100). When set, the
+    /// `/v1/outbound` verifier trusts THIS issuer instead of
+    /// `oidc_issuer` — per-surface issuer, exactly like the existing
+    /// per-surface audience. Unset → falls back to `oidc_issuer`
+    /// (today's behaviour). Enables mirror-image static-upstream
+    /// signing: the upstream agent signs its own short-TTL outbound
+    /// tokens and serves JWKS on its internal FQDN.
+    pub outbound_issuer: Option<String>,
+    /// Explicit JWKS document URL for the outbound verifier (#100).
+    /// When set, key refresh fetches this URL directly instead of
+    /// walking OIDC discovery — for agent issuers that serve only a
+    /// JWKS document (e.g. `/.well-known/jwks.json`).
+    pub outbound_jwks_url: Option<String>,
     pub consul_url: Option<String>,
     pub vault_url: Option<String>,
     pub vault_token: Option<String>,
@@ -214,6 +227,19 @@ struct Cli {
     /// endpoint when OIDC is configured.
     #[arg(long, env = "TRITON_OUTBOUND_AUDIENCE")]
     outbound_audience: Option<String>,
+
+    /// Dedicated issuer for the outbound surface (#100); falls back
+    /// to `TRITON_OIDC_ISSUER` when unset. Set this to the upstream
+    /// agent's own issuer URL for mirror-image static-upstream
+    /// signing (the inverse of #83).
+    #[arg(long, env = "TRITON_OUTBOUND_ISSUER")]
+    outbound_issuer: Option<String>,
+
+    /// Explicit JWKS URL for the outbound verifier (#100). When set,
+    /// keys are fetched from this URL directly — the agent issuer
+    /// need not serve an OIDC discovery endpoint.
+    #[arg(long, env = "TRITON_OUTBOUND_JWKS_URL")]
+    outbound_jwks_url: Option<String>,
 
     /// Consul HTTP base URL (e.g. `http://127.0.0.1:8500`). When
     /// unset the upstream router is disabled and the dispatcher
@@ -496,6 +522,8 @@ impl From<Cli> for Settings {
             oidc_issuer: c.oidc_issuer,
             oidc_audience: c.oidc_audience,
             outbound_audience: c.outbound_audience,
+            outbound_issuer: c.outbound_issuer,
+            outbound_jwks_url: c.outbound_jwks_url,
             static_upstream_tenant: c.static_upstream_tenant,
             consul_url: c.consul_url,
             vault_url: c.vault_url,
