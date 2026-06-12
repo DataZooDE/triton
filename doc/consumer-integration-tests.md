@@ -193,6 +193,34 @@ Worked reference: `crates/triton-tests/tests/telegram_courier.rs`.
 Other adapters and the cross-channel parity tests live alongside it
 under `crates/triton-tests/tests/` (e.g. `discord.rs`).
 
+## Resolver-tool pattern (`identity.kind: upstream`, FR-I-7)
+
+If your adapter resolves senders via one of your tools (instead of an
+operator `sender_table`), test the resolver round-trip end to end:
+
+1. In the test manifest, declare the adapter with
+   `identity.kind: upstream`, `resolver_tool: <your-resolver>`, and
+   `tool: <your-command-tool>`.
+2. Register **both** tools to a real upstream endpoint — either a
+   `FakeAgent` per tool or, for a real worked example, one agent serving
+   both and branching on `X-Triton-Tool`. With `TRITON_STATIC_UPSTREAMS`
+   that is `"<command>=<host:port>,<resolver>=<host:port>"`; with Consul,
+   one `tag:agent:<tool>` per tool.
+3. Use `FakeAgent::start_returning(json!({ "sub": …, "scopes": […],
+   "tenant": … }))` for the resolver to pin the resolved principal, and
+   `FakeAgent::start_always_failing()` to exercise the rejection path.
+4. POST a signed inbound from a sender no table knows. Assert: the
+   resolver received `{platform, sender}` (`bodies_seen()`); a dispatch
+   audit under `…:identity` with `result: ok`; the command dispatch's
+   `who`/`tenant` equal the resolver's reply; and the reply was
+   couriered. For the failure agent, assert the inbound is refused `401`
+   with **no** command dispatch and nothing couriered.
+
+Worked references: `crates/triton-tests/tests/whatsapp_upstream_identity.rs`
+(FakeAgents) and `examples/adk-hello-agent/tests/resolver_e2e.rs` (a real
+agent serving `resolve_identity` + `hello`). Contract:
+`doc/upstream-agent-contract.md` §5.
+
 ## What you don't get
 
 - **No rate-limit override.** Production defaults apply (NFR-P-3).

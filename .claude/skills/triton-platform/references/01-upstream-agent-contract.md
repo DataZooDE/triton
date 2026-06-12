@@ -87,11 +87,49 @@ shows up loudly, not as a silent downgrade).
   HTTP status matters. Put diagnostics in your own stdout logs
   (→ `references/09`).
 
+## Resolving chat senders: the `upstream` identity strategy (FR-I-7)
+
+A chat adapter normally maps a platform sender id to a subject via an
+operator-curated `sender_table`. With `identity.kind: upstream` it
+instead delegates resolution to one of YOUR tools, named by
+`identity.resolver_tool`. This is a **separate dispatch *before* the
+command dispatch**, once per inbound from an unresolved sender, audited
+under its own protocol label (e.g. `messenger:whatsapp:identity`) with
+its own `trace_id`. The resolver reaches you on the same `POST /` path;
+distinguish it by the `X-Triton-Tool` header.
+
+Request body Triton sends:
+
+```json
+{ "platform": "whatsapp", "sender": "<platform sender id>" }
+```
+
+Response you MUST return to resolve the sender:
+
+```json
+{ "sub": "<subject>", "scopes": ["chat"], "tenant": "<tenant>" }
+```
+
+`scopes` may be omitted (defaults empty); `sub` and `tenant` must be
+non-empty. To refuse a sender, reply non-2xx (or with an empty
+`sub`/`tenant`): Triton rejects the inbound `401`, records a rejection,
+and **never dispatches the command tool** — no guessed principal. The
+command dispatch then runs as the resolved `sub` (today only `sub`
+reaches your command-tool bearer; see `doc/upstream-agent-contract.md`
+§3 and issue #110).
+
+Manifest (operator side): `identity.kind: upstream` +
+`identity.resolver_tool: <one of your tools>` + `tool: <command tool>`
+(see `templates/adapter-manifest.yaml`). Normative contract:
+`doc/upstream-agent-contract.md` §5; worked round-trip:
+`examples/adk-hello-agent/` (`resolve_identity` + `tests/resolver_e2e.rs`).
+
 ## A minimal conformant agent
 
 `templates/upstream-agent-axum/` is a working skeleton: one axum
-route at `/`, an OIDC-bearer extractor, and a tool returning an A2UI
-surface. Fork it rather than hand-rolling the wiring.
+route at `/`, an OIDC-bearer extractor, a tool returning an A2UI
+surface, and an optional `resolve_identity` resolver tool (FR-I-7).
+Fork it rather than hand-rolling the wiring.
 
 ## What you do NOT implement
 
