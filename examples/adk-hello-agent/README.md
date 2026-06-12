@@ -15,6 +15,11 @@ door.
 > every frontend for free. The integration test *demonstrates* that; the
 > agent never codes a frontend.
 
+The normative wire contract this example implements — dispatch shape,
+sender-identity carriage in the bearer, response envelope, and the
+`upstream` identity-resolver contract — is pinned in
+[`doc/upstream-agent-contract.md`](../../doc/upstream-agent-contract.md).
+
 ## What "replace adk-rust's A2A interface" means here
 
 adk-rust ships `adk-server`, which exposes its own REST/SSE and A2A

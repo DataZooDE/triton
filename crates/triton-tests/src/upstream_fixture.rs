@@ -381,6 +381,9 @@ pub struct FakeAgent {
 struct FakeAgentState {
     mode: Mutex<AgentMode>,
     bearers_seen: Mutex<Vec<String>>,
+    /// `X-Triton-Tool` header per request (`None` when absent) — lets
+    /// tests pin the dispatch-header contract for both upstream modes.
+    tools_seen: Mutex<Vec<Option<String>>>,
     hits: Mutex<u32>,
     failures_remaining: Mutex<u32>,
     /// Fixed response body for `AgentMode::Returning`.
@@ -419,6 +422,7 @@ impl FakeAgent {
         let state = Arc::new(FakeAgentState {
             mode: Mutex::new(mode),
             bearers_seen: Mutex::new(Vec::new()),
+            tools_seen: Mutex::new(Vec::new()),
             hits: Mutex::new(0),
             failures_remaining: Mutex::new(fail_first),
             fixed_response,
@@ -445,6 +449,12 @@ impl FakeAgent {
         self.state.bearers_seen.lock().unwrap().clone()
     }
 
+    /// The `X-Triton-Tool` header of each request, `None` where the
+    /// dispatcher omitted it.
+    pub fn tools_seen(&self) -> Vec<Option<String>> {
+        self.state.tools_seen.lock().unwrap().clone()
+    }
+
     pub fn hits(&self) -> u32 {
         *self.state.hits.lock().unwrap()
     }
@@ -466,6 +476,11 @@ async fn handler(
         .map(|s| s.strip_prefix("Bearer ").unwrap_or(s).to_string())
         .unwrap_or_default();
     state.bearers_seen.lock().unwrap().push(bearer);
+    let tool = headers
+        .get("X-Triton-Tool")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    state.tools_seen.lock().unwrap().push(tool);
 
     let mode = *state.mode.lock().unwrap();
     let should_fail = match mode {

@@ -61,4 +61,14 @@ async fn static_upstream_dispatch_no_hashicorp() {
 
     // The agent saw the static dev-token (no Vault swap happened).
     assert_eq!(agent.bearers_seen()[0], "dev-token");
+
+    // Contract parity with the Consul-mode router (#101): static
+    // dispatch carries the informational `X-Triton-Tool` header too,
+    // so an agent serving several tools can route without parsing
+    // the args body.
+    assert_eq!(
+        agent.tools_seen()[0].as_deref(),
+        Some("assistant"),
+        "static upstream dispatch must carry X-Triton-Tool"
+    );
 }
