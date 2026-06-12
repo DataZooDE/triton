@@ -1,0 +1,35 @@
+# `identity.kind: upstream` for whatsapp_cloud (FR-I-7): sender
+# resolution is delegated to a resolver tool reached through the
+# upstream router — the adapter calls `resolver_tool` with
+# {platform, sender} and the tool returns {sub, scopes, tenant}.
+# Plain text dispatches to the upstream `assistant` agent (T1's
+# `tool` field). Literal credentials (dev mode only).
+version: "0.2"
+
+adapters:
+  whatsapp:
+    kind: whatsapp_cloud
+    tool: assistant
+    inbound:
+      kind: webhook
+      signature: hmac256
+      secret: whatsapp-app-secret-for-test
+      verify_token: meta-verify-token-for-test
+    outbound:
+      kind: rest_api
+      token: whatsapp-access-token-for-test
+      phone_number_id: "100200300"
+    identity:
+      kind: upstream
+      resolver_tool: resolve_identity
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: whatsapp-correlation-key-for-test

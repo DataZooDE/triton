@@ -153,7 +153,29 @@ async fn main() -> std::io::Result<()> {
     });
 
     let metrics = Arc::new(Metrics::new());
-    let registry = Arc::new(build_registry());
+    // Tool names claimed by `TRITON_STATIC_UPSTREAMS` (only honoured
+    // when no Consul/Vault is configured — the same gate as the
+    // static-upstream wiring below). The dispatcher prefers in-process
+    // tools, so registering one under a name the static map claims
+    // would silently shadow the upstream agent and make the mapped
+    // endpoint unreachable; those names are skipped at registration.
+    let static_upstream_tools: std::collections::HashSet<String> =
+        if settings.consul_url.is_none() && settings.vault_url.is_none() {
+            std::env::var("TRITON_STATIC_UPSTREAMS")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|spec| {
+                    spec.split(',')
+                        .filter_map(|kv| kv.split_once('='))
+                        .map(|(k, _)| k.trim().to_string())
+                        .filter(|k| !k.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        };
+    let registry = Arc::new(build_registry(&static_upstream_tools));
     let mut dispatcher =
         Dispatcher::new(registry, settings.env.clone()).with_metrics(metrics.clone());
 
@@ -1092,18 +1114,34 @@ async fn main() -> std::io::Result<()> {
     // #95: build the agent-initiated outbound surface. Its bearer must
     // carry the DEDICATED outbound audience (a second OIDC verifier),
     // so a token minted for the HTTP trio cannot drive proactive sends.
-    // When OIDC is on but no outbound audience is configured the
-    // endpoint stays unmounted (fail closed); in the no-OIDC dev path
-    // it reuses the trio's dev-token identity for parity.
+    // #100: the verifier may also trust a DEDICATED issuer
+    // (TRITON_OUTBOUND_ISSUER, falling back to the trio's) — the
+    // mirror image of static-upstream signing: the registered agent
+    // signs its own short-TTL outbound tokens and serves JWKS on its
+    // internal FQDN (TRITON_OUTBOUND_JWKS_URL skips OIDC discovery).
+    // When an issuer is known but no outbound audience is configured
+    // the endpoint stays unmounted (fail closed); in the no-OIDC dev
+    // path it reuses the trio's dev-token identity for parity.
     let outbound_couriers = Arc::new(outbound_couriers);
+    let outbound_issuer = settings
+        .outbound_issuer
+        .as_ref()
+        .or(settings.oidc_issuer.as_ref());
     let outbound_state: Option<triton_adapters_http::outbound::OutboundState> =
-        match (&settings.oidc_issuer, &settings.outbound_audience) {
+        match (outbound_issuer, &settings.outbound_audience) {
             (Some(issuer), Some(aud)) => {
-                tracing::info!(issuer, aud, "outbound OIDC verifier enabled (/v1/outbound)");
-                let verifier = Arc::new(OidcVerifier::new(OidcConfig::new(
-                    issuer.clone(),
-                    aud.clone(),
-                )));
+                tracing::info!(
+                    issuer,
+                    aud,
+                    jwks_url = settings.outbound_jwks_url.as_deref(),
+                    dedicated_issuer = settings.outbound_issuer.is_some(),
+                    "outbound OIDC verifier enabled (/v1/outbound)"
+                );
+                let mut config = OidcConfig::new(issuer.clone(), aud.clone());
+                if let Some(jwks_url) = &settings.outbound_jwks_url {
+                    config = config.with_jwks_url(jwks_url.clone());
+                }
+                let verifier = Arc::new(OidcVerifier::new(config));
                 Some(triton_adapters_http::outbound::OutboundState {
                     identity: Arc::new(IdentityProvider::new(Some(verifier))),
                     dispatcher: dispatcher.clone(),
@@ -1309,22 +1347,36 @@ async fn main() -> std::io::Result<()> {
     serve_result
 }
 
-fn build_registry() -> ToolRegistry {
+/// Build the in-process tool registry, skipping any tool whose name is
+/// claimed by a static upstream (`TRITON_STATIC_UPSTREAMS`). The
+/// dispatcher prefers in-process tools over the upstream router, so a
+/// shadowed registration would make the mapped agent unreachable.
+fn build_registry(shadowed: &std::collections::HashSet<String>) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(tools::Echo));
+    let mut register = |tool: Arc<dyn triton_core::Tool>| {
+        if shadowed.contains(tool.name()) {
+            tracing::info!(
+                tool = tool.name(),
+                "in-process tool shadowed by static upstream; skipping registration"
+            );
+            return;
+        }
+        registry.register(tool);
+    };
+    register(Arc::new(tools::Echo));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::Delay));
-    registry.register(Arc::new(tools::Narrate));
+    register(Arc::new(tools::Delay));
+    register(Arc::new(tools::Narrate));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::DemoPanel));
+    register(Arc::new(tools::DemoPanel));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::EmptySurface));
+    register(Arc::new(tools::EmptySurface));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::FormOnlyDemo));
+    register(Arc::new(tools::FormOnlyDemo));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::FormOnlyDemoMulti));
+    register(Arc::new(tools::FormOnlyDemoMulti));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::SubmittedForm));
+    register(Arc::new(tools::SubmittedForm));
     registry
 }
 

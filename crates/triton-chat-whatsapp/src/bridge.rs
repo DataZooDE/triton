@@ -70,6 +70,9 @@ pub struct WhatsAppBridgeAdapter {
     name: String,
     bridge_addr: BridgeAddr,
     sender_table: HashMap<String, SenderClaims>,
+    /// Manifest `tool`: where plain inbound text dispatches (default
+    /// `echo`). Commands (`/narrate` etc.) keep their special routes.
+    inbound_tool: String,
     dispatcher: Arc<Dispatcher>,
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
@@ -152,6 +155,7 @@ impl WhatsAppBridgeAdapter {
             name: name.to_string(),
             bridge_addr,
             sender_table,
+            inbound_tool: adapter.tool.clone(),
             dispatcher,
             rate_limit,
             per_tenant_limit,
@@ -286,12 +290,12 @@ impl WhatsAppBridgeAdapter {
             trace_id: uuid::Uuid::new_v4().to_string(),
         };
         let principal_for_post = principal.clone();
-        let (tool, args) = route_command(text);
+        let (tool, args) = route_command(text, &self.inbound_tool);
 
         let started = std::time::Instant::now();
         let result = self
             .dispatcher
-            .invoke(tool, args, principal, PROTOCOL)
+            .invoke(&tool, args, principal, PROTOCOL)
             .await;
         let latency_ms = started.elapsed().as_millis() as u64;
 
@@ -301,7 +305,7 @@ impl WhatsAppBridgeAdapter {
                 let body = json!({ "type": "send", "to": from, "text": reply });
                 match write_line(write, &body).await {
                     Ok(()) => self.dispatcher.record_post(
-                        tool,
+                        &tool,
                         PROTOCOL,
                         &principal_for_post,
                         latency_ms,
@@ -310,7 +314,7 @@ impl WhatsAppBridgeAdapter {
                     Err(_) => {
                         let provider = TritonError::Provider("whatsapp bridge write failed".into());
                         self.dispatcher.record_post(
-                            tool,
+                            &tool,
                             PROTOCOL,
                             &principal_for_post,
                             latency_ms,
@@ -397,14 +401,14 @@ async fn backoff_sleep(shutdown: &CancellationToken, d: Duration) -> bool {
     }
 }
 
-fn route_command(text: &str) -> (&'static str, Value) {
+fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     if let Some(rest) = text.strip_prefix("/narrate ") {
-        return ("narrate", json!({ "subject": rest }));
+        return ("narrate".to_string(), json!({ "subject": rest }));
     }
     if text == "/narrate" {
-        return ("narrate", json!({ "subject": "" }));
+        return ("narrate".to_string(), json!({ "subject": "" }));
     }
-    ("echo", json!({ "message": text }))
+    (default_tool.to_string(), json!({ "message": text }))
 }
 
 fn reply_text(result: &Value) -> String {
@@ -458,7 +462,9 @@ mod tests {
 
     #[test]
     fn route_command_narrate_and_echo() {
-        assert_eq!(route_command("/narrate hi").0, "narrate");
-        assert_eq!(route_command("hello").0, "echo");
+        assert_eq!(route_command("/narrate hi", "echo").0, "narrate");
+        assert_eq!(route_command("hello", "echo").0, "echo");
+        // The plain-text fallback honours the configured tool.
+        assert_eq!(route_command("hello", "assistant").0, "assistant");
     }
 }

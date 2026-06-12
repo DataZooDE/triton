@@ -40,6 +40,14 @@ pub struct Manifest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Adapter {
     pub kind: AdapterKind,
+    /// The tool plain chat text dispatches to; commands (`/narrate`
+    /// etc.) keep their special routes. Defaults to the in-process
+    /// `echo` tool so existing manifests are untouched. Naming an
+    /// upstream agent here (Consul `agent:<name>` or a
+    /// `TRITON_STATIC_UPSTREAMS` entry) routes every plain inbound
+    /// message to that agent.
+    #[serde(default = "default_inbound_tool")]
+    pub tool: String,
     pub inbound: Inbound,
     pub outbound: Outbound,
     pub identity: Identity,
@@ -79,6 +87,10 @@ pub struct TemplateDecl {
 
 fn default_template_language() -> String {
     "en".to_string()
+}
+
+fn default_inbound_tool() -> String {
+    "echo".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
