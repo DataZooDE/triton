@@ -33,6 +33,14 @@ const ALLOWED_ALGS: &[Algorithm] = &[
 pub struct OidcConfig {
     pub issuer: String,
     pub audience: String,
+    /// Explicit JWKS document URL. When set, key refresh fetches this
+    /// URL directly and skips OIDC discovery entirely — for issuers
+    /// that publish keys without a `/.well-known/openid-configuration`
+    /// endpoint (#100: an upstream agent serving its own JWKS for the
+    /// outbound surface). The token `iss` claim is still validated
+    /// against `issuer`, so the trust anchor stays the (issuer, JWKS)
+    /// pair the operator configured.
+    pub jwks_url: Option<String>,
     /// Minimum interval between JWKS refreshes for the same `kid`
     /// (FR-I-2 anti-DoS guard). Default 30 s.
     pub refresh_interval: Duration,
@@ -43,8 +51,15 @@ impl OidcConfig {
         Self {
             issuer: issuer.into(),
             audience: audience.into(),
+            jwks_url: None,
             refresh_interval: Duration::from_secs(30),
         }
+    }
+
+    /// Pin the JWKS document URL, bypassing OIDC discovery (#100).
+    pub fn with_jwks_url(mut self, jwks_url: impl Into<String>) -> Self {
+        self.jwks_url = Some(jwks_url.into());
+        self
     }
 }
 
@@ -170,6 +185,17 @@ impl OidcVerifier {
     }
 
     async fn refresh_jwks(&self) -> Result<(), TritonError> {
+        // Explicit JWKS URL (#100): fetch the document directly, no
+        // discovery round-trip. The discovery-doc issuer mix-up check
+        // below has no equivalent here — a raw JWKS carries no issuer
+        // — but the operator pinned the (issuer, JWKS URL) pair
+        // together, and `verify` still enforces `iss` on every token.
+        if let Some(jwks_url) = &self.config.jwks_url {
+            let jwks = self.fetch_jwks(jwks_url).await?;
+            self.install_keys(&jwks).await;
+            return Ok(());
+        }
+
         let discovery_url = format!(
             "{}/.well-known/openid-configuration",
             self.config.issuer.trim_end_matches('/')
@@ -197,19 +223,24 @@ impl OidcVerifier {
             )));
         }
 
-        let jwks: JwkSet = self
-            .http
-            .get(&discovery.jwks_uri)
+        let jwks = self.fetch_jwks(&discovery.jwks_uri).await?;
+        self.install_keys(&jwks).await;
+        Ok(())
+    }
+
+    async fn fetch_jwks(&self, jwks_url: &str) -> Result<JwkSet, TritonError> {
+        self.http
+            .get(jwks_url)
             .send()
             .await
             .and_then(|r| r.error_for_status())
-            .map_err(|e| {
-                TritonError::Provider(format!("JWKS fetch {}: {}", discovery.jwks_uri, e))
-            })?
+            .map_err(|e| TritonError::Provider(format!("JWKS fetch {jwks_url}: {e}")))?
             .json()
             .await
-            .map_err(|e| TritonError::Provider(format!("JWKS decode: {e}")))?;
+            .map_err(|e| TritonError::Provider(format!("JWKS decode: {e}")))
+    }
 
+    async fn install_keys(&self, jwks: &JwkSet) {
         let mut next = HashMap::new();
         for jwk in &jwks.keys {
             let Some(kid) = jwk.common.key_id.clone() else {
@@ -229,7 +260,6 @@ impl OidcVerifier {
             next.insert(kid, key);
         }
         *self.keys.write().await = next;
-        Ok(())
     }
 }
 
