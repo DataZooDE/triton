@@ -113,6 +113,9 @@ pub struct MsTeamsAdapter {
     #[allow(dead_code)]
     correlation_key: Vec<u8>,
     identity: IdentityMode,
+    /// Manifest `tool`: where plain inbound text dispatches (default
+    /// `echo`). Commands (`/narrate` etc.) keep their special routes.
+    inbound_tool: String,
     dispatcher: Arc<Dispatcher>,
     verifier: JwtVerifier,
     token_client: TokenClient,
@@ -276,6 +279,7 @@ impl MsTeamsAdapter {
             audience,
             correlation_key,
             identity,
+            inbound_tool: adapter.tool.clone(),
             dispatcher,
             verifier,
             token_client,
@@ -597,11 +601,11 @@ async fn dispatch_message(
     };
     let principal_for_post = principal.clone();
 
-    let (tool_name, args) = route_command(stripped);
+    let (tool_name, args) = route_command(stripped, &adapter.inbound_tool);
     let started = std::time::Instant::now();
     let result = adapter
         .dispatcher
-        .invoke(tool_name, args, principal, PROTOCOL)
+        .invoke(&tool_name, args, principal, PROTOCOL)
         .await;
     let latency_ms = started.elapsed().as_millis() as u64;
 
@@ -629,7 +633,7 @@ async fn dispatch_message(
             post_reply(
                 adapter,
                 verified,
-                tool_name,
+                &tool_name,
                 &principal_for_post,
                 &conversation.id,
                 &recipient.id,
@@ -661,16 +665,29 @@ fn strip_mention_prefix(text: &str) -> &str {
     trimmed
 }
 
-fn route_command(text: &str) -> (&'static str, Value) {
+fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     if let Some(rest) = text.strip_prefix('/') {
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
         match tool {
-            "narrate" => return ("narrate", serde_json::json!({ "subject": subject })),
-            "echo" => return ("echo", serde_json::json!({ "message": subject })),
+            "narrate" => {
+                return (
+                    "narrate".to_string(),
+                    serde_json::json!({ "subject": subject }),
+                );
+            }
+            "echo" => {
+                return (
+                    "echo".to_string(),
+                    serde_json::json!({ "message": subject }),
+                );
+            }
             _ => {}
         }
     }
-    ("echo", serde_json::json!({ "message": text }))
+    (
+        default_tool.to_string(),
+        serde_json::json!({ "message": text }),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -803,11 +820,14 @@ mod tests {
 
     #[test]
     fn route_command_echo_default_and_explicit() {
-        let (t, args) = route_command("hello world");
+        let (t, args) = route_command("hello world", "echo");
         assert_eq!(t, "echo");
         assert_eq!(args["message"], "hello world");
-        let (t, args) = route_command("/echo only this");
+        let (t, args) = route_command("/echo only this", "echo");
         assert_eq!(t, "echo");
         assert_eq!(args["message"], "only this");
+        // The plain-text fallback honours the configured tool.
+        let (t, _) = route_command("hello world", "assistant");
+        assert_eq!(t, "assistant");
     }
 }

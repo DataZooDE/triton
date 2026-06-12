@@ -110,6 +110,9 @@ pub struct WhatsAppAdapter {
     /// (`/v18.0/{phone_number_id}/messages`). Per-bot routing id.
     phone_number_id: String,
     sender_table: HashMap<String, SenderClaims>,
+    /// Manifest `tool`: where plain inbound text dispatches (default
+    /// `echo`). Commands (`/narrate` etc.) keep their special routes.
+    inbound_tool: String,
     dispatcher: Arc<Dispatcher>,
     courier: CourierClient,
     /// NFR-P-3 first tier: adapter-wide DoS floor. See the matching
@@ -265,6 +268,7 @@ impl WhatsAppAdapter {
             access_token,
             phone_number_id,
             sender_table,
+            inbound_tool: adapter.tool.clone(),
             dispatcher,
             courier,
             rate_limit,
@@ -792,32 +796,31 @@ async fn process_message(
 
     // Command parser mirrors Telegram's `route_command`: `/<tool>
     // <rest>` routes to `tool` with `{ subject: rest }`; anything
-    // else falls through to `echo` with the whole text as `{
-    // message: text }`. Keeps both tool shapes exercised through
-    // the surface mapper.
-    let (tool_name, args) = route_command(text);
+    // else falls through to the manifest-configured `tool` (default
+    // `echo`) with the whole text as `{ message: text }`.
+    let (tool_name, args) = route_command(text, &adapter.inbound_tool);
     let principal_for_post = principal.clone();
     let to = sender_key.to_string();
     let result = adapter
         .dispatcher
-        .invoke(tool_name, args, principal, PROTOCOL)
+        .invoke(&tool_name, args, principal, PROTOCOL)
         .await;
     match result {
         Ok(dispatch) => match render_dispatch_result(&dispatch.result, &adapter.correlation_key) {
             Ok(rendered) => {
-                log_deferrals(tool_name, &rendered);
-                post_back(adapter, &principal_for_post, tool_name, &to, rendered).await;
+                log_deferrals(&tool_name, &rendered);
+                post_back(adapter, &principal_for_post, &tool_name, &to, rendered).await;
                 Ok(())
             }
             Err(surface_mapper::RenderError::EmptyAfterRender) => {
                 tracing::warn!(
-                    tool = tool_name,
+                    tool = %tool_name,
                     "whatsapp surface mapper: empty surface (no renderable components); skipping post-back",
                 );
                 let provider =
                     TritonError::Provider("whatsapp surface mapper: empty surface".into());
                 adapter.dispatcher.record_post(
-                    tool_name,
+                    &tool_name,
                     PROTOCOL,
                     &principal_for_post,
                     0,
@@ -877,21 +880,21 @@ fn log_deferrals(tool_name: &str, rendered: &RenderedMessage) {
     }
 }
 
-fn route_command(text: &str) -> (&'static str, Value) {
+fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     if let Some(rest) = text.strip_prefix('/') {
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
         match tool {
-            "narrate" => return ("narrate", json!({ "subject": subject })),
+            "narrate" => return ("narrate".to_string(), json!({ "subject": subject })),
             // PR 38: dev-only command exercising the rasterizer
             // wiring. Same `dev-token` gate as the underlying
             // `demo_panel` tool so production builds don't reserve
             // a route for an unregistered tool.
             #[cfg(feature = "dev-token")]
-            "demo" => return ("demo_panel", json!({})),
+            "demo" => return ("demo_panel".to_string(), json!({})),
             _ => {}
         }
     }
-    ("echo", json!({ "message": text }))
+    (default_tool.to_string(), json!({ "message": text }))
 }
 
 fn render_dispatch_result(
