@@ -49,6 +49,9 @@ pub struct DiscordGatewayAdapter {
     name: String,
     bot_token: String,
     sender_table: HashMap<String, SenderClaims>,
+    /// Manifest `tool`: where plain inbound text dispatches (default
+    /// `echo`). Commands (`/narrate` etc.) keep their special routes.
+    inbound_tool: String,
     dispatcher: Arc<Dispatcher>,
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
@@ -137,6 +140,7 @@ impl DiscordGatewayAdapter {
             name: name.to_string(),
             bot_token,
             sender_table,
+            inbound_tool: adapter.tool.clone(),
             dispatcher,
             rate_limit,
             per_tenant_limit,
@@ -419,19 +423,19 @@ impl DiscordGatewayAdapter {
             trace_id: uuid::Uuid::new_v4().to_string(),
         };
         let principal_for_post = principal.clone();
-        let (tool, args) = route_command(content);
+        let (tool, args) = route_command(content, &self.inbound_tool);
 
         let started = std::time::Instant::now();
         let result = self
             .dispatcher
-            .invoke(tool, args, principal, PROTOCOL)
+            .invoke(&tool, args, principal, PROTOCOL)
             .await;
         let latency_ms = started.elapsed().as_millis() as u64;
 
         match result {
             Ok(dispatch) => {
                 let reply = reply_text(&dispatch.result);
-                self.post_reply(channel_id, &reply, &principal_for_post, tool, latency_ms)
+                self.post_reply(channel_id, &reply, &principal_for_post, &tool, latency_ms)
                     .await;
             }
             Err(e) => {
@@ -645,15 +649,16 @@ async fn backoff_sleep(shutdown: &CancellationToken, d: Duration) -> bool {
 }
 
 /// Minimal command router (mirrors the other adapters): `/narrate x`
-/// → narrate, else echo the whole message.
-fn route_command(text: &str) -> (&'static str, Value) {
+/// → narrate, else the manifest-configured default tool gets the
+/// whole message.
+fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     if let Some(rest) = text.strip_prefix("/narrate ") {
-        return ("narrate", json!({ "subject": rest }));
+        return ("narrate".to_string(), json!({ "subject": rest }));
     }
     if text == "/narrate" {
-        return ("narrate", json!({ "subject": "" }));
+        return ("narrate".to_string(), json!({ "subject": "" }));
     }
-    ("echo", json!({ "message": text }))
+    (default_tool.to_string(), json!({ "message": text }))
 }
 
 /// Best-effort plain-text reply from a tool result: echo's `{echo}`,

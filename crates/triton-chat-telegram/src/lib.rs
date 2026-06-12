@@ -108,6 +108,9 @@ pub struct TelegramAdapter {
     bot_token: String,
     correlation_key: Vec<u8>,
     sender_table: HashMap<String, SenderClaims>,
+    /// Manifest `tool`: where plain inbound text dispatches (default
+    /// `echo`). Commands (`/narrate` etc.) keep their special routes.
+    inbound_tool: String,
     dispatcher: Arc<Dispatcher>,
     courier: CourierClient,
     /// PR 36: optional handle to the out-of-process rasterizer
@@ -260,6 +263,7 @@ impl TelegramAdapter {
             bot_token,
             correlation_key,
             sender_table,
+            inbound_tool: adapter.tool.clone(),
             dispatcher,
             courier,
             rasterizer,
@@ -923,18 +927,17 @@ async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -
 
     // PR 19 minimal command parser: `/<tool> <rest>` routes to
     // `tool` with `{ subject: rest }` (matches `narrate`'s arg
-    // shape); anything else falls through to `echo` with the
-    // whole text as `{ message: text }`. The real shared command
-    // parser ships when the second adapter (Discord) needs it; for
-    // now this lets PR 19 exercise both tool shapes through the
-    // surface mapper.
-    let (tool_name, args) = route_command(text);
-    let tool_name: &str = tool_name;
+    // shape); anything else falls through to the manifest-configured
+    // `tool` (default `echo`) with the whole text as
+    // `{ message: text }`. The real shared command parser ships when
+    // the second adapter (Discord) needs it; for now this lets PR 19
+    // exercise both tool shapes through the surface mapper.
+    let (tool_name, args) = route_command(text, &adapter.inbound_tool);
     dispatch_and_render(
         adapter,
         principal,
         principal_for_post,
-        tool_name.to_string(),
+        tool_name,
         args,
         chat_id,
         form_key.telegram_user_id,
@@ -1419,7 +1422,7 @@ async fn handle_callback_query(
     }
 }
 
-fn route_command(text: &str) -> (&'static str, Value) {
+fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     if let Some(rest) = text.strip_prefix('/') {
         // Split on the first space; if there's no space the whole
         // remainder is the command, with empty args. PR 19's
@@ -1430,7 +1433,7 @@ fn route_command(text: &str) -> (&'static str, Value) {
         // to do with it (echoes back "Hello, .").
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
         match tool {
-            "narrate" => return ("narrate", json!({ "subject": subject })),
+            "narrate" => return ("narrate".to_string(), json!({ "subject": subject })),
             // Dev-only command, gated on the same feature as the
             // dev-only `EmptySurface` tool itself. Without the gate
             // a production build would reserve `/empty` and route
@@ -1438,7 +1441,7 @@ fn route_command(text: &str) -> (&'static str, Value) {
             // "unknown tool" instead of the user's text echoing
             // back. Codex PR 20 review caught this gap.
             #[cfg(feature = "dev-token")]
-            "empty" => return ("empty_surface", json!({})),
+            "empty" => return ("empty_surface".to_string(), json!({})),
             // `demo_panel` reference tool emits a Surface covering
             // every component variant (Text + Narration + Selection
             // + Form + Dashboard + Button). PR 26's integration
@@ -1447,7 +1450,7 @@ fn route_command(text: &str) -> (&'static str, Value) {
             // builds don't reserve the route for an unregistered
             // tool (Codex PR 25 review pattern).
             #[cfg(feature = "dev-token")]
-            "demo" => return ("demo_panel", json!({})),
+            "demo" => return ("demo_panel".to_string(), json!({})),
             // PR 32 (numbered_prompts): the `form_only_demo_multi`
             // tool emits a form-only Surface with one String, one
             // Integer, and one optional Boolean field. The
@@ -1455,15 +1458,15 @@ fn route_command(text: &str) -> (&'static str, Value) {
             // through this command. Same `dev-token` gate as the
             // tool itself.
             #[cfg(feature = "dev-token")]
-            "form_only_demo_multi" => return ("form_only_demo_multi", json!({})),
+            "form_only_demo_multi" => return ("form_only_demo_multi".to_string(), json!({})),
             _ => {
-                // Unknown commands fall through to echo so the
-                // user sees their raw text and knows the command
-                // wasn't recognised.
+                // Unknown commands fall through to the default tool
+                // so the user sees their raw text and knows the
+                // command wasn't recognised.
             }
         }
     }
-    ("echo", json!({ "message": text }))
+    (default_tool.to_string(), json!({ "message": text }))
 }
 
 fn render_dispatch_result(

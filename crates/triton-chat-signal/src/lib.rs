@@ -78,6 +78,9 @@ pub struct SignalAdapter {
     /// outbound `send.username`.
     account: String,
     sender_table: HashMap<String, SenderClaims>,
+    /// Manifest `tool`: where plain inbound text dispatches (default
+    /// `echo`). Commands (`/narrate` etc.) keep their special routes.
+    inbound_tool: String,
     dispatcher: Arc<Dispatcher>,
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
@@ -188,6 +191,7 @@ impl SignalAdapter {
             signald_addr,
             account,
             sender_table,
+            inbound_tool: adapter.tool.clone(),
             dispatcher,
             rate_limit,
             per_tenant_limit,
@@ -364,12 +368,12 @@ impl SignalAdapter {
             raw_token: String::new(),
             trace_id: uuid::Uuid::new_v4().to_string(),
         };
-        let (tool_name, args) = route_command(body);
+        let (tool_name, args) = route_command(body, &self.inbound_tool);
         let principal_for_post = principal.clone();
         tracing::info!(
             adapter = %self.name,
             sender_uuid = %source_uuid,
-            tool = tool_name,
+            tool = %tool_name,
             body_len = body.len(),
             "signal: dispatching command",
         );
@@ -378,7 +382,7 @@ impl SignalAdapter {
 
         let result = self
             .dispatcher
-            .invoke(tool_name, args, principal, PROTOCOL)
+            .invoke(&tool_name, args, principal, PROTOCOL)
             .await;
         match result {
             Ok(dispatch) => match render_dispatch_result(&dispatch.result) {
@@ -386,7 +390,7 @@ impl SignalAdapter {
                     if rendered.deferred_buttons > 0 {
                         tracing::warn!(
                             adapter = %self.name,
-                            tool = tool_name,
+                            tool = %tool_name,
                             deferred_buttons = rendered.deferred_buttons,
                             "signal: button components deferred (no button primitive on signald)",
                         );
@@ -394,7 +398,7 @@ impl SignalAdapter {
                     if rendered.deferred_selections > 0 {
                         tracing::warn!(
                             adapter = %self.name,
-                            tool = tool_name,
+                            tool = %tool_name,
                             deferred_selections = rendered.deferred_selections,
                             "signal: Selection components deferred",
                         );
@@ -402,7 +406,7 @@ impl SignalAdapter {
                     if rendered.deferred_forms > 0 {
                         tracing::warn!(
                             adapter = %self.name,
-                            tool = tool_name,
+                            tool = %tool_name,
                             deferred_forms = rendered.deferred_forms,
                             "signal: Form components deferred",
                         );
@@ -410,7 +414,7 @@ impl SignalAdapter {
                     if rendered.deferred_dashboards > 0 {
                         tracing::warn!(
                             adapter = %self.name,
-                            tool = tool_name,
+                            tool = %tool_name,
                             deferred_dashboards = rendered.deferred_dashboards,
                             "signal: Dashboard components deferred (rasteriser not yet wired)",
                         );
@@ -418,7 +422,7 @@ impl SignalAdapter {
                     if rendered.truncated {
                         tracing::warn!(
                             adapter = %self.name,
-                            tool = tool_name,
+                            tool = %tool_name,
                             cap_bytes = surface_mapper::SIGNAL_TEXT_MAX_BYTES,
                             "signal: rendered text exceeded cap; truncated",
                         );
@@ -426,7 +430,7 @@ impl SignalAdapter {
                     self.post_back(
                         sender,
                         &principal_for_post,
-                        tool_name,
+                        &tool_name,
                         source_uuid,
                         source_number,
                         rendered,
@@ -436,13 +440,13 @@ impl SignalAdapter {
                 Err(surface_mapper::RenderError::EmptyAfterRender) => {
                     tracing::warn!(
                         adapter = %self.name,
-                        tool = tool_name,
+                        tool = %tool_name,
                         "signal: empty surface; skipping post-back",
                     );
                     let provider =
                         TritonError::Provider("signal surface mapper: empty surface".into());
                     self.dispatcher.record_post(
-                        tool_name,
+                        &tool_name,
                         PROTOCOL,
                         &principal_for_post,
                         0,
@@ -502,7 +506,7 @@ impl SignalAdapter {
                 };
                 tracing::warn!(
                     adapter = %self.name,
-                    tool = tool_name,
+                    tool = %tool_name,
                     "signal: courier failed: {e}",
                 );
                 let provider = TritonError::Provider(format!("signal courier: {e}"));
@@ -521,19 +525,20 @@ impl SignalAdapter {
 /// Same shape as Telegram's `route_command`: a leading `/` is the
 /// command marker; the first whitespace-separated token names the
 /// tool; the rest is the argument shape (`subject` for `narrate`,
-/// `message` for `echo`). Unknown commands fall through to `echo`
-/// so the user sees their raw text echoed back, which makes the
-/// "command not recognised" path observable rather than silent.
-fn route_command(text: &str) -> (&'static str, Value) {
+/// `message` for `echo`). Unknown commands fall through to the
+/// manifest-configured default tool so the user sees their raw text
+/// answered, which makes the "command not recognised" path
+/// observable rather than silent.
+fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     if let Some(rest) = text.strip_prefix('/') {
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
         match tool {
-            "narrate" => return ("narrate", json!({ "subject": subject })),
-            "echo" => return ("echo", json!({ "message": subject })),
+            "narrate" => return ("narrate".to_string(), json!({ "subject": subject })),
+            "echo" => return ("echo".to_string(), json!({ "message": subject })),
             _ => {}
         }
     }
-    ("echo", json!({ "message": text }))
+    (default_tool.to_string(), json!({ "message": text }))
 }
 
 fn render_dispatch_result(result: &Value) -> Result<RenderedMessage, surface_mapper::RenderError> {

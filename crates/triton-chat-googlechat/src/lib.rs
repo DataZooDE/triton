@@ -120,6 +120,9 @@ pub struct GoogleChatAdapter {
     name: String,
     verifier: Arc<GoogleJwtVerifier>,
     identity: IdentityMode,
+    /// Manifest `tool`: where plain inbound text dispatches (default
+    /// `echo`). Commands (`/narrate` etc.) keep their special routes.
+    inbound_tool: String,
     dispatcher: Arc<Dispatcher>,
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
@@ -276,6 +279,7 @@ impl GoogleChatAdapter {
             name: name.to_string(),
             verifier,
             identity,
+            inbound_tool: adapter.tool.clone(),
             dispatcher,
             rate_limit,
             per_tenant_limit,
@@ -510,11 +514,11 @@ async fn handle_webhook(
         trace_id: uuid::Uuid::new_v4().to_string(),
     };
     let principal_for_post = principal.clone();
-    let (tool_name, args) = route_command(text);
+    let (tool_name, args) = route_command(text, &adapter.inbound_tool);
 
     let result = adapter
         .dispatcher
-        .invoke(tool_name, args, principal, PROTOCOL)
+        .invoke(&tool_name, args, principal, PROTOCOL)
         .await;
     match result {
         Ok(dispatch) => match render_dispatch_result(&dispatch.result) {
@@ -543,7 +547,7 @@ async fn handle_webhook(
                 }
                 let body = surface_mapper::build_inline_response(&rendered);
                 adapter.dispatcher.record_post(
-                    tool_name,
+                    &tool_name,
                     PROTOCOL,
                     &principal_for_post,
                     0,
@@ -559,7 +563,7 @@ async fn handle_webhook(
                 let provider =
                     TritonError::Provider("google_chat surface mapper: empty surface".into());
                 adapter.dispatcher.record_post(
-                    tool_name,
+                    &tool_name,
                     PROTOCOL,
                     &principal_for_post,
                     0,
@@ -587,7 +591,7 @@ async fn handle_webhook(
             // observed class so operators see one consistent shape
             // across success + failure.
             adapter.dispatcher.record_post(
-                tool_name,
+                &tool_name,
                 PROTOCOL,
                 &principal_for_post,
                 0,
@@ -704,8 +708,8 @@ async fn resolve_via_upstream(
 /// Strip a leading `@bot ` mention if present, then route by the
 /// first word. Mirrors Telegram's `route_command`: `/<tool> <rest>`
 /// goes to `tool` with `{ subject: rest }` for narrate, otherwise
-/// falls through to `echo`.
-fn route_command(text: &str) -> (&'static str, Value) {
+/// falls through to the manifest-configured default tool.
+fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     let trimmed = text
         .trim_start_matches("@bot ")
         .trim_start_matches("@bot")
@@ -713,10 +717,16 @@ fn route_command(text: &str) -> (&'static str, Value) {
     if let Some(rest) = trimmed.strip_prefix('/') {
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
         if tool == "narrate" {
-            return ("narrate", serde_json::json!({ "subject": subject }));
+            return (
+                "narrate".to_string(),
+                serde_json::json!({ "subject": subject }),
+            );
         }
     }
-    ("echo", serde_json::json!({ "message": trimmed }))
+    (
+        default_tool.to_string(),
+        serde_json::json!({ "message": trimmed }),
+    )
 }
 
 fn render_dispatch_result(
