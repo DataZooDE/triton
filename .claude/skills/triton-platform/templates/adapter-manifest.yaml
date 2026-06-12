@@ -59,3 +59,31 @@ adapters:
       messages_per_sec: 25
       burst: 50
     correlation_key: vault://kv/data/apps/<co>/triton/<env>/telegram#correlation_key
+
+# ── OPTIONAL: agent-resolved sender identity (FR-I-7) ─────────────
+# Instead of an operator-curated `sender_table`, an adapter can delegate
+# sender resolution to one of YOUR tools via `identity.kind: upstream`.
+# Triton calls `resolver_tool` with {platform, sender} BEFORE the command
+# dispatch and expects {sub, scopes, tenant} back; a non-2xx / empty
+# reply rejects the inbound 401. `tool:` is the command tool a plain
+# message dispatches. See references/01 §upstream and
+# doc/upstream-agent-contract.md §5.
+#
+#  whatsapp:
+#    kind: whatsapp_cloud
+#    tool: my-tool
+#    inbound:
+#      kind: webhook
+#      signature: hmac256
+#      secret: vault://kv/data/apps/<co>/triton/<env>/whatsapp#app_secret
+#      verify_token: vault://kv/data/apps/<co>/triton/<env>/whatsapp#verify_token
+#    outbound:
+#      kind: rest_api
+#      token: vault://kv/data/apps/<co>/triton/<env>/whatsapp#access_token
+#      phone_number_id: vault://kv/data/apps/<co>/triton/<env>/whatsapp#phone_number_id
+#    identity:
+#      kind: upstream
+#      resolver_tool: resolve_identity   # one of YOUR tools, not in-process
+#    degrade: { text: passthrough, narration: passthrough, buttons: inline_keyboard }
+#    rate_limit: { messages_per_sec: 25, burst: 50 }
+#    correlation_key: vault://kv/data/apps/<co>/triton/<env>/whatsapp#correlation_key

@@ -1,0 +1,47 @@
+# Worked example for issue #101 part B: a chat adapter whose sender
+# identity is resolved by an upstream resolver tool (FR-I-7), served by
+# the REAL adk-hello-agent.
+#
+# - `kind: whatsapp_cloud` + `identity.kind: upstream` delegates sender
+#   resolution to `resolver_tool: resolve_identity` (the agent's resolver
+#   tool). Triton calls it with {platform, sender} and expects
+#   {sub, scopes, tenant} back; any failure rejects the inbound 401.
+# - `tool: hello` is the command tool a plain inbound message dispatches
+#   (the agent's greeting tool), run as the resolved principal.
+#
+# Literal credentials — dev/local only (FR-L-6 forbids these in prod).
+version: "0.2"
+
+adapters:
+  whatsapp:
+    kind: whatsapp_cloud
+    tool: hello
+    inbound:
+      kind: webhook
+      signature: hmac256
+      secret: whatsapp-app-secret-for-test
+      verify_token: meta-verify-token-for-test
+    outbound:
+      kind: rest_api
+      token: whatsapp-access-token-for-test
+      phone_number_id: "100200300"
+    identity:
+      kind: upstream
+      resolver_tool: resolve_identity
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: whatsapp-correlation-key-for-test
+
+tools:
+  # The greeting tool emits a narration + a button (src/main.rs); declare
+  # them so boot-time coverage (M-COVERAGE-1) passes for the chat adapter.
+  hello:
+    surface_components: [narration, buttons]

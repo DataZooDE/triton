@@ -62,10 +62,13 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "hex",
+ "hmac",
  "jsonwebtoken",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "triton-tests",
 ]

@@ -72,7 +72,22 @@ async fn handle_tool_call(
         }
     };
 
-    // 2. Run the tool. EDIT: this is your domain logic. `args` is the
+    // 2. (OPTIONAL) If a chat adapter declares `identity.kind: upstream`
+    // (FR-I-7), Triton dispatches your resolver tool here BEFORE the
+    // command tool, naming it in `X-Triton-Tool`. It carries
+    // {platform, sender}; return {sub, scopes, tenant} to resolve, or a
+    // non-2xx / empty `sub` to refuse (Triton then rejects the inbound
+    // 401). Delete this block if you don't use the strategy. See
+    // references/01 §upstream + doc/upstream-agent-contract.md §5.
+    let tool = headers
+        .get("x-triton-tool")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if tool == "resolve_identity" {
+        return resolve_identity(&args).into_response();
+    }
+
+    // 3. Run the tool. EDIT: this is your domain logic. `args` is the
     // exact object the dispatcher validated against your tool's schema.
     let subject = args
         .get("subject")
@@ -97,6 +112,27 @@ async fn handle_tool_call(
         }
     });
     (StatusCode::OK, Json(surface)).into_response()
+}
+
+/// (OPTIONAL) Resolver tool for the `upstream` identity strategy
+/// (FR-I-7). Triton calls this with `{platform, sender}` and expects
+/// `{sub, scopes, tenant}` back. EDIT: look the sender up in your own
+/// store. Refuse unknown/blocked senders with a non-2xx (or empty
+/// `sub`/`tenant`) — Triton rejects the inbound 401 and never dispatches
+/// the command tool. See doc/upstream-agent-contract.md §5.
+fn resolve_identity(args: &Value) -> impl IntoResponse {
+    let platform = args.get("platform").and_then(Value::as_str).unwrap_or("");
+    let sender = args.get("sender").and_then(Value::as_str).unwrap_or("");
+    if sender.is_empty() {
+        return (StatusCode::FORBIDDEN, Json(json!({ "error": "unresolved" }))).into_response();
+    }
+    // EDIT: real lookup goes here. This skeleton mints a stable subject.
+    let _ = platform;
+    (
+        StatusCode::OK,
+        Json(json!({ "sub": sender, "scopes": ["chat"], "tenant": "default" })),
+    )
+        .into_response()
 }
 
 /// Returns the verified subject, or an error reason.

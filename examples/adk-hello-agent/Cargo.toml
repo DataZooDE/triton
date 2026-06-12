@@ -65,3 +65,8 @@ triton-tests = { path = "../../crates/triton-tests" }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Sign the inbound webhook in the resolver e2e (mirrors Meta's
+# X-Hub-Signature-256 over the body).
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"

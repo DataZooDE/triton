@@ -107,10 +107,24 @@ async fn handle_tool_call(
         }
     };
 
-    // 2. Run the tool. `args` is the object the dispatcher validated
-    //    against the `hello` tool's schema: { "subject": "<string>" }.
+    // 2. Branch on which tool Triton dispatched. Triton names the tool
+    //    in the informational `X-Triton-Tool` header (references/01); we
+    //    routed to this agent by name, so there is no per-tool path.
+    let tool = headers
+        .get("x-triton-tool")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if tool == "resolve_identity" {
+        return resolve_identity(&args).into_response();
+    }
+
+    // 3. Run the `hello` greeting tool. `args` is the object the
+    //    dispatcher validated: `{ "subject": "<string>" }` from the HTTP
+    //    trio, or `{ "message": "<text>" }` from a chat inbound — accept
+    //    either so the example renders in both.
     let subject = args
         .get("subject")
+        .or_else(|| args.get("message"))
         .and_then(Value::as_str)
         .unwrap_or("world");
     eprintln!(r#"{{"kind":"log","level":"info","msg":"hello invoked","who":"{principal}"}}"#);
@@ -127,7 +141,7 @@ async fn handle_tool_call(
         }
     };
 
-    // 3. Return a canonical A2UI surface (references/02). Triton builds
+    // 4. Return a canonical A2UI surface (references/02). Triton builds
     //    v0.8 / v0.9 / a chat PlatformMessage from this — we do NOT emit
     //    the versioned wire shape ourselves. The narration carries the
     //    greeting; the button lets any frontend re-invoke us.
@@ -143,6 +157,53 @@ async fn handle_tool_call(
         }
     });
     (StatusCode::OK, Json(surface)).into_response()
+}
+
+/// The `upstream` identity-resolution strategy resolver tool (FR-I-7 /
+/// `doc/upstream-agent-contract.md` §5). A chat adapter with
+/// `identity.kind: upstream` and `resolver_tool: resolve_identity`
+/// delegates sender resolution here: Triton calls us with
+/// `{ "platform": "<channel>", "sender": "<platform sender id>" }`, and
+/// we MUST return `{ "sub", "scopes", "tenant" }` for a resolved
+/// subject. To signal "unknown — reject", refuse with a non-2xx (or an
+/// empty `sub`/`tenant`): Triton rejects the inbound `401` and never
+/// dispatches the command tool. A real resolver would look the sender up
+/// in its own store; this demo mints a stable per-sender subject so
+/// unknown senders flow into onboarding as a guest principal (the Carl
+/// use case), and refuses any sender prefixed `blocked` to exercise the
+/// rejection path.
+fn resolve_identity(args: &Value) -> impl IntoResponse {
+    let platform = args.get("platform").and_then(Value::as_str).unwrap_or("");
+    let sender = args.get("sender").and_then(Value::as_str).unwrap_or("");
+    eprintln!(
+        r#"{{"kind":"log","level":"info","msg":"resolve_identity invoked","platform":"{platform}","sender":"{sender}"}}"#
+    );
+
+    if sender.is_empty() || sender.starts_with("blocked") {
+        // Unknown/blocked → refuse. Triton maps any resolver failure to a
+        // 401 inbound rejection (no guessed principal ever reaches the
+        // command tool).
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "unresolved" })),
+        )
+            .into_response();
+    }
+
+    // Resolved. The `sub` is the subject the command dispatch then runs
+    // as (it appears as `who` in Triton's audit). `scopes`/`tenant` are
+    // carried in Triton's audit and per-tenant fair-share, though only
+    // `sub` reaches the upstream bearer today (§3 / issue #110).
+    let prefix = match platform {
+        "whatsapp" => "wa",
+        other => other,
+    };
+    let resolved = json!({
+        "sub": format!("{prefix}:{sender}"),
+        "scopes": ["chat"],
+        "tenant": "demo",
+    });
+    (StatusCode::OK, Json(resolved)).into_response()
 }
 
 /// Returns the verified subject, or an error reason.
