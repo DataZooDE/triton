@@ -120,6 +120,10 @@ impl UpstreamDispatch for StaticUpstream {
             .http
             .post(format!("http://{ep}/"))
             .bearer_auth(&bearer)
+            // Contract parity with the Consul-mode router (#101): the
+            // informational tool-name header rides every dispatch so
+            // multi-tool agents can route without sniffing the body.
+            .header("X-Triton-Tool", tool)
             .json(&args)
             .send()
             .await

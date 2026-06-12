@@ -61,4 +61,60 @@ async fn static_upstream_dispatch_no_hashicorp() {
 
     // The agent saw the static dev-token (no Vault swap happened).
     assert_eq!(agent.bearers_seen()[0], "dev-token");
+
+    // Contract parity with the Consul-mode router (#101): static
+    // dispatch carries the informational `X-Triton-Tool` header too,
+    // so an agent serving several tools can route without parsing
+    // the args body.
+    assert_eq!(
+        agent.tools_seen()[0].as_deref(),
+        Some("assistant"),
+        "static upstream dispatch must carry X-Triton-Tool"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn static_upstream_shadows_inprocess_tool() {
+    // When TRITON_STATIC_UPSTREAMS names a tool that would also be
+    // registered in-process (`echo`), the in-process registration is
+    // skipped so dispatch falls through to the upstream router —
+    // otherwise the static map entry would be silently unreachable
+    // (the dispatcher prefers in-process tools).
+    let agent = FakeAgent::start_echoing().await;
+
+    let env = HashMap::from([
+        ("TRITON_ENV".into(), "nonprod".into()),
+        (
+            "TRITON_STATIC_UPSTREAMS".into(),
+            format!("echo={}", agent.host_port()),
+        ),
+    ]);
+    let triton = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    let resp: Value = reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/echo"))
+        .bearer_auth("dev-token")
+        .json(&json!({ "message": "shadow-1" }))
+        .send()
+        .await
+        .expect("POST /v1/tools/echo")
+        .json()
+        .await
+        .expect("json");
+    // The upstream FakeAgent wraps the args in `echoed`; the
+    // in-process tool would have answered `{"echo": "shadow-1"}`.
+    assert_eq!(
+        resp["result"]["echoed"]["message"], "shadow-1",
+        "echo must dispatch to the static upstream, not in-process: {resp}"
+    );
+    assert_eq!(agent.hits(), 1, "the upstream agent must be hit");
+
+    // Boot logged the shadowing decision.
+    assert!(
+        triton
+            .stdout_snapshot()
+            .iter()
+            .any(|l| l.contains("shadowed by static upstream")),
+        "expected an info line about the skipped in-process tool"
+    );
 }

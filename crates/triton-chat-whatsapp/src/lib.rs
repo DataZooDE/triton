@@ -10,8 +10,9 @@
 //!    the `X-Hub-Signature-256: sha256=<hex>` HMAC over the raw
 //!    body using the configured app secret (FR-I-8 / M-SIG-1),
 //!    parses Meta's nested `entry[*].changes[*].value.messages[]`
-//!    envelope, resolves `messages[i].from` against the manifest's
-//!    sender_table (FR-I-7), and dispatches a tool.
+//!    envelope, resolves `messages[i].from` per the manifest's
+//!    identity strategy — `sender_table` lookup or an `upstream`
+//!    resolver tool (FR-I-7) — and dispatches a tool.
 //! 2. Verify handshake (`GET /<adapter-name>/webhook`) — Meta's
 //!    one-time subscription probe. We echo the supplied
 //!    `hub.challenge` plain-text when the presented
@@ -78,6 +79,33 @@ pub struct SenderClaims {
     pub tenant: String,
 }
 
+/// How this adapter resolves an inbound sender to a `Principal`.
+/// Mirrors google_chat's `IdentityMode` (FR-I-7).
+enum IdentityMode {
+    /// Operator-enumerated `wa_id` → claims. Unknown sender = 401.
+    SenderTable(HashMap<String, SenderClaims>),
+    /// Delegate resolution to a resolver tool reached through the
+    /// upstream router (FR-I-7). The adapter calls `resolver_tool`
+    /// with `{platform, sender}`; the tool returns `{sub, scopes,
+    /// tenant}`. A resolver error rejects the inbound.
+    Upstream { resolver_tool: String },
+}
+
+/// Protocol label for the resolver-tool dispatch under the `upstream`
+/// identity strategy. Distinct from [`PROTOCOL`] so the resolve call's
+/// audit lines never blur with the real command's (mirrors
+/// google_chat's `PROTOCOL_RESOLVE`).
+const PROTOCOL_RESOLVE: &str = "messenger:whatsapp:identity";
+
+/// Principal shape the `upstream` resolver tool returns.
+#[derive(Debug, Deserialize)]
+struct ResolvedPrincipal {
+    sub: String,
+    #[serde(default)]
+    scopes: Vec<String>,
+    tenant: String,
+}
+
 /// Configuration for the outbound courier half. Default base is
 /// `https://graph.facebook.com`; tests override via
 /// `TRITON_WHATSAPP_API_BASE` to point at the in-repo fake.
@@ -109,7 +137,12 @@ pub struct WhatsAppAdapter {
     /// Phone-number ID embedded in the outbound URL path
     /// (`/v18.0/{phone_number_id}/messages`). Per-bot routing id.
     phone_number_id: String,
-    sender_table: HashMap<String, SenderClaims>,
+    /// FR-I-7 sender resolution strategy: `sender_table` (static map)
+    /// or `upstream` (resolver tool through the upstream router).
+    identity: IdentityMode,
+    /// Manifest `tool`: where plain inbound text dispatches (default
+    /// `echo`). Commands (`/narrate` etc.) keep their special routes.
+    inbound_tool: String,
     dispatcher: Arc<Dispatcher>,
     courier: CourierClient,
     /// NFR-P-3 first tier: adapter-wide DoS floor. See the matching
@@ -168,9 +201,12 @@ impl WhatsAppAdapter {
                 adapter.inbound.signature
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
+        if !matches!(
+            adapter.identity.kind,
+            IdentityKind::SenderTable | IdentityKind::Upstream
+        ) {
             return Err(BuildError::Unsupported(format!(
-                "whatsapp adapter requires `identity.kind: sender_table`; got {:?}",
+                "whatsapp adapter supports `identity.kind: sender_table` or `upstream`; got {:?}",
                 adapter.identity.kind
             )));
         }
@@ -219,17 +255,61 @@ impl WhatsAppAdapter {
             None => return Err(BuildError::MissingCredential("outbound.phone_number_id")),
         };
 
-        let table_field = adapter
-            .identity
-            .credentials
-            .get("table")
-            .ok_or(BuildError::MissingCredential("identity.table"))?;
-        let table_json = resolver
-            .resolve(table_field)
-            .await
-            .map_err(|e| BuildError::Resolve("identity.table", e))?;
-        let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+        let identity = match adapter.identity.kind {
+            IdentityKind::SenderTable => {
+                let table_field = adapter
+                    .identity
+                    .credentials
+                    .get("table")
+                    .ok_or(BuildError::MissingCredential("identity.table"))?;
+                let table_json = resolver
+                    .resolve(table_field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("identity.table", e))?;
+                let table: HashMap<String, SenderClaims> = serde_json::from_str(&table_json)
+                    .map_err(|e| BuildError::TableParse(e.to_string()))?;
+                IdentityMode::SenderTable(table)
+            }
+            IdentityKind::Upstream => {
+                let field = adapter
+                    .identity
+                    .credentials
+                    .get("resolver_tool")
+                    .ok_or(BuildError::MissingCredential("identity.resolver_tool"))?;
+                let resolver_tool = resolver
+                    .resolve(field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("identity.resolver_tool", e))?;
+                if resolver_tool.trim().is_empty() {
+                    return Err(BuildError::Unsupported(
+                        "identity.resolver_tool must be non-empty".into(),
+                    ));
+                }
+                // The resolver MUST be an upstream tool (FR-I-7
+                // "reached through the upstream router"). If its name
+                // collides with an in-process tool, dispatcher.invoke
+                // would run that locally and silently bypass the
+                // router + the per-call upstream token. Refuse at boot
+                // (mirrors google_chat).
+                if dispatcher
+                    .descriptors()
+                    .iter()
+                    .any(|d| d.name == resolver_tool)
+                {
+                    return Err(BuildError::Unsupported(format!(
+                        "identity.resolver_tool `{resolver_tool}` collides with an in-process \
+                         tool; the upstream resolver must be a distinct upstream agent"
+                    )));
+                }
+                IdentityMode::Upstream { resolver_tool }
+            }
+            // Guarded above; unreachable for other kinds.
+            other => {
+                return Err(BuildError::Unsupported(format!(
+                    "whatsapp adapter supports `identity.kind: sender_table` or `upstream`; got {other:?}"
+                )));
+            }
+        };
 
         // FR-L-6 / NFR-S-5: resolve at boot; a bad Vault ref must fail
         // closed at startup. #94 uses this key to sign the interactive
@@ -264,7 +344,8 @@ impl WhatsAppAdapter {
             verify_token,
             access_token,
             phone_number_id,
-            sender_table,
+            identity,
+            inbound_tool: adapter.tool.clone(),
             dispatcher,
             courier,
             rate_limit,
@@ -747,14 +828,38 @@ async fn process_message(
     sender_key: &str,
     text: &str,
 ) -> Result<(), Response> {
-    let Some(claims) = adapter.sender_table.get(sender_key) else {
-        record_rejection(
-            adapter,
-            "-",
-            "-",
-            TritonError::Auth(format!("unknown sender {sender_key}")),
-        );
-        return Err((StatusCode::UNAUTHORIZED, "unknown sender").into_response());
+    // FR-I-7 sender resolution → (sub, scopes, tenant).
+    let (sub, scopes, tenant) = match &adapter.identity {
+        IdentityMode::SenderTable(table) => match table.get(sender_key) {
+            Some(claims) => (
+                claims.sub.clone(),
+                claims.scopes.clone(),
+                claims.tenant.clone(),
+            ),
+            None => {
+                record_rejection(
+                    adapter,
+                    "-",
+                    "-",
+                    TritonError::Auth(format!("unknown sender {sender_key}")),
+                );
+                return Err((StatusCode::UNAUTHORIZED, "unknown sender").into_response());
+            }
+        },
+        // Delegate to the resolver tool reached through the upstream
+        // router; any failure rejects the inbound — never a guessed
+        // principal (mirrors google_chat).
+        IdentityMode::Upstream { resolver_tool } => {
+            match resolve_via_upstream(&adapter.dispatcher, resolver_tool, sender_key).await {
+                Ok(p) => p,
+                Err(e) => {
+                    record_rejection(adapter, "-", "-", e);
+                    return Err(
+                        (StatusCode::UNAUTHORIZED, "identity resolution failed").into_response()
+                    );
+                }
+            }
+        }
     };
 
     // #94: a verified inbound message opens this recipient's 24-hour
@@ -763,14 +868,14 @@ async fn process_message(
 
     // NFR-P-3 second tier: per-tenant fair-share, keyed by the
     // verified tenant id, not the platform `wa_id`.
-    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&claims.tenant) {
+    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&tenant) {
         record_rejection(
             adapter,
-            &claims.sub,
-            &claims.tenant,
+            &sub,
+            &tenant,
             TritonError::RateLimited(format!(
-                "tenant `{}` rate limit hit on adapter `{}`; retry in {:.2}s",
-                claims.tenant, adapter.name, retry_after
+                "tenant `{tenant}` rate limit hit on adapter `{}`; retry in {retry_after:.2}s",
+                adapter.name
             )),
         );
         let secs = retry_after.ceil().max(1.0) as u64;
@@ -783,41 +888,40 @@ async fn process_message(
     }
 
     let principal = Principal {
-        sub: claims.sub.clone(),
-        scopes: claims.scopes.clone(),
-        tenant: claims.tenant.clone(),
+        sub,
+        scopes,
+        tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
     };
 
     // Command parser mirrors Telegram's `route_command`: `/<tool>
     // <rest>` routes to `tool` with `{ subject: rest }`; anything
-    // else falls through to `echo` with the whole text as `{
-    // message: text }`. Keeps both tool shapes exercised through
-    // the surface mapper.
-    let (tool_name, args) = route_command(text);
+    // else falls through to the manifest-configured `tool` (default
+    // `echo`) with the whole text as `{ message: text }`.
+    let (tool_name, args) = route_command(text, &adapter.inbound_tool);
     let principal_for_post = principal.clone();
     let to = sender_key.to_string();
     let result = adapter
         .dispatcher
-        .invoke(tool_name, args, principal, PROTOCOL)
+        .invoke(&tool_name, args, principal, PROTOCOL)
         .await;
     match result {
         Ok(dispatch) => match render_dispatch_result(&dispatch.result, &adapter.correlation_key) {
             Ok(rendered) => {
-                log_deferrals(tool_name, &rendered);
-                post_back(adapter, &principal_for_post, tool_name, &to, rendered).await;
+                log_deferrals(&tool_name, &rendered);
+                post_back(adapter, &principal_for_post, &tool_name, &to, rendered).await;
                 Ok(())
             }
             Err(surface_mapper::RenderError::EmptyAfterRender) => {
                 tracing::warn!(
-                    tool = tool_name,
+                    tool = %tool_name,
                     "whatsapp surface mapper: empty surface (no renderable components); skipping post-back",
                 );
                 let provider =
                     TritonError::Provider("whatsapp surface mapper: empty surface".into());
                 adapter.dispatcher.record_post(
-                    tool_name,
+                    &tool_name,
                     PROTOCOL,
                     &principal_for_post,
                     0,
@@ -877,21 +981,65 @@ fn log_deferrals(tool_name: &str, rendered: &RenderedMessage) {
     }
 }
 
-fn route_command(text: &str) -> (&'static str, Value) {
+/// Resolve a sender to `(sub, scopes, tenant)` by invoking the
+/// `resolver_tool` through the upstream router (FR-I-7 `upstream`).
+/// The resolver receives `{platform, sender}` and returns `{sub,
+/// scopes, tenant}`. Any failure (empty sender, resolver error,
+/// malformed reply) is an `Auth` error so the inbound is rejected
+/// rather than dispatched with a guessed principal.
+///
+/// The resolver call is itself a dispatch: it emits a `phase:
+/// dispatch` audit line under [`PROTOCOL_RESOLVE`] plus the upstream
+/// router's `phase: upstream` line, both under the bootstrap
+/// principal's trace_id — distinct from the real command's audit
+/// pair. Ported from google_chat's `resolve_via_upstream`.
+async fn resolve_via_upstream(
+    dispatcher: &Dispatcher,
+    resolver_tool: &str,
+    sender_key: &str,
+) -> Result<(String, Vec<String>, String), TritonError> {
+    if sender_key.is_empty() {
+        return Err(TritonError::Auth(
+            "empty sender for upstream resolver".into(),
+        ));
+    }
+    let bootstrap = Principal {
+        sub: "identity-resolver".to_string(),
+        scopes: vec!["resolve".to_string()],
+        tenant: "system".to_string(),
+        raw_token: String::new(),
+        trace_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let args = json!({ "platform": "whatsapp", "sender": sender_key });
+    let dispatch = dispatcher
+        .invoke(resolver_tool, args, bootstrap, PROTOCOL_RESOLVE)
+        .await
+        .map_err(|e| TritonError::Auth(format!("identity resolver `{resolver_tool}`: {e}")))?;
+    let resolved: ResolvedPrincipal = serde_json::from_value(dispatch.result)
+        .map_err(|e| TritonError::Auth(format!("resolver reply not {{sub,scopes,tenant}}: {e}")))?;
+    if resolved.sub.trim().is_empty() || resolved.tenant.trim().is_empty() {
+        return Err(TritonError::Auth(
+            "resolver returned empty sub or tenant".into(),
+        ));
+    }
+    Ok((resolved.sub, resolved.scopes, resolved.tenant))
+}
+
+fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     if let Some(rest) = text.strip_prefix('/') {
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
         match tool {
-            "narrate" => return ("narrate", json!({ "subject": subject })),
+            "narrate" => return ("narrate".to_string(), json!({ "subject": subject })),
             // PR 38: dev-only command exercising the rasterizer
             // wiring. Same `dev-token` gate as the underlying
             // `demo_panel` tool so production builds don't reserve
             // a route for an unregistered tool.
             #[cfg(feature = "dev-token")]
-            "demo" => return ("demo_panel", json!({})),
+            "demo" => return ("demo_panel".to_string(), json!({})),
             _ => {}
         }
     }
-    ("echo", json!({ "message": text }))
+    (default_tool.to_string(), json!({ "message": text }))
 }
 
 fn render_dispatch_result(
