@@ -153,7 +153,29 @@ async fn main() -> std::io::Result<()> {
     });
 
     let metrics = Arc::new(Metrics::new());
-    let registry = Arc::new(build_registry());
+    // Tool names claimed by `TRITON_STATIC_UPSTREAMS` (only honoured
+    // when no Consul/Vault is configured — the same gate as the
+    // static-upstream wiring below). The dispatcher prefers in-process
+    // tools, so registering one under a name the static map claims
+    // would silently shadow the upstream agent and make the mapped
+    // endpoint unreachable; those names are skipped at registration.
+    let static_upstream_tools: std::collections::HashSet<String> =
+        if settings.consul_url.is_none() && settings.vault_url.is_none() {
+            std::env::var("TRITON_STATIC_UPSTREAMS")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|spec| {
+                    spec.split(',')
+                        .filter_map(|kv| kv.split_once('='))
+                        .map(|(k, _)| k.trim().to_string())
+                        .filter(|k| !k.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            std::collections::HashSet::new()
+        };
+    let registry = Arc::new(build_registry(&static_upstream_tools));
     let mut dispatcher =
         Dispatcher::new(registry, settings.env.clone()).with_metrics(metrics.clone());
 
@@ -1325,22 +1347,36 @@ async fn main() -> std::io::Result<()> {
     serve_result
 }
 
-fn build_registry() -> ToolRegistry {
+/// Build the in-process tool registry, skipping any tool whose name is
+/// claimed by a static upstream (`TRITON_STATIC_UPSTREAMS`). The
+/// dispatcher prefers in-process tools over the upstream router, so a
+/// shadowed registration would make the mapped agent unreachable.
+fn build_registry(shadowed: &std::collections::HashSet<String>) -> ToolRegistry {
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(tools::Echo));
+    let mut register = |tool: Arc<dyn triton_core::Tool>| {
+        if shadowed.contains(tool.name()) {
+            tracing::info!(
+                tool = tool.name(),
+                "in-process tool shadowed by static upstream; skipping registration"
+            );
+            return;
+        }
+        registry.register(tool);
+    };
+    register(Arc::new(tools::Echo));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::Delay));
-    registry.register(Arc::new(tools::Narrate));
+    register(Arc::new(tools::Delay));
+    register(Arc::new(tools::Narrate));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::DemoPanel));
+    register(Arc::new(tools::DemoPanel));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::EmptySurface));
+    register(Arc::new(tools::EmptySurface));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::FormOnlyDemo));
+    register(Arc::new(tools::FormOnlyDemo));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::FormOnlyDemoMulti));
+    register(Arc::new(tools::FormOnlyDemoMulti));
     #[cfg(feature = "dev-token")]
-    registry.register(Arc::new(tools::SubmittedForm));
+    register(Arc::new(tools::SubmittedForm));
     registry
 }
 
