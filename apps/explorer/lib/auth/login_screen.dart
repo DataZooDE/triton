@@ -46,15 +46,7 @@ class LoginScreen extends ConsumerWidget {
                     Text('Discovering Triton...'),
                   ],
                 ),
-                error: (e, _) => Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(Icons.error_outline,
-                        color: Theme.of(context).colorScheme.error, size: 40),
-                    const SizedBox(height: 12),
-                    Text('Could not reach Triton: $e'),
-                  ],
-                ),
+                error: (e, _) => _BootstrapErrorPanel(error: e),
               ),
             ),
           ),
@@ -62,6 +54,81 @@ class LoginScreen extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// Bootstrap failure must never be a dead end: the whole app blocks
+/// on `/v1/runtime`, so when the persisted base URL is wrong (stale
+/// port, trailing slash pasted from an address bar, …) the user
+/// can't reach Settings to fix it. Offer the fix inline instead.
+class _BootstrapErrorPanel extends ConsumerStatefulWidget {
+  const _BootstrapErrorPanel({required this.error});
+  final Object error;
+
+  @override
+  ConsumerState<_BootstrapErrorPanel> createState() =>
+      _BootstrapErrorPanelState();
+}
+
+class _BootstrapErrorPanelState extends ConsumerState<_BootstrapErrorPanel> {
+  late final TextEditingController _baseUrlCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _baseUrlCtrl = TextEditingController(text: ref.read(tritonBaseUrlProvider));
+  }
+
+  @override
+  void dispose() {
+    _baseUrlCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _saveAndRetry() async {
+    await setTritonBaseUrl(ref, _baseUrlCtrl.text);
+    // Reflect the normalised form (trailing slashes stripped) so what
+    // the user sees is what will be requested.
+    _baseUrlCtrl.text = ref.read(tritonBaseUrlProvider);
+    ref.invalidate(runtimeConfigProvider);
+  }
+
+  @override
+  Widget build(BuildContext context) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Icon(Icons.error_outline,
+                color: Theme.of(context).colorScheme.error, size: 40),
+          ),
+          const SizedBox(height: 12),
+          Text('Could not reach Triton: ${widget.error}'),
+          const SizedBox(height: 16),
+          const Text(
+            'Check the Triton base URL below — it must be the REST '
+            'adapter root (e.g. http://127.0.0.1:8081 in local dev).',
+            style: TextStyle(fontSize: 12),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _baseUrlCtrl,
+            decoration: const InputDecoration(
+              labelText: 'Triton base URL',
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => _saveAndRetry(),
+          ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton.icon(
+              icon: const Icon(Icons.refresh),
+              label: const Text('Save & retry'),
+              onPressed: _saveAndRetry,
+            ),
+          ),
+        ],
+      );
 }
 
 class _NotRegistered extends StatelessWidget {

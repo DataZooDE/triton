@@ -20,15 +20,30 @@ final tritonBaseUrlProvider = StateProvider<String>((ref) {
 
 const _kPrefsBaseUrlKey = 'triton.baseUrl';
 
+/// Canonical form of a Triton base URL: trimmed, no trailing slashes.
+/// Every consumer string-concatenates paths onto it
+/// (`'$base/v1/runtime'`), so a trailing slash — the shape every
+/// browser address bar produces on copy-paste — yields `//v1/...`,
+/// which Triton's router 404s. Normalise at BOTH ends (save and load)
+/// so a value persisted by an older build heals on next boot.
+String normalizeBaseUrl(String url) {
+  var out = url.trim();
+  while (out.endsWith('/')) {
+    out = out.substring(0, out.length - 1);
+  }
+  return out;
+}
+
 /// Persist a new base URL and update the in-memory provider. Returns
 /// the new value so callers can update a controller too.
 Future<void> setTritonBaseUrl(WidgetRef ref, String url) async {
-  ref.read(tritonBaseUrlProvider.notifier).state = url;
+  final normalized = normalizeBaseUrl(url);
+  ref.read(tritonBaseUrlProvider.notifier).state = normalized;
   final prefs = await SharedPreferences.getInstance();
-  if (url.isEmpty) {
+  if (normalized.isEmpty) {
     await prefs.remove(_kPrefsBaseUrlKey);
   } else {
-    await prefs.setString(_kPrefsBaseUrlKey, url);
+    await prefs.setString(_kPrefsBaseUrlKey, normalized);
   }
 }
 
@@ -36,8 +51,8 @@ Future<void> setTritonBaseUrl(WidgetRef ref, String url) async {
 /// when nothing has been saved. Called once at app start.
 Future<String> loadInitialBaseUrl(String fallback) async {
   final prefs = await SharedPreferences.getInstance();
-  final saved = prefs.getString(_kPrefsBaseUrlKey);
-  if (saved != null && saved.isNotEmpty) {
+  final saved = normalizeBaseUrl(prefs.getString(_kPrefsBaseUrlKey) ?? '');
+  if (saved.isNotEmpty) {
     return saved;
   }
 
@@ -52,8 +67,8 @@ Future<String> loadInitialBaseUrl(String fallback) async {
           .toString();
       final resp = await dio.get<Map<String, dynamic>>(versionUrl);
       if (resp.statusCode == 200 && resp.data != null) {
-        final apiUrl = resp.data!['api_url'] as String?;
-        if (apiUrl != null && apiUrl.isNotEmpty) {
+        final apiUrl = normalizeBaseUrl(resp.data!['api_url'] as String? ?? '');
+        if (apiUrl.isNotEmpty) {
           return apiUrl;
         }
       }
@@ -62,7 +77,7 @@ Future<String> loadInitialBaseUrl(String fallback) async {
     }
   }
 
-  return fallback;
+  return normalizeBaseUrl(fallback);
 }
 
 final dioProvider = Provider<Dio>((ref) {
