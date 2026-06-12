@@ -75,6 +75,9 @@ void main() {
 
     // Select the tool, opt into A2UI v0.9 (REST is the default protocol),
     // and send.
+    // Demo (non-upstream) tools are hidden by default — reveal first.
+    await tester.tap(find.text('Show demo tools'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('narrate').first);
     await tester.pumpAndSettle();
     await tester.tap(find.text('v0.9'));

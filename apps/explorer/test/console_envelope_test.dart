@@ -75,6 +75,9 @@ void main() {
         .controller!
         .text;
 
+    // Demo (non-upstream) tools are hidden by default — reveal first.
+    await tester.tap(find.text('Show demo tools'));
+    await tester.pumpAndSettle();
     await tester.tap(find.text('hello').first);
     await tester.pumpAndSettle();
 

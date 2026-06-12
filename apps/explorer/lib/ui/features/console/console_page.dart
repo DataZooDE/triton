@@ -61,6 +61,12 @@ class ConsolePage extends ConsumerStatefulWidget {
 
 class _ConsolePageState extends ConsumerState<ConsolePage> {
   ToolDescriptor? _selected;
+
+  /// Triton's built-in demo/debug tools (`upstream: false` in
+  /// /v1/tools — echo, delay, demo_panel, …) are noise when the
+  /// gateway fronts a real agent: hidden unless this tick is set.
+  bool _showDemoTools = false;
+
   _Protocol _protocol = _Protocol.rest;
   String? _a2uiVersion;
 
@@ -502,7 +508,9 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
             });
           }
 
-          final sortedList = List<ToolDescriptor>.from(list)
+          final hasDemoTools = list.any((t) => !t.upstream);
+          final sortedList = List<ToolDescriptor>.from(
+              _showDemoTools ? list : list.where((t) => t.upstream))
             ..sort((a, b) {
               if (a.upstream && !b.upstream) return -1;
               if (!a.upstream && b.upstream) return 1;
@@ -546,6 +554,19 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                       ),
                     ),
                     const Divider(height: 1),
+                    if (hasDemoTools)
+                      CheckboxListTile(
+                        key: const Key('show-demo-tools'),
+                        dense: true,
+                        controlAffinity: ListTileControlAffinity.leading,
+                        contentPadding:
+                            const EdgeInsets.symmetric(horizontal: 8),
+                        title: const Text('Show demo tools',
+                            style: TextStyle(fontSize: 12)),
+                        value: _showDemoTools,
+                        onChanged: (v) =>
+                            setState(() => _showDemoTools = v ?? false),
+                      ),
                     Expanded(
                       child: ListView.builder(
                         itemCount: sortedList.length,
