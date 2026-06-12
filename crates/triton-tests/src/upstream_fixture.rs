@@ -384,6 +384,7 @@ struct FakeAgentState {
     /// `X-Triton-Tool` header per request (`None` when absent) — lets
     /// tests pin the dispatch-header contract for both upstream modes.
     tools_seen: Mutex<Vec<Option<String>>>,
+    bodies_seen: Mutex<Vec<Value>>,
     hits: Mutex<u32>,
     failures_remaining: Mutex<u32>,
     /// Fixed response body for `AgentMode::Returning`.
@@ -423,6 +424,7 @@ impl FakeAgent {
             mode: Mutex::new(mode),
             bearers_seen: Mutex::new(Vec::new()),
             tools_seen: Mutex::new(Vec::new()),
+            bodies_seen: Mutex::new(Vec::new()),
             hits: Mutex::new(0),
             failures_remaining: Mutex::new(fail_first),
             fixed_response,
@@ -455,6 +457,12 @@ impl FakeAgent {
         self.state.tools_seen.lock().unwrap().clone()
     }
 
+    /// JSON bodies of every request this agent received, in order.
+    /// Unparseable bodies are recorded as `Value::Null`.
+    pub fn bodies_seen(&self) -> Vec<Value> {
+        self.state.bodies_seen.lock().unwrap().clone()
+    }
+
     pub fn hits(&self) -> u32 {
         *self.state.hits.lock().unwrap()
     }
@@ -481,6 +489,8 @@ async fn handler(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     state.tools_seen.lock().unwrap().push(tool);
+    let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    state.bodies_seen.lock().unwrap().push(value.clone());
 
     let mode = *state.mode.lock().unwrap();
     let should_fail = match mode {
@@ -509,6 +519,5 @@ async fn handler(
         return Json(body).into_response();
     }
 
-    let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     Json(json!({ "echoed": value })).into_response()
 }

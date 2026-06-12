@@ -1,0 +1,34 @@
+# Manifest-configurable inbound tool: plain chat text on this adapter
+# dispatches to `tool: assistant` — an upstream agent reached through
+# the (static) upstream router — instead of the in-process `echo`.
+# Commands (/narrate etc.) keep their special routes. Literal
+# credentials (dev mode only).
+version: "0.2"
+
+adapters:
+  whatsapp:
+    kind: whatsapp_cloud
+    tool: assistant
+    inbound:
+      kind: webhook
+      signature: hmac256
+      secret: whatsapp-app-secret-for-test
+      verify_token: meta-verify-token-for-test
+    outbound:
+      kind: rest_api
+      token: whatsapp-access-token-for-test
+      phone_number_id: "100200300"
+    identity:
+      kind: sender_table
+      table: '{"491701234567":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: whatsapp-correlation-key-for-test
