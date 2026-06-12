@@ -308,11 +308,12 @@ async fn main() -> std::io::Result<()> {
                             .clone()
                             .unwrap_or_else(|| format!("agents-{}", settings.env));
                         let tenant = settings.static_upstream_tenant.clone().unwrap_or_default();
+                        let forward_principal = settings.static_upstream_forward_principal;
                         tracing::warn!(
-                            spec = %spec, aud = %aud, tenant = %tenant,
+                            spec = %spec, aud = %aud, tenant = %tenant, forward_principal,
                             "TRITON_STATIC_UPSTREAMS set: dispatching by name with signed RS256 JWTs (no Consul/Vault)"
                         );
-                        su.with_signer(signer.clone(), aud, tenant)
+                        su.with_signer(signer.clone(), aud, tenant, forward_principal)
                     } else {
                         tracing::warn!(
                             spec = %spec,

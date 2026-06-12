@@ -160,6 +160,10 @@ pub struct Settings {
     /// forwards the token to (e.g. Escurel) may key its tenant off this claim;
     /// unset → no `tenant` claim is added.
     pub static_upstream_tenant: Option<String>,
+    /// #110: forward the resolved sender's `tenant` + `scope` on the minted
+    /// static-upstream token (instead of `sub`-only + the deployment tenant).
+    /// Default `false` — the default carriage contract is unchanged.
+    pub static_upstream_forward_principal: bool,
 }
 
 impl Settings {
@@ -507,6 +511,16 @@ struct Cli {
     /// downstream like Escurel may key its tenant off it). Unset → no claim.
     #[arg(long, env = "TRITON_STATIC_UPSTREAM_TENANT")]
     static_upstream_tenant: Option<String>,
+
+    /// #110: forward the resolved sender's `tenant` + `scope` on the minted
+    /// static-upstream token instead of `sub`-only. Default off so the
+    /// default upstream-agent contract is unchanged.
+    #[arg(
+        long,
+        env = "TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL",
+        default_value_t = false
+    )]
+    static_upstream_forward_principal: bool,
 }
 
 impl From<Cli> for Settings {
@@ -525,6 +539,7 @@ impl From<Cli> for Settings {
             outbound_issuer: c.outbound_issuer,
             outbound_jwks_url: c.outbound_jwks_url,
             static_upstream_tenant: c.static_upstream_tenant,
+            static_upstream_forward_principal: c.static_upstream_forward_principal,
             consul_url: c.consul_url,
             vault_url: c.vault_url,
             vault_token: c.vault_token,
