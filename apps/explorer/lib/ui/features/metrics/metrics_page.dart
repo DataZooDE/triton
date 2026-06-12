@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../providers/api_provider.dart';
 import '../../../widgets/panel_help.dart';
 import '../../../widgets/prometheus_parser.dart';
+import '../../../api/friendly_error.dart';
 
 /// Live Prometheus view backed by `GET /v1/metrics`. The substrate
 /// scrapes the unauthenticated tailnet-only `:9090` listener; this
@@ -45,7 +46,7 @@ class MetricsPage extends ConsumerWidget {
                   color: Theme.of(context).colorScheme.errorContainer,
                   child: Padding(
                     padding: const EdgeInsets.all(16),
-                    child: Text('Could not load /v1/metrics: $e'),
+                    child: Text(friendlyApiError('Could not load /v1/metrics', e)),
                   ),
                 ),
               ),

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../providers/api_provider.dart';
 import '../../../widgets/json_viewer.dart';
 import '../../../widgets/panel_help.dart';
+import '../../../api/friendly_error.dart';
 
 /// Renders the loaded `adapter.yaml`. The endpoint returns
 /// credentials redacted (vault refs are echoed verbatim; literal
@@ -51,7 +52,7 @@ class ManifestPage extends ConsumerWidget {
             color: Theme.of(context).colorScheme.errorContainer,
             child: Padding(
               padding: const EdgeInsets.all(16),
-              child: Text('Could not load /v1/manifest: $e'),
+              child: Text(friendlyApiError('Could not load /v1/manifest', e)),
             ),
           ),
         ),

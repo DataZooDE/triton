@@ -22,6 +22,10 @@ class TokenNotifier extends StateNotifier<String?> {
     return TokenNotifier(prefs.getString(_key));
   }
 
+  /// Current bearer, readable outside the provider graph (boot-time
+  /// seeding in `main()` runs before any `ref` exists).
+  String? get value => state;
+
   Future<void> set(String? token) async {
     state = token;
     final prefs = await SharedPreferences.getInstance();
@@ -30,6 +34,21 @@ class TokenNotifier extends StateNotifier<String?> {
     } else {
       await prefs.setString(_key, token);
     }
+  }
+}
+
+/// Seed the bearer from version.json's optional `dev_token` field —
+/// the same deployment-config channel that carries `api_url`. Lets a
+/// dev stack (e.g. a local compose/script serving the bundle) hand
+/// the explorer a ready-to-use token so no manual Settings step is
+/// needed. Never overwrites a token the user pasted themselves, and
+/// a deployment that doesn't inject the field gets today's behaviour.
+Future<void> seedDevToken(
+    TokenNotifier notifier, Map<String, dynamic>? versionJson) async {
+  if ((notifier.value ?? '').isNotEmpty) return;
+  final token = (versionJson?['dev_token'] as String? ?? '').trim();
+  if (token.isNotEmpty) {
+    await notifier.set(token);
   }
 }
 

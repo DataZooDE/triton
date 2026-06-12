@@ -13,8 +13,14 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // Read persisted overrides BEFORE the first runApp build so the
   // SPA never paints the "default" URL only to swap immediately.
-  final baseUrl = await loadInitialBaseUrl(_defaultBaseUrl());
+  // version.json (same origin) is the deployment-config channel:
+  // `api_url` discovers the base URL, `dev_token` seeds the bearer
+  // on a dev stack so no manual Settings step is needed.
+  final versionJson = await fetchVersionJson();
+  final baseUrl =
+      await loadInitialBaseUrl(_defaultBaseUrl(), versionJson: versionJson);
   final tokenNotifier = await TokenNotifier.load();
+  await seedDevToken(tokenNotifier, versionJson);
   runApp(
     ProviderScope(
       overrides: [

@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../providers/api_provider.dart';
 import '../../../widgets/json_viewer.dart';
 import '../../../widgets/panel_help.dart';
+import '../../../api/friendly_error.dart';
 
 /// The **Trace** view (issue #75): one communication as a timeline,
 /// correlated by `trace_id`. Reads `GET /v1/trace/{id}` — the ordered
@@ -103,7 +104,7 @@ class _TracePageState extends ConsumerState<TracePage> {
         if (snap.hasError) {
           return Padding(
             padding: const EdgeInsets.all(24),
-            child: Text('Could not load trace: ${snap.error}'),
+            child: Text(friendlyApiError('Could not load trace', snap.error!)),
           );
         }
         final data = snap.data ?? const {};
