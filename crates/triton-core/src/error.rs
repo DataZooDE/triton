@@ -12,6 +12,14 @@ pub enum TritonError {
     #[error("auth: {0}")]
     Auth(String),
 
+    /// Authenticated, but not authorized for this action/resource
+    /// (#113 — e.g. an outbound caller targeting a recipient outside
+    /// its tenant, or missing the required scope). Distinct from `Auth`
+    /// so audit/status separate "who are you" (401) from "you may not"
+    /// (403). HTTP 403.
+    #[error("forbidden: {0}")]
+    Forbidden(String),
+
     /// Argument schema validation failed (FR-D-2). HTTP 400 /
     /// JSON-RPC -32602 / A2A `metadata.error: "validation"`.
     #[error("validation: {0}")]
@@ -45,6 +53,7 @@ impl TritonError {
     pub fn class(&self) -> &'static str {
         match self {
             Self::Auth(_) => "auth",
+            Self::Forbidden(_) => "forbidden",
             Self::Validation(_) => "validation",
             Self::Tool(_) => "tool",
             Self::Provider(_) => "provider",
@@ -81,6 +90,7 @@ impl TritonError {
         }
         match self {
             Self::Auth(_) => 401,
+            Self::Forbidden(_) => 403,
             Self::Validation(_) => 400,
             Self::Tool(_) | Self::Provider(_) => 502,
             Self::RateLimited(_) => 429,
@@ -95,6 +105,7 @@ mod tests {
     #[test]
     fn http_status_mapping_matches_architecture_8_3() {
         assert_eq!(TritonError::Auth("x".into()).http_status(), 401);
+        assert_eq!(TritonError::Forbidden("x".into()).http_status(), 403);
         assert_eq!(TritonError::Validation("x".into()).http_status(), 400);
         assert_eq!(TritonError::Provider("x".into()).http_status(), 502);
         assert_eq!(TritonError::RateLimited("x".into()).http_status(), 429);

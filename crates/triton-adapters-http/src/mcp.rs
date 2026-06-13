@@ -395,7 +395,7 @@ fn wrap_a2ui_if_requested(
 
 fn code_for(e: &TritonError) -> i32 {
     match e {
-        TritonError::Auth(_) => CODE_AUTH,
+        TritonError::Auth(_) | TritonError::Forbidden(_) => CODE_AUTH,
         TritonError::Validation(_) => CODE_INVALID_PARAMS,
         TritonError::Tool(_) | TritonError::Provider(_) => CODE_TOOL_PROVIDER,
         TritonError::RateLimited(_) => CODE_RATE_LIMITED,

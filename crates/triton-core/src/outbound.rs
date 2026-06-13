@@ -45,6 +45,19 @@ pub trait OutboundCourier: Send + Sync {
     /// Audit protocol label, e.g. `messenger:whatsapp`.
     fn protocol(&self) -> &'static str;
 
+    /// Authorize `principal` to send to `req.to` on this adapter (#113).
+    /// Runs BEFORE [`Self::deliver`] — recipient/tenant binding lives
+    /// behind the courier because only the adapter knows its identity
+    /// model (e.g. a `sender_table` maps a recipient to a tenant). MUST
+    /// return [`TritonError::Forbidden`] when the caller may not message
+    /// `req.to`. The endpoint additionally enforces a capability scope
+    /// before calling this.
+    async fn authorize(
+        &self,
+        req: &OutboundRequest,
+        principal: &Principal,
+    ) -> Result<(), TritonError>;
+
     /// Render `req` through the adapter's surface mapper and post it to
     /// the platform, emitting a `phase: post` audit record that shares
     /// `principal.trace_id`.

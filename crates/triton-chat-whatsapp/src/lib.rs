@@ -396,6 +396,33 @@ impl OutboundCourier for WhatsAppAdapter {
         PROTOCOL
     }
 
+    /// #113 recipient/tenant binding. `sender_table` adapters: `to` MUST
+    /// be a known recipient whose tenant matches the caller's — an agent
+    /// can only message its own tenant's users. `upstream` adapters have
+    /// no static table; we trust the caller's verified `tenant` (the
+    /// agent owns its tenant's users) — a deliberately weaker posture,
+    /// gated by the dedicated audience + scope at the endpoint.
+    async fn authorize(
+        &self,
+        req: &OutboundRequest,
+        principal: &Principal,
+    ) -> Result<(), TritonError> {
+        match &self.identity {
+            IdentityMode::SenderTable(table) => match table.get(&req.to) {
+                Some(claims) if claims.tenant == principal.tenant => Ok(()),
+                Some(_) => Err(TritonError::Forbidden(format!(
+                    "recipient {} is not in tenant `{}`",
+                    req.to, principal.tenant
+                ))),
+                None => Err(TritonError::Forbidden(format!(
+                    "recipient {} is not a known sender for this adapter",
+                    req.to
+                ))),
+            },
+            IdentityMode::Upstream { .. } => Ok(()),
+        }
+    }
+
     /// Deliver an agent-initiated send. With a `category` hint, Triton
     /// resolves the manifest template and posts a `type: template` body
     /// (the only thing Meta accepts outside the 24-h service window).

@@ -376,6 +376,7 @@ impl Dispatcher {
         // Reconstruct a parallel error so we can both audit and return.
         match error {
             TritonError::Auth(m) => TritonError::Auth(m.clone()),
+            TritonError::Forbidden(m) => TritonError::Forbidden(m.clone()),
             TritonError::Validation(m) => TritonError::Validation(m.clone()),
             TritonError::Tool(m) => TritonError::Tool(m.clone()),
             TritonError::Provider(m) => TritonError::Provider(m.clone()),

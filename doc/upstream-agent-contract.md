@@ -190,4 +190,11 @@ Pinned by
 - **Proactive sends** are a different surface: `POST /v1/outbound`
   (#95) with a dedicated audience — and, once #100 lands, a dedicated
   issuer so the agent can sign its own outbound tokens (mirror-image
-  static-upstream signing).
+  static-upstream signing). **Authorization (#113):** the token MUST
+  carry the `outbound:send` scope, and the recipient (`to`) MUST belong
+  to the caller's `tenant` — for `sender_table` adapters Triton checks
+  `to`'s tenant against the table, so an agent can only message its own
+  tenant's users (cross-tenant → `403`). For `identity.kind: upstream`
+  adapters there is no static table, so Triton trusts the caller's
+  verified `tenant` (the agent owns its tenant's users) — a weaker,
+  deliberate posture gated by the audience + scope.

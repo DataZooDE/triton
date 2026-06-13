@@ -29,8 +29,15 @@ use serde::Deserialize;
 use serde_json::json;
 use triton_core::{Dispatcher, OutboundCourier, OutboundRequest};
 
+use triton_core::TritonError;
+
 use crate::identity::IdentityProvider;
 use crate::rest::error_response;
+
+/// Capability scope a token MUST carry to use `/v1/outbound` (#113).
+/// The dedicated outbound audience says "this token is for the outbound
+/// surface"; this scope says "...and it may send". Both are required.
+const REQUIRED_OUTBOUND_SCOPE: &str = "outbound:send";
 
 /// Registry of adapters that accept agent-initiated sends, keyed by
 /// the adapter name from `adapter.yaml` (e.g. `whatsapp`). Built once
@@ -95,7 +102,28 @@ async fn outbound_send(
         }
     };
 
-    // 2. Resolve the target adapter's courier.
+    // 2. Authz layer 1 (#113): the token must carry the outbound
+    //    capability scope, not just the audience.
+    if !principal
+        .scopes
+        .iter()
+        .any(|s| s == REQUIRED_OUTBOUND_SCOPE)
+    {
+        let e = TritonError::Forbidden(format!(
+            "outbound send requires the `{REQUIRED_OUTBOUND_SCOPE}` scope"
+        ));
+        state.dispatcher.record_rejection(
+            "v1/outbound",
+            "rest",
+            &principal.sub,
+            &principal.tenant,
+            &principal.trace_id,
+            &e,
+        );
+        return error_response(&e, Some(&principal.trace_id));
+    }
+
+    // 3. Resolve the target adapter's courier.
     let Some(courier) = state.couriers.get(&body.adapter) else {
         return (
             StatusCode::NOT_FOUND,
@@ -107,8 +135,6 @@ async fn outbound_send(
             .into_response();
     };
 
-    // 3. Render + post through the adapter; it emits the `phase: post`
-    //    audit sharing `principal.trace_id`.
     let trace_id = principal.trace_id.clone();
     let req = OutboundRequest {
         to: body.to,
@@ -116,6 +142,23 @@ async fn outbound_send(
         category: body.category,
         variables: body.variables,
     };
+
+    // 4. Authz layer 2 (#113): recipient/tenant binding, behind the
+    //    adapter (it knows its identity model). Runs before delivery.
+    if let Err(e) = courier.authorize(&req, &principal).await {
+        state.dispatcher.record_rejection(
+            "v1/outbound",
+            "rest",
+            &principal.sub,
+            &principal.tenant,
+            &trace_id,
+            &e,
+        );
+        return error_response(&e, Some(&trace_id));
+    }
+
+    // 5. Render + post through the adapter; it emits the `phase: post`
+    //    audit sharing `principal.trace_id`.
     match courier.deliver(&req, &principal).await {
         Ok(()) => (StatusCode::ACCEPTED, Json(json!({ "trace_id": trace_id }))).into_response(),
         Err(e) => error_response(&e, Some(&trace_id)),
