@@ -1719,7 +1719,10 @@ fn telegram_status_for(e: &TritonError) -> StatusCode {
     match e {
         TritonError::Provider(_) => StatusCode::BAD_GATEWAY,
         TritonError::RateLimited(_) => StatusCode::TOO_MANY_REQUESTS,
-        TritonError::Validation(_) | TritonError::Auth(_) | TritonError::Tool(_) => StatusCode::OK,
+        TritonError::Validation(_)
+        | TritonError::Auth(_)
+        | TritonError::Forbidden(_)
+        | TritonError::Tool(_) => StatusCode::OK,
     }
 }
 

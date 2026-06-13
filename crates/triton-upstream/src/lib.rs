@@ -368,6 +368,7 @@ fn status_for(e: &TritonError) -> u16 {
     }
     match e {
         TritonError::Auth(_) => 401,
+        TritonError::Forbidden(_) => 403,
         TritonError::Validation(_) => 400,
         TritonError::Tool(_) => 502,
         TritonError::Provider(_) => 502,

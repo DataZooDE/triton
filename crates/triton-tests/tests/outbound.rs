@@ -63,14 +63,18 @@ fn env_for(issuer: &TestIssuer, whatsapp: &FakeWhatsAppApi) -> HashMap<String, S
 }
 
 fn token_with_aud(issuer: &TestIssuer, aud: &str) -> String {
+    token_full(issuer, aud, "acme", "outbound:send")
+}
+
+fn token_full(issuer: &TestIssuer, aud: &str, tenant: &str, scope: &str) -> String {
     issuer.sign_jwt(json!({
         "iss": issuer.issuer_url(),
         "sub": "carl-agent",
         "aud": aud,
         "exp": now() + 60,
         "iat": now(),
-        "tenant": "acme",
-        "scope": "outbound:send",
+        "tenant": tenant,
+        "scope": scope,
     }))
 }
 
@@ -193,6 +197,81 @@ async fn unknown_adapter_is_not_found() {
         .await
         .expect("POST /v1/outbound");
     assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cross_tenant_recipient_is_forbidden() {
+    // #113: the recipient `KNOWN_WA_ID` belongs to tenant `acme` in the
+    // sender_table; a token for tenant `globex` must not be allowed to
+    // message it, even with the outbound audience + scope. Authorization
+    // runs before delivery, so this is a 403 regardless of the service
+    // window.
+    let issuer = TestIssuer::start().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &whatsapp)).await;
+
+    let token = token_full(&issuer, OUTBOUND_AUDIENCE, "globex", "outbound:send");
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "adapter": "whatsapp",
+            "to": KNOWN_WA_ID,
+            "result": { "text": "cross-tenant" },
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+    assert_eq!(
+        resp.status(),
+        403,
+        "cross-tenant recipient must be forbidden"
+    );
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        whatsapp.captured().is_empty(),
+        "a forbidden outbound must not post to the platform"
+    );
+
+    wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "rejected" && v["result"] == "error:forbidden"
+    });
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn missing_outbound_scope_is_forbidden() {
+    // #113: the outbound audience alone is not enough — the token must
+    // also carry the `outbound:send` scope.
+    let issuer = TestIssuer::start().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &whatsapp)).await;
+
+    let token = token_full(&issuer, OUTBOUND_AUDIENCE, "acme", "chat");
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "adapter": "whatsapp",
+            "to": KNOWN_WA_ID,
+            "result": { "text": "no scope" },
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+    assert_eq!(
+        resp.status(),
+        403,
+        "missing outbound:send scope must be forbidden"
+    );
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        whatsapp.captured().is_empty(),
+        "no scope → nothing couriered"
+    );
 }
 
 /// Post a signed inbound webhook so the recipient's 24-hour service
