@@ -99,6 +99,16 @@ fn env_for(
     resolver: &FakeAgent,
     forward: bool,
 ) -> HashMap<String, String> {
+    env_for_full(whatsapp, agent, resolver, forward, None)
+}
+
+fn env_for_full(
+    whatsapp: &FakeWhatsAppApi,
+    agent: &FakeAgent,
+    resolver: &FakeAgent,
+    forward: bool,
+    scope_allowlist: Option<&str>,
+) -> HashMap<String, String> {
     let mut env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
@@ -127,6 +137,12 @@ fn env_for(
         env.insert(
             "TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL".to_string(),
             "true".to_string(),
+        );
+    }
+    if let Some(allow) = scope_allowlist {
+        env.insert(
+            "TRITON_STATIC_UPSTREAM_SCOPE_ALLOWLIST".to_string(),
+            allow.to_string(),
         );
     }
     env
@@ -179,9 +195,17 @@ async fn forward_on_carries_resolved_scope_and_tenant() {
     });
     let claims = jwt_claims(&bearer);
     assert_eq!(claims["sub"], "resolved-bob", "sub = resolved sender");
+    // #114: resolved scopes ride a NON-authoritative private claim (array),
+    // never the standard OAuth `scope`, so a downstream can't mistake
+    // resolver-derived data for granted authorization.
     assert_eq!(
-        claims["scope"], "chat reports",
-        "space-delimited resolved scopes"
+        claims["triton_sender_scopes"],
+        json!(["chat", "reports"]),
+        "resolved scopes under the private claim"
+    );
+    assert!(
+        claims.get("scope").is_none(),
+        "must NOT emit a standard OAuth `scope` claim: {claims}"
     );
     assert_eq!(claims["tenant"], "globex", "resolved sender tenant");
 }
@@ -211,15 +235,83 @@ async fn forward_off_is_sub_only_by_default() {
     });
     let claims = jwt_claims(&bearer);
     // Default contract unchanged: sub is the only per-sender claim; no
-    // `scope`, and no per-sender `tenant` (deployment tenant unset here).
+    // forwarded scopes, and no per-sender `tenant` (deployment tenant unset).
     assert_eq!(claims["sub"], "resolved-bob");
     assert!(
-        claims.get("scope").is_none(),
-        "no scope claim by default: {claims}"
+        claims.get("triton_sender_scopes").is_none() && claims.get("scope").is_none(),
+        "no forwarded scopes by default: {claims}"
     );
     assert!(
         claims.get("tenant").is_none(),
         "no per-sender tenant by default: {claims}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_on_caps_and_sanitises_resolver_scopes() {
+    // #114: a buggy/hostile resolver returning junk scopes (whitespace,
+    // over-length) must not bloat or corrupt the token — they're dropped,
+    // the clean ones survive, and the send still succeeds.
+    let long = "x".repeat(200);
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "scopes": ["chat", "has space", long, "reports"],
+        "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for(&whatsapp, &agent, &resolver, true),
+    )
+    .await;
+
+    let resp = post_inbound(&proc, UNKNOWN_WA_ID, "hi").await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let bearer = wait_for(Duration::from_secs(5), || {
+        agent.bearers_seen().into_iter().next()
+    });
+    let claims = jwt_claims(&bearer);
+    // The whitespace + over-length scopes are dropped; clean ones kept.
+    assert_eq!(
+        claims["triton_sender_scopes"],
+        json!(["chat", "reports"]),
+        "junk scopes sanitised away: {claims}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_on_applies_scope_allowlist() {
+    // #114: with an operator allowlist, only blessed scopes propagate.
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "scopes": ["chat", "admin"],
+        "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for_full(&whatsapp, &agent, &resolver, true, Some("chat")),
+    )
+    .await;
+
+    let resp = post_inbound(&proc, UNKNOWN_WA_ID, "hi").await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let bearer = wait_for(Duration::from_secs(5), || {
+        agent.bearers_seen().into_iter().next()
+    });
+    let claims = jwt_claims(&bearer);
+    assert_eq!(
+        claims["triton_sender_scopes"],
+        json!(["chat"]),
+        "only allowlisted scopes forwarded (`admin` dropped): {claims}"
     );
 }
 

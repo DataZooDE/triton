@@ -65,16 +65,18 @@ fresh RS256 JWT minted by Triton itself
 | `aud` | `TRITON_STATIC_UPSTREAM_AUD` (default `agents-<env>`); comma-separated config becomes a **multi-audience array** so the agent can forward the same token to a named downstream (e.g. `agents-nonprod,escurel-nonprod`) — each hop pins its own audience |
 | `sub` | **`Principal.sub` — the resolved sender.** For a chat inbound this is the subject the adapter's identity strategy produced (e.g. the `sender_table` mapping for the sender's `wa_id`); for a trio call it is the verified API caller's subject |
 | `tenant` | **Default:** `TRITON_STATIC_UPSTREAM_TENANT` when set, else absent — deployment-level config, *not* the per-sender tenant. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110):** the resolved sender's `Principal.tenant` instead |
-| `scope` | Absent by default. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110):** the resolved sender's scopes, space-delimited (OAuth2 `scope`); omitted when the sender has none |
+| `triton_sender_scopes` | Absent by default. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110/#114):** the resolved sender's scopes as a **JSON array** under this private claim — deliberately NOT the standard OAuth2 `scope`, since it's resolver-derived *authentication* data, not authorization Triton granted; a downstream must opt in to read it. Values are sanitised + capped, and intersected with `TRITON_STATIC_UPSTREAM_SCOPE_ALLOWLIST` when set. Omitted when empty |
 | `iat` / `exp` | now / now + TTL, TTL clamped to **≤ 300 s** |
 
 Notes for agent authors:
 
 - **By default `sub` is the only per-sender claim.** The sender's
   resolved `scopes`/`tenant` are not carried unless the operator sets
-  `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110), which adds a
-  space-delimited `scope` claim and sources `tenant` from the resolved
-  sender. Off → key your own lookup off `sub`. The flag applies to the
+  `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110/#114), which adds a
+  `triton_sender_scopes` array (sanitised, capped, optionally allowlisted
+  — NOT a standard OAuth `scope`, so don't treat it as granted authority)
+  and sources `tenant` from the resolved sender. Off → key your own
+  lookup off `sub`. The flag applies to the
   signed static-upstream path only; the Consul/Vault path carries no
   sender identity (it mints a Triton-workload token).
 - Verify the token like any OIDC bearer: fetch JWKS from the issuer,

@@ -10,7 +10,7 @@
 //!     `AGENT_OIDC_ISSUER` path — workload→workload auth without Vault. This is
 //!     the Consul-less analogue of [`crate::UpstreamRouter`]'s Vault swap.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,6 +21,26 @@ use triton_identity::JwtSigner;
 
 /// Upstream OIDC token TTL (NFR-S-3 cap is enforced by the signer too).
 const TOKEN_TTL: Duration = Duration::from_secs(300);
+
+/// #114 caps on resolver-supplied principal data forwarded into the
+/// minted token, so a buggy/hostile resolver can't bloat or corrupt it.
+const MAX_SCOPES: usize = 32;
+const MAX_SCOPE_LEN: usize = 64;
+const MAX_TENANT_LEN: usize = 128;
+
+/// Sanitise resolver-supplied scopes before they're signed into the
+/// `triton_sender_scopes` claim (#114): drop empty / whitespace-bearing /
+/// over-length values, apply the operator allowlist when configured, and
+/// cap the count. Pure so it's unit-testable.
+fn sanitise_scopes(scopes: &[String], allowlist: Option<&HashSet<String>>) -> Vec<String> {
+    scopes
+        .iter()
+        .filter(|s| !s.is_empty() && s.len() <= MAX_SCOPE_LEN && !s.contains(char::is_whitespace))
+        .filter(|s| allowlist.is_none_or(|a| a.contains(s.as_str())))
+        .take(MAX_SCOPES)
+        .cloned()
+        .collect()
+}
 
 pub struct StaticUpstream {
     map: HashMap<String, String>,
@@ -45,6 +65,11 @@ pub struct StaticUpstream {
     /// `tenant` and no scopes. Opt-in (default false) so the default
     /// contract is unchanged. Ignored when `signer` is None.
     forward_principal: bool,
+    /// #114: optional operator allowlist of scopes that may be forwarded
+    /// (the `triton_sender_scopes` claim). `Some` → forwarded scopes are
+    /// `principal.scopes ∩ allowlist`; `None` → caps only. Ignored unless
+    /// `forward_principal`.
+    forward_scope_allowlist: Option<HashSet<String>>,
 }
 
 impl StaticUpstream {
@@ -70,6 +95,7 @@ impl StaticUpstream {
             audience: String::new(),
             tenant: String::new(),
             forward_principal: false,
+            forward_scope_allowlist: None,
         }
     }
 
@@ -83,11 +109,13 @@ impl StaticUpstream {
         audience: impl Into<String>,
         tenant: impl Into<String>,
         forward_principal: bool,
+        forward_scope_allowlist: Option<HashSet<String>>,
     ) -> Self {
         self.signer = Some(signer);
         self.audience = audience.into();
         self.tenant = tenant.into();
         self.forward_principal = forward_principal;
+        self.forward_scope_allowlist = forward_scope_allowlist;
         self
     }
 
@@ -106,12 +134,25 @@ impl StaticUpstream {
                     .collect();
                 // #110: opt-in, forward the resolved sender's tenant + scopes;
                 // otherwise the deployment-static tenant and no scopes.
-                let (tenant, scopes): (&str, &[String]) = if self.forward_principal {
-                    (&principal.tenant, &principal.scopes)
+                // #114: resolver-supplied values are sanitised/capped (and
+                // allowlisted) before signing — see `sanitise_scopes`.
+                let (tenant, scopes): (String, Vec<String>) = if self.forward_principal {
+                    let tenant = if principal.tenant.len() <= MAX_TENANT_LEN {
+                        principal.tenant.clone()
+                    } else {
+                        tracing::warn!(
+                            len = principal.tenant.len(),
+                            "forwarded tenant over cap; dropping"
+                        );
+                        String::new()
+                    };
+                    let scopes =
+                        sanitise_scopes(&principal.scopes, self.forward_scope_allowlist.as_ref());
+                    (tenant, scopes)
                 } else {
-                    (self.tenant.as_str(), &[])
+                    (self.tenant.clone(), Vec::new())
                 };
-                s.sign(&auds, &principal.sub, tenant, scopes, TOKEN_TTL)
+                s.sign(&auds, &principal.sub, &tenant, &scopes, TOKEN_TTL)
                     .map_err(|e| TritonError::Tool(format!("mint upstream token: {e}")))
             }
             None => Ok(self.token.clone()),
@@ -159,5 +200,50 @@ impl UpstreamDispatch for StaticUpstream {
         let mut v: Vec<String> = self.map.keys().cloned().collect();
         v.sort();
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_SCOPES, sanitise_scopes};
+    use std::collections::HashSet;
+
+    fn s(v: &[&str]) -> Vec<String> {
+        v.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn sanitise_drops_junk_and_caps_count() {
+        let long = "x".repeat(100);
+        let mut input = s(&["chat", "has space", "reports"]);
+        input.push(long); // over MAX_SCOPE_LEN
+        input.push(String::new()); // empty
+        // Pad well past the count cap with valid scopes.
+        for i in 0..MAX_SCOPES + 10 {
+            input.push(format!("extra{i}"));
+        }
+        let out = sanitise_scopes(&input, None);
+        assert!(out.len() <= MAX_SCOPES, "count capped");
+        assert!(out.contains(&"chat".to_string()));
+        assert!(out.contains(&"reports".to_string()));
+        assert!(!out.iter().any(|x| x.contains(' ')), "no whitespace scopes");
+        assert!(!out.iter().any(|x| x.is_empty()), "no empty scopes");
+        assert!(
+            !out.iter().any(|x| x.len() > super::MAX_SCOPE_LEN),
+            "no over-length"
+        );
+    }
+
+    #[test]
+    fn sanitise_applies_allowlist() {
+        let allow: HashSet<String> = ["chat".to_string()].into_iter().collect();
+        let out = sanitise_scopes(&s(&["chat", "admin"]), Some(&allow));
+        assert_eq!(out, s(&["chat"]), "only allowlisted scopes survive");
+    }
+
+    #[test]
+    fn sanitise_without_allowlist_keeps_clean_scopes() {
+        let out = sanitise_scopes(&s(&["chat", "reports"]), None);
+        assert_eq!(out, s(&["chat", "reports"]));
     }
 }
