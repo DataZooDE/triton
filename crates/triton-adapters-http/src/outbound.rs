@@ -27,9 +27,8 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
-use triton_core::{Dispatcher, OutboundCourier, OutboundRequest};
-
-use triton_core::TritonError;
+use triton_core::ratelimit::{PerTenantBuckets, TokenBucket};
+use triton_core::{Dispatcher, OutboundCourier, OutboundRequest, Principal, TritonError};
 
 use crate::identity::IdentityProvider;
 use crate::rest::error_response;
@@ -52,6 +51,10 @@ pub struct OutboundState {
     pub identity: Arc<IdentityProvider>,
     pub dispatcher: Arc<Dispatcher>,
     pub couriers: Arc<CourierRegistry>,
+    /// #115: adapter-wide outbound DoS floor (global token bucket).
+    pub rate_limit: Arc<TokenBucket>,
+    /// #115: per-tenant fair-share, keyed by the caller's tenant.
+    pub per_tenant_limit: Arc<PerTenantBuckets>,
 }
 
 pub fn router(state: OutboundState) -> Router {
@@ -123,7 +126,16 @@ async fn outbound_send(
         return error_response(&e, Some(&principal.trace_id));
     }
 
-    // 3. Resolve the target adapter's courier.
+    // 3. Rate limit (#115): global floor, then per-tenant fair share —
+    //    consumed before courier work so a throttled send is cheap.
+    if let Err(retry) = state.rate_limit.try_take() {
+        return rate_limited(&state, &principal, retry);
+    }
+    if let Err(retry) = state.per_tenant_limit.try_take(&principal.tenant) {
+        return rate_limited(&state, &principal, retry);
+    }
+
+    // 4. Resolve the target adapter's courier.
     let Some(courier) = state.couriers.get(&body.adapter) else {
         return (
             StatusCode::NOT_FOUND,
@@ -143,7 +155,7 @@ async fn outbound_send(
         variables: body.variables,
     };
 
-    // 4. Authz layer 2 (#113): recipient/tenant binding, behind the
+    // 5. Authz layer 2 (#113): recipient/tenant binding, behind the
     //    adapter (it knows its identity model). Runs before delivery.
     if let Err(e) = courier.authorize(&req, &principal).await {
         state.dispatcher.record_rejection(
@@ -157,10 +169,34 @@ async fn outbound_send(
         return error_response(&e, Some(&trace_id));
     }
 
-    // 5. Render + post through the adapter; it emits the `phase: post`
+    // 6. Render + post through the adapter; it emits the `phase: post`
     //    audit sharing `principal.trace_id`.
     match courier.deliver(&req, &principal).await {
         Ok(()) => (StatusCode::ACCEPTED, Json(json!({ "trace_id": trace_id }))).into_response(),
         Err(e) => error_response(&e, Some(&trace_id)),
     }
+}
+
+/// Build a `429` for a throttled outbound (#115): audit the rejection and
+/// return a `Retry-After` header, mirroring the chat adapters' shape.
+fn rate_limited(state: &OutboundState, principal: &Principal, retry_after: f64) -> Response {
+    let secs = retry_after.ceil().max(1.0) as u64;
+    let e = TritonError::RateLimited(format!(
+        "outbound rate limit for tenant `{}`; retry in {secs}s",
+        principal.tenant
+    ));
+    state.dispatcher.record_rejection(
+        "v1/outbound",
+        "rest",
+        &principal.sub,
+        &principal.tenant,
+        &principal.trace_id,
+        &e,
+    );
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [("Retry-After", secs.to_string())],
+        Json(json!({ "error": "ratelimit", "message": e.to_string() })),
+    )
+        .into_response()
 }
