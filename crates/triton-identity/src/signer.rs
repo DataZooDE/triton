@@ -88,11 +88,16 @@ impl JwtSigner {
     ///
     /// `tenant`, when non-empty, is added as a `tenant` claim — a forwarded-to
     /// downstream (e.g. Escurel) may key its tenant off it. Empty → omitted.
+    ///
+    /// `scopes`, when non-empty, are joined space-delimited into an OAuth2
+    /// `scope` claim (#110 — the resolved sender's scopes, forwarded opt-in).
+    /// Empty → omitted, so the default contract is byte-for-byte unchanged.
     pub fn sign(
         &self,
         audiences: &[&str],
         subject: &str,
         tenant: &str,
+        scopes: &[String],
         ttl: Duration,
     ) -> Result<String, String> {
         let now = SystemTime::now()
@@ -109,6 +114,9 @@ impl JwtSigner {
         });
         if !tenant.is_empty() {
             claims["tenant"] = json!(tenant);
+        }
+        if !scopes.is_empty() {
+            claims["scope"] = json!(scopes.join(" "));
         }
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(self.kid.clone());
@@ -164,6 +172,7 @@ mod tests {
                 &["agents-nonprod", "escurel-nonprod"],
                 "dz-triton-api",
                 "default",
+                &[],
                 Duration::from_secs(300),
             )
             .expect("sign");

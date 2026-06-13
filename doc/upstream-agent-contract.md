@@ -64,14 +64,19 @@ fresh RS256 JWT minted by Triton itself
 | `iss` | `TRITON_SELF_ISSUER` — Triton serves discovery at `<iss>/.well-known/openid-configuration` and JWKS at `<iss>/.well-known/jwks.json` |
 | `aud` | `TRITON_STATIC_UPSTREAM_AUD` (default `agents-<env>`); comma-separated config becomes a **multi-audience array** so the agent can forward the same token to a named downstream (e.g. `agents-nonprod,escurel-nonprod`) — each hop pins its own audience |
 | `sub` | **`Principal.sub` — the resolved sender.** For a chat inbound this is the subject the adapter's identity strategy produced (e.g. the `sender_table` mapping for the sender's `wa_id`); for a trio call it is the verified API caller's subject |
-| `tenant` | `TRITON_STATIC_UPSTREAM_TENANT` when set, else absent. **Deployment-level config, not the per-sender tenant** the identity strategy resolved |
+| `tenant` | **Default:** `TRITON_STATIC_UPSTREAM_TENANT` when set, else absent — deployment-level config, *not* the per-sender tenant. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110):** the resolved sender's `Principal.tenant` instead |
+| `scope` | Absent by default. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110):** the resolved sender's scopes, space-delimited (OAuth2 `scope`); omitted when the sender has none |
 | `iat` / `exp` | now / now + TTL, TTL clamped to **≤ 300 s** |
 
 Notes for agent authors:
 
-- **`sub` is the only per-sender claim.** The sender's resolved
-  `scopes` and `tenant` are *not* carried in the minted token today; if
-  your agent needs them, key your own lookup off `sub`.
+- **By default `sub` is the only per-sender claim.** The sender's
+  resolved `scopes`/`tenant` are not carried unless the operator sets
+  `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110), which adds a
+  space-delimited `scope` claim and sources `tenant` from the resolved
+  sender. Off → key your own lookup off `sub`. The flag applies to the
+  signed static-upstream path only; the Consul/Vault path carries no
+  sender identity (it mints a Triton-workload token).
 - Verify the token like any OIDC bearer: fetch JWKS from the issuer,
   check `iss`, your `aud`, `exp`, and the algorithm. Recipe:
   `examples/adk-hello-agent/src/main.rs` (`verify_bearer`).

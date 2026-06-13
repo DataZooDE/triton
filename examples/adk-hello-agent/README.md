@@ -114,10 +114,11 @@ the `who` in Triton's audit). See `doc/upstream-agent-contract.md` §5 for
 the normative contract and `tests/resolver_e2e.rs` for the worked
 round-trip.
 
-> **Carriage caveat:** today only the resolved `sub` reaches the agent on
-> the *command* dispatch (in the bearer; §3). If you need the resolved
-> `scopes`/`tenant` per message, key your own lookup off `sub` — see
-> issue #110.
+> **Carriage:** by default only the resolved `sub` reaches the agent on
+> the *command* dispatch (in the bearer; §3). To also receive the
+> resolved `scope` + `tenant`, the operator sets
+> `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110); otherwise key
+> your own lookup off `sub`.
 
 ## Extracting to a standalone template repo
 

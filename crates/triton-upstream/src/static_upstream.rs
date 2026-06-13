@@ -39,6 +39,12 @@ pub struct StaticUpstream {
     /// may key its tenant off it). Empty → no `tenant` claim. Ignored when
     /// `signer` is None.
     tenant: String,
+    /// #110: when true, the minted token carries the RESOLVED SENDER's
+    /// identity — `tenant` ← `principal.tenant` and a space-delimited
+    /// `scope` ← `principal.scopes` — instead of the deployment-static
+    /// `tenant` and no scopes. Opt-in (default false) so the default
+    /// contract is unchanged. Ignored when `signer` is None.
+    forward_principal: bool,
 }
 
 impl StaticUpstream {
@@ -63,6 +69,7 @@ impl StaticUpstream {
             signer: None,
             audience: String::new(),
             tenant: String::new(),
+            forward_principal: false,
         }
     }
 
@@ -75,10 +82,12 @@ impl StaticUpstream {
         signer: Arc<JwtSigner>,
         audience: impl Into<String>,
         tenant: impl Into<String>,
+        forward_principal: bool,
     ) -> Self {
         self.signer = Some(signer);
         self.audience = audience.into();
         self.tenant = tenant.into();
+        self.forward_principal = forward_principal;
         self
     }
 
@@ -95,7 +104,14 @@ impl StaticUpstream {
                     .map(str::trim)
                     .filter(|a| !a.is_empty())
                     .collect();
-                s.sign(&auds, &principal.sub, &self.tenant, TOKEN_TTL)
+                // #110: opt-in, forward the resolved sender's tenant + scopes;
+                // otherwise the deployment-static tenant and no scopes.
+                let (tenant, scopes): (&str, &[String]) = if self.forward_principal {
+                    (&principal.tenant, &principal.scopes)
+                } else {
+                    (self.tenant.as_str(), &[])
+                };
+                s.sign(&auds, &principal.sub, tenant, scopes, TOKEN_TTL)
                     .map_err(|e| TritonError::Tool(format!("mint upstream token: {e}")))
             }
             None => Ok(self.token.clone()),
