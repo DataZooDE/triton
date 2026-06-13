@@ -169,6 +169,10 @@ pub struct Settings {
     /// static-upstream token (instead of `sub`-only + the deployment tenant).
     /// Default `false` — the default carriage contract is unchanged.
     pub static_upstream_forward_principal: bool,
+    /// #114: allowlist of scopes that may be forwarded on the minted token
+    /// (the `triton_sender_scopes` claim). Empty → no allowlist (caps only);
+    /// non-empty → forwarded scopes are intersected with this set.
+    pub static_upstream_scope_allowlist: Vec<String>,
 }
 
 impl Settings {
@@ -535,6 +539,15 @@ struct Cli {
         default_value_t = false
     )]
     static_upstream_forward_principal: bool,
+
+    /// #114: comma-separated allowlist of scopes that may be forwarded on
+    /// the minted token. Empty → no allowlist (caps only).
+    #[arg(
+        long,
+        env = "TRITON_STATIC_UPSTREAM_SCOPE_ALLOWLIST",
+        default_value = ""
+    )]
+    static_upstream_scope_allowlist: String,
 }
 
 impl From<Cli> for Settings {
@@ -556,6 +569,12 @@ impl From<Cli> for Settings {
             outbound_rate_limit_burst: c.outbound_rate_limit_burst,
             static_upstream_tenant: c.static_upstream_tenant,
             static_upstream_forward_principal: c.static_upstream_forward_principal,
+            static_upstream_scope_allowlist: c
+                .static_upstream_scope_allowlist
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
             consul_url: c.consul_url,
             vault_url: c.vault_url,
             vault_token: c.vault_token,

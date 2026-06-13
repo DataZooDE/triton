@@ -309,11 +309,31 @@ async fn main() -> std::io::Result<()> {
                             .unwrap_or_else(|| format!("agents-{}", settings.env));
                         let tenant = settings.static_upstream_tenant.clone().unwrap_or_default();
                         let forward_principal = settings.static_upstream_forward_principal;
+                        // #114: empty allowlist → None (caps only); else the set.
+                        let scope_allowlist: Option<std::collections::HashSet<String>> =
+                            if settings.static_upstream_scope_allowlist.is_empty() {
+                                None
+                            } else {
+                                Some(
+                                    settings
+                                        .static_upstream_scope_allowlist
+                                        .iter()
+                                        .cloned()
+                                        .collect(),
+                                )
+                            };
                         tracing::warn!(
                             spec = %spec, aud = %aud, tenant = %tenant, forward_principal,
+                            scope_allowlist = ?settings.static_upstream_scope_allowlist,
                             "TRITON_STATIC_UPSTREAMS set: dispatching by name with signed RS256 JWTs (no Consul/Vault)"
                         );
-                        su.with_signer(signer.clone(), aud, tenant, forward_principal)
+                        su.with_signer(
+                            signer.clone(),
+                            aud,
+                            tenant,
+                            forward_principal,
+                            scope_allowlist,
+                        )
                     } else {
                         tracing::warn!(
                             spec = %spec,

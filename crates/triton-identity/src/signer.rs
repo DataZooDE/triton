@@ -89,9 +89,13 @@ impl JwtSigner {
     /// `tenant`, when non-empty, is added as a `tenant` claim — a forwarded-to
     /// downstream (e.g. Escurel) may key its tenant off it. Empty → omitted.
     ///
-    /// `scopes`, when non-empty, are joined space-delimited into an OAuth2
-    /// `scope` claim (#110 — the resolved sender's scopes, forwarded opt-in).
-    /// Empty → omitted, so the default contract is byte-for-byte unchanged.
+    /// `scopes`, when non-empty, are emitted as a JSON array under the
+    /// NON-authoritative private claim `triton_sender_scopes` (#110/#114 —
+    /// the resolved sender's scopes, forwarded opt-in). Deliberately NOT
+    /// the standard OAuth2 `scope` claim: this is resolver-derived
+    /// authentication data, not authorization Triton granted, so a
+    /// downstream must opt in to read it. Empty → omitted. Callers
+    /// sanitise/cap before passing (see `static_upstream`).
     pub fn sign(
         &self,
         audiences: &[&str],
@@ -116,7 +120,7 @@ impl JwtSigner {
             claims["tenant"] = json!(tenant);
         }
         if !scopes.is_empty() {
-            claims["scope"] = json!(scopes.join(" "));
+            claims["triton_sender_scopes"] = json!(scopes);
         }
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(self.kid.clone());
