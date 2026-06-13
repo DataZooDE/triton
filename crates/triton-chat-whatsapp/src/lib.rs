@@ -372,11 +372,34 @@ impl WhatsAppAdapter {
 /// so this names the proactive surface instead.
 const OUTBOUND_TOOL: &str = "outbound";
 
+/// #116: prune the service-window map once it reaches this many entries,
+/// so a long-lived process doesn't accumulate one entry per distinct
+/// sender forever. The steady-state bound is "senders seen within
+/// SERVICE_WINDOW"; the prune drops everything older.
+const SERVICE_WINDOW_PRUNE_AT: usize = 1024;
+
+/// Drop window entries whose age (`now - stamped`) is at or beyond
+/// `window`. Pure + window-injectable so it's unit-testable without a
+/// 24-hour wait. `saturating_duration_since` never panics.
+fn prune_expired_window(
+    map: &mut HashMap<String, std::time::Instant>,
+    now: std::time::Instant,
+    window: std::time::Duration,
+) {
+    map.retain(|_, stamped| now.saturating_duration_since(*stamped) < window);
+}
+
 impl WhatsAppAdapter {
-    /// Open (or refresh) the 24-h service window for `wa_id`.
+    /// Open (or refresh) the 24-h service window for `wa_id`. Prunes
+    /// expired entries first once the map grows past the soft cap (#116)
+    /// so memory stays bounded by the active-sender set.
     fn stamp_service_window(&self, wa_id: &str) {
         if let Ok(mut map) = self.service_window.lock() {
-            map.insert(wa_id.to_string(), std::time::Instant::now());
+            let now = std::time::Instant::now();
+            if map.len() >= SERVICE_WINDOW_PRUNE_AT {
+                prune_expired_window(&mut map, now, SERVICE_WINDOW);
+            }
+            map.insert(wa_id.to_string(), now);
         }
     }
 
@@ -1361,4 +1384,39 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     let content_eq: bool = a_buf.ct_eq(&b_buf).into();
     let length_eq = a.len() == b.len();
     content_eq & length_eq
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SERVICE_WINDOW, prune_expired_window};
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn prune_drops_expired_window_entries_keeps_fresh() {
+        // #116: a stale entry (aged past the window) is evicted; a fresh
+        // one survives. Uses a tiny injected window + real elapsed time so
+        // the test needs no 24-hour wait and never underflows the clock.
+        let mut map: HashMap<String, Instant> = HashMap::new();
+        let stale = Instant::now();
+        map.insert("stale".to_string(), stale);
+        std::thread::sleep(Duration::from_millis(10));
+        let now = Instant::now();
+        map.insert("fresh".to_string(), now);
+
+        prune_expired_window(&mut map, now, Duration::from_millis(5));
+
+        assert!(!map.contains_key("stale"), "entry older than the window is pruned");
+        assert!(map.contains_key("fresh"), "entry within the window is kept");
+    }
+
+    #[test]
+    fn prune_is_a_noop_when_all_entries_are_fresh() {
+        let now = Instant::now();
+        let mut map: HashMap<String, Instant> = HashMap::new();
+        map.insert("a".to_string(), now);
+        map.insert("b".to_string(), now);
+        prune_expired_window(&mut map, now, SERVICE_WINDOW);
+        assert_eq!(map.len(), 2);
+    }
 }
