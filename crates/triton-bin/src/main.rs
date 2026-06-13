@@ -1124,6 +1124,17 @@ async fn main() -> std::io::Result<()> {
     // the endpoint stays unmounted (fail closed); in the no-OIDC dev
     // path it reuses the trio's dev-token identity for parity.
     let outbound_couriers = Arc::new(outbound_couriers);
+    // #115: outbound rate limiters — a global floor (10× per-sec headroom,
+    // mirroring the chat adapters) + a per-tenant fair-share gate. Shared
+    // into whichever OutboundState we build below.
+    let outbound_rate_limit = Arc::new(triton_core::ratelimit::TokenBucket::new(
+        settings.outbound_rate_limit_per_sec.saturating_mul(10),
+        settings.outbound_rate_limit_burst.saturating_mul(10),
+    ));
+    let outbound_per_tenant = Arc::new(triton_core::ratelimit::PerTenantBuckets::new(
+        settings.outbound_rate_limit_per_sec,
+        settings.outbound_rate_limit_burst,
+    ));
     let outbound_issuer = settings
         .outbound_issuer
         .as_ref()
@@ -1147,6 +1158,8 @@ async fn main() -> std::io::Result<()> {
                     identity: Arc::new(IdentityProvider::new(Some(verifier))),
                     dispatcher: dispatcher.clone(),
                     couriers: outbound_couriers.clone(),
+                    rate_limit: outbound_rate_limit.clone(),
+                    per_tenant_limit: outbound_per_tenant.clone(),
                 })
             }
             (Some(_), None) => {
@@ -1159,6 +1172,8 @@ async fn main() -> std::io::Result<()> {
                 identity: identity.clone(),
                 dispatcher: dispatcher.clone(),
                 couriers: outbound_couriers.clone(),
+                rate_limit: outbound_rate_limit.clone(),
+                per_tenant_limit: outbound_per_tenant.clone(),
             }),
         };
 

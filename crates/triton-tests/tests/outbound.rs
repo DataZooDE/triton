@@ -274,6 +274,50 @@ async fn missing_outbound_scope_is_forbidden() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outbound_rate_limited_returns_429() {
+    // #115: with a per-tenant burst of 1, the first proactive send is
+    // accepted and a second immediate one from the same tenant is
+    // throttled (429) — even though authn/authz/window all pass.
+    let issuer = TestIssuer::start().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let mut env = env_for(&issuer, &whatsapp);
+    env.insert("TRITON_OUTBOUND_RATE_LIMIT".to_string(), "1".to_string());
+    env.insert(
+        "TRITON_OUTBOUND_RATE_LIMIT_BURST".to_string(),
+        "1".to_string(),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    // Open the window so the sends are valid free-form (not template).
+    open_service_window(&proc, KNOWN_WA_ID).await;
+    let _reply = wait_for(Duration::from_secs(2), || {
+        let v = whatsapp.captured();
+        (!v.is_empty()).then_some(v)
+    });
+
+    let token = token_with_aud(&issuer, OUTBOUND_AUDIENCE);
+    let client = reqwest::Client::new();
+    let send = || {
+        client
+            .post(proc.rest_url("/v1/outbound"))
+            .bearer_auth(&token)
+            .json(&json!({
+                "adapter": "whatsapp",
+                "to": KNOWN_WA_ID,
+                "result": { "text": "rl" },
+            }))
+            .send()
+    };
+    let c1 = send().await.expect("post 1").status().as_u16();
+    let c2 = send().await.expect("post 2").status().as_u16();
+
+    assert!(
+        [c1, c2].contains(&202) && [c1, c2].contains(&429),
+        "expected one 202 and one 429 (per-tenant burst=1); got [{c1}, {c2}]"
+    );
+}
+
 /// Post a signed inbound webhook so the recipient's 24-hour service
 /// window opens (#94), allowing a subsequent free-form proactive send.
 async fn open_service_window(proc: &TritonProcess, wa_id: &str) {

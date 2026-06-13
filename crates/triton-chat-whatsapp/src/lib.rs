@@ -1406,7 +1406,10 @@ mod tests {
 
         prune_expired_window(&mut map, now, Duration::from_millis(5));
 
-        assert!(!map.contains_key("stale"), "entry older than the window is pruned");
+        assert!(
+            !map.contains_key("stale"),
+            "entry older than the window is pruned"
+        );
         assert!(map.contains_key("fresh"), "entry within the window is kept");
     }
 

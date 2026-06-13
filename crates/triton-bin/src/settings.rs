@@ -49,6 +49,11 @@ pub struct Settings {
     /// walking OIDC discovery — for agent issuers that serve only a
     /// JWKS document (e.g. `/.well-known/jwks.json`).
     pub outbound_jwks_url: Option<String>,
+    /// #115: per-tenant rate limit for `POST /v1/outbound`
+    /// (messages/sec + burst). The global floor is 10× the per-sec rate.
+    /// Defaults 25/50, mirroring the chat adapters.
+    pub outbound_rate_limit_per_sec: u32,
+    pub outbound_rate_limit_burst: u32,
     pub consul_url: Option<String>,
     pub vault_url: Option<String>,
     pub vault_token: Option<String>,
@@ -244,6 +249,15 @@ struct Cli {
     /// need not serve an OIDC discovery endpoint.
     #[arg(long, env = "TRITON_OUTBOUND_JWKS_URL")]
     outbound_jwks_url: Option<String>,
+
+    /// #115: per-tenant rate limit for `POST /v1/outbound`
+    /// (messages/sec). Default 25. The global floor is 10× this.
+    #[arg(long, env = "TRITON_OUTBOUND_RATE_LIMIT", default_value_t = 25)]
+    outbound_rate_limit: u32,
+
+    /// #115: per-tenant burst for `POST /v1/outbound`. Default 50.
+    #[arg(long, env = "TRITON_OUTBOUND_RATE_LIMIT_BURST", default_value_t = 50)]
+    outbound_rate_limit_burst: u32,
 
     /// Consul HTTP base URL (e.g. `http://127.0.0.1:8500`). When
     /// unset the upstream router is disabled and the dispatcher
@@ -538,6 +552,8 @@ impl From<Cli> for Settings {
             outbound_audience: c.outbound_audience,
             outbound_issuer: c.outbound_issuer,
             outbound_jwks_url: c.outbound_jwks_url,
+            outbound_rate_limit_per_sec: c.outbound_rate_limit,
+            outbound_rate_limit_burst: c.outbound_rate_limit_burst,
             static_upstream_tenant: c.static_upstream_tenant,
             static_upstream_forward_principal: c.static_upstream_forward_principal,
             consul_url: c.consul_url,
