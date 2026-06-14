@@ -10,9 +10,10 @@
 //! * **Cross-cutting checks** via [`Manifest::validate`]:
 //!     - M-COVERAGE-1 / FR-L-5: every tool's `surface_components`
 //!       is covered by every chat-channel adapter's `degrade` table.
-//!     - M-SECRETS-1 / FR-L-6 / NFR-S-5: every credential field is
-//!       either `vault://<path>#<field>` or admitted only in dev
-//!       mode with a runtime warning. Production refuses literals.
+//!     - M-SECRETS-1 / FR-L-6 / NFR-S-5: every credential field is a
+//!       `vault://<path>#<field>` ref, an `env://<VARNAME>` ref, or —
+//!       admitted only in dev mode with a runtime warning — a literal.
+//!       Production refuses literals; both ref shapes are accepted.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -249,9 +250,10 @@ pub enum DegradeRule {
     CardV2,
 }
 
-/// A credential value. Either a Vault reference (production-safe)
-/// or a literal string (dev-only). Parse-time we only distinguish
-/// the two — production refusal happens in [`Manifest::validate`].
+/// A credential value: a Vault reference, an `env://` reference (both
+/// production-safe), or a literal string (dev-only). Parse-time we only
+/// classify the shape — production refusal of literals happens in
+/// [`Manifest::validate`]; `env://` and `vault://` refs are admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretField {
     /// Vault reference of the form `vault://<path>#<field>`, both
@@ -259,6 +261,15 @@ pub enum SecretField {
     Vault {
         path: String,
         field: String,
+    },
+    /// Environment-variable reference of the form `env://<VARNAME>`.
+    /// Resolved from the process environment at boot — the
+    /// production-safe shape on a substrate that injects secrets as
+    /// container env (GCP Secret Manager → kamal → env) rather than
+    /// running Vault. Like a Vault path, the variable NAME is not
+    /// secret (only the resolved value is).
+    Env {
+        var: String,
     },
     Literal(String),
 }
@@ -275,6 +286,7 @@ impl Serialize for SecretField {
             SecretField::Vault { path, field } => {
                 s.serialize_str(&format!("vault://{path}#{field}"))
             }
+            SecretField::Env { var } => s.serialize_str(&format!("env://{var}")),
             SecretField::Literal(v) => {
                 s.serialize_str(&format!("<literal:{} chars>", v.chars().count()))
             }
@@ -305,9 +317,69 @@ impl<'de> Deserialize<'de> for SecretField {
                 path: path.to_string(),
                 field: field.to_string(),
             })
+        } else if let Some(var) = s.strip_prefix("env://") {
+            if var.is_empty() {
+                return Err(serde::de::Error::custom(
+                    "env ref `env://<VARNAME>` MUST name a non-empty variable",
+                ));
+            }
+            Ok(SecretField::Env {
+                var: var.to_string(),
+            })
         } else {
             Ok(SecretField::Literal(s))
         }
+    }
+}
+
+#[cfg(test)]
+mod secret_field_tests {
+    use super::SecretField;
+
+    fn parse(s: &str) -> Result<SecretField, serde_yaml_ng::Error> {
+        serde_yaml_ng::from_str(s)
+    }
+
+    #[test]
+    fn env_ref_parses_to_env_variant() {
+        assert_eq!(
+            parse("env://TRITON_WA_APP_SECRET").unwrap(),
+            SecretField::Env {
+                var: "TRITON_WA_APP_SECRET".into()
+            }
+        );
+    }
+
+    #[test]
+    fn empty_env_ref_is_rejected() {
+        assert!(
+            parse("env://").is_err(),
+            "env:// with no var must fail parse"
+        );
+    }
+
+    #[test]
+    fn vault_and_literal_shapes_still_parse() {
+        assert_eq!(
+            parse("vault://kv/data/apps/x#field").unwrap(),
+            SecretField::Vault {
+                path: "kv/data/apps/x".into(),
+                field: "field".into()
+            }
+        );
+        assert_eq!(
+            parse("just-a-literal").unwrap(),
+            SecretField::Literal("just-a-literal".into())
+        );
+    }
+
+    #[test]
+    fn env_ref_serialises_verbatim() {
+        // The var NAME is not secret (like a vault path), so it is
+        // reproduced for the operator-visible /v1/manifest — unlike a
+        // literal, which is masked.
+        let yaml = serde_yaml_ng::to_string(&SecretField::Env { var: "FOO".into() }).unwrap();
+        assert_eq!(yaml.trim(), "env://FOO");
     }
 }
 
