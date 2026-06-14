@@ -1,7 +1,13 @@
 //! v0.2 secret resolution. Adapters declare credentials as
-//! [`SecretField`] values: either an inline literal (dev only) or a
-//! `vault://<path>#<field>` reference. The resolver materialises
-//! either shape into a `String` at boot.
+//! [`SecretField`] values: an inline literal (dev only), an
+//! `env://<VARNAME>` reference (resolved from the process environment —
+//! the production-safe shape on a Vault-less substrate), or a
+//! `vault://<path>#<field>` reference. The resolver materialises any of
+//! these into a `String` at boot.
+//!
+//! `env://` refs resolve regardless of which resolver is selected (no
+//! backend needed), so they work on the substrate where secrets arrive
+//! as container env (GCP Secret Manager → kamal `.kamal/secrets`).
 //!
 //! Two impls ship today:
 //!
@@ -45,11 +51,23 @@ impl SecretResolver for LiteralResolver {
     async fn resolve(&self, field: &SecretField) -> Result<String, ResolveError> {
         match field {
             SecretField::Literal(s) => Ok(s.clone()),
+            SecretField::Env { var } => resolve_env(var),
             SecretField::Vault { path, field } => Err(ResolveError::VaultNotConfigured {
                 ref_string: format!("vault://{path}#{field}"),
             }),
         }
     }
+}
+
+/// Materialise an `env://<VARNAME>` ref from the process environment.
+/// Backend-independent (no Vault, no network), so BOTH resolvers share
+/// it — this is how the Vault-less substrate delivers secrets (GCP
+/// Secret Manager → kamal `.kamal/secrets` → container env). A missing
+/// or non-UTF-8 variable fails the boot closed (M-SECRETS-1).
+fn resolve_env(var: &str) -> Result<String, ResolveError> {
+    std::env::var(var).map_err(|_| ResolveError::EnvNotSet {
+        var: var.to_string(),
+    })
 }
 
 /// Resolves both literal and Vault refs. Vault refs are read via
@@ -149,6 +167,7 @@ impl SecretResolver for VaultKvResolver {
     async fn resolve(&self, field: &SecretField) -> Result<String, ResolveError> {
         match field {
             SecretField::Literal(s) => Ok(s.clone()),
+            SecretField::Env { var } => resolve_env(var),
             SecretField::Vault { path, field } => match self.fetch_once(path, field).await {
                 // Vault rejected our token — it may have been revoked
                 // before its proactive refresh. Force a re-login and
@@ -170,6 +189,11 @@ impl SecretResolver for VaultKvResolver {
 pub enum ResolveError {
     #[error("manifest declares Vault ref `{ref_string}` but no resolver is configured")]
     VaultNotConfigured { ref_string: String },
+    #[error(
+        "manifest declares `env://{var}` but the environment variable is unset or not UTF-8 — \
+         the substrate must inject it (GCP Secret Manager → kamal `.kamal/secrets`)"
+    )]
+    EnvNotSet { var: String },
     #[error("vault transport error on {url}: {detail}")]
     Transport { url: String, detail: String },
     #[error("vault non-2xx on {url}: {status}{hint}")]
@@ -231,7 +255,35 @@ fn json_type(v: &Value) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::vault_status_hint;
+    use super::{LiteralResolver, ResolveError, SecretResolver, vault_status_hint};
+    use triton_manifest::SecretField;
+
+    // A unique var name keeps this hermetic under the parallel test
+    // runner (process-global env).
+    const VAR: &str = "TRITON_SECRETS_TEST_ENV_REF_92F1";
+
+    #[tokio::test]
+    async fn literal_resolver_materialises_env_refs() {
+        // env:// resolves with NO Vault configured — the substrate path.
+        // SAFETY: single-threaded resolution of one uniquely-named var.
+        unsafe {
+            std::env::set_var(VAR, "the-secret-value");
+        }
+        let got = LiteralResolver
+            .resolve(&SecretField::Env { var: VAR.into() })
+            .await
+            .expect("env ref resolves");
+        assert_eq!(got, "the-secret-value");
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+        let err = LiteralResolver
+            .resolve(&SecretField::Env { var: VAR.into() })
+            .await
+            .expect_err("unset env var must fail closed");
+        assert!(matches!(err, ResolveError::EnvNotSet { .. }), "{err:?}");
+    }
 
     #[test]
     fn status_hint_diagnoses_common_boot_failures() {
