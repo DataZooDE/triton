@@ -49,6 +49,14 @@ adapters:
       messages_per_sec: 25
       burst: 50
     correlation_key: env://TRITON_WHATSAPP_CORRELATION_KEY
+    # Meta-approved templates for business-initiated sends (#94). Carl's
+    # proactive sends (carl #39) hint a `category`; Triton resolves it to
+    # the template registered here. `carl_community_nudge` must be approved
+    # in Meta under the matching category before it delivers.
+    templates:
+      utility:
+        name: carl_community_nudge
+        language: de
 
 # `carl` is the upstream agent (TRITON_STATIC_UPSTREAMS); no in-process
 # tool surface is declared here, so M-COVERAGE-1 has nothing to cover.
