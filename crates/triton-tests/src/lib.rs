@@ -57,6 +57,10 @@ pub struct TritonProcess {
     pub rest_addr: SocketAddr,
     pub metrics_addr: Option<SocketAddr>,
     pub chat_webhook_addr: Option<SocketAddr>,
+    /// Single-port mode (TRITON_SINGLE_PORT): the MCP/A2A ports are never
+    /// bound (the trio rides the REST port), so readiness skips their TCP
+    /// probe and checks only `/healthz`.
+    single_port: bool,
 }
 
 impl TritonProcess {
@@ -188,6 +192,12 @@ impl TritonProcess {
             rest_addr: format!("127.0.0.1:{rest_port}").parse().unwrap(),
             metrics_addr: Some(format!("127.0.0.1:{metrics_port}").parse().unwrap()),
             chat_webhook_addr: Some(format!("127.0.0.1:{chat_webhook_port}").parse().unwrap()),
+            single_port: extra_env.get("TRITON_SINGLE_PORT").is_some_and(|v| {
+                matches!(
+                    v.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            }),
         };
         if proc.wait_for_ready_or_early_exit(boot_deadline).await {
             Ok(proc)
@@ -238,8 +248,10 @@ impl TritonProcess {
                 .await
                 .map(|r| r.status().is_success())
                 .unwrap_or(false);
-            let mcp_ok = tcp_connect_ok(self.mcp_addr).await;
-            let a2a_ok = tcp_connect_ok(self.a2a_addr).await;
+            // Single-port: MCP/A2A share the REST port, so /healthz alone
+            // implies all three; their dedicated ports are never bound.
+            let mcp_ok = self.single_port || tcp_connect_ok(self.mcp_addr).await;
+            let a2a_ok = self.single_port || tcp_connect_ok(self.a2a_addr).await;
             if rest_ok && mcp_ok && a2a_ok {
                 return true;
             }

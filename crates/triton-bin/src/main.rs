@@ -1112,14 +1112,20 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
-    let chat_listener = if chat_router.is_some() && settings.chat_webhook_port != 0 {
-        let addr: SocketAddr = (settings.chat_webhook_host, settings.chat_webhook_port).into();
-        let l = TcpListener::bind(addr).await?;
-        tracing::info!(chat_webhook = %addr, "chat webhook listener bound");
-        Some(l)
-    } else {
-        None
-    };
+    // In single-port mode the chat webhook rides the unified HTTP port
+    // (merged into `combined` below) — the substrate model is one port per
+    // host, so the webhook is reachable behind kamal-proxy's TLS at
+    // `/<adapter>/webhook` without a second public listener. Only the
+    // three-port path binds a dedicated chat listener.
+    let chat_listener =
+        if !settings.single_port && chat_router.is_some() && settings.chat_webhook_port != 0 {
+            let addr: SocketAddr = (settings.chat_webhook_host, settings.chat_webhook_port).into();
+            let l = TcpListener::bind(addr).await?;
+            tracing::info!(chat_webhook = %addr, "chat webhook listener bound");
+            Some(l)
+        } else {
+            None
+        };
 
     // Opt-in CORS layer for internal browser frontends (e.g. the
     // Flutter explorer at `apps/explorer/`). Mounted only when the
@@ -1230,6 +1236,13 @@ async fn main() -> std::io::Result<()> {
         let mut combined = rest_router
             .nest("/mcp", mcp_router)
             .nest("/a2a", a2a_router);
+        // Mount chat webhook adapters (e.g. `/whatsapp/webhook`) on the
+        // same port so a single kamal-proxy TLS route fronts both the REST
+        // trio and the inbound webhook (one public host, one cert).
+        if let Some(cr) = chat_router.take() {
+            combined = combined.merge(cr);
+            tracing::info!("chat webhook adapters mounted on the unified HTTP port (single_port)");
+        }
         if let Some(l) = &cors_layer {
             combined = combined.layer(l.clone());
         }
