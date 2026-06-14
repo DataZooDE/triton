@@ -36,6 +36,10 @@ RUN cargo build --release -p triton-bin
 # ----- stage 2: runtime -----
 FROM gcr.io/distroless/cc-debian12:nonroot
 COPY --from=build /src/target/release/triton /usr/local/bin/triton
+# Secret-free chat manifest (env:// refs only). OPT-IN: loaded only when the
+# deploy sets TRITON_MANIFEST_PATH=/etc/triton/adapter.yaml; a pure-REST
+# deploy leaves it unset and ignores the file (backward compatible).
+COPY deploy/triton/adapter.yaml /etc/triton/adapter.yaml
 USER nonroot
 # REST, MCP, A2A. /metrics stays on 127.0.0.1:9090 (internal-only).
 EXPOSE 8001 8002 8003

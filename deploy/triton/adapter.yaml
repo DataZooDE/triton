@@ -1,0 +1,55 @@
+# dz-triton chat manifest — WhatsApp Cloud, baked into the image at
+# /etc/triton/adapter.yaml (deploy/triton/Dockerfile). OPT-IN: it is only
+# loaded when the deploy sets TRITON_MANIFEST_PATH=/etc/triton/adapter.yaml.
+# A pure-REST deploy leaves TRITON_MANIFEST_PATH unset and ignores it.
+#
+# Secret-free: every credential is an `env://VARNAME` ref (triton #120),
+# resolved from the container environment the substrate injects from GCP
+# Secret Manager via kamal `.kamal/secrets`. No Vault (decommissioned),
+# no literals (refused in non-`local` env, M-SECRETS-1). Seed in SM:
+#   triton-whatsapp-app-secret, -verify-token, -access-token,
+#   -phone-number-id, -sender-table (JSON wa_id→claims), -correlation-key.
+#
+# Inbound webhook needs Triton reachable by Meta — dz-triton is the public
+# ingress (registry exposure: external in prod). Plain inbound text
+# dispatches to the `carl` upstream (TRITON_STATIC_UPSTREAMS carl=...).
+#
+# identity.kind: sender_table maps the (small, operator-enumerated) set of
+# member wa_ids to claims in tenant `default` (= CARL_TENANT on dz-carl).
+# Triton #113 binds the outbound recipient's tenant to the sender's, so the
+# table tenant MUST equal Carl's. PRODUCTION evolution: switch to
+# identity.kind: upstream + resolver_tool: resolve_identity (Carl owns
+# identity) and Meta-approved templates for out-of-window broadcasts.
+version: "0.2"
+
+adapters:
+  whatsapp:
+    kind: whatsapp_cloud
+    tool: carl
+    inbound:
+      kind: webhook
+      signature: hmac256
+      secret: env://TRITON_WHATSAPP_APP_SECRET
+      verify_token: env://TRITON_WHATSAPP_VERIFY_TOKEN
+    outbound:
+      kind: rest_api
+      token: env://TRITON_WHATSAPP_ACCESS_TOKEN
+      phone_number_id: env://TRITON_WHATSAPP_PHONE_NUMBER_ID
+    identity:
+      kind: sender_table
+      table: env://TRITON_WHATSAPP_SENDER_TABLE
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: env://TRITON_WHATSAPP_CORRELATION_KEY
+
+# `carl` is the upstream agent (TRITON_STATIC_UPSTREAMS); no in-process
+# tool surface is declared here, so M-COVERAGE-1 has nothing to cover.
+tools: {}
