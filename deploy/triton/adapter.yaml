@@ -58,6 +58,40 @@ adapters:
         name: carl_community_nudge
         language: de
 
+  # Telegram — the secondary channel (carl BRD §4.3). Same upstream `carl`
+  # tool; sender resolution delegated to Carl's `resolve_identity` through
+  # the upstream router (identity.kind: upstream, triton #125) so any new
+  # Telegram sender onboards dynamically — no static table to maintain.
+  # Telegram has no 24-h window, so proactive sends are free-form (no
+  # templates). Secrets are env:// refs seeded in GCP Secret Manager:
+  #   telegram-bot-token, telegram-secret-token, telegram-correlation-key.
+  # Inbound webhook: POST /telegram/webhook on the same public ingress;
+  # register it with Telegram via setWebhook + the secret token.
+  telegram:
+    kind: telegram
+    tool: carl
+    inbound:
+      kind: webhook
+      signature: secret_token
+      secret: env://TRITON_TELEGRAM_SECRET_TOKEN
+    outbound:
+      kind: rest_api
+      token: env://TRITON_TELEGRAM_BOT_TOKEN
+    identity:
+      kind: upstream
+      resolver_tool: resolve_identity
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: env://TRITON_TELEGRAM_CORRELATION_KEY
+
 # `carl` is the upstream agent (TRITON_STATIC_UPSTREAMS); no in-process
 # tool surface is declared here, so M-COVERAGE-1 has nothing to cover.
 tools: {}
