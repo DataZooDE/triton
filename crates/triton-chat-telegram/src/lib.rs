@@ -82,6 +82,35 @@ pub struct SenderClaims {
     pub tenant: String,
 }
 
+/// How this adapter resolves an inbound sender to a `Principal`.
+/// Mirrors the WhatsApp adapter's `IdentityMode` (FR-I-7).
+enum IdentityMode {
+    /// Operator-enumerated Telegram user id → claims. Unknown sender = 401.
+    SenderTable(HashMap<String, SenderClaims>),
+    /// Delegate resolution to a resolver tool reached through the
+    /// upstream router (FR-I-7). The adapter calls `resolver_tool`
+    /// with `{platform, sender}`; the tool returns `{sub, scopes,
+    /// tenant}`. A resolver error rejects the inbound. This enables
+    /// self-onboarding: a new Telegram sender is resolved dynamically
+    /// rather than rejected at the door.
+    Upstream { resolver_tool: String },
+}
+
+/// Protocol label for the resolver-tool dispatch under the `upstream`
+/// identity strategy. Distinct from [`PROTOCOL`] so the resolve call's
+/// audit lines never blur with the real command's (mirrors WhatsApp's
+/// `PROTOCOL_RESOLVE`).
+const PROTOCOL_RESOLVE: &str = "messenger:telegram:identity";
+
+/// Principal shape the `upstream` resolver tool returns.
+#[derive(Debug, Deserialize)]
+struct ResolvedPrincipal {
+    sub: String,
+    #[serde(default)]
+    scopes: Vec<String>,
+    tenant: String,
+}
+
 /// Configuration for the outbound courier half. Default base is
 /// `https://api.telegram.org`; tests override it via
 /// `TRITON_TELEGRAM_API_BASE` to point at a local fake.
@@ -107,7 +136,9 @@ pub struct TelegramAdapter {
     secret_token: String,
     bot_token: String,
     correlation_key: Vec<u8>,
-    sender_table: HashMap<String, SenderClaims>,
+    /// FR-I-7 sender resolution strategy: `sender_table` (static map)
+    /// or `upstream` (resolver tool through the upstream router).
+    identity: IdentityMode,
     /// Manifest `tool`: where plain inbound text dispatches (default
     /// `echo`). Commands (`/narrate` etc.) keep their special routes.
     inbound_tool: String,
@@ -167,9 +198,12 @@ impl TelegramAdapter {
                 adapter.inbound.signature
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
+        if !matches!(
+            adapter.identity.kind,
+            IdentityKind::SenderTable | IdentityKind::Upstream
+        ) {
             return Err(BuildError::Unsupported(format!(
-                "PR 13 only handles `identity.kind: sender_table`; got {:?}",
+                "telegram adapter supports `identity.kind: sender_table` or `upstream`; got {:?}",
                 adapter.identity.kind
             )));
         }
@@ -190,17 +224,61 @@ impl TelegramAdapter {
             )));
         }
 
-        let table_field = adapter
-            .identity
-            .credentials
-            .get("table")
-            .ok_or(BuildError::MissingCredential("identity.table"))?;
-        let table_json = resolver
-            .resolve(table_field)
-            .await
-            .map_err(|e| BuildError::Resolve("identity.table", e))?;
-        let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+        let identity = match adapter.identity.kind {
+            IdentityKind::SenderTable => {
+                let table_field = adapter
+                    .identity
+                    .credentials
+                    .get("table")
+                    .ok_or(BuildError::MissingCredential("identity.table"))?;
+                let table_json = resolver
+                    .resolve(table_field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("identity.table", e))?;
+                let table: HashMap<String, SenderClaims> = serde_json::from_str(&table_json)
+                    .map_err(|e| BuildError::TableParse(e.to_string()))?;
+                IdentityMode::SenderTable(table)
+            }
+            IdentityKind::Upstream => {
+                let field = adapter
+                    .identity
+                    .credentials
+                    .get("resolver_tool")
+                    .ok_or(BuildError::MissingCredential("identity.resolver_tool"))?;
+                let resolver_tool = resolver
+                    .resolve(field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("identity.resolver_tool", e))?;
+                if resolver_tool.trim().is_empty() {
+                    return Err(BuildError::Unsupported(
+                        "identity.resolver_tool must be non-empty".into(),
+                    ));
+                }
+                // The resolver MUST be an upstream tool (FR-I-7
+                // "reached through the upstream router"). If its name
+                // collides with an in-process tool, dispatcher.invoke
+                // would run that locally and silently bypass the
+                // router + the per-call upstream token. Refuse at boot
+                // (mirrors whatsapp).
+                if dispatcher
+                    .descriptors()
+                    .iter()
+                    .any(|d| d.name == resolver_tool)
+                {
+                    return Err(BuildError::Unsupported(format!(
+                        "identity.resolver_tool `{resolver_tool}` collides with an in-process \
+                         tool; the upstream resolver must be a distinct upstream agent"
+                    )));
+                }
+                IdentityMode::Upstream { resolver_tool }
+            }
+            // Guarded above; unreachable for other kinds.
+            other => {
+                return Err(BuildError::Unsupported(format!(
+                    "telegram adapter supports `identity.kind: sender_table` or `upstream`; got {other:?}"
+                )));
+            }
+        };
 
         // FR-L-6 / NFR-S-5: every credential field MUST resolve at
         // boot or the binary refuses to start. `outbound.token` is
@@ -262,7 +340,7 @@ impl TelegramAdapter {
             secret_token,
             bot_token,
             correlation_key,
-            sender_table,
+            identity,
             inbound_tool: adapter.tool.clone(),
             dispatcher,
             courier,
@@ -808,6 +886,78 @@ async fn handle_webhook(
     process_update(adapter, update).await
 }
 
+/// FR-I-7 sender resolution → `(sub, scopes, tenant)`. Either a static
+/// `sender_table` lookup (unknown sender = `Auth` error) or a dynamic
+/// `upstream` resolver-tool call. Shared by all three inbound
+/// resolution sites (main text, form-completion, callback-query) so
+/// they stay identical. The caller maps the returned error to the same
+/// 401/rejection each site already returns.
+async fn resolve_sender(
+    adapter: &Arc<TelegramAdapter>,
+    sender_key: &str,
+) -> Result<(String, Vec<String>, String), TritonError> {
+    match &adapter.identity {
+        IdentityMode::SenderTable(table) => match table.get(sender_key) {
+            Some(claims) => Ok((
+                claims.sub.clone(),
+                claims.scopes.clone(),
+                claims.tenant.clone(),
+            )),
+            None => Err(TritonError::Auth(format!("unknown sender {sender_key}"))),
+        },
+        // Delegate to the resolver tool reached through the upstream
+        // router; any failure rejects the inbound — never a guessed
+        // principal (mirrors whatsapp).
+        IdentityMode::Upstream { resolver_tool } => {
+            resolve_via_upstream(&adapter.dispatcher, resolver_tool, sender_key).await
+        }
+    }
+}
+
+/// Resolve a sender to `(sub, scopes, tenant)` by invoking the
+/// `resolver_tool` through the upstream router (FR-I-7 `upstream`).
+/// The resolver receives `{platform, sender}` and returns `{sub,
+/// scopes, tenant}`. Any failure (empty sender, resolver error,
+/// malformed reply) is an `Auth` error so the inbound is rejected
+/// rather than dispatched with a guessed principal.
+///
+/// The resolver call is itself a dispatch: it emits a `phase:
+/// dispatch` audit line under [`PROTOCOL_RESOLVE`] plus the upstream
+/// router's `phase: upstream` line, both under the bootstrap
+/// principal's trace_id — distinct from the real command's audit
+/// pair. Ported from whatsapp's `resolve_via_upstream`.
+async fn resolve_via_upstream(
+    dispatcher: &Dispatcher,
+    resolver_tool: &str,
+    sender_key: &str,
+) -> Result<(String, Vec<String>, String), TritonError> {
+    if sender_key.is_empty() {
+        return Err(TritonError::Auth(
+            "empty sender for upstream resolver".into(),
+        ));
+    }
+    let bootstrap = Principal {
+        sub: "identity-resolver".to_string(),
+        scopes: vec!["resolve".to_string()],
+        tenant: "system".to_string(),
+        raw_token: String::new(),
+        trace_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let args = json!({ "platform": "telegram", "sender": sender_key });
+    let dispatch = dispatcher
+        .invoke(resolver_tool, args, bootstrap, PROTOCOL_RESOLVE)
+        .await
+        .map_err(|e| TritonError::Auth(format!("identity resolver `{resolver_tool}`: {e}")))?;
+    let resolved: ResolvedPrincipal = serde_json::from_value(dispatch.result)
+        .map_err(|e| TritonError::Auth(format!("resolver reply not {{sub,scopes,tenant}}: {e}")))?;
+    if resolved.sub.trim().is_empty() || resolved.tenant.trim().is_empty() {
+        return Err(TritonError::Auth(
+            "resolver returned empty sub or tenant".into(),
+        ));
+    }
+    Ok((resolved.sub, resolved.scopes, resolved.tenant))
+}
+
 /// Process one parsed Telegram update through the callback / identity
 /// / form / dispatch pipeline. Transport-agnostic: the webhook
 /// handler calls it after the secret-token check + adapter
@@ -837,32 +987,31 @@ async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -
         return StatusCode::OK.into_response();
     };
 
-    // FR-I-7 sender resolution. Unknown sender → rejected audit
-    // + 401 (we treat unrecognised platform users as auth failures
-    // because there's no in-band path for them to acquire a
-    // Triton identity yet).
+    // FR-I-7 sender resolution. `sender_table` lookup or `upstream`
+    // resolver tool; either failure → rejected audit + 401 (we treat
+    // unresolvable platform users as auth failures — under `upstream`
+    // the resolver may itself onboard a new sender, so a 401 here means
+    // the resolver declined, not that onboarding is impossible).
     let sender_key = message.from.id.to_string();
-    let Some(claims) = adapter.sender_table.get(&sender_key) else {
-        record_rejection(
-            &adapter,
-            "-",
-            "-",
-            TritonError::Auth(format!("unknown sender {sender_key}")),
-        );
-        return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+    let (sub, scopes, tenant) = match resolve_sender(&adapter, &sender_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            record_rejection(&adapter, "-", "-", e);
+            return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+        }
     };
 
     // PR 28: per-tenant fair-share rate limit (NFR-P-3 second
     // tier). Consumed AFTER sender resolution so the bucket key
     // is the verified tenant id, not the platform user id.
-    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&claims.tenant) {
+    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&tenant) {
         record_rejection(
             &adapter,
-            &claims.sub,
-            &claims.tenant,
+            &sub,
+            &tenant,
             TritonError::RateLimited(format!(
-                "tenant `{}` rate limit hit on adapter `{}`; retry in {:.2}s",
-                claims.tenant, adapter.name, retry_after
+                "tenant `{tenant}` rate limit hit on adapter `{}`; retry in {retry_after:.2}s",
+                adapter.name
             )),
         );
         let secs = retry_after.ceil().max(1.0) as u64;
@@ -879,9 +1028,9 @@ async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -
     // don't carry a JWT we forward; the upstream router won't
     // touch this field for messenger-routed calls).
     let principal = Principal {
-        sub: claims.sub.clone(),
-        scopes: claims.scopes.clone(),
-        tenant: claims.tenant.clone(),
+        sub,
+        scopes,
+        tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
     };
@@ -1097,38 +1246,41 @@ async fn handle_form_outcome(
             // thing needed to continue, not a snapshot of the
             // boot-time identity).
             //
-            // PR 37 Finding 5: we look up `sender_table` by the
-            // platform-asserted `telegram_user_id` from the form
-            // key, NOT by scanning for a matching `sub`. The
-            // platform id is the same key the inbound handler
-            // already uses, so this lookup is unambiguous. (The
-            // old code scanned for the first sub-match, which is
-            // wrong when two ids share a sub.) If the table
-            // changed between install and complete the new claims
-            // win — the table is the source of truth.
+            // PR 37 Finding 5: we re-resolve by the platform-asserted
+            // `telegram_user_id` from the form key, NOT by scanning for
+            // a matching `sub`. The platform id is the same key the
+            // inbound handler already uses, so this lookup is
+            // unambiguous. Under `sender_table` a table edit between
+            // install and complete means the new claims win (the table
+            // is the source of truth); under `upstream` the resolver is
+            // re-consulted, so a since-deauthorised sender is dropped.
             let sender_key = form_key.telegram_user_id.to_string();
-            let Some(claims) = adapter.sender_table.get(&sender_key) else {
-                // Sender disappeared mid-flight (table reload).
-                // Drop the submission with a rejection audit + a
-                // user-facing notice. No dispatch happens.
-                record_rejection(
-                    adapter,
-                    &principal_for_post.sub,
-                    &principal_for_post.tenant,
-                    TritonError::Auth(format!(
-                        "telegram user id `{}` no longer in sender_table; form submission dropped",
-                        sender_key
-                    )),
-                );
-                let reply =
-                    courier_reply("Your session is no longer authorised; form submission dropped.");
-                post_back(adapter, &principal_for_post, "form_dropped", chat_id, reply).await;
-                return StatusCode::OK.into_response();
+            let (sub, scopes, tenant) = match resolve_sender(adapter, &sender_key).await {
+                Ok(p) => p,
+                Err(_) => {
+                    // Sender no longer resolvable mid-flight (table
+                    // reload / resolver decline). Drop the submission
+                    // with a rejection audit + a user-facing notice. No
+                    // dispatch happens.
+                    record_rejection(
+                        adapter,
+                        &principal_for_post.sub,
+                        &principal_for_post.tenant,
+                        TritonError::Auth(format!(
+                            "telegram user id `{sender_key}` no longer resolvable; form submission dropped"
+                        )),
+                    );
+                    let reply = courier_reply(
+                        "Your session is no longer authorised; form submission dropped.",
+                    );
+                    post_back(adapter, &principal_for_post, "form_dropped", chat_id, reply).await;
+                    return StatusCode::OK.into_response();
+                }
             };
             let principal = Principal {
-                sub: claims.sub.clone(),
-                scopes: claims.scopes.clone(),
-                tenant: claims.tenant.clone(),
+                sub,
+                scopes,
+                tenant,
                 raw_token: String::new(),
                 trace_id: uuid::Uuid::new_v4().to_string(),
             };
@@ -1262,28 +1414,27 @@ async fn handle_callback_query(
     // FR-I-7 sender resolution. The principal comes from `from.id`
     // — never from the token. A hostile platform actor cannot
     // impersonate a different user by forging tokens because the
-    // sender_table lookup is independent.
+    // sender resolution (table lookup or upstream resolver) is
+    // independent of the token.
     let sender_key = cq.from.id.to_string();
-    let Some(claims) = adapter.sender_table.get(&sender_key) else {
-        record_rejection(
-            adapter,
-            "-",
-            "-",
-            TritonError::Auth(format!("unknown sender {sender_key}")),
-        );
-        return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+    let (sub, scopes, tenant) = match resolve_sender(adapter, &sender_key).await {
+        Ok(p) => p,
+        Err(e) => {
+            record_rejection(adapter, "-", "-", e);
+            return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+        }
     };
 
     // PR 28: per-tenant fair-share. Same shape as the message
     // path above — bucket keyed by verified tenant id.
-    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&claims.tenant) {
+    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&tenant) {
         record_rejection(
             adapter,
-            &claims.sub,
-            &claims.tenant,
+            &sub,
+            &tenant,
             TritonError::RateLimited(format!(
-                "tenant `{}` rate limit hit on adapter `{}`; retry in {:.2}s",
-                claims.tenant, adapter.name, retry_after
+                "tenant `{tenant}` rate limit hit on adapter `{}`; retry in {retry_after:.2}s",
+                adapter.name
             )),
         );
         let secs = retry_after.ceil().max(1.0) as u64;
@@ -1298,8 +1449,8 @@ async fn handle_callback_query(
     let Some(token) = cq.data.as_deref().filter(|s| !s.is_empty()) else {
         record_rejection(
             adapter,
-            &claims.sub,
-            &claims.tenant,
+            &sub,
+            &tenant,
             TritonError::Validation("callback_query without data".into()),
         );
         return (StatusCode::BAD_REQUEST, "callback_query missing data").into_response();
@@ -1320,8 +1471,8 @@ async fn handle_callback_query(
     if message_date == 0 {
         record_rejection(
             adapter,
-            &claims.sub,
-            &claims.tenant,
+            &sub,
+            &tenant,
             TritonError::Auth("callback_query missing message.date (freshness anchor)".into()),
         );
         return (StatusCode::UNAUTHORIZED, "missing message.date").into_response();
@@ -1332,8 +1483,8 @@ async fn handle_callback_query(
         let age = now.saturating_sub(message_date);
         record_rejection(
             adapter,
-            &claims.sub,
-            &claims.tenant,
+            &sub,
+            &tenant,
             TritonError::Auth(format!(
                 "stale callback: message age {age}s exceeds TTL {CALLBACK_TTL_SECS}s"
             )),
@@ -1347,8 +1498,8 @@ async fn handle_callback_query(
         let skew = message_date.saturating_sub(now);
         record_rejection(
             adapter,
-            &claims.sub,
-            &claims.tenant,
+            &sub,
+            &tenant,
             TritonError::Auth(format!(
                 "future-dated callback: message {skew}s ahead of now"
             )),
@@ -1361,8 +1512,8 @@ async fn handle_callback_query(
         Err(e) => {
             record_rejection(
                 adapter,
-                &claims.sub,
-                &claims.tenant,
+                &sub,
+                &tenant,
                 TritonError::Auth(format!("callback token: {e}")),
             );
             return (StatusCode::UNAUTHORIZED, "callback token rejected").into_response();
@@ -1370,9 +1521,9 @@ async fn handle_callback_query(
     };
 
     let principal = Principal {
-        sub: claims.sub.clone(),
-        scopes: claims.scopes.clone(),
-        tenant: claims.tenant.clone(),
+        sub,
+        scopes,
+        tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
     };

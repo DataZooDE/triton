@@ -1,0 +1,37 @@
+# `identity.kind: upstream` for the telegram adapter (FR-I-7): sender
+# resolution is delegated to a resolver tool reached through the
+# upstream router — the adapter calls `resolver_tool` with
+# {platform, sender} and the tool returns {sub, scopes, tenant}.
+# Plain text dispatches to the upstream `assistant` agent (the
+# adapter's `tool` field). Literal credentials (dev mode only).
+#
+# Mirrors manifest-whatsapp-cloud-upstream-identity.yaml so any new
+# Telegram sender is dynamically resolved (self-onboarding) exactly
+# like WhatsApp.
+version: "0.2"
+
+adapters:
+  telegram:
+    kind: telegram
+    tool: assistant
+    inbound:
+      kind: webhook
+      signature: secret_token
+      secret: webhook-secret-for-test
+    outbound:
+      kind: rest_api
+      token: bot-token-for-test
+    identity:
+      kind: upstream
+      resolver_tool: resolve_identity
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
