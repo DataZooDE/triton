@@ -656,6 +656,16 @@ fn visit_secrets(
         paths.push((format!("adapters.{name}.outbound.{k}"), v));
     }
     for (k, v) in &adapter.identity.credentials {
+        // `resolver_tool` (identity.kind: upstream) is the NAME of a public
+        // upstream tool (declared in TRITON_STATIC_UPSTREAMS), not a secret —
+        // exempt it from M-SECRETS-1 so a PRODUCTION manifest can delegate
+        // identity resolution with a literal tool name. The other identity
+        // credential fields (sender_table `table`, azure `azure_identity`,
+        // self_enrol `fallback_table`) carry sender→claims data and stay
+        // secrets.
+        if k == "resolver_tool" {
+            continue;
+        }
         paths.push((format!("adapters.{name}.identity.{k}"), v));
     }
     paths.push((
