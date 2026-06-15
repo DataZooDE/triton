@@ -70,6 +70,21 @@ async fn shipped_dz_triton_manifest_validates_and_boots_under_nonprod() {
             "TRITON_WHATSAPP_CORRELATION_KEY".to_string(),
             "correlation-key-32-bytes-or-more!!".to_string(),
         ),
+        // Telegram env:// refs the substrate injects from GCP SM (the
+        // telegram adapter resolves these at boot too; identity.kind:
+        // upstream needs no sender table).
+        (
+            "TRITON_TELEGRAM_BOT_TOKEN".to_string(),
+            "123456:telegram-bot-token-stand-in".to_string(),
+        ),
+        (
+            "TRITON_TELEGRAM_SECRET_TOKEN".to_string(),
+            "telegram-secret-token-stand-in".to_string(),
+        ),
+        (
+            "TRITON_TELEGRAM_CORRELATION_KEY".to_string(),
+            "telegram-correlation-key-32-bytes-or-more!!".to_string(),
+        ),
     ]);
 
     // Reaches /healthz only after manifest closed-checks pass, all env://
