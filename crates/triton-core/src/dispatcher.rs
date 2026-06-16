@@ -26,10 +26,10 @@ use crate::principal::Principal;
 use crate::tool::{ToolDescriptor, ToolRegistry};
 
 /// Hook the dispatcher calls when the in-process registry doesn't
-/// know a tool. PR 9's `triton-upstream::UpstreamRouter` implements
-/// this; tests can plug in their own implementations. The trait is
-/// the dependency-inversion seam between the core dispatcher and
-/// the per-substrate router (Consul + Vault + breaker).
+/// know a tool. `triton-upstream::StaticUpstream` implements this;
+/// tests can plug in their own implementations. The trait is the
+/// dependency-inversion seam between the core dispatcher and the
+/// upstream dispatcher (a static `host:port` map + per-call RS256 JWT).
 /// Outcome handed to [`Dispatcher::record_post`]. `Ok` carries
 /// `(http_status, disposition, optional detail)`; `Err` carries the
 /// error plus the same triple. The `detail` is a free-form
@@ -49,10 +49,10 @@ pub trait UpstreamDispatch: Send + Sync {
         principal: &Principal,
     ) -> Result<Value, TritonError>;
 
-    /// Tool names of upstream agents discoverable right now (Consul
-    /// `agent:<name>` services). Surfaced by `GET /v1/tools` so clients
-    /// can discover agents that aren't in the in-process registry. The
-    /// default returns nothing; the real router queries Consul and
+    /// Tool names of upstream agents discoverable right now (the keys
+    /// of the `TRITON_STATIC_UPSTREAMS` map). Surfaced by `GET /v1/tools`
+    /// so clients can discover agents that aren't in the in-process
+    /// registry. The default returns nothing; the real dispatcher
     /// degrades to empty on error (listing must never fail the
     /// endpoint).
     async fn list_agents(&self) -> Vec<String> {
