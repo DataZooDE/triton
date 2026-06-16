@@ -3,21 +3,26 @@
 Triton is the public **agent-ingress gateway** of the DataZoo Hetzner
 substrate. One Rust binary exposes **nine adapters**, verifies every
 inbound credential, and dispatches each tool call to an **upstream
-agent** discovered via Consul. It returns either plain JSON or an
-A2UI surface, in the wire format the caller used.
+agent** resolved by tool name from a static `host:port` map. It
+returns either plain JSON or an A2UI surface, in the wire format the
+caller used.
 
 Full picture: `doc/architecture.md` §3 (context) and §5.1 (Level-1
 whitebox). The one-paragraph version:
 
 ```
-clients ─▶ Fabio :443 ─▶ Triton ─▶ upstream agents (your tools)
-            (MCP/A2A/REST + 6 chat channels)   (tag:agent:<name> in Consul)
+clients ─▶ Triton ─▶ upstream agents (your tools)
+            (MCP/A2A/REST + 6 chat channels)   (tool name → host:port in TRITON_STATIC_UPSTREAMS)
                               │
                               ├─ identity boundary (OIDC / platform sig)
                               ├─ dispatcher  ◀── the single audit pivot
-                              ├─ upstream router (Consul + Vault swap + breaker)
+                              ├─ upstream router (static map + per-call RS256 JWT + breaker)
                               └─ audit → stdout → substrate collector
 ```
+
+(The router resolved agents via Consul `tag:agent:<name>` and minted
+bearers via Vault before the Kamal migration; both are gone — see
+`references/03` and `references/04`.)
 
 ## The nine adapters
 
@@ -35,8 +40,8 @@ binary. You write the thing on either end of the arrows.
 
 | Your app is… | You build… | Triton sees you as… |
 |---|---|---|
-| an **upstream agent** | a Nomad job implementing tools | a Consul service `tag:agent:<tool>` it dispatches into → `references/01` |
-| a **frontend / client** | an MCP host, A2A peer, or REST caller | a caller hitting `:443` → `references/06` |
+| an **upstream agent** | a service (a Kamal app) implementing tools | a `host:port` it resolves by tool name from `TRITON_STATIC_UPSTREAMS` and dispatches into → `references/01` |
+| a **frontend / client** | an MCP host, A2A peer, or REST caller | a caller hitting its public ingress → `references/06` |
 
 Most DataZoo "agentic apps" are the first kind: a tool-bearing agent.
 The dispatcher hands you `(tool, args, principal)`; you return a
@@ -54,8 +59,9 @@ agent is protocol-agnostic.
    interaction is a fresh `(tool, args, principal)` invocation. Your
    agent must be stateless too (G-8). (`doc/realizations.md` §1.)
 3. **Lethal-trifecta cut.** Triton never forwards the inbound token
-   to you. You get a fresh Vault-minted OIDC token scoped to your
-   agent, TTL ≤ 5 min. (NFR-S-3, ADR-3 → `references/04`.)
+   to you. You get a fresh RS256 OIDC token Triton mints per call,
+   scoped to your agent, TTL ≤ 5 min. (NFR-S-3, ADR-3 →
+   `references/04`.)
 
 ## When NOT to use this skill
 

@@ -173,7 +173,7 @@ impl GoogleChatAdapter {
         // FR-L-6 / NFR-S-5: every credential field MUST resolve at
         // boot. `outbound.token` is reserved for the future async
         // courier path (`https://chat.googleapis.com/...`); we still
-        // resolve it now so a misconfigured Vault ref fails closed.
+        // resolve it now so a misconfigured `env://` ref fails closed.
         if let Some(field) = adapter.outbound.credentials.get("token") {
             resolver
                 .resolve(field)
@@ -228,8 +228,8 @@ impl GoogleChatAdapter {
                 // The resolver MUST be an upstream tool (FR-I-7
                 // "reached through the upstream router"). If its name
                 // collides with an in-process tool, dispatcher.invoke
-                // would run that locally and silently bypass Consul +
-                // the Vault-minted token. Refuse at boot.
+                // would run that locally and silently bypass the static
+                // upstream router + the per-call RS256 JWT. Refuse at boot.
                 if dispatcher
                     .descriptors()
                     .iter()
@@ -237,7 +237,7 @@ impl GoogleChatAdapter {
                 {
                     return Err(BuildError::Unsupported(format!(
                         "identity.resolver_tool `{resolver_tool}` collides with an in-process \
-                         tool; the upstream resolver must be a distinct Consul-discovered agent"
+                         tool; the upstream resolver must be a distinct static-upstream agent"
                     )));
                 }
                 IdentityMode::Upstream { resolver_tool }
@@ -252,7 +252,7 @@ impl GoogleChatAdapter {
 
         // `correlation_key` isn't functionally consumed in PR 33
         // (no Buttons mean no HMAC correlation tokens) but we still
-        // resolve it so a bad Vault ref fails closed at boot.
+        // resolve it so a bad `env://` ref fails closed at boot.
         resolver
             .resolve(&adapter.correlation_key)
             .await

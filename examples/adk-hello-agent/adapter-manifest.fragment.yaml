@@ -4,8 +4,9 @@
 # surface reaches chat channels) the degrade rules for it. The operator
 # merges it into the live manifest. See references/03 and references/05.
 #
-# The HTTP trio (REST/MCP/A2A) needs none of this — Triton discovers the
-# agent via the Consul tag `agent:hello` and dispatches by tool name. This
+# The HTTP trio (REST/MCP/A2A) needs none of this — Triton reaches the
+# agent via its `TRITON_STATIC_UPSTREAMS` entry (`hello=<host:port>`) and
+# dispatches by tool name. This
 # fragment matters only when you want the greeting to reach a CHAT channel,
 # where Triton boot-checks that every component the tool emits has a
 # degrade rule on every chat adapter (FR-L-5, M-COVERAGE-1).
@@ -23,7 +24,7 @@ tools:
 
 # ── OPERATOR territory (shown for context) ───────────────────────────
 # A worked Telegram example covering narration + buttons. Credentials
-# MUST be vault:// refs in production — a literal here makes prod boot
+# MUST be env:// refs in production — a literal here makes prod boot
 # fail (FR-L-6, NFR-S-5).
 adapters:
   telegram:
@@ -31,20 +32,20 @@ adapters:
     inbound:
       kind: webhook
       signature: secret_token
-      secret: vault://kv/data/apps/<co>/triton/<env>/telegram#webhook_secret
+      secret: env://TRITON_TELEGRAM_WEBHOOK_SECRET
     outbound:
       kind: rest_api
-      token: vault://kv/data/apps/<co>/triton/<env>/telegram#bot_token
+      token: env://TRITON_TELEGRAM_BOT_TOKEN
     identity:
       kind: sender_table
-      table: vault://kv/data/apps/<co>/triton/<env>/telegram#senders
+      table: env://TRITON_TELEGRAM_SENDERS
     degrade:
       narration: passthrough
       buttons: inline_keyboard # Telegram native; ≤ 8 buttons/row
     rate_limit:
       messages_per_sec: 25
       burst: 50
-    correlation_key: vault://kv/data/apps/<co>/triton/<env>/telegram#correlation_key
+    correlation_key: env://TRITON_TELEGRAM_CORRELATION_KEY
 
 # ── OPTIONAL: let THIS agent resolve chat senders (FR-I-7) ───────────
 # If you'd rather not maintain an operator `sender_table`, declare
@@ -61,12 +62,12 @@ adapters:
 #    inbound:
 #      kind: webhook
 #      signature: hmac256
-#      secret: vault://kv/data/apps/<co>/triton/<env>/whatsapp#app_secret
-#      verify_token: vault://kv/data/apps/<co>/triton/<env>/whatsapp#verify_token
+#      secret: env://TRITON_WHATSAPP_APP_SECRET
+#      verify_token: env://TRITON_WHATSAPP_VERIFY_TOKEN
 #    outbound:
 #      kind: rest_api
-#      token: vault://kv/data/apps/<co>/triton/<env>/whatsapp#access_token
-#      phone_number_id: vault://kv/data/apps/<co>/triton/<env>/whatsapp#phone_number_id
+#      token: env://TRITON_WHATSAPP_ACCESS_TOKEN
+#      phone_number_id: env://TRITON_WHATSAPP_PHONE_NUMBER_ID
 #    identity:
 #      kind: upstream
 #      resolver_tool: resolve_identity
@@ -74,4 +75,4 @@ adapters:
 #      narration: passthrough
 #      buttons: inline_keyboard
 #    rate_limit: { messages_per_sec: 25, burst: 50 }
-#    correlation_key: vault://kv/data/apps/<co>/triton/<env>/whatsapp#correlation_key
+#    correlation_key: env://TRITON_WHATSAPP_CORRELATION_KEY

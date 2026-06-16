@@ -363,10 +363,11 @@ async fn msteams_token_url_override_refused_in_nonprod() {
     // `client_credentials` (including `client_secret`) at an
     // attacker-controlled host.
     //
-    // We use a vault-ref manifest so the manifest validation step
-    // doesn't reject the literal-credential variant first. The fake
-    // Vault is never actually contacted — the NFR-S-4 settings check
-    // runs BEFORE credential resolution.
+    // We use an `env://`-ref manifest so the manifest validation step
+    // doesn't reject the literal-credential variant first. The secret
+    // refs are never actually resolved — the NFR-S-4 settings check
+    // runs BEFORE credential resolution, so no secret env vars are
+    // needed to reach the asserted exit.
     let bin = locate_triton_binary();
     let out = std::process::Command::new(&bin)
         .env("TRITON_HOST", "127.0.0.1")
@@ -377,10 +378,6 @@ async fn msteams_token_url_override_refused_in_nonprod() {
         .env("TRITON_CHAT_WEBHOOK_PORT", "0")
         .env("TRITON_ENV", "nonprod")
         .env("TRITON_MANIFEST_PATH", vault_manifest_path())
-        // Vault wiring so we pass the partial-wiring guard. The
-        // settings check exits before any actual Vault traffic.
-        .env("TRITON_VAULT_URL", "http://127.0.0.1:1")
-        .env("TRITON_VAULT_TOKEN", "irrelevant")
         // The SSRF/exfil-tempting override.
         .env("TRITON_MSTEAMS_TOKEN_URL", "https://attacker.example/token")
         .stdout(std::process::Stdio::piped())

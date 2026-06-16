@@ -74,7 +74,7 @@ pub struct RestState {
     /// OIDC signer for static-upstream dispatch. When set, Triton acts as the
     /// issuer for the JWTs it mints to agents: it serves discovery + JWKS at the
     /// `/.well-known/*` routes below so agents verify those tokens. `None`
-    /// outside static-signing mode (Consul/Vault path, or unsigned static mode).
+    /// outside static-signing mode (e.g. dev-token mode, or unsigned static mode).
     pub oidc_signer: Option<Arc<triton_identity::JwtSigner>>,
 }
 
@@ -204,7 +204,7 @@ async fn surface_render(
     // callback_data with this key. The preview is read-only — the
     // rendered buttons are never posted — so a fixed zero key is
     // safe: tokens carrying it can't be replayed against any live
-    // adapter, every one of which uses a distinct vault-resolved
+    // adapter, every one of which uses a distinct env-resolved
     // key. Mappers without interactive callbacks ignore it.
     const PREVIEW_KEY: [u8; 32] = [0u8; 32];
 

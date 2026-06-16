@@ -38,9 +38,7 @@ From `crates/triton-tests/src/lib.rs` and its fixture modules:
 |---|---|
 | `TritonProcess` | Spawns the real `triton` binary on free loopback ports; waits for `/healthz`; `Drop` kills it. `spawn()`, `spawn_with_env(...)`, `spawn_with_args(...)`. Exposes `rest_addr`, `mcp_addr`, `a2a_addr`, `metrics_addr`, `chat_webhook_addr`, and `rest_url(path)` / `mcp_url` / `a2a_url`. |
 | `TestIssuer` | A real OIDC issuer (Ed25519 keypair + JWKS endpoint). `issuer_url()`, `sign_jwt(claims: Value)`, `unsigned_jwt(claims)` for the real-JWT path. |
-| `upstream_fixture::FakeConsul` | `start(&[(service, host_port)])` → `.url()`. Resolves `tag:agent:<name>` to your stub. |
-| `upstream_fixture::FakeVault` | `start_minting(token)` (OIDC swap, what the upstream router needs) or `start_kv_v2(expected_token, entries)` (manifest credential resolution). `.url()`. |
-| `upstream_fixture::FakeAgent` | `start_echoing()`, `start_always_failing()`, `start_failing_then_recovering(n)`; `.host_port()`, `.hits()`, `.bearers_seen()`. |
+| `upstream_fixture::FakeAgent` | A real axum server speaking the upstream wire shape. `start_echoing()`, `start_always_failing()`, `start_failing_then_recovering(n)`, `start_returning(json)`; `.host_port()` (feed it into `TRITON_STATIC_UPSTREAMS`), `.hits()`, `.bearers_seen()`, `.tools_seen()` (the `X-Triton-Tool` header), `.bodies_seen()`. |
 | chat fakes | `chat_courier_fixture` (Telegram-shaped capture), `signald_fixture`, `rasterizer_fixture`. |
 
 ADR-16 guarantee: any breaking change to these goes through a
@@ -49,31 +47,28 @@ refactor of Triton's internal tests.
 
 ## Pattern A — dev-token, end-to-end through your agent (the common case)
 
-A real upstream dispatch needs **both** a `FakeConsul` (to resolve
-your tool) and a `FakeVault` (the upstream router mints a per-call
-OIDC token for your agent before dispatching). The binary refuses to
-boot with `TRITON_CONSUL_URL` set but no Vault — they go together.
-This compiles against the checked-out `triton-tests`
-(`crates/triton-tests/tests/upstream.rs`):
+A real upstream dispatch needs only a `FakeAgent` and a
+`TRITON_STATIC_UPSTREAMS` entry pointing your tool name at it. With no
+signer configured, Triton sends the static `dev-token` bearer to your
+agent (no JWT mint). The Consul + Vault fakes are **gone** — there is
+no `FakeConsul`/`FakeVault` any more. This compiles against the
+checked-out `triton-tests`
+(`crates/triton-tests/tests/static_upstream.rs`):
 
 ```rust
 use std::collections::HashMap;
 use std::time::Duration;
 use serde_json::json;
-use triton_tests::{TritonProcess, upstream_fixture::{FakeConsul, FakeVault, FakeAgent}};
+use triton_tests::{TritonProcess, upstream_fixture::FakeAgent};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn frontend_calls_triton_calls_my_agent() {
-    let agent  = FakeAgent::start_echoing().await;           // stands in for your Nomad job
-    let consul = FakeConsul::start(&[("my-tool", agent.host_port())]).await;
-    let vault  = FakeVault::start_minting("vault-minted-agent-token").await;
+    let agent = FakeAgent::start_echoing().await;            // stands in for your deployed agent
 
     let env = HashMap::from([
-        ("TRITON_ENV".into(),            "nonprod".into()),
-        ("TRITON_CONSUL_URL".into(),     consul.url()),
-        ("TRITON_VAULT_URL".into(),      vault.url()),
-        ("TRITON_VAULT_TOKEN".into(),    "triton-vault-token".into()),
-        ("TRITON_VAULT_OIDC_ROLE".into(),"agent-oidc-swap".into()),
+        ("TRITON_ENV".into(), "nonprod".into()),
+        // Resolve the tool name to the agent's host:port — no Consul, no Vault.
+        ("TRITON_STATIC_UPSTREAMS".into(), format!("my-tool={}", agent.host_port())),
     ]);
     let triton = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
 
@@ -87,17 +82,18 @@ async fn frontend_calls_triton_calls_my_agent() {
     let body: serde_json::Value = resp.json().await.unwrap();
     // FakeAgent echoes args; Triton wraps the upstream result in `result`.
     assert_eq!(body["result"]["echoed"]["city"], "Berlin");
-    assert_eq!(agent.bearers_seen()[0], "vault-minted-agent-token"); // NOT dev-token
+    // No signer configured → Triton sends the static dev-token bearer.
+    assert_eq!(agent.bearers_seen()[0], "dev-token");
+    // The dispatch carries the informational tool-name header.
+    assert_eq!(agent.tools_seen()[0].as_deref(), Some("my-tool"));
 }
 ```
 
-> `doc/consumer-integration-tests.md` shows a slimmer snippet
-> (`consul.base_url()`, only `TRITON_CONSUL_URL`, a
-> `TRITON_MANIFEST_PATH`). Prefer what compiles against the
-> checked-out crate: the methods are `consul.url()` /
-> `vault.url()` / `agent.host_port()`, Consul implies Vault, and an
-> empty manifest is the default (no `TRITON_MANIFEST_PATH` needed).
-> The template in this skill is kept in sync with the live API.
+> To exercise the **real RS256 path** instead of the dev-token bearer,
+> add `TRITON_JWT_SIGNING_KEY` + `TRITON_SELF_ISSUER` +
+> `TRITON_JWT_JWKS` to the env (all three together) and assert the
+> bearer your agent saw is a JWT it can verify against Triton's
+> `/.well-known/jwks.json` (→ `references/04`).
 
 ## Pattern B — real OIDC
 

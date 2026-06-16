@@ -60,15 +60,13 @@ FAIL=0
 TRITON_PID=""
 HTTP_PID=""
 AGENT_PID=""
-CONSUL_PID=""
-VAULT_PID=""
 
 pass() { PASS=$((PASS+1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL: $1" >&2; }
 
 cleanup() {
   rodney stop >/dev/null 2>&1 || true
-  for p in "$HTTP_PID" "$TRITON_PID" "$AGENT_PID" "$CONSUL_PID" "$VAULT_PID"; do
+  for p in "$HTTP_PID" "$TRITON_PID" "$AGENT_PID"; do
     [ -n "$p" ] && kill "$p" >/dev/null 2>&1 || true
   done
 }
@@ -90,40 +88,28 @@ fi
 [ -f "$WEB_DIR/index.html" ] || { echo "no build at $WEB_DIR (drop --no-build)" >&2; exit 2; }
 
 # ---- build everything ----------------------------------------------
-echo "==> building triton-bin, the adk-hello-agent, and the Consul/Vault fakes"
+echo "==> building triton-bin and the adk-hello-agent"
 ( cd "$REPO_ROOT" && cargo build -p triton-bin --bin triton >/dev/null 2>&1 )
-( cd "$REPO_ROOT" && cargo build -p triton-tests --bin fake-consul --bin fake-vault >/dev/null 2>&1 )
 ( cd "$AGENT_DIR" && cargo build --bin adk-hello-agent >/dev/null 2>&1 )
 
-# ---- start the live upstream agent + Consul/Vault fakes -------------
+# ---- start the live upstream agent ----------------------------------
 # The agent runs its deterministic StaticBrain (no ANTHROPIC_API_KEY), so
-# the greeting is fixed and assertable. The fakes print their URL on the
-# first stdout line; we capture them and point Triton's upstream router
-# at them. FakeVault mints `dev-token`, which the agent accepts in its
-# dev-token mode.
+# the greeting is fixed and assertable. Triton reaches it via the static
+# TRITON_STATIC_UPSTREAMS map (no Consul, no Vault); with no JWT signer
+# configured Triton dispatches the static `dev-token` bearer, which the
+# agent accepts in its dev-token mode.
 echo "==> starting adk-hello-agent on :$AGENT_PORT"
 AGENT_PORT=$AGENT_PORT "$AGENT_DIR/target/debug/adk-hello-agent" >/dev/null 2>&1 &
 AGENT_PID=$!
-CONSUL_OUT="$(mktemp)"; VAULT_OUT="$(mktemp)"
-"$REPO_ROOT/target/debug/fake-consul" "hello=127.0.0.1:$AGENT_PORT" >"$CONSUL_OUT" 2>/dev/null &
-CONSUL_PID=$!
-"$REPO_ROOT/target/debug/fake-vault" dev-token >"$VAULT_OUT" 2>/dev/null &
-VAULT_PID=$!
-for _ in $(seq 1 50); do
-  [ -s "$CONSUL_OUT" ] && [ -s "$VAULT_OUT" ] && break; sleep 0.1
-done
-CONSUL_URL="$(cat "$CONSUL_OUT")"; VAULT_URL="$(cat "$VAULT_OUT")"
-rm -f "$CONSUL_OUT" "$VAULT_OUT"
-[ -n "$CONSUL_URL" ] && [ -n "$VAULT_URL" ] || { echo "fakes never printed a URL" >&2; exit 1; }
-echo "    consul=$CONSUL_URL vault=$VAULT_URL"
 
-# ---- start Triton (dev-token inbound; upstream router → the agent) --
+# ---- start Triton (dev-token inbound; static upstream → the agent) --
+# `local` env so the loopback static-upstream endpoint is accepted (the
+# NFR-S-4 SSRF guard only enforces tailnet/private targets outside local).
 echo "==> starting triton-bin"
 TRITON_HOST=127.0.0.1 TRITON_REST_PORT=$REST_PORT TRITON_MCP_PORT=$MCP_PORT \
   TRITON_A2A_PORT=$A2A_PORT TRITON_METRICS_PORT=0 TRITON_CHAT_WEBHOOK_PORT=0 \
-  TRITON_ENV=nonprod \
-  TRITON_CONSUL_URL="$CONSUL_URL" TRITON_VAULT_URL="$VAULT_URL" \
-  TRITON_VAULT_TOKEN=triton-vault-token TRITON_VAULT_OIDC_ROLE=agent-oidc-swap \
+  TRITON_ENV=local \
+  TRITON_STATIC_UPSTREAMS="hello=127.0.0.1:$AGENT_PORT" \
   "$REPO_ROOT/target/debug/triton" \
     --cors-allowed-origins "$SPA_URL" \
     --explorer-client-id triton-explorer-dev >/dev/null 2>&1 &

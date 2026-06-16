@@ -15,10 +15,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use serde_json::json;
-use triton_tests::{
-    TritonProcess,
-    upstream_fixture::{FakeConsul, FakeVault},
-};
+use triton_tests::TritonProcess;
 
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0")
@@ -71,14 +68,15 @@ async fn live_llm_greeting_through_rest() {
     }
     assert!(ok, "agent /healthz never came up");
 
-    let consul = FakeConsul::start(&[("hello", format!("127.0.0.1:{}", agent.port))]).await;
-    let vault = FakeVault::start_minting("dev-token").await;
     let env = HashMap::from([
         ("TRITON_ENV".into(), "nonprod".into()),
-        ("TRITON_CONSUL_URL".into(), consul.url()),
-        ("TRITON_VAULT_URL".into(), vault.url()),
-        ("TRITON_VAULT_TOKEN".into(), "triton-vault-token".into()),
-        ("TRITON_VAULT_OIDC_ROLE".into(), "agent-oidc-swap".into()),
+        // Reach the agent via the static upstream map — no Consul, no
+        // Vault. With no OIDC signer Triton forwards the literal
+        // `dev-token`, which the agent accepts.
+        (
+            "TRITON_STATIC_UPSTREAMS".into(),
+            format!("hello=127.0.0.1:{}", agent.port),
+        ),
         // Upstream LLM calls can be slow; give the dispatch room.
         ("TRITON_UPSTREAM_TIMEOUT".into(), "30s".into()),
     ]);

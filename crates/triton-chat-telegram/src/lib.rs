@@ -174,7 +174,7 @@ struct CourierClient {
 impl TelegramAdapter {
     /// Read a manifest [`Adapter`] of `kind: telegram`, resolve
     /// every declared credential through the supplied
-    /// [`SecretResolver`] (literal or Vault KV v2), and produce a
+    /// [`SecretResolver`] (literal or `env://` ref), and produce a
     /// runnable adapter. Called once at boot per declared adapter.
     ///
     /// `rasterizer` (PR 36) is the optional out-of-process
@@ -286,7 +286,7 @@ impl TelegramAdapter {
         // see `https://api.telegram.org/bot{token}/sendMessage`).
         // `correlation_key` isn't functionally consumed yet (PR
         // 18+: HMAC correlation tokens), but it still resolves at
-        // boot so a bad Vault ref fails closed.
+        // boot so a bad `env://` ref fails closed.
         let bot_token = match adapter.outbound.credentials.get("token") {
             Some(field) => resolver
                 .resolve(field)

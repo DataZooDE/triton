@@ -15,9 +15,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::FakeTelegramApi;
-use triton_tests::upstream_fixture::FakeVault;
 
-const VAULT_TOKEN: &str = "triton-vault-token";
 const RESOLVED_SECRET: &str = "secret-resolved-from-vault";
 const BOT_TOKEN: &str = "12345:resolved-bot-token";
 const CORRELATION_KEY: &str = "correlation-key-from-vault";
@@ -42,32 +40,24 @@ fn telegram_update(text: &str) -> Value {
     })
 }
 
-async fn start_kv_vault() -> FakeVault {
-    FakeVault::start_kv_v2(
-        VAULT_TOKEN,
-        &[(
-            "kv/data/triton-test/telegram",
-            &[
-                ("webhook_secret", RESOLVED_SECRET),
-                ("bot_token", BOT_TOKEN),
-                (
-                    "senders",
-                    r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
-                ),
-                ("correlation_key", CORRELATION_KEY),
-            ],
-        )],
-    )
-    .await
-}
-
-fn env_with(vault: &FakeVault, telegram: &FakeTelegramApi) -> HashMap<String, String> {
+fn env_with(telegram: &FakeTelegramApi) -> HashMap<String, String> {
     HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
-        ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
         ("TRITON_TELEGRAM_API_BASE".to_string(), telegram.url()),
+        (
+            "TRITON_TG_WEBHOOK_SECRET".to_string(),
+            RESOLVED_SECRET.to_string(),
+        ),
+        ("TRITON_TG_BOT_TOKEN".to_string(), BOT_TOKEN.to_string()),
+        (
+            "TRITON_TG_SENDERS".to_string(),
+            r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#.to_string(),
+        ),
+        (
+            "TRITON_TG_CORRELATION_KEY".to_string(),
+            CORRELATION_KEY.to_string(),
+        ),
     ])
 }
 
@@ -77,10 +67,8 @@ async fn narrate_surface_is_rendered_as_html_italics() {
     // text passthrough, narration to <i>...</i> in HTML mode, and
     // defers buttons (audited as "dropped" with a deferral reason
     // because correlation tokens land next PR).
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let resp = reqwest::Client::new()
@@ -133,10 +121,8 @@ async fn html_special_chars_in_tool_output_are_escaped() {
     // embeds the subject in its text + narration verbatim. The
     // mapper must render `&lt;fragile&amp;unsafe&gt;` (escaped),
     // not the raw chars.
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let _ = reqwest::Client::new()
@@ -169,10 +155,8 @@ async fn html_special_chars_in_tool_output_are_escaped() {
 async fn echo_response_stays_plain_text_no_parse_mode() {
     // Non-A2UI tool results (echo returns `{ "echo": "..." }`)
     // keep PR 18's bare-text path — no `parse_mode`, no HTML.
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let _ = reqwest::Client::new()
@@ -202,10 +186,8 @@ async fn empty_surface_is_dropped_at_mapper_edge_no_courier_call() {
     // refuses at its edge. PR 20 audits this as
     // `phase: post, status_label: dropped` and skips the courier
     // call entirely (so the fake never sees a request).
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let resp = reqwest::Client::new()
@@ -254,10 +236,8 @@ async fn narrate_with_no_arg_routes_to_narrate_not_echo() {
     // routes to narrate with an empty subject — narrate just
     // produces "Hello, ." which is harmless and visibly handled
     // instead of vanishing.
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let _ = reqwest::Client::new()
@@ -294,10 +274,8 @@ async fn demo_selection_defers_when_any_option_overflows_cap() {
     // Selection defers — only the standalone Refresh Button
     // ships, and the Selection prompt is dropped too (no
     // prompt-without-control).
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
 
     let _ = reqwest::Client::new()
@@ -365,10 +343,8 @@ async fn narrate_renders_button_as_inline_keyboard() {
     // `callback_data: <signed token>`. The token round-trip itself
     // is exercised by `telegram_callback.rs`; here we just confirm
     // the courier body now carries the `reply_markup`.
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let _ = reqwest::Client::new()

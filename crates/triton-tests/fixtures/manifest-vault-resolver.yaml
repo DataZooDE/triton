@@ -1,9 +1,10 @@
-# PR 16 integration manifest. Every secret is a Vault KV v2 ref —
-# the resolver is what makes this manifest serviceable. The fake
-# Vault test fixture serves `kv/data/triton-test/telegram` with the
-# four fields below. PR 13's literal-only `manifest-telegram-test`
-# fixture stays around for the inbound-only tests; this one is the
-# vault-resolved variant.
+# Integration manifest. Every secret is an `env://` ref — the
+# Vault-less substrate path (GCP Secret Manager → kamal `.kamal/secrets`
+# → container env). Tests inject the four env vars below on the spawned
+# binary. (Vault was decommissioned with the move off the HashiCorp
+# stack; this fixture is the env-resolved successor to the old
+# vault-resolved variant — the file name is kept so test paths don't
+# churn.)
 version: "0.2"
 
 adapters:
@@ -12,13 +13,13 @@ adapters:
     inbound:
       kind: webhook
       signature: secret_token
-      secret: vault://kv/data/triton-test/telegram#webhook_secret
+      secret: env://TRITON_TG_WEBHOOK_SECRET
     outbound:
       kind: rest_api
-      token: vault://kv/data/triton-test/telegram#bot_token
+      token: env://TRITON_TG_BOT_TOKEN
     identity:
       kind: sender_table
-      table: vault://kv/data/triton-test/telegram#senders
+      table: env://TRITON_TG_SENDERS
     degrade:
       text: passthrough
       narration: passthrough
@@ -29,7 +30,7 @@ adapters:
     rate_limit:
       messages_per_sec: 25
       burst: 50
-    correlation_key: vault://kv/data/triton-test/telegram#correlation_key
+    correlation_key: env://TRITON_TG_CORRELATION_KEY
 
 tools:
   echo:

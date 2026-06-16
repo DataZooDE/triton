@@ -19,9 +19,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::{FakeTelegramApi, Profile};
-use triton_tests::upstream_fixture::FakeVault;
 
-const VAULT_TOKEN: &str = "triton-vault-token";
 const RESOLVED_SECRET: &str = "secret-resolved-from-vault";
 const BOT_TOKEN: &str = "12345:resolved-bot-token";
 
@@ -45,41 +43,30 @@ fn telegram_update(user_id: u64, text: &str) -> Value {
     })
 }
 
-async fn start_kv_vault() -> FakeVault {
-    FakeVault::start_kv_v2(
-        VAULT_TOKEN,
-        &[(
-            "kv/data/triton-test/telegram",
-            &[
-                ("webhook_secret", RESOLVED_SECRET),
-                ("bot_token", BOT_TOKEN),
-                (
-                    "senders",
-                    r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
-                ),
-                ("correlation_key", "correlation-key-from-vault"),
-            ],
-        )],
-    )
-    .await
-}
+const SENDERS_JSON: &str = r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#;
 
-fn env_with(vault: &FakeVault, telegram: &FakeTelegramApi) -> HashMap<String, String> {
+fn env_with(telegram: &FakeTelegramApi) -> HashMap<String, String> {
     HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
-        ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
+        (
+            "TRITON_TG_WEBHOOK_SECRET".to_string(),
+            RESOLVED_SECRET.to_string(),
+        ),
+        ("TRITON_TG_BOT_TOKEN".to_string(), BOT_TOKEN.to_string()),
+        ("TRITON_TG_SENDERS".to_string(), SENDERS_JSON.to_string()),
+        (
+            "TRITON_TG_CORRELATION_KEY".to_string(),
+            "correlation-key-from-vault".to_string(),
+        ),
         ("TRITON_TELEGRAM_API_BASE".to_string(), telegram.url()),
     ])
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tool_result_is_posted_back_to_telegram_and_audited() {
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let resp = reqwest::Client::new()
@@ -142,13 +129,20 @@ async fn post_failure_audits_provider_error_does_not_fail_inbound_ack() {
     // 200 (we acked the message; the message-was-handled half is
     // independent of whether we managed to ship the reply). The
     // courier failure is audited as `phase: post, result: error:provider`.
-    let vault = start_kv_vault().await;
     let proc = {
         let mut env = HashMap::from([
             ("TRITON_ENV".to_string(), "local".to_string()),
             ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
-            ("TRITON_VAULT_URL".to_string(), vault.url()),
-            ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
+            (
+                "TRITON_TG_WEBHOOK_SECRET".to_string(),
+                RESOLVED_SECRET.to_string(),
+            ),
+            ("TRITON_TG_BOT_TOKEN".to_string(), BOT_TOKEN.to_string()),
+            ("TRITON_TG_SENDERS".to_string(), SENDERS_JSON.to_string()),
+            (
+                "TRITON_TG_CORRELATION_KEY".to_string(),
+                "correlation-key-from-vault".to_string(),
+            ),
             // Port 1 is reserved; nothing listens there.
             (
                 "TRITON_TELEGRAM_API_BASE".to_string(),
@@ -190,14 +184,12 @@ async fn bot_api_200_with_ok_false_429_is_audited_retry() {
     // for rate-limit failures. Treating any 2xx as success would
     // emit `result=ok status_label=posted` and silently lose the
     // failure. The courier must parse the envelope.
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::with_profile(Profile::Application {
         error_code: 429,
         retry_after: Some(15),
     })
     .await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let resp = reqwest::Client::new()
@@ -222,14 +214,12 @@ async fn bot_api_200_with_ok_false_403_is_audited_dropped() {
     // error_code: bot blocked by user. Should be a `dropped`
     // status_label so the operator can distinguish "tried-but-no"
     // from "try-again-later".
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::with_profile(Profile::Application {
         error_code: 403,
         retry_after: None,
     })
     .await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let resp = reqwest::Client::new()
@@ -257,27 +247,16 @@ async fn bot_token_never_leaks_into_courier_failure_logs() {
     // Drive the courier against an unreachable port, scrape the
     // child's full stdout+stderr, assert the marker is absent.
     let marker = "leak-canary-bot-token-aaa";
-    let vault = FakeVault::start_kv_v2(
-        VAULT_TOKEN,
-        &[(
-            "kv/data/triton-test/telegram",
-            &[
-                ("webhook_secret", RESOLVED_SECRET),
-                ("bot_token", marker),
-                (
-                    "senders",
-                    r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
-                ),
-                ("correlation_key", "ck"),
-            ],
-        )],
-    )
-    .await;
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
-        ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
+        (
+            "TRITON_TG_WEBHOOK_SECRET".to_string(),
+            RESOLVED_SECRET.to_string(),
+        ),
+        ("TRITON_TG_BOT_TOKEN".to_string(), marker.to_string()),
+        ("TRITON_TG_SENDERS".to_string(), SENDERS_JSON.to_string()),
+        ("TRITON_TG_CORRELATION_KEY".to_string(), "ck".to_string()),
         (
             "TRITON_TELEGRAM_API_BASE".to_string(),
             "http://127.0.0.1:1".to_string(),
@@ -326,11 +305,6 @@ async fn nonlocal_env_refuses_non_canonical_telegram_api_base() {
         // env=nonprod tightens the rule (only canonical base).
         .env("TRITON_ENV", "nonprod")
         .env("TRITON_MANIFEST_PATH", manifest_path())
-        // Provide *some* Vault wiring so the binary doesn't refuse
-        // before it gets to the telegram-api-base check — we just
-        // need it past the earlier guards.
-        .env("TRITON_VAULT_URL", "http://127.0.0.1:1")
-        .env("TRITON_VAULT_TOKEN", "irrelevant")
         // The SSRF-tempting override.
         .env("TRITON_TELEGRAM_API_BASE", "http://attacker.example.com")
         .stdout(std::process::Stdio::piped())

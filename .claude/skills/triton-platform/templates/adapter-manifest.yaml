@@ -4,7 +4,8 @@
 # deployment's adapter.yaml that registers YOUR tool (and, if your
 # tool's surface targets chat channels, the degrade rules for it).
 # The operator merges it into the live manifest. See references/03,
-# references/05, and crates/triton-tests/fixtures/manifest-valid.yaml.
+# references/05, and deploy/triton/adapter.yaml in the Triton repo for
+# a real example.
 #
 # Two ownership zones:
 #   - `tools:`     → you drive the content (what your tool emits).
@@ -15,8 +16,10 @@ version: "0.2"
 
 # ── YOU drive this ───────────────────────────────────────────────
 tools:
-  # EDIT: your tool name. Must match the Consul tag agent:<name> and
-  # the path the frontend calls (/v1/tools/<name>).
+  # EDIT: your tool name. It must match the path the frontend calls
+  # (/v1/tools/<name>) and the key the operator gives your agent in
+  # TRITON_STATIC_UPSTREAMS=<name>=<host:port> — there is no Consul
+  # tag any more; discovery is a static name→endpoint map.
   my-tool:
     # Declare EXACTLY the component kinds your tool can emit. Triton
     # closed-checks at boot that every chat adapter has a degrade rule
@@ -32,21 +35,23 @@ tools:
 # ── OPERATOR territory (shown for context) ───────────────────────
 # If your tool's surface reaches chat channels, every adapter needs a
 # degrade rule per component type you declared above. Credentials MUST
-# be vault:// refs in production — a literal here makes prod boot fail
-# (FR-L-6, NFR-S-5). This Telegram example covers text+narration+buttons.
+# be `env://VARNAME` refs in production — a literal here makes prod boot
+# fail (M-SECRETS-1). Vault is decommissioned; the named env vars are
+# injected from GCP Secret Manager via kamal `.kamal/secrets` (see
+# substrate-platform). This Telegram example covers text+narration+buttons.
 adapters:
   telegram:
     kind: telegram
     inbound:
       kind: webhook
       signature: secret_token
-      secret: vault://kv/data/apps/<co>/triton/<env>/telegram#webhook_secret
+      secret: env://TRITON_TELEGRAM_SECRET_TOKEN
     outbound:
       kind: rest_api
-      token: vault://kv/data/apps/<co>/triton/<env>/telegram#bot_token
+      token: env://TRITON_TELEGRAM_BOT_TOKEN
     identity:
       kind: sender_table
-      table: vault://kv/data/apps/<co>/triton/<env>/telegram#senders
+      table: env://TRITON_TELEGRAM_SENDER_TABLE
     degrade:
       text: passthrough
       narration: passthrough
@@ -58,7 +63,7 @@ adapters:
     rate_limit:
       messages_per_sec: 25
       burst: 50
-    correlation_key: vault://kv/data/apps/<co>/triton/<env>/telegram#correlation_key
+    correlation_key: env://TRITON_TELEGRAM_CORRELATION_KEY
 
 # ── OPTIONAL: agent-resolved sender identity (FR-I-7) ─────────────
 # Instead of an operator-curated `sender_table`, an adapter can delegate
@@ -75,15 +80,15 @@ adapters:
 #    inbound:
 #      kind: webhook
 #      signature: hmac256
-#      secret: vault://kv/data/apps/<co>/triton/<env>/whatsapp#app_secret
-#      verify_token: vault://kv/data/apps/<co>/triton/<env>/whatsapp#verify_token
+#      secret: env://TRITON_WHATSAPP_APP_SECRET
+#      verify_token: env://TRITON_WHATSAPP_VERIFY_TOKEN
 #    outbound:
 #      kind: rest_api
-#      token: vault://kv/data/apps/<co>/triton/<env>/whatsapp#access_token
-#      phone_number_id: vault://kv/data/apps/<co>/triton/<env>/whatsapp#phone_number_id
+#      token: env://TRITON_WHATSAPP_ACCESS_TOKEN
+#      phone_number_id: env://TRITON_WHATSAPP_PHONE_NUMBER_ID
 #    identity:
 #      kind: upstream
 #      resolver_tool: resolve_identity   # one of YOUR tools, not in-process
 #    degrade: { text: passthrough, narration: passthrough, buttons: inline_keyboard }
 #    rate_limit: { messages_per_sec: 25, burst: 50 }
-#    correlation_key: vault://kv/data/apps/<co>/triton/<env>/whatsapp#correlation_key
+#    correlation_key: env://TRITON_WHATSAPP_CORRELATION_KEY

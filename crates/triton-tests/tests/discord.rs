@@ -7,8 +7,9 @@
 //!     under the same shared `triton-correlation` crate that PR 21
 //!     ships for Telegram)
 //!
-//! No mocks: real binary, real HTTP, real Ed25519 keypair, real
-//! Vault KV v2 fake serving the public key + sender_table.
+//! No mocks: real binary, real HTTP, real Ed25519 keypair; the
+//! discord credentials (public key + sender table) are delivered via
+//! `env://` refs on the spawned process.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,10 +19,9 @@ use ed25519_dalek::{Signer, SigningKey};
 use rand_core::OsRng;
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
-use triton_tests::upstream_fixture::FakeVault;
 
-const VAULT_TOKEN: &str = "triton-vault-token";
 const CORRELATION_KEY: &str = "32byte-correlation-key-discord!!";
+const SENDERS: &str = r#"{"99":{"sub":"bob","scopes":["chat"],"tenant":"acme"}}"#;
 
 fn manifest_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -30,40 +30,31 @@ fn manifest_path() -> String {
         .to_string()
 }
 
-/// Generate a fresh Ed25519 keypair and pre-bake all Vault values
-/// (sender table, correlation key, public key hex) the manifest
-/// references. Returns the keypair so the test can sign requests
-/// after the binary boots.
-async fn start_kv_vault_with_keypair() -> (FakeVault, SigningKey) {
+/// Generate a fresh Ed25519 keypair. Returns the keypair so the test
+/// can sign requests after the binary boots, plus the public-key hex
+/// the manifest's `env://TRITON_DISCORD_PUBLIC_KEY` ref resolves to.
+fn keypair() -> (SigningKey, String) {
     let signing = SigningKey::generate(&mut OsRng);
-    let verifying = signing.verifying_key();
-    let pk_hex = hex::encode(verifying.as_bytes());
-
-    let vault = FakeVault::start_kv_v2(
-        VAULT_TOKEN,
-        &[(
-            "kv/data/triton-test/discord",
-            &[
-                ("public_key", pk_hex.as_str()),
-                ("bot_token", "stub-bot-token"),
-                (
-                    "senders",
-                    r#"{"99":{"sub":"bob","scopes":["chat"],"tenant":"acme"}}"#,
-                ),
-                ("correlation_key", CORRELATION_KEY),
-            ],
-        )],
-    )
-    .await;
-    (vault, signing)
+    let pk_hex = hex::encode(signing.verifying_key().as_bytes());
+    (signing, pk_hex)
 }
 
-fn env_with(vault: &FakeVault) -> HashMap<String, String> {
+/// Inject the four `TRITON_DISCORD_*` env vars the manifest's `env://`
+/// refs resolve to, alongside the manifest path.
+fn env_with(pk_hex: &str) -> HashMap<String, String> {
     HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
-        ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
+        ("TRITON_DISCORD_PUBLIC_KEY".to_string(), pk_hex.to_string()),
+        (
+            "TRITON_DISCORD_BOT_TOKEN".to_string(),
+            "stub-bot-token".to_string(),
+        ),
+        ("TRITON_DISCORD_SENDERS".to_string(), SENDERS.to_string()),
+        (
+            "TRITON_DISCORD_CORRELATION_KEY".to_string(),
+            CORRELATION_KEY.to_string(),
+        ),
     ])
 }
 
@@ -97,8 +88,8 @@ fn sign(signing: &SigningKey, body: &[u8]) -> (String, String) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ping_returns_pong_under_valid_signature() {
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let body = json!({ "type": 1 }).to_string();
@@ -120,8 +111,8 @@ async fn ping_returns_pong_under_valid_signature() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forged_signature_is_rejected_with_phase_rejected() {
-    let (vault, _signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (_signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     // Sign with a DIFFERENT keypair — adapter's public_key won't
@@ -149,8 +140,8 @@ async fn forged_signature_is_rejected_with_phase_rejected() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn button_click_dispatches_via_correlation_token() {
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     // Mint a correlation token for narrate(subject=bob) under the
@@ -234,8 +225,8 @@ async fn button_click_dispatches_via_correlation_token() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forged_custom_id_token_rejected_at_inbound() {
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let forged = triton_correlation::encode(
@@ -278,8 +269,8 @@ async fn stale_message_timestamp_rejects_button_click() {
     // with a VALID correlation token, but attach an
     // `interaction.message.timestamp` that's 1 hour in the past.
     // Adapter must refuse before reaching the dispatcher.
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let valid_token = triton_correlation::encode(
@@ -334,31 +325,10 @@ async fn burst_succeeds_then_excess_is_ratelimited() {
     // Telegram rate_limit.rs integration test for the Discord
     // path, since signature/route shape diverges (Codex PR 24
     // concern — single-adapter coverage hides regressions).
-    let (vault, signing) = {
-        // Reuse the start_kv_vault_with_keypair vault layout but
-        // point the manifest at a fixture with a tiny rate limit
-        // (rate=1/sec, burst=2). The vault payload itself is
-        // identical to manifest-discord-test.yaml.
-        let signing = SigningKey::generate(&mut OsRng);
-        let pk_hex = hex::encode(signing.verifying_key().as_bytes());
-        let vault = FakeVault::start_kv_v2(
-            VAULT_TOKEN,
-            &[(
-                "kv/data/triton-test/discord",
-                &[
-                    ("public_key", pk_hex.as_str()),
-                    ("bot_token", "stub-bot-token"),
-                    (
-                        "senders",
-                        r#"{"99":{"sub":"bob","scopes":["chat"],"tenant":"acme"}}"#,
-                    ),
-                    ("correlation_key", CORRELATION_KEY),
-                ],
-            )],
-        )
-        .await;
-        (vault, signing)
-    };
+    // Reuse the same discord credentials but point the manifest at a
+    // fixture with a tiny rate limit (rate=1/sec, burst=2). The
+    // injected env values are identical to manifest-discord-test.yaml.
+    let (signing, pk_hex) = keypair();
 
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/manifest-discord-rate-limit.yaml")
@@ -367,8 +337,16 @@ async fn burst_succeeds_then_excess_is_ratelimited() {
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
-        ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
+        ("TRITON_DISCORD_PUBLIC_KEY".to_string(), pk_hex.clone()),
+        (
+            "TRITON_DISCORD_BOT_TOKEN".to_string(),
+            "stub-bot-token".to_string(),
+        ),
+        ("TRITON_DISCORD_SENDERS".to_string(), SENDERS.to_string()),
+        (
+            "TRITON_DISCORD_CORRELATION_KEY".to_string(),
+            CORRELATION_KEY.to_string(),
+        ),
     ]);
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
@@ -438,8 +416,8 @@ async fn button_callback_with_values_is_rejected() {
     // callback. Without strict shape validation that would
     // mutate the args by filling a null slot. Inbound now
     // rejects.
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let token = triton_correlation::encode(
@@ -480,8 +458,8 @@ async fn selection_callback_substitutes_picked_value_and_dispatches() {
     // `data.values[0]`. The mapper emitted the menu with a token
     // encoding `(tool, {args_key: null})`; the inbound handler
     // substitutes the null with the chosen value, then dispatches.
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     // Mint a token shaped the way the mapper would: tool=narrate,
@@ -536,8 +514,8 @@ async fn missing_message_timestamp_fails_closed() {
     // MUST NOT bypass replay protection. A type=3 interaction
     // without `message` (or with an empty `message.timestamp`)
     // gets 401 + a rejected audit, NOT through to dispatch.
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let valid_token = triton_correlation::encode(
@@ -582,8 +560,8 @@ async fn slash_command_dispatches_with_options_as_args() {
     // flatten options into a JSON args map and dispatch the
     // command name as the tool — same sender resolution +
     // per-tenant rate-limit gates as the button-callback path.
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let interaction = json!({
@@ -646,8 +624,8 @@ async fn slash_command_unknown_sender_rejected_at_inbound() {
     // Sender-table lookup must happen for slash commands too:
     // a user not in the table MUST 401 + audit rejected,
     // never dispatch.
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let interaction = json!({
@@ -684,8 +662,8 @@ async fn slash_command_unknown_sender_rejected_at_inbound() {
 async fn slash_command_missing_name_rejected() {
     // Discord guarantees `data.name` on APPLICATION_COMMAND.
     // A payload without it is malformed; refuse it.
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let interaction = json!({
@@ -722,8 +700,8 @@ async fn slash_command_form_only_surface_opens_modal() {
     // (MODAL) — NOT a type-4 channel message with deferred text.
     // The modal's custom_id is a correlation token committing
     // to the submit tool + the expected field set.
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let interaction = json!({
@@ -782,8 +760,8 @@ async fn modal_submit_substitutes_values_and_dispatches() {
     // through the form's submit tool with those values
     // substituted into the args-skeleton the modal-opener
     // committed to.
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     // Mint the token the modal-opener would have minted: echo
@@ -858,8 +836,8 @@ async fn modal_submit_with_extra_field_rejected() {
     // the field names the modal-opener emitted. A forged
     // modal-submit that adds an extra field MUST be refused at
     // the inbound boundary, never reach the dispatcher.
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     // Token commits to { subject: null }. Attacker submits both
@@ -914,8 +892,8 @@ async fn modal_submit_with_forged_custom_id_rejected() {
     // submission signed with a different key MUST fail token
     // verification (401 + error:auth audit) before any args
     // substitution happens.
-    let (vault, signing) = start_kv_vault_with_keypair().await;
-    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault)).await;
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let forged = triton_correlation::encode(

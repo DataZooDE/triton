@@ -16,7 +16,8 @@ use std::fmt;
 use serde::Serialize;
 
 /// Dispatcher-internal identity. Holds the raw bearer so the
-/// upstream router (PR 9) can mint a Vault-swap OIDC token from it.
+/// upstream router can mint a per-call RS256 JWT carrying this
+/// principal when dispatching to a static upstream agent.
 /// **Never derive `Debug`** — see the manual impl below.
 #[derive(Clone, Serialize)]
 pub struct Principal {

@@ -26,9 +26,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::{FakeTelegramApi, SentMessage};
-use triton_tests::upstream_fixture::FakeVault;
 
-const VAULT_TOKEN: &str = "triton-vault-token";
 const RESOLVED_SECRET: &str = "secret-resolved-from-vault";
 const BOT_TOKEN: &str = "12345:resolved-bot-token";
 const CORRELATION_KEY: &str = "correlation-key-from-vault";
@@ -56,64 +54,38 @@ fn telegram_update(user_id: u64, text: &str) -> Value {
     })
 }
 
-async fn start_kv_vault() -> FakeVault {
-    // The PR 32 fixture has TWO senders so the per-chat-isolation
-    // test can drive distinct (chat, sender) pairs; the other
-    // tests use only `42` and ignore `99`.
-    FakeVault::start_kv_v2(
-        VAULT_TOKEN,
-        &[(
-            "kv/data/triton-test/telegram",
-            &[
-                ("webhook_secret", RESOLVED_SECRET),
-                ("bot_token", BOT_TOKEN),
-                (
-                    "senders",
-                    r#"{
+// The PR 32 fixture has TWO senders so the per-chat-isolation test
+// can drive distinct (chat, sender) pairs; the other tests use only
+// `42` and ignore `99`.
+const SENDERS_JSON: &str = r#"{
                         "42":{"sub":"alice","scopes":["chat"],"tenant":"acme"},
                         "99":{"sub":"bob","scopes":["chat"],"tenant":"acme"}
-                    }"#,
-                ),
-                ("correlation_key", CORRELATION_KEY),
-            ],
-        )],
-    )
-    .await
-}
+                    }"#;
 
 /// PR 37 Finding 5 fixture: two Telegram user_ids both resolving to
 /// the SAME `sub` (`alice`) but DIFFERENT tenants. Reproduces the
 /// ambiguity the FormKey-by-sub code allowed: user 43 sending a
 /// value used to advance user 42's form because the store scanned
 /// for the first sub match.
-async fn start_kv_vault_shared_sub() -> FakeVault {
-    FakeVault::start_kv_v2(
-        VAULT_TOKEN,
-        &[(
-            "kv/data/triton-test/telegram",
-            &[
-                ("webhook_secret", RESOLVED_SECRET),
-                ("bot_token", BOT_TOKEN),
-                (
-                    "senders",
-                    r#"{
+const SENDERS_JSON_SHARED_SUB: &str = r#"{
                         "42":{"sub":"alice","scopes":["chat"],"tenant":"acme"},
                         "43":{"sub":"alice","scopes":["chat"],"tenant":"beta"}
-                    }"#,
-                ),
-                ("correlation_key", CORRELATION_KEY),
-            ],
-        )],
-    )
-    .await
-}
+                    }"#;
 
-fn env_with(vault: &FakeVault, telegram: &FakeTelegramApi) -> HashMap<String, String> {
+fn env_with(telegram: &FakeTelegramApi) -> HashMap<String, String> {
     HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
-        ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
+        (
+            "TRITON_TG_WEBHOOK_SECRET".to_string(),
+            RESOLVED_SECRET.to_string(),
+        ),
+        ("TRITON_TG_BOT_TOKEN".to_string(), BOT_TOKEN.to_string()),
+        ("TRITON_TG_SENDERS".to_string(), SENDERS_JSON.to_string()),
+        (
+            "TRITON_TG_CORRELATION_KEY".to_string(),
+            CORRELATION_KEY.to_string(),
+        ),
         ("TRITON_TELEGRAM_API_BASE".to_string(), telegram.url()),
     ])
 }
@@ -183,10 +155,8 @@ where
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn form_first_message_installs_state_and_prompts_field_one() {
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let status = post_webhook(webhook, &telegram_update(42, "/form_only_demo_multi")).await;
@@ -214,10 +184,8 @@ async fn form_first_message_installs_state_and_prompts_field_one() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn form_collects_all_fields_then_dispatches_submit_tool() {
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     // Install the form, then walk through three valid answers.
@@ -294,10 +262,8 @@ async fn form_collects_all_fields_then_dispatches_submit_tool() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn form_integer_field_rejects_non_numeric_then_advances() {
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     assert!(
@@ -371,11 +337,8 @@ async fn form_boolean_field_accepts_variants() {
         ("FALSE", "\"subscribe\":false"),
         ("0", "\"subscribe\":false"),
     ] {
-        let vault = start_kv_vault().await;
         let telegram = FakeTelegramApi::start().await;
-        let proc =
-            TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram))
-                .await;
+        let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
         let webhook = proc.chat_webhook_addr.expect("listener bound");
 
         assert!(
@@ -423,10 +386,8 @@ async fn form_boolean_field_accepts_variants() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn form_required_empty_reprompts_same_field() {
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     assert!(
@@ -456,10 +417,8 @@ async fn form_required_empty_reprompts_same_field() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn form_cancel_clears_state_and_falls_through_to_route_command() {
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     // Install a form.
@@ -513,10 +472,8 @@ async fn form_cancel_clears_state_and_falls_through_to_route_command() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn form_state_is_per_chat() {
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     // Two distinct senders / chats install forms simultaneously.
@@ -619,9 +576,8 @@ async fn form_state_is_per_chat() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn form_per_tenant_cap_evicts_oldest() {
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let mut env = env_with(&vault, &telegram);
+    let mut env = env_with(&telegram);
     // Tiny cap so we can reach the eviction branch by installing
     // 3 forms instead of 100.
     env.insert(
@@ -718,10 +674,15 @@ async fn form_state_isolates_two_senders_sharing_sub() {
     // After the fix the FormKey is `(chat_id, telegram_user_id)`,
     // so each user has an independent form slot. User 43 sending a
     // value in the same chat MUST NOT advance user 42's form.
-    let vault = start_kv_vault_shared_sub().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let mut env = env_with(&telegram);
+    // This test needs two user_ids sharing the same `sub` across
+    // different tenants — override the default senders table.
+    env.insert(
+        "TRITON_TG_SENDERS".to_string(),
+        SENDERS_JSON_SHARED_SUB.to_string(),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     // Both senders share `chat_id = 1000` (a group chat). User 42
@@ -818,29 +779,18 @@ async fn form_eviction_audit_records_evictee_principal() {
     // `43 -> alice@beta`. We need a tenant-shared but sub-distinct
     // setup so we can prove the audit picks the right principal,
     // independent of which sender installed last. Use a small
-    // 3-sender vault for this.
-    let vault = FakeVault::start_kv_v2(
-        VAULT_TOKEN,
-        &[(
-            "kv/data/triton-test/telegram",
-            &[
-                ("webhook_secret", RESOLVED_SECRET),
-                ("bot_token", BOT_TOKEN),
-                (
-                    "senders",
-                    r#"{
+    // 3-sender table for this.
+    let telegram = FakeTelegramApi::start().await;
+    let mut env = env_with(&telegram);
+    env.insert(
+        "TRITON_TG_SENDERS".to_string(),
+        r#"{
                         "42":{"sub":"alice","scopes":["chat"],"tenant":"acme"},
                         "43":{"sub":"bob","scopes":["chat"],"tenant":"acme"},
                         "44":{"sub":"carol","scopes":["chat"],"tenant":"acme"}
-                    }"#,
-                ),
-                ("correlation_key", CORRELATION_KEY),
-            ],
-        )],
-    )
-    .await;
-    let telegram = FakeTelegramApi::start().await;
-    let mut env = env_with(&vault, &telegram);
+                    }"#
+        .to_string(),
+    );
     env.insert(
         "TRITON_TELEGRAM_FORM_CAP_PER_TENANT".to_string(),
         "2".to_string(),

@@ -15,22 +15,23 @@ is, for any substrate workload), reach for it on the topics below.
 
 | Topic | This skill says… | `substrate-platform` says… |
 |---|---|---|
-| **OIDC verification** | The *callee shape*: issuer = substrate issuer, audience = your agent, reject `none`/symmetric — `references/04`. | The *crypto*: discovery, JWKS cache/rotation, Rust/Python/Go verify recipes — `references/11-oidc-verification.md`. |
-| **App-to-app auth** | Don't relay the inbound token; mint your own to call other services — `references/04`. | The per-app role + `aud` contract, mint+verify recipes — `references/14-app-to-app-auth.md`. |
-| **Consul registration** | The discovery key Triton resolves: `tag:agent:<tool>`, no `urlprefix-` — `references/03`. | Service stanza conventions, health checks, Fabio routing, internal DNS — `references/03-consul-and-fabio.md`. |
-| **Vault references** | Manifest credentials must be `vault://` refs — `references/03`. | Vault-from-a-job `template` stanzas, KV layout — `references/02-vault-from-a-job.md`. |
-| **Nomad job shape** | The agent stanza tags + verifier wiring — `templates/agent.nomad.hcl`. | Full job templates (llm-agent, web-service, batch) + `update`/canary conventions — `templates/` and `references/01`. |
-| **Logging / metrics / health** | What Triton audits vs what you log — `references/09`. | `/healthz` contract, structured logs, Prometheus metrics — `references/07-logging-metrics-healthchecks.md`. |
-| **Deploy lifecycle** | — | Developer↔operator handoff, blue/green — `references/08-deploy-lifecycle.md`. |
+| **OIDC verification** | The *callee shape*: issuer = Triton's self-issuer (`TRITON_SELF_ISSUER`), audience = `agents-<env>`, reject `none`/symmetric — `references/04`. | The *crypto*: JWKS discovery, cache/rotation, Rust/Python/Go verify recipes. |
+| **App-to-app auth** | Don't relay the inbound token; mint your own to call other services — `references/04`. | The per-app identity + `aud` contract, mint+verify recipes. |
+| **Tool discovery** | The routing key Triton resolves: a tool name in `TRITON_STATIC_UPSTREAMS=name=host:port` (no Consul) — `references/03`. | Tailnet naming, internal DNS, how services reach each other. |
+| **Secret references** | Manifest credentials must be `env://VARNAME` refs (`vault://` fails closed) — `references/03`. | Secret Manager → kamal `.kamal/secrets` → container env injection. |
+| **Deploy shape** | Your agent is a Kamal app reachable on the tailnet; the operator names it in Triton's `TRITON_STATIC_UPSTREAMS`. | The Kamal `deploy.yml` + `apps/registry.yml` row, image pinning, exposure (internal/external). |
+| **Logging / metrics / health** | What Triton audits vs what you log — `references/09`. | `/healthz` contract, structured logs, Prometheus/GCP metrics. |
+| **Deploy lifecycle** | — | Developer↔operator handoff, the two-actor PR/apply model. |
 
 ## A practical split for "build me an agent for Triton"
 
 1. **Shape the tool** with this skill: wire contract (`01`), A2UI
    surface (`02`), what to verify (`04`), chat degradation (`05`).
-2. **Wire the deployment** with `substrate-platform`: fork its
-   `llm-agent.nomad.hcl`, add the `tag:agent:<tool>` Consul service
-   from this skill's `templates/agent.nomad.hcl`, follow its Vault
-   and OIDC recipes for the actual code.
+2. **Wire the deployment** with `substrate-platform`: package your
+   agent as a Kamal app + an `apps/registry.yml` row, follow its
+   secret-injection and OIDC-verification recipes for the actual code.
+   Then ask the Triton operator to add your `tool=host:port` to
+   Triton's `TRITON_STATIC_UPSTREAMS` (substrate-side config).
 3. **Test it** with this skill's `references/08` + the
    `consumer-integration-test` template — real Triton, real fakes,
    no mocks.
@@ -38,7 +39,8 @@ is, for any substrate workload), reach for it on the topics below.
 ## When neither skill covers it
 
 A capability gap in *Triton* → PR to the Triton repo. A capability
-gap in the *substrate* (a bucket, a policy, a hostname, a tag) → PR
-to the substrate repo. Both escalation paths are in `references/10`
+gap in the *substrate* (a bucket, a Secret Manager entry, a hostname,
+a tag) → PR to the substrate repo. Both escalation paths are in
+`references/10`
 and `substrate-platform/references/09-out-of-bounds.md` respectively.
 Don't improvise infra from inside your app.

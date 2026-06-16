@@ -1,10 +1,11 @@
 # 07 — dev-token mode for local dev and CI
 
-Triton has a "minimum-viable boot" mode for development: no Consul, no
-Vault, no OIDC issuer, an empty manifest, and the literal bearer
+Triton has a "minimum-viable boot" mode for development: no upstream
+signing key, no OIDC issuer, an empty manifest, and the literal bearer
 `"dev-token"` accepted as a fixed dev principal. This is the FR-T-1
 contract and the foundation of the consumer test harness
-(→ `references/08`).
+(→ `references/08`). (There is no Consul or Vault to stand up either —
+both were removed in the Kamal migration.)
 
 Source: `doc/requirements.md` FR-T-1, ACC-13; `doc/architecture.md`
 §8.8, ADR-10; the canonical example at `examples/consumer-smoke/`.
@@ -43,11 +44,14 @@ Two layers of dev-token in play, don't conflate them:
 
 1. **Inbound to Triton** — your *test's* client sends `dev-token` to
    Triton (above).
-2. **Triton → your agent** — Triton still mints a token via Vault to
-   call you. In the harness, a `FakeVault` mints a stub token, or you
-   simply skip verification in dev. The `templates/upstream-agent-axum/`
-   skeleton accepts `dev-token` directly when no issuer is set, so
-   you can run it standalone without a Vault.
+2. **Triton → your agent** — with no signing key configured, Triton
+   sends the static `TRITON_STATIC_UPSTREAM_TOKEN` bearer (default
+   `dev-token`) rather than a minted JWT. The
+   `templates/upstream-agent-axum/` skeleton accepts `dev-token`
+   directly when no issuer is set, so you can run it standalone with
+   no signer to verify against. (Configure
+   `TRITON_JWT_SIGNING_KEY` + `TRITON_SELF_ISSUER` + `TRITON_JWT_JWKS`
+   to exercise the real RS256 path instead → `references/04`.)
 
 ## The minimum-viable boot, verified
 
