@@ -54,15 +54,6 @@ pub struct Settings {
     /// Defaults 25/50, mirroring the chat adapters.
     pub outbound_rate_limit_per_sec: u32,
     pub outbound_rate_limit_burst: u32,
-    pub consul_url: Option<String>,
-    pub vault_url: Option<String>,
-    pub vault_token: Option<String>,
-    pub vault_jwt_path: Option<String>,
-    pub vault_jwt_role: Option<String>,
-    pub vault_auth_mount: String,
-    pub vault_oidc_role: String,
-    pub circuit_open_after: u32,
-    pub circuit_cooldown: Duration,
     pub upstream_timeout: Duration,
     pub metrics_host: IpAddr,
     pub metrics_port: u16,
@@ -262,60 +253,6 @@ struct Cli {
     /// #115: per-tenant burst for `POST /v1/outbound`. Default 50.
     #[arg(long, env = "TRITON_OUTBOUND_RATE_LIMIT_BURST", default_value_t = 50)]
     outbound_rate_limit_burst: u32,
-
-    /// Consul HTTP base URL (e.g. `http://127.0.0.1:8500`). When
-    /// unset the upstream router is disabled and the dispatcher
-    /// only serves in-process tools.
-    #[arg(long, env = "TRITON_CONSUL_URL")]
-    consul_url: Option<String>,
-
-    /// Vault HTTP base URL.
-    #[arg(long, env = "TRITON_VAULT_URL")]
-    vault_url: Option<String>,
-
-    /// Triton's own Vault auth token (static). Discouraged on the
-    /// substrate (workload identity below is preferred); kept for
-    /// local dev / a hand-issued token. Used to read `vault://` refs
-    /// and mint per-call agent OIDC tokens. Mutually exclusive with
-    /// the JWT (workload-identity) vars — if both are set, the static
-    /// token wins.
-    #[arg(long, env = "TRITON_VAULT_TOKEN")]
-    vault_token: Option<String>,
-
-    /// Workload-identity auth: path to the Nomad-issued Vault JWT
-    /// (an `identity { aud = ["vault"], file = true }` stanza writes
-    /// it, e.g. `${NOMAD_SECRETS_DIR}/nomad_vault.jwt`). When set
-    /// (with `--vault-jwt-role`) Triton logs in at
-    /// `auth/<mount>/login` and refreshes the token itself — no
-    /// static token needed.
-    #[arg(long, env = "TRITON_VAULT_JWT_PATH")]
-    vault_jwt_path: Option<String>,
-
-    /// Vault JWT-auth role to assume on login (the role's policies
-    /// must grant `kv` read on the app's branch + a capability on
-    /// `identity/oidc/token/<oidc-role>`).
-    #[arg(long, env = "TRITON_VAULT_JWT_ROLE")]
-    vault_jwt_role: Option<String>,
-
-    /// Vault JWT-auth mount path (the substrate's Nomad auth method).
-    #[arg(long, env = "TRITON_VAULT_AUTH_MOUNT", default_value = "jwt-nomad")]
-    vault_auth_mount: String,
-
-    /// Vault OIDC role for the per-call swap (FR-U-2).
-    #[arg(
-        long,
-        env = "TRITON_VAULT_OIDC_ROLE",
-        default_value = "agent-oidc-swap"
-    )]
-    vault_oidc_role: String,
-
-    /// Per-tool circuit-breaker open-after threshold (FR-U-3).
-    #[arg(long, env = "TRITON_CIRCUIT_OPEN_AFTER", default_value_t = 5)]
-    circuit_open_after: u32,
-
-    /// Per-tool circuit-breaker cooldown in milliseconds (FR-U-3).
-    #[arg(long, env = "TRITON_CIRCUIT_COOLDOWN_MS", default_value_t = 30_000)]
-    circuit_cooldown_ms: u64,
 
     /// Per-upstream-call timeout in milliseconds.
     #[arg(long, env = "TRITON_UPSTREAM_TIMEOUT_MS", default_value_t = 10_000)]
@@ -575,15 +512,6 @@ impl From<Cli> for Settings {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            consul_url: c.consul_url,
-            vault_url: c.vault_url,
-            vault_token: c.vault_token,
-            vault_jwt_path: c.vault_jwt_path,
-            vault_jwt_role: c.vault_jwt_role,
-            vault_auth_mount: c.vault_auth_mount,
-            vault_oidc_role: c.vault_oidc_role,
-            circuit_open_after: c.circuit_open_after,
-            circuit_cooldown: Duration::from_millis(c.circuit_cooldown_ms),
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
             metrics_host: c.metrics_host,
             metrics_port: c.metrics_port,

@@ -10,13 +10,13 @@ adapters:
     inbound:
       kind: webhook
       signature: secret_token
-      secret: vault://kv/data/apps/dz/triton/nonprod/telegram#webhook_secret
+      secret: env://TRITON_TG_WEBHOOK_SECRET
     outbound:
       kind: rest_api
-      token: vault://kv/data/apps/dz/triton/nonprod/telegram#bot_token
+      token: env://TRITON_TG_BOT_TOKEN
     identity:
       kind: sender_table
-      table: vault://kv/data/apps/dz/triton/nonprod/telegram#senders
+      table: env://TRITON_TG_SENDERS
     degrade:
       text: passthrough
       narration: passthrough
@@ -27,20 +27,20 @@ adapters:
     rate_limit:
       messages_per_sec: 25
       burst: 50
-    correlation_key: vault://kv/data/apps/dz/triton/nonprod/telegram#correlation_key
+    correlation_key: env://TRITON_TG_CORRELATION_KEY
 
   discord:
     kind: discord
     inbound:
       kind: webhook
       signature: ed25519
-      public_key: vault://kv/data/apps/dz/triton/nonprod/discord#public_key
+      public_key: env://TRITON_DISCORD_PUBLIC_KEY
     outbound:
       kind: rest_api
-      token: vault://kv/data/apps/dz/triton/nonprod/discord#bot_token
+      token: env://TRITON_DISCORD_BOT_TOKEN
     identity:
       kind: sender_table
-      table: vault://kv/data/apps/dz/triton/nonprod/discord#senders
+      table: env://TRITON_DISCORD_SENDERS
     degrade:
       text: passthrough
       narration: passthrough
@@ -51,7 +51,7 @@ adapters:
     rate_limit:
       messages_per_sec: 50
       burst: 100
-    correlation_key: vault://kv/data/apps/dz/triton/nonprod/discord#correlation_key
+    correlation_key: env://TRITON_DISCORD_CORRELATION_KEY
 
 tools:
   narrate:

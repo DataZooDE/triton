@@ -1,9 +1,9 @@
 # PR 37 NFR-S-4 fix-up: msteams manifest whose credentials are all
-# `vault://` refs so the manifest validates in `production` env. The
+# `env://` refs so the manifest validates in `production` env. The
 # integration test only exercises boot-time settings rejection — the
 # binary refuses the env var BEFORE any credential resolution, so the
-# fake Vault behind the refs is never actually contacted. The refs
-# only exist to satisfy `M-SECRETS-1`.
+# refs are never actually resolved. They only exist to satisfy
+# `M-SECRETS-1`.
 version: "0.2"
 
 adapters:
@@ -12,14 +12,14 @@ adapters:
     inbound:
       kind: webhook
       signature: bot_framework_jwt
-      audience: vault://kv/data/triton-test/msteams#audience
+      audience: env://TRITON_MSTEAMS_AUDIENCE
     outbound:
       kind: bot_connector
-      client_id: vault://kv/data/triton-test/msteams#client_id
-      client_secret: vault://kv/data/triton-test/msteams#client_secret
+      client_id: env://TRITON_MSTEAMS_CLIENT_ID
+      client_secret: env://TRITON_MSTEAMS_CLIENT_SECRET
     identity:
       kind: sender_table
-      table: vault://kv/data/triton-test/msteams#sender_table
+      table: env://TRITON_MSTEAMS_SENDER_TABLE
     degrade:
       text: passthrough
       narration: passthrough
@@ -30,7 +30,7 @@ adapters:
     rate_limit:
       messages_per_sec: 25
       burst: 50
-    correlation_key: vault://kv/data/triton-test/msteams#correlation_key
+    correlation_key: env://TRITON_MSTEAMS_CORRELATION_KEY
 
 tools:
   echo:

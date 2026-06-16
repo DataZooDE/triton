@@ -30,10 +30,9 @@ use rand_core::OsRng;
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
 use triton_tests::rasterizer_fixture::RasterizerProcess;
-use triton_tests::upstream_fixture::FakeVault;
 
-const VAULT_TOKEN: &str = "triton-vault-token";
 const CORRELATION_KEY: &str = "32byte-correlation-key-discord!!";
+const SENDERS: &str = r#"{"99":{"sub":"bob","scopes":["chat"],"tenant":"acme"}}"#;
 
 fn manifest_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -42,34 +41,29 @@ fn manifest_path() -> String {
         .to_string()
 }
 
-async fn start_kv_vault_with_keypair() -> (FakeVault, SigningKey) {
+/// Generate a fresh Ed25519 keypair. Returns the keypair plus the
+/// public-key hex the manifest's `env://TRITON_DISCORD_PUBLIC_KEY` ref
+/// resolves to.
+fn keypair() -> (SigningKey, String) {
     let signing = SigningKey::generate(&mut OsRng);
     let pk_hex = hex::encode(signing.verifying_key().as_bytes());
-    let vault = FakeVault::start_kv_v2(
-        VAULT_TOKEN,
-        &[(
-            "kv/data/triton-test/discord",
-            &[
-                ("public_key", pk_hex.as_str()),
-                ("bot_token", "stub-bot-token"),
-                (
-                    "senders",
-                    r#"{"99":{"sub":"bob","scopes":["chat"],"tenant":"acme"}}"#,
-                ),
-                ("correlation_key", CORRELATION_KEY),
-            ],
-        )],
-    )
-    .await;
-    (vault, signing)
+    (signing, pk_hex)
 }
 
-fn env_with(vault: &FakeVault, rasterizer_url: &str) -> HashMap<String, String> {
+fn env_with(pk_hex: &str, rasterizer_url: &str) -> HashMap<String, String> {
     HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
-        ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
+        ("TRITON_DISCORD_PUBLIC_KEY".to_string(), pk_hex.to_string()),
+        (
+            "TRITON_DISCORD_BOT_TOKEN".to_string(),
+            "stub-bot-token".to_string(),
+        ),
+        ("TRITON_DISCORD_SENDERS".to_string(), SENDERS.to_string()),
+        (
+            "TRITON_DISCORD_CORRELATION_KEY".to_string(),
+            CORRELATION_KEY.to_string(),
+        ),
         (
             "TRITON_RASTERIZER_URL".to_string(),
             rasterizer_url.to_string(),
@@ -92,10 +86,10 @@ fn sign(signing: &SigningKey, body: &[u8]) -> (String, String) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn discord_dashboard_surface_responds_with_multipart_png() {
-    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let (signing, pk_hex) = keypair();
     let raster = RasterizerProcess::spawn().await;
     let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &raster.url()))
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex, &raster.url()))
             .await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
@@ -186,7 +180,7 @@ async fn discord_dashboard_surface_responds_with_multipart_png() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discord_dashboard_falls_back_to_text_on_rasterizer_failure() {
-    let (vault, signing) = start_kv_vault_with_keypair().await;
+    let (signing, pk_hex) = keypair();
     // Point the adapter at a dead port. Bind-then-drop reserves a
     // free port we know nothing is listening on.
     let dead_port = {
@@ -197,7 +191,7 @@ async fn discord_dashboard_falls_back_to_text_on_rasterizer_failure() {
     };
     let dead_url = format!("http://127.0.0.1:{dead_port}");
     let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &dead_url)).await;
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex, &dead_url)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
     let interaction = json!({

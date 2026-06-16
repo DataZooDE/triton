@@ -14,7 +14,6 @@ use std::time::Duration;
 
 use triton_manifest::{Env, Manifest, ManifestError};
 use triton_tests::TritonProcess;
-use triton_tests::upstream_fixture::FakeVault;
 
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -84,58 +83,50 @@ async fn binary_boots_with_valid_manifest() {
     // End-to-end: spawn the real `triton` binary with
     // TRITON_MANIFEST_PATH=<valid>, confirm it serves /healthz.
     //
-    // The canonical fixture uses Vault refs for every credential
-    // (production-shaped). PR 16's resolver makes that mandatory:
-    // a Vault ref without a configured Vault is a hard boot
-    // failure. So this test stands up a KV-v2 fake serving all the
-    // fields the fixture references for both `telegram` and
-    // `discord` adapter blocks.
-    let vault = FakeVault::start_kv_v2(
-        "test-vault-token",
-        &[
-            (
-                "kv/data/apps/dz/triton/nonprod/telegram",
-                &[
-                    ("webhook_secret", "telegram-webhook-secret"),
-                    ("bot_token", "telegram-bot-token"),
-                    (
-                        "senders",
-                        r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
-                    ),
-                    ("correlation_key", "telegram-correlation-key"),
-                ],
-            ),
-            (
-                "kv/data/apps/dz/triton/nonprod/discord",
-                // PR 22 wired the Discord adapter, so the
-                // public_key MUST decode as a valid Ed25519 key
-                // (32 bytes hex, on-curve). Using RFC 8032 Test 1's
-                // canonical example so it's traceable.
-                &[
-                    (
-                        "public_key",
-                        "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
-                    ),
-                    ("bot_token", "discord-bot-token"),
-                    (
-                        "senders",
-                        r#"{"99":{"sub":"bob","scopes":["chat"],"tenant":"acme"}}"#,
-                    ),
-                    ("correlation_key", "discord-correlation-key"),
-                ],
-            ),
-        ],
-    )
-    .await;
+    // The canonical fixture uses `env://` refs for every credential
+    // (production-shaped). The resolver makes those mandatory: an
+    // `env://` ref pointing at an unset variable is a hard boot
+    // failure. So this test injects all the fields the fixture
+    // references for both the `telegram` and `discord` adapter
+    // blocks. The Discord public_key MUST decode as a valid Ed25519
+    // key (32 bytes hex, on-curve); we use RFC 8032 Test 1's
+    // canonical example so it's traceable.
     let env = HashMap::from([
         (
             "TRITON_MANIFEST_PATH".to_string(),
             fixture("manifest-valid.yaml").display().to_string(),
         ),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
         (
-            "TRITON_VAULT_TOKEN".to_string(),
-            "test-vault-token".to_string(),
+            "TRITON_TG_WEBHOOK_SECRET".to_string(),
+            "telegram-webhook-secret".to_string(),
+        ),
+        (
+            "TRITON_TG_BOT_TOKEN".to_string(),
+            "telegram-bot-token".to_string(),
+        ),
+        (
+            "TRITON_TG_SENDERS".to_string(),
+            r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#.to_string(),
+        ),
+        (
+            "TRITON_TG_CORRELATION_KEY".to_string(),
+            "telegram-correlation-key".to_string(),
+        ),
+        (
+            "TRITON_DISCORD_PUBLIC_KEY".to_string(),
+            "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a".to_string(),
+        ),
+        (
+            "TRITON_DISCORD_BOT_TOKEN".to_string(),
+            "discord-bot-token".to_string(),
+        ),
+        (
+            "TRITON_DISCORD_SENDERS".to_string(),
+            r#"{"99":{"sub":"bob","scopes":["chat"],"tenant":"acme"}}"#.to_string(),
+        ),
+        (
+            "TRITON_DISCORD_CORRELATION_KEY".to_string(),
+            "discord-correlation-key".to_string(),
         ),
     ]);
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;

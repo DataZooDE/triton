@@ -65,7 +65,7 @@ rasteriser is realised as either:
 
 - an **upstream tool named `render_a2ui_to_png`** (preferred —
   inherits identity + audit symmetry through the upstream router), or
-- a peer Nomad sidecar.
+- a peer sidecar service.
 
 MS Teams projects dashboards onto an Adaptive Card `ColumnSet`
 natively and skips the rasteriser. If you emit dashboards and target

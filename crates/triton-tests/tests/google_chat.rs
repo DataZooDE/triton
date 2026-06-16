@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::{FakeGoogleJwks, attacker_signing_key};
-use triton_tests::upstream_fixture::{FakeAgent, FakeConsul, FakeVault};
+use triton_tests::upstream_fixture::FakeAgent;
 
 const AUDIENCE: &str = "1234567890";
 const GOOGLE_ISS: &str = "chat@system.gserviceaccount.com";
@@ -442,7 +442,7 @@ async fn self_enrol_rejects_missing_or_nonuser_sender() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upstream_identity_resolves_principal_via_resolver_tool() {
     // FR-I-7 `upstream`: the adapter delegates sender resolution to a
-    // resolver tool reached through the upstream router. A real
+    // resolver tool reached through the upstream dispatcher. A real
     // resolver agent (FakeAgent) returns {sub, scopes, tenant}; the
     // adapter then dispatches the actual command under that principal.
     let jwks = FakeGoogleJwks::start().await;
@@ -452,8 +452,6 @@ async fn upstream_identity_resolves_principal_via_resolver_tool() {
         "tenant": "globex"
     }))
     .await;
-    let consul = FakeConsul::start(&[("resolve_identity", resolver.host_port())]).await;
-    let vault = FakeVault::start_minting("vault-minted-agent-token").await;
 
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/manifest-googlechat-upstream-test.yaml")
@@ -463,15 +461,9 @@ async fn upstream_identity_resolves_principal_via_resolver_tool() {
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest),
         ("TRITON_GOOGLE_CHAT_JWKS_URI".to_string(), jwks.jwks_uri()),
-        ("TRITON_CONSUL_URL".to_string(), consul.url()),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
         (
-            "TRITON_VAULT_TOKEN".to_string(),
-            "triton-vault-token".to_string(),
-        ),
-        (
-            "TRITON_VAULT_OIDC_ROLE".to_string(),
-            "agent-oidc-swap".to_string(),
+            "TRITON_STATIC_UPSTREAMS".to_string(),
+            format!("resolve_identity={}", resolver.host_port()),
         ),
     ]);
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
@@ -499,15 +491,15 @@ async fn upstream_identity_resolves_principal_via_resolver_tool() {
     assert_eq!(dispatch["tenant"], "globex", "tenant from resolver tool");
     assert_eq!(dispatch["result"], "ok");
 
-    // Prove the resolve actually traversed the upstream router + Vault
+    // Prove the resolve actually traversed the upstream dispatcher
     // (not an in-process bypass): the resolver agent was hit exactly
-    // once and saw the Vault-minted bearer, never a raw token.
+    // once and saw the static upstream bearer, never the inbound token.
     assert_eq!(resolver.hits(), 1, "resolver agent must be called once");
     let bearers = resolver.bearers_seen();
     assert_eq!(bearers.len(), 1);
     assert_eq!(
-        bearers[0], "vault-minted-agent-token",
-        "resolver must receive the Vault-minted token"
+        bearers[0], "dev-token",
+        "resolver must receive the static upstream bearer"
     );
 }
 
@@ -517,8 +509,6 @@ async fn upstream_identity_rejects_when_resolver_fails() {
     // is rejected — never dispatched with a guessed principal.
     let jwks = FakeGoogleJwks::start().await;
     let resolver = FakeAgent::start_always_failing().await;
-    let consul = FakeConsul::start(&[("resolve_identity", resolver.host_port())]).await;
-    let vault = FakeVault::start_minting("vault-minted-agent-token").await;
 
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/manifest-googlechat-upstream-test.yaml")
@@ -528,15 +518,9 @@ async fn upstream_identity_rejects_when_resolver_fails() {
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest),
         ("TRITON_GOOGLE_CHAT_JWKS_URI".to_string(), jwks.jwks_uri()),
-        ("TRITON_CONSUL_URL".to_string(), consul.url()),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
         (
-            "TRITON_VAULT_TOKEN".to_string(),
-            "triton-vault-token".to_string(),
-        ),
-        (
-            "TRITON_VAULT_OIDC_ROLE".to_string(),
-            "agent-oidc-swap".to_string(),
+            "TRITON_STATIC_UPSTREAMS".to_string(),
+            format!("resolve_identity={}", resolver.host_port()),
         ),
     ]);
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
@@ -579,8 +563,10 @@ async fn upstream_identity_rejects_when_resolver_fails() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn upstream_resolver_colliding_with_inprocess_tool_refuses_to_boot() {
     // Codex review finding 1: a resolver_tool that names an in-process
-    // tool (`echo`) would be dispatched locally, bypassing Consul +
-    // the Vault-minted token. The adapter MUST refuse at boot.
+    // tool (`echo`) would be dispatched locally, bypassing the upstream
+    // dispatcher and its workload-to-workload token. The adapter MUST
+    // refuse at boot. The collision check keys off the in-process tool
+    // descriptors, so it fires regardless of upstream wiring.
     let bin = locate_triton_binary();
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/manifest-googlechat-upstream-collision.yaml")
@@ -596,11 +582,6 @@ async fn upstream_resolver_colliding_with_inprocess_tool_refuses_to_boot() {
         .env("TRITON_ENV", "local")
         .env("TRITON_MANIFEST_PATH", manifest)
         .env("TRITON_GOOGLE_CHAT_JWKS_URI", "https://www.googleapis.com")
-        // Provide Consul+Vault so we get past partial-wiring guards and
-        // reach the adapter build where the collision is caught.
-        .env("TRITON_CONSUL_URL", "http://127.0.0.1:1")
-        .env("TRITON_VAULT_URL", "http://127.0.0.1:1")
-        .env("TRITON_VAULT_TOKEN", "irrelevant")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .output()

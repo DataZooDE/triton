@@ -4,6 +4,43 @@ The skill version tracks the consumer-facing contract, not the Triton
 binary version. The Triton repo's checked-out git ref is the true
 version pin (see `SKILL.md` → "How this skill is installed").
 
+## 0.3.0 — Consul/Vault → StaticUpstream + RS256-JWT + env:// (Kamal migration)
+
+Catches the consumer contract up to the move off the HashiCorp stack
+onto Kamal (ADR-0013). The wire shape, A2UI envelopes, surface/degrade,
+OIDC *verification*, audit/logging, and the test-harness `pub` surface
+are unchanged; the **discovery, agent-auth, secrets, and deploy
+mechanics** were rewritten throughout.
+
+- **Discovery is a static map, not Consul (`SKILL.md`, `00`, `01`,
+  `03`).** Triton resolves a tool name to a fixed `host:port` from
+  `TRITON_STATIC_UPSTREAMS=name=host:port,…`. There is no service
+  catalog and no `tag:agent:<name>` registration; tool names must be
+  globally unique. Adding/removing a tool is an edit to that env var on
+  the Triton deploy.
+- **Agent auth is a Triton-signed RS256 JWT, not a Vault token swap
+  (`00`, `01`, `04`, `07`).** Triton mints a short-TTL (≤ 5 min) RS256
+  OIDC JWT per dispatch (`TRITON_JWT_SIGNING_KEY` + `TRITON_SELF_ISSUER`
+  + `TRITON_JWT_JWKS`, all-or-nothing; `TRITON_JWT_KID`) and serves it
+  for verification at `/.well-known/jwks.json` +
+  `/.well-known/openid-configuration`. Dev fallback: a static
+  `TRITON_STATIC_UPSTREAM_TOKEN` bearer (default `dev-token`) when no
+  signer is configured. The dispatch wire shape (`POST /`,
+  `X-Triton-Tool`, args body) is unchanged.
+- **Secrets are `env://VARNAME` refs, not `vault://` (`03`, `10`,
+  `11`).** The substrate injects values as container env from GCP
+  Secret Manager via kamal `.kamal/secrets`. `vault://` still parses
+  but fails boot closed; literals are `local`-env-only.
+- **Substrate is Kamal, not Nomad (`SKILL.md`, `11`).** Images
+  `ghcr.io/datazoode/dz-triton*` pinned by SHA; the deploy config
+  (`kamal/<app>/deploy.yml` + `apps/registry.yml`) lives in the
+  substrate repo. The `agent.nomad.hcl` template was deleted; no Fabio,
+  no Consul DNS.
+- **Test harness (`08`).** The Pattern-A example now uses
+  `TRITON_STATIC_UPSTREAMS` + `FakeAgent` only. `FakeConsul` and
+  `FakeVault` are gone; `FakeAgent` gained `start_returning`,
+  `tools_seen`, `bodies_seen`.
+
 ## 0.2.0 — wire-contract corrections + new auth modes
 
 Catches the consumer contract up to Triton commits #56–#71.

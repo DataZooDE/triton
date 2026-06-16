@@ -1,12 +1,19 @@
 //! Minimal upstream-agent skeleton for Triton.
 //!
 //! Triton dispatches to this agent by POSTing the tool's args JSON to
-//! `/` with `Authorization: Bearer <vault-minted-oidc>` (see
-//! references/01). The agent verifies the bearer, runs the tool, and
+//! `/` with `X-Triton-Tool: <tool>` and `Authorization: Bearer <token>`
+//! (see references/01). Outside dev the token is a short-TTL RS256 JWT
+//! Triton mints per call (workload→workload auth, no Vault); the agent
+//! verifies it against Triton's JWKS. In dev it is the static
+//! `dev-token`. The agent verifies the bearer, runs the tool, and
 //! returns either raw JSON or a canonical A2UI `surface`
 //! (references/02). Triton wraps/builds the response for whatever
 //! protocol the original caller used — this agent stays
 //! protocol-agnostic.
+//!
+//! Triton finds this agent by a STATIC map, not Consul: the operator
+//! adds `<tool>=<this agent's host:port>` to TRITON_STATIC_UPSTREAMS.
+//! There is no self-registration — this is just an HTTP server.
 //!
 //! Run locally:  cargo run            (dev-token accepted, no issuer)
 //! Build to ship: cargo build --release --no-default-features
@@ -24,8 +31,11 @@ use serde_json::{Value, json};
 
 #[derive(Clone)]
 struct AppState {
-    // EDIT: when present, verify real OIDC tokens against this issuer
-    // (references/04). When absent, the dev-token path applies.
+    // EDIT: when present, verify real RS256 JWTs against this issuer's
+    // JWKS (references/04). Set it to Triton's self-issuer URL — Triton
+    // serves discovery at `<issuer>/.well-known/openid-configuration`
+    // and keys at `<issuer>/.well-known/jwks.json`. When absent, the
+    // dev-token path applies.
     oidc_issuer: Option<String>,
     oidc_audience: Option<String>,
 }
@@ -38,13 +48,14 @@ async fn main() {
     };
 
     let app = Router::new()
-        // Triton always POSTs to `/` — it routed to us via Consul, so
-        // there is no per-tool path on our side (references/01).
+        // Triton always POSTs to `/` — it resolved us by tool name from
+        // its static map, so there is no per-tool path on our side; the
+        // tool rides the `X-Triton-Tool` header (references/01).
         .route("/", post(handle_tool_call))
         .route("/healthz", get(|| async { Json(json!({ "status": "ok" })) }))
         .with_state(state);
 
-    // EDIT: port comes from your Nomad `network` stanza in prod.
+    // EDIT: the port the operator names in TRITON_STATIC_UPSTREAMS.
     let port: u16 = std::env::var("AGENT_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -88,14 +99,16 @@ async fn handle_tool_call(
     }
 
     // 3. Run the tool. EDIT: this is your domain logic. `args` is the
-    // exact object the dispatcher validated against your tool's schema.
+    // exact object the dispatcher validated against your tool's schema;
+    // `tool` (the X-Triton-Tool header above) names which tool to run
+    // if this agent serves several.
     let subject = args
         .get("subject")
         .and_then(Value::as_str)
         .unwrap_or("world");
     eprintln!(r#"{{"kind":"log","level":"info","msg":"tool invoked","who":"{principal}"}}"#);
 
-    // 3. Return a canonical A2UI surface (references/02). Triton builds
+    // 4. Return a canonical A2UI surface (references/02). Triton builds
     // v0.8 / v0.9 / a chat PlatformMessage from this — do NOT emit the
     // versioned wire shape yourself. To return a plain result instead,
     // just `Json(json!({ "answer": 42 }))` and Triton wraps it.
@@ -144,9 +157,10 @@ async fn verify_bearer(state: &AppState, headers: &HeaderMap) -> Result<String, 
         .ok_or_else(|| "missing bearer".to_string())?;
 
     match &state.oidc_issuer {
-        // Real OIDC path. EDIT: this is a sketch — use the full
+        // Real RS256-JWT path. EDIT: this is a sketch — use the full
         // verify recipe (JWKS discovery + per-kid cache + rotation)
-        // from substrate-platform/references/11-oidc-verification.md.
+        // from references/04. The issuer is Triton's self-issuer; it
+        // serves the verifying keys at `<issuer>/.well-known/jwks.json`.
         Some(issuer) => verify_oidc(issuer, state.oidc_audience.as_deref(), bearer).await,
 
         // No issuer configured → dev / CI. Accept the literal
@@ -171,8 +185,9 @@ async fn verify_bearer(state: &AppState, headers: &HeaderMap) -> Result<String, 
 }
 
 /// Sketch of the real verification path. Replace with the cached
-/// recipe from substrate-platform/references/11; this fetches JWKS
-/// on every call, which is fine for a skeleton, not for production.
+/// recipe from references/04; this fetches JWKS on every call, which is
+/// fine for a skeleton, not for production. Triton mints RS256 tokens,
+/// so the algorithm is RS256.
 async fn verify_oidc(
     issuer: &str,
     audience: Option<&str>,
@@ -201,9 +216,8 @@ async fn verify_oidc(
     let key = jwks.find(&kid).ok_or("kid not in JWKS")?;
     let decoding = DecodingKey::from_jwk(key).map_err(|e| format!("decoding key: {e}"))?;
 
-    // Triton's inbound allowlist (FR-I-3). EdDSA matches TestIssuer's
-    // Ed25519 keys; widen to RS256/ES256 for the real substrate issuer.
-    let mut validation = Validation::new(Algorithm::EdDSA);
+    // Triton mints RS256 JWTs for upstream agents, so pin RS256.
+    let mut validation = Validation::new(Algorithm::RS256);
     validation.set_issuer(&[issuer]);
     if let Some(aud) = audience {
         validation.set_audience(&[aud]);

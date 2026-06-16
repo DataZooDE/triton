@@ -1,27 +1,8 @@
 ---
 name: triton-platform
-version: 0.2.0
-description: Use when developing an application that integrates with the DataZoo Triton agent-ingress gateway — either an upstream agent Triton dispatches into (registered in Consul as `tag:agent:<name>`) or a frontend/client that calls Triton's HTTP trio (REST/MCP/A2A). Provides the upstream-agent wire contract, A2UI envelope shapes, the `adapter.yaml` manifest fragment, the OIDC verification recipe, the `crates/triton-tests` consumer test harness, and ready-to-fork templates. Triggers on phrases like "agent for Triton", "tool that Triton calls", "A2UI envelope", "adapter.yaml entry", "TritonProcess test", "verify Triton's bearer", "register a new tool", "chat-channel surface", "render_a2ui_to_png". DO NOT use for Triton-internal work (writing adapters, the dispatcher, the surface mapper, the identity boundary) — that is work inside the Triton repo itself, not consumer-facing.
+version: 0.3.0
+description: Use when developing an application that integrates with the DataZoo Triton agent-ingress gateway — either an upstream agent Triton dispatches into (resolved by tool name from a static `TRITON_STATIC_UPSTREAMS` map) or a frontend/client that calls Triton's HTTP trio (REST/MCP/A2A). Provides the upstream-agent wire contract, A2UI envelope shapes, the `adapter.yaml` manifest fragment, the OIDC verification recipe, the `crates/triton-tests` consumer test harness, and ready-to-fork templates. Triggers on phrases like "agent for Triton", "tool that Triton calls", "A2UI envelope", "adapter.yaml entry", "TritonProcess test", "verify Triton's bearer", "register a new tool", "chat-channel surface", "render_a2ui_to_png". DO NOT use for Triton-internal work (writing adapters, the dispatcher, the surface mapper, the identity boundary) — that is work inside the Triton repo itself, not consumer-facing.
 ---
-
-> ## ⚠️ Substrate is now Kamal (ADR-0013) — the discovery/deploy model below is the ARCHIVED stack
->
-> Triton runs the same, but on the DataZoo substrate **agents are no longer
-> discovered via Consul `tag:agent:<name>`, deployed as Nomad jobs, or handed
-> Vault-minted bearers.** When deploying against the Kamal substrate:
-> - **Discovery/dispatch:** Triton uses a **StaticUpstream** — the agent's URL is
->   configured by env (`TRITON_STATIC_UPSTREAM_*`), not a Consul tag. There is no Consul.
-> - **Your agent is a Kamal app**, not a Nomad job: a container + `kamal/<app>/deploy.yml`
->   + a row in the substrate's `apps/registry.yml` (the `agent.nomad.hcl` template is archived).
-> - **OIDC bearer:** Triton signs an **RS256 JWT** (key in GCP Secret Manager,
->   `aud=<agents-env>`, optional `tenant` claim) and serves `/.well-known/openid-configuration`
->   + `/jwks.json`; your agent verifies against the JWKS. No Vault, no per-call Vault mint.
-> - **Images:** private **ghcr.io** (pulled with a `read:packages` token), not GAR.
->
-> The wire contract, A2UI envelopes, OIDC *verification* recipe, and the consumer
-> test harness below are still accurate. The Consul-tag / Nomad-job / Vault-mint
-> *registration + deploy* references are pre-migration and pending a Kamal rewrite —
-> see the `substrate-platform` skill and `DataZooDE/hetzner-agent-substrate` CLAUDE.md §11.
 
 # triton-platform — build apps that integrate with Triton
 
@@ -32,10 +13,13 @@ binary in its own repo (`DataZooDE/triton`); this skill is the
 integration roles, and most apps are one of them:
 
 - **Upstream-agent author** (the common case). You are building a
-  Nomad job that implements one or more *tools*. Triton discovers it
-  via Consul (`tag:agent:<tool_name>`), dispatches inbound calls to
-  it, and ships the audit trail. Your deliverable receives a
-  Vault-minted OIDC bearer and returns JSON or an A2UI surface.
+  service that implements one or more *tools*. Triton resolves it by
+  **tool name** from a static `host:port` map
+  (`TRITON_STATIC_UPSTREAMS`), dispatches inbound calls to it, and
+  ships the audit trail. Your deliverable receives a per-call RS256
+  OIDC bearer minted by Triton and returns JSON or an A2UI surface.
+  (Discovery was Consul `tag:agent:<name>` + a Vault-minted bearer
+  before the Kamal migration; both are gone.)
 - **Frontend / client author**. You are building something that
   *calls* Triton — over REST, MCP, or A2A — and consumes the A2UI
   envelopes it returns.
@@ -73,7 +57,7 @@ Read only the references relevant to the task at hand. Each is small
 | `references/00-what-is-triton.md` | First contact. The nine adapters, the dispatcher pivot, where your app sits in the picture. |
 | `references/01-upstream-agent-contract.md` | Building a tool Triton calls. The exact HTTP wire shape, bearer, request/response body. |
 | `references/02-a2ui-envelopes.md` | Your tool returns a UI surface. The `{surface:{components:[…]}}` shape, v0.8 vs v0.9, who builds what. |
-| `references/03-tool-registration.md` | Making a tool reachable: Consul `tag:agent:<name>` + the operator-side `adapter.yaml` entry. |
+| `references/03-tool-registration.md` | Making a tool reachable: the `TRITON_STATIC_UPSTREAMS` map entry + the operator-side `adapter.yaml` entry. |
 | `references/04-oidc-verification.md` | Your agent verifies Triton's per-call OIDC bearer. Issuer, audience, JWKS caching; defers crypto to substrate-platform. |
 | `references/05-surface-and-degrade.md` | Your surface targets chat channels. `degrade` rules, `SurfaceLimits` caps, the rasteriser for dashboards. |
 | `references/06-frontend-client.md` | Building the *caller* side (REST/MCP/A2A): tool discovery, content negotiation, error model. |
@@ -81,7 +65,7 @@ Read only the references relevant to the task at hand. Each is small
 | `references/08-consumer-test-harness.md` | Writing `frontend → triton → app-agent` integration tests against a real Triton process. The `triton-tests` `pub` surface. |
 | `references/09-audit-and-logging.md` | What your app logs, what Triton audits, and what must NEVER appear in either. |
 | `references/10-out-of-bounds.md` | Before writing anything that feels like it belongs *inside* Triton. Hard prohibitions. |
-| `references/11-substrate-crossref.md` | Where the `substrate-platform` skill covers the same surface (Nomad/Vault/Consul/OIDC) from the platform side. |
+| `references/11-substrate-crossref.md` | Where the `substrate-platform` skill covers the same surface (Kamal deploy, secrets, OIDC) from the platform side. |
 
 ## Templates (`templates/`)
 
@@ -92,9 +76,13 @@ encodes the conventions documented in the references. See
 | Template | Use for |
 |---|---|
 | `templates/upstream-agent-axum/` | A working Rust upstream-agent skeleton: axum handler, OIDC-bearer verification, a tool returning an A2UI v0.9 surface. |
-| `templates/consumer-integration-test/` | A drop-in `tests/triton_e2e.rs` (+ Cargo snippet) that boots a real Triton with `FakeConsul` + `FakeAgent` and drives it end-to-end. |
+| `templates/consumer-integration-test/` | A drop-in `tests/triton_e2e.rs` (+ Cargo snippet) that boots a real Triton with a `TRITON_STATIC_UPSTREAMS` entry + `FakeAgent` and drives it end-to-end. |
 | `templates/adapter-manifest.yaml` | The `adapter.yaml` fragment an operator pastes to register your tool and its chat-channel `degrade` rules. |
-| `templates/agent.nomad.hcl` | The Nomad job stanza: `tag:agent:<name>` Consul registration, Vault verifier wiring, tailnet binding. |
+
+There is no Nomad-job template — deployment is Kamal, and the deploy
+config (a `kamal/<app>/deploy.yml` + a row in the substrate's
+`apps/registry.yml`) lives in the substrate repo, not here. See the
+`substrate-platform` skill.
 
 ## Hard prohibitions
 
@@ -104,11 +92,12 @@ encodes the conventions documented in the references. See
 - **No bypassing Triton.** Don't call chat platforms or other agents
   directly; everything goes through the dispatcher so audit symmetry
   holds.
-- **No raw-token forwarding.** Your agent receives a fresh
-  Vault-minted token scoped to it, never the inbound caller's token.
-  Don't try to recover or reuse the original.
-- **No static credentials, no on-disk user state.** Vault references
-  only; stateless across restarts.
+- **No raw-token forwarding.** Your agent receives a fresh RS256 JWT
+  Triton mints per call, scoped to it, never the inbound caller's
+  token. Don't try to recover or reuse the original.
+- **No static credentials, no on-disk user state.** `env://` secret
+  references only (the substrate injects them as container env);
+  stateless across restarts.
 
 See `references/10-out-of-bounds.md` for the complete list and the
 escalation path.

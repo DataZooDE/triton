@@ -32,23 +32,26 @@ workaround.
 ## Never do these anywhere
 
 - **Forward the inbound caller's token.** You never receive it. Your
-  agent's identity to anything it calls is its own Vault-minted token
+  agent's identity to anything it calls is its own minted token
   (ADR-3, lethal-trifecta cut). No relaying.
 - **Bypass Triton to reach a chat platform or another agent.** Calls
   go through the dispatcher so audit symmetry holds. The courier owns
   the platform credential; your agent does not call Telegram/Discord
   directly.
-- **Static credentials.** No tokens in code, HCL, or env literals.
-  Vault references only (NFR-S-1, M-SECRETS-1). A literal credential
-  in a manifest fragment makes the operator's prod boot fail.
+- **Static credentials.** No tokens in code, deploy config, or
+  manifest literals. `env://<VARNAME>` references only — the substrate
+  injects the value from GCP Secret Manager via kamal `.kamal/secrets`
+  (NFR-S-1, M-SECRETS-1). A literal (or a decommissioned `vault://`)
+  credential in a manifest fragment makes the operator's prod boot
+  fail.
 - **On-disk user state.** Stateless across restarts (G-8). No Redis
   "just for one tool", no session files. Each call is a fresh
   `(tool, args, principal)`.
 - **A log shipper in your binary.** No Loki/Vector/OTel exporter.
   Emit JSON to stdout; the substrate collector ships it (ADR-7).
-- **`:latest` images, on-the-fly provisioning.** Pin image SHAs;
-  buckets/Vault policies/DNS/Tailscale tags are substrate-repo PRs
-  (→ `references/11`).
+- **`:latest` images, on-the-fly provisioning.** Pin image SHAs
+  (`ghcr.io/datazoode/dz-triton*`); buckets/Secret Manager
+  entries/DNS/Tailscale tags are substrate-repo PRs (→ `references/11`).
 
 ## The escalation path
 
@@ -57,9 +60,10 @@ If your app genuinely needs a capability Triton doesn't expose:
 1. **A new tool surface concept** (a component type, a richer chat
    degradation) → open an issue/PR against the **Triton repo**;
    reference the spec clause it extends (`doc/requirements.md`).
-2. **A new backing-service capability** (a bucket, a Vault policy, a
-   public hostname, a Tailscale tag) → PR against the **substrate
-   repo** (see `substrate-platform/references/09-out-of-bounds.md`).
+2. **A new backing-service capability** (a bucket, a Secret Manager
+   entry, a public hostname, a Tailscale tag) → PR against the
+   **substrate repo** (see
+   `substrate-platform/references/09-out-of-bounds.md`).
 3. **A breaking change to the test harness `pub` surface** → it's
    governed by ADR-16's one-release deprecation cycle; file a
    follow-up rather than depending on un-deprecated internals.

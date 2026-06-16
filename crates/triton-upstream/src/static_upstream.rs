@@ -8,7 +8,7 @@
 //!     mints a short-lived RS256 OIDC token per call instead, so PRODUCTION
 //!     agents (dev-token compiled out, ADR-10) verify it through their normal
 //!     `AGENT_OIDC_ISSUER` path — workload→workload auth without Vault. This is
-//!     the Consul-less analogue of [`crate::UpstreamRouter`]'s Vault swap.
+//!     the Consul-less, Vault-less dispatch path (and the only one).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

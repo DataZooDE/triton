@@ -93,8 +93,6 @@ async fn signal_rejects_non_tailnet_addr_in_nonprod() {
     let out = spawn_and_wait_for_exit(&[
         ("TRITON_ENV", "nonprod"),
         ("TRITON_MANIFEST_PATH", &mpath),
-        ("TRITON_VAULT_URL", "http://127.0.0.1:1"),
-        ("TRITON_VAULT_TOKEN", "irrelevant"),
         // The SSRF-tempting override.
         ("TRITON_SIGNAL_SIGNALD_ADDR", "tcp://attacker.example:15432"),
     ]);
@@ -120,19 +118,16 @@ async fn signal_rejects_non_tailnet_addr_in_nonprod() {
 async fn signal_accepts_tailnet_addr_in_nonprod() {
     // Paired with the rejection test: a `tcp://*.ts.net:port` is on
     // the tailnet allowlist and MUST get past the NFR-S-4 gate. The
-    // binary still fails downstream (the manifest's vault refs are
-    // unreachable against `http://127.0.0.1:1`) but the FAILURE
+    // binary still fails downstream (the manifest's `env://` credential
+    // refs are unset, so secret resolution fails) but the FAILURE
     // MODE is what matters: the NFR-S-4 path emits a specific
     // "MUST set TRITON_SIGNAL_SIGNALD_ADDR" + "NFR-S-4" error.
     // A non-allowlist value triggers that error; an allowlist value
-    // skips it and the binary fails downstream for a different
-    // reason (or boots, depending on Vault availability).
+    // skips it and the binary fails downstream for a different reason.
     let mpath = vault_manifest_path();
     let out = spawn_and_wait_for_exit(&[
         ("TRITON_ENV", "nonprod"),
         ("TRITON_MANIFEST_PATH", &mpath),
-        ("TRITON_VAULT_URL", "http://127.0.0.1:1"),
-        ("TRITON_VAULT_TOKEN", "irrelevant"),
         // Allowlist-passing override.
         (
             "TRITON_SIGNAL_SIGNALD_ADDR",
@@ -167,8 +162,6 @@ async fn signal_accepts_unix_socket_addr_in_nonprod() {
     let out = spawn_and_wait_for_exit(&[
         ("TRITON_ENV", "nonprod"),
         ("TRITON_MANIFEST_PATH", &mpath),
-        ("TRITON_VAULT_URL", "http://127.0.0.1:1"),
-        ("TRITON_VAULT_TOKEN", "irrelevant"),
         (
             "TRITON_SIGNAL_SIGNALD_ADDR",
             "unix:///var/run/signald/signald.sock",

@@ -1,22 +1,30 @@
 # 01 — The upstream-agent wire contract
 
 This is the contract your tool-bearing agent MUST implement. Source
-of truth: `crates/triton-upstream/src/lib.rs` (`UpstreamRouter`), spec
-FR-U-1..5 in `doc/requirements.md`.
+of truth: `crates/triton-upstream/src/static_upstream.rs`
+(`StaticUpstream`), spec FR-U-1..5 in `doc/requirements.md`.
 
 ## The request Triton makes
 
 For each inbound tool call, Triton's upstream router:
 
-1. Resolves your agent via Consul: `tag:agent:<tool_name>` (FR-U-1).
-2. Mints a fresh short-lived OIDC token via Vault role
-   `agent-oidc-swap`, TTL ≤ 5 min (FR-U-2, NFR-S-3).
+1. Resolves your agent by **tool name** to a fixed `host:port` from
+   the static `TRITON_STATIC_UPSTREAMS=name=host:port,…` map (FR-U-1;
+   no service catalog, no Consul). Tool names are the routing key, so
+   they must be globally unique across agents.
+2. Mints a fresh short-lived **RS256 OIDC JWT** itself (TTL ≤ 5 min),
+   signing with its own key and serving the public key at
+   `/.well-known/jwks.json` so your agent can verify it (FR-U-2,
+   NFR-S-3 → `references/04`). No Vault. In issuer-less dev, the
+   bearer is instead the static `TRITON_STATIC_UPSTREAM_TOKEN`
+   (default `dev-token`).
 3. **POSTs to `/` on your agent** over HTTP/1.1 on the tailnet:
 
 ```
 POST / HTTP/1.1
 Host: <your-agent-host:port>
-Authorization: Bearer <vault-minted-oidc-jwt>
+Authorization: Bearer <triton-minted-rs256-jwt | dev-token>
+X-Triton-Tool: <tool name>
 Content-Type: application/json
 
 <the tool's args JSON, verbatim>
@@ -24,18 +32,21 @@ Content-Type: application/json
 
 Key facts, all load-bearing:
 
-- **The path is always `/`.** Triton does not route by tool name on
-  your side — Consul already resolved the right agent. You own your
-  internal routing if you serve more than one tool from one binary.
-  (`crates/triton-upstream/src/lib.rs` `do_dispatch`: `let url =
-  format!("http://{endpoint}/")`.)
+- **The path is always `/`.** Triton does not route by tool name in
+  the path — the static map already resolved the right agent. You own
+  your internal routing if you serve more than one tool from one
+  binary; the informational `X-Triton-Tool` header names the tool so
+  you can dispatch without sniffing the body.
+  (`crates/triton-upstream/src/static_upstream.rs` `invoke`: `let resp
+  = self.http.post(format!("http://{ep}/"))`.)
 - **The body is the raw args object**, exactly what the dispatcher
   validated against your tool's schema. No envelope, no metadata
   wrapper.
-- **The bearer is NOT the inbound caller's token.** It is Vault-minted
-  and scoped to your agent. Verify it (→ `references/04`); never try
-  to recover the original caller's token — there is no path to it,
-  by design (ADR-3).
+- **The bearer is NOT the inbound caller's token.** Triton mints a
+  fresh RS256 JWT scoped to your agent. Verify it (→ `references/04`);
+  never try to recover the original caller's token — there is no path
+  to it, by design (ADR-3). (This bearer was Vault-minted before the
+  Kamal migration; Triton now signs it directly.)
 - **Transport is cleartext HTTP/1.1 over Tailscale.** No TLS in your
   agent; the tailnet provides transport security. (`doc/requirements.md`
   §3.2.)
@@ -134,7 +145,8 @@ Fork it rather than hand-rolling the wiring.
 ## What you do NOT implement
 
 - No audit emission — Triton audits the dispatch (`phase: upstream`).
-- No Consul registration *in code* — that's a Nomad job tag
-  (→ `references/03`, `templates/agent.nomad.hcl`).
+- No discovery registration *in code* — your tool is reachable
+  because the operator adds a `name=host:port` entry to Triton's
+  `TRITON_STATIC_UPSTREAMS` (→ `references/03`).
 - No A2UI version branching — return the canonical `surface`;
   Triton's builders own v0.8 vs v0.9 (ADR-4).

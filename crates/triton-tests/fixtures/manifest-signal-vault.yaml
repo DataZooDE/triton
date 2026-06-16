@@ -11,13 +11,13 @@ adapters:
     inbound:
       kind: socket
       signature: trusted_socket
-      signald_addr: vault://kv/data/triton-test/signal#signald_addr
-      account: vault://kv/data/triton-test/signal#account
+      signald_addr: env://TRITON_SIGNAL_SIGNALD_ADDR
+      account: env://TRITON_SIGNAL_ACCOUNT
     outbound:
       kind: socket
     identity:
       kind: sender_table
-      table: vault://kv/data/triton-test/signal#sender_table
+      table: env://TRITON_SIGNAL_SENDER_TABLE
     degrade:
       text: passthrough
       narration: passthrough
@@ -28,7 +28,7 @@ adapters:
     rate_limit:
       messages_per_sec: 25
       burst: 50
-    correlation_key: vault://kv/data/triton-test/signal#correlation_key
+    correlation_key: env://TRITON_SIGNAL_CORRELATION_KEY
 
 tools:
   echo:

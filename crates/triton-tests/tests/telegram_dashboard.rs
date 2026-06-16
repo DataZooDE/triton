@@ -21,9 +21,7 @@ use serde_json::{Value, json};
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::FakeTelegramApi;
 use triton_tests::rasterizer_fixture::RasterizerProcess;
-use triton_tests::upstream_fixture::FakeVault;
 
-const VAULT_TOKEN: &str = "triton-vault-token";
 const RESOLVED_SECRET: &str = "secret-resolved-from-vault";
 const BOT_TOKEN: &str = "12345:resolved-bot-token";
 const CORRELATION_KEY: &str = "correlation-key-from-vault";
@@ -48,39 +46,27 @@ fn telegram_update(text: &str) -> Value {
     })
 }
 
-async fn start_kv_vault() -> FakeVault {
-    FakeVault::start_kv_v2(
-        VAULT_TOKEN,
-        &[(
-            "kv/data/triton-test/telegram",
-            &[
-                ("webhook_secret", RESOLVED_SECRET),
-                ("bot_token", BOT_TOKEN),
-                (
-                    "senders",
-                    r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
-                ),
-                ("correlation_key", CORRELATION_KEY),
-            ],
-        )],
-    )
-    .await
-}
-
-fn env_with(
-    vault: &FakeVault,
-    telegram: &FakeTelegramApi,
-    rasterizer_url: &str,
-) -> HashMap<String, String> {
+fn env_with(telegram: &FakeTelegramApi, rasterizer_url: &str) -> HashMap<String, String> {
     HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
-        ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
         ("TRITON_TELEGRAM_API_BASE".to_string(), telegram.url()),
         (
             "TRITON_RASTERIZER_URL".to_string(),
             rasterizer_url.to_string(),
+        ),
+        (
+            "TRITON_TG_WEBHOOK_SECRET".to_string(),
+            RESOLVED_SECRET.to_string(),
+        ),
+        ("TRITON_TG_BOT_TOKEN".to_string(), BOT_TOKEN.to_string()),
+        (
+            "TRITON_TG_SENDERS".to_string(),
+            r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#.to_string(),
+        ),
+        (
+            "TRITON_TG_CORRELATION_KEY".to_string(),
+            CORRELATION_KEY.to_string(),
         ),
     ])
 }
@@ -91,15 +77,12 @@ async fn dashboard_surface_dispatches_sendphoto_with_png() {
     // component. With the rasterizer up, the adapter MUST call
     // sendPhoto (not sendMessage), ship the PNG bytes, and emit a
     // `phase: post, result: rasterizer_call` audit line.
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
     let raster = RasterizerProcess::spawn().await;
 
-    let proc = TritonProcess::spawn_with_env(
-        Duration::from_secs(5),
-        env_with(&vault, &telegram, &raster.url()),
-    )
-    .await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram, &raster.url()))
+            .await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let resp = reqwest::Client::new()
@@ -191,7 +174,6 @@ async fn rasterizer_failure_falls_back_to_text() {
     // dashboard surface still completes — the adapter falls back
     // to sendMessage with a deferred-text placeholder so the user
     // sees something. Audit MUST log the rasterizer failure.
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
     // Reserve a port by binding then dropping; nothing is listening
     // on it for the duration of the test.
@@ -203,11 +185,8 @@ async fn rasterizer_failure_falls_back_to_text() {
     };
     let dead_url = format!("http://127.0.0.1:{dead_port}");
 
-    let proc = TritonProcess::spawn_with_env(
-        Duration::from_secs(5),
-        env_with(&vault, &telegram, &dead_url),
-    )
-    .await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram, &dead_url)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let resp = reqwest::Client::new()

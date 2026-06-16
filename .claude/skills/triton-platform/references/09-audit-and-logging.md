@@ -39,12 +39,12 @@ shipper (no Loki/Vector/OTel exporter) — that's substrate's job
 
 ## The non-negotiable: never log secrets
 
-FR-AU-3 / NFR-S: tokens, JWKS private material, and Vault-minted
-tokens MUST NEVER appear in audit lines or any log. This applies to
-your agent too:
+FR-AU-3 / NFR-S: tokens, JWKS private material, and the per-call
+bearers Triton mints MUST NEVER appear in audit lines or any log.
+This applies to your agent too:
 
-- The Vault-minted bearer Triton sends you → never log it. Log the
-  verified `sub` only.
+- The RS256 bearer Triton sends you (or the static dev-token) → never
+  log it. Log the verified `sub` only.
 - Any platform credential or DB password → never log it.
 - If you must correlate, log a token-hash *prefix*, not the token.
 

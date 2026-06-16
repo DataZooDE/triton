@@ -2649,12 +2649,8 @@ name = "triton-secrets"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "reqwest",
- "serde",
- "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tracing",
  "triton-manifest",
 ]
 
@@ -2689,14 +2685,11 @@ version = "0.0.1"
 dependencies = [
  "async-trait",
  "reqwest",
- "serde",
  "serde_json",
  "tokio",
  "tracing",
  "triton-core",
  "triton-identity",
- "triton-secrets",
- "uuid",
 ]
 
 [[package]]

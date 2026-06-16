@@ -1,377 +1,31 @@
-//! Test fixtures for the upstream-router PR: tiny axum servers that
-//! speak the actual Consul, Vault, and upstream-agent wire shapes.
-//! No mocks per CLAUDE.md §1.
+//! Test fixtures for the upstream dispatch path: a tiny axum server
+//! that speaks the actual upstream-agent wire shape. No mocks per
+//! CLAUDE.md §1.
+//!
+//! The Consul + Vault fakes were removed with the decommission of the
+//! HashiCorp stack; `StaticUpstream` dispatches straight to a fixed
+//! `host:port`, so only [`FakeAgent`] is needed.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{any, get};
+use axum::routing::any;
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
-
-/// Fake Consul speaking `/v1/health/service/<service>?passing`.
-///
-/// Returns each registered service as a single healthy entry with
-/// the Service.Address/Port the caller will dial.
-pub struct FakeConsul {
-    addr: SocketAddr,
-}
-
-impl FakeConsul {
-    pub async fn start(services: &[(&str, String)]) -> Self {
-        let table: Vec<(String, String)> = services
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect();
-        let table = Arc::new(table);
-        let table_cat = table.clone();
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
-        let addr = listener.local_addr().unwrap();
-
-        let router = Router::new()
-            .route(
-                "/v1/health/service/{service}",
-                get(move |Path(service): Path<String>| {
-                    let table = table.clone();
-                    async move {
-                        let matches: Vec<Value> = table
-                            .iter()
-                            .filter(|(name, _)| name == &service)
-                            .map(|(name, host_port)| {
-                                let (host, port) = parse_host_port(host_port);
-                                json!({
-                                    "Node": { "Address": host, "Node": "test" },
-                                    "Service": {
-                                        "ID": format!("{name}-1"),
-                                        "Service": name,
-                                        "Address": host,
-                                        "Port": port,
-                                        "Tags": [format!("agent:{name}")],
-                                    },
-                                    "Checks": []
-                                })
-                            })
-                            .collect();
-                        Json(Value::Array(matches))
-                    }
-                }),
-            )
-            // Consul catalog: `{ "<service>": ["<tag>", ...] }`. Each
-            // registered service carries its `agent:<name>` tag, which is
-            // what `ConsulClient::list_agent_tools` filters on.
-            .route(
-                "/v1/catalog/services",
-                get(move || {
-                    let table = table_cat.clone();
-                    async move {
-                        let mut map = serde_json::Map::new();
-                        for (name, _) in table.iter() {
-                            map.insert(
-                                name.clone(),
-                                Value::Array(vec![json!(format!("agent:{name}"))]),
-                            );
-                        }
-                        Json(Value::Object(map))
-                    }
-                }),
-            );
-
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
-        Self { addr }
-    }
-
-    pub fn url(&self) -> String {
-        format!("http://{}", self.addr)
-    }
-}
-
-fn parse_host_port(host_port: &str) -> (String, u16) {
-    let (h, p) = host_port.rsplit_once(':').expect("host:port");
-    (h.to_string(), p.parse().expect("port"))
-}
-
-/// Fake Vault speaking either the OIDC swap endpoint
-/// (`/v1/identity/oidc/token/<role>`, used by the PR 9 upstream
-/// router) or the KV v2 read endpoint (`GET /v1/<path>`, used by
-/// the PR 16 secret resolver). CLAUDE.md §1 admits "tiny in-repo
-/// HTTP fakes that speak the actual wire protocol" as not-mocks.
-pub struct FakeVault {
-    addr: SocketAddr,
-    state: Arc<VaultConfig>,
-}
-
-impl FakeVault {
-    /// OIDC-swap-only fake. Returns `token` on every
-    /// `/v1/identity/oidc/token/{role}` request (auth not modelled).
-    pub async fn start_minting(token: &'static str) -> Self {
-        Self::start(VaultConfig {
-            oidc_token: Some(token.to_string()),
-            kv_v2: Vec::new(),
-            expected_token: None,
-            login_token: None,
-            oidc_fail_first: false,
-            login_hits: AtomicU32::new(0),
-            oidc_hits: AtomicU32::new(0),
-        })
-        .await
-    }
-
-    /// Workload-identity fake: serves `POST /v1/auth/<mount>/login`
-    /// issuing `issued_token`, and the OIDC swap endpoint which both
-    /// REQUIRES that token (proving Triton logged in and presented
-    /// the workload-identity token) and returns `agent_oidc_token`.
-    /// No KV route (keeps the router free of a wildcard that would
-    /// clash with the static login/oidc routes).
-    pub async fn start_workload_identity(issued_token: &str, agent_oidc_token: &str) -> Self {
-        Self::start(VaultConfig {
-            oidc_token: Some(agent_oidc_token.to_string()),
-            kv_v2: Vec::new(),
-            expected_token: Some(issued_token.to_string()),
-            login_token: Some(issued_token.to_string()),
-            oidc_fail_first: false,
-            login_hits: AtomicU32::new(0),
-            oidc_hits: AtomicU32::new(0),
-        })
-        .await
-    }
-
-    /// Like [`start_workload_identity`], but the OIDC swap returns 403
-    /// on its FIRST call (simulating a Vault token revoked
-    /// server-side before its proactive refresh) and succeeds
-    /// afterwards. Lets a test prove the consumer invalidates the
-    /// cached token, re-logs in, and retries. Inspect [`login_hits`]
-    /// / [`oidc_hits`] to confirm the re-login happened.
-    ///
-    /// [`start_workload_identity`]: FakeVault::start_workload_identity
-    /// [`login_hits`]: FakeVault::login_hits
-    /// [`oidc_hits`]: FakeVault::oidc_hits
-    pub async fn start_workload_identity_revoke_once(
-        issued_token: &str,
-        agent_oidc_token: &str,
-    ) -> Self {
-        Self::start(VaultConfig {
-            oidc_token: Some(agent_oidc_token.to_string()),
-            kv_v2: Vec::new(),
-            expected_token: Some(issued_token.to_string()),
-            login_token: Some(issued_token.to_string()),
-            oidc_fail_first: true,
-            login_hits: AtomicU32::new(0),
-            oidc_hits: AtomicU32::new(0),
-        })
-        .await
-    }
-
-    /// Number of `auth/<mount>/login` calls served so far.
-    pub fn login_hits(&self) -> u32 {
-        self.state.login_hits.load(Ordering::SeqCst)
-    }
-
-    /// Number of OIDC-swap calls served so far.
-    pub fn oidc_hits(&self) -> u32 {
-        self.state.oidc_hits.load(Ordering::SeqCst)
-    }
-
-    /// KV-v2-only fake. Serves the listed `(path, fields)` pairs at
-    /// `GET /v1/<path>` and requires the right `X-Vault-Token`
-    /// header on every request so the resolver's auth wiring is
-    /// exercised. `path` must include the KV v2 `data/` segment
-    /// (e.g. `kv/data/apps/dz/triton/test/telegram`) because the
-    /// manifest's `vault://<path>#<field>` refs include it verbatim.
-    pub async fn start_kv_v2(expected_token: &str, entries: &[(&str, &[(&str, &str)])]) -> Self {
-        let kv_v2 = entries
-            .iter()
-            .map(|(path, fields)| {
-                let map = fields
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect::<Vec<_>>();
-                (path.to_string(), map)
-            })
-            .collect();
-        Self::start(VaultConfig {
-            oidc_token: None,
-            kv_v2,
-            expected_token: Some(expected_token.to_string()),
-            login_token: None,
-            oidc_fail_first: false,
-            login_hits: AtomicU32::new(0),
-            oidc_hits: AtomicU32::new(0),
-        })
-        .await
-    }
-
-    async fn start(cfg: VaultConfig) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
-        let addr = listener.local_addr().unwrap();
-        let state = Arc::new(cfg);
-
-        let mut router: Router = Router::new();
-        // Workload-identity login: issue `login_token` to anyone who
-        // POSTs a (non-empty) jwt. We don't verify the JWT — the test
-        // only needs to prove Triton read the file, logged in, and
-        // then USED the issued token downstream.
-        if state.login_token.is_some() {
-            let login_state = state.clone();
-            router = router.route(
-                "/v1/auth/{mount}/login",
-                axum::routing::post(move |Path(_mount): Path<String>, body: String| {
-                    let login_state = login_state.clone();
-                    async move {
-                        let _ = &body;
-                        login_state.login_hits.fetch_add(1, Ordering::SeqCst);
-                        let token = login_state.login_token.clone().unwrap();
-                        Json(json!({
-                            "auth": { "client_token": token, "lease_duration": 3600 }
-                        }))
-                    }
-                }),
-            );
-        }
-        if state.oidc_token.is_some() {
-            let oidc_state = state.clone();
-            router = router.route(
-                "/v1/identity/oidc/token/{role}",
-                get(move |headers: HeaderMap, Path(_role): Path<String>| {
-                    let oidc_state = oidc_state.clone();
-                    async move {
-                        let hit = oidc_state.oidc_hits.fetch_add(1, Ordering::SeqCst) + 1;
-                        // Simulate a revoked Vault token: reject the
-                        // first swap so the consumer must invalidate,
-                        // re-login, and retry.
-                        if oidc_state.oidc_fail_first && hit == 1 {
-                            return (StatusCode::FORBIDDEN, "token revoked").into_response();
-                        }
-                        // When configured, require the (login-issued)
-                        // token — proves the mint uses the WI token.
-                        if let Some(expected) = &oidc_state.expected_token {
-                            let presented = headers
-                                .get("x-vault-token")
-                                .and_then(|v| v.to_str().ok())
-                                .unwrap_or("");
-                            if presented != expected {
-                                return (StatusCode::FORBIDDEN, "wrong vault token")
-                                    .into_response();
-                            }
-                        }
-                        let token = oidc_state.oidc_token.clone().unwrap();
-                        Json(json!({
-                            "request_id": "00000000-0000-0000-0000-000000000000",
-                            "lease_id": "",
-                            "renewable": false,
-                            "lease_duration": 0,
-                            "data": {
-                                "client_id": "agents",
-                                "token": token,
-                                "ttl": 300,
-                            },
-                            "wrap_info": null,
-                            "warnings": null,
-                            "auth": null,
-                        }))
-                        .into_response()
-                    }
-                }),
-            );
-        }
-        if !state.kv_v2.is_empty() {
-            let kv_state = state.clone();
-            router = router.route(
-                "/v1/{*path}",
-                get(move |headers: HeaderMap, Path(path): Path<String>| {
-                    let kv_state = kv_state.clone();
-                    async move { kv_v2_handler(kv_state, headers, path).await }
-                }),
-            );
-        }
-
-        let ret_state = state.clone();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, router).await;
-        });
-        Self {
-            addr,
-            state: ret_state,
-        }
-    }
-
-    pub fn url(&self) -> String {
-        format!("http://{}", self.addr)
-    }
-}
-
-struct VaultConfig {
-    oidc_token: Option<String>,
-    kv_v2: Vec<(String, Vec<(String, String)>)>,
-    expected_token: Option<String>,
-    /// When set, serve `POST /v1/auth/<mount>/login` issuing this
-    /// token (workload-identity flow).
-    login_token: Option<String>,
-    /// When true, the OIDC swap returns 403 on its first call
-    /// (simulates a revoked Vault token) then succeeds.
-    oidc_fail_first: bool,
-    login_hits: AtomicU32,
-    oidc_hits: AtomicU32,
-}
-
-async fn kv_v2_handler(
-    state: Arc<VaultConfig>,
-    headers: HeaderMap,
-    requested_path: String,
-) -> axum::response::Response {
-    if let Some(expected) = &state.expected_token {
-        let presented = headers
-            .get("x-vault-token")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if presented != expected {
-            return (StatusCode::FORBIDDEN, "wrong vault token").into_response();
-        }
-    }
-    let Some((_, fields)) = state.kv_v2.iter().find(|(p, _)| p == &requested_path) else {
-        return (StatusCode::NOT_FOUND, "no such secret").into_response();
-    };
-    let mut data = serde_json::Map::new();
-    for (k, v) in fields {
-        data.insert(k.clone(), Value::String(v.clone()));
-    }
-    Json(json!({
-        "request_id": "00000000-0000-0000-0000-000000000000",
-        "lease_id": "",
-        "renewable": false,
-        "lease_duration": 0,
-        "data": {
-            "data": Value::Object(data),
-            "metadata": {
-                "created_time": "2026-05-24T00:00:00Z",
-                "destroyed": false,
-                "version": 1,
-            }
-        },
-        "wrap_info": null,
-        "warnings": null,
-        "auth": null,
-        "mount_type": "kv",
-    }))
-    .into_response()
-}
 
 /// Fake upstream agent. Several profiles:
 /// * `echoing` — accepts anything, echoes the body back.
 /// * `always_failing` — returns 500 on every request.
 /// * `failing_then_recovering(n)` — fails the first `n` calls, then
-///   recovers (used for circuit-breaker cooldown test).
+///   recovers.
 /// * `returning(json)` — responds with a fixed JSON body on every
-///   request (used by the `upstream` identity-resolver test, where the
+///   request (used by the upstream identity-resolver tests, where the
 ///   resolver agent returns a `{sub, scopes, tenant}` principal).
 pub struct FakeAgent {
     addr: SocketAddr,
@@ -382,7 +36,7 @@ struct FakeAgentState {
     mode: Mutex<AgentMode>,
     bearers_seen: Mutex<Vec<String>>,
     /// `X-Triton-Tool` header per request (`None` when absent) — lets
-    /// tests pin the dispatch-header contract for both upstream modes.
+    /// tests pin the dispatch-header contract.
     tools_seen: Mutex<Vec<Option<String>>>,
     bodies_seen: Mutex<Vec<Value>>,
     hits: Mutex<u32>,
@@ -413,8 +67,8 @@ impl FakeAgent {
     }
 
     /// Respond with `body` (status 200) on every request, ignoring the
-    /// request body. The upstream router returns this verbatim as the
-    /// tool result.
+    /// request body. The upstream dispatcher returns this verbatim as
+    /// the tool result.
     pub async fn start_returning(body: Value) -> Self {
         Self::start(AgentMode::Returning, 0, Some(body)).await
     }

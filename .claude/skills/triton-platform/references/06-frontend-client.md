@@ -2,8 +2,9 @@
 
 This is the *caller* side: you're building an MCP host, an A2A peer,
 or a plain REST/SDK client that drives tools through Triton. You hit
-one stable URL (`agents.<env>.<domain>` on `:443`, Fabio-routed) and
-get back A2UI in the wire format you used. Source: FR-A-3..7,
+one stable public URL (`agents.<env>.<domain>` on `:443`, the
+substrate's ingress proxy in front) and get back A2UI in the wire
+format you used. Source: FR-A-3..7,
 `doc/requirements.md` §5.1.
 
 ## Bootstrap discovery (anonymous)
@@ -103,11 +104,12 @@ precedence (`crates/triton-adapters-http/src/identity.rs`):
    an `X-Forwarded-Email` header injected by a **co-located
    oauth2-proxy sidecar** (ADR-0011 / issue #67). The browser never
    sends a bearer — it authenticates to the sidecar via SSO and the
-   sidecar forwards the header on loopback inside the Nomad alloc. The
-   synthesized principal is `{ sub: <email>, scopes: ["sso-ops"],
-   tenant: "ops" }` with **no** raw token, so upstream-agent routing
-   (the Vault OIDC swap) is unavailable on this path — it's for
-   in-process / demo tools. This is exactly how the explorer + API
+   sidecar forwards the header on loopback inside the same container /
+   netns. The synthesized principal is `{ sub: <email>, scopes:
+   ["sso-ops"], tenant: "ops" }` with **no** raw token, so
+   upstream-agent routing (the per-call RS256 mint) is unavailable on
+   this path — it's for in-process / demo tools. This is exactly how
+   the explorer + API
    deploy on the substrate. Only safe because Triton binds loopback and
    only the sidecar shares its netns; never enable it on a
    publicly-bound listener.
@@ -141,6 +143,7 @@ client author wires up call-by-call.
 ## Testing your client
 
 Spin a real Triton with the consumer harness and point your client at
-its `rest_url()` / `mcp_url()` / `a2a_url()`. Register a `FakeAgent`
-behind a `FakeConsul` so a full `frontend → triton → app-agent`
-round-trip runs in your CI with no mocks (→ `references/08`).
+its `rest_url()` / `mcp_url()` / `a2a_url()`. Start a `FakeAgent` and
+name it in `TRITON_STATIC_UPSTREAMS` so a full
+`frontend → triton → app-agent` round-trip runs in your CI with no
+mocks (→ `references/08`).

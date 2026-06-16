@@ -23,9 +23,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::FakeTelegramApi;
-use triton_tests::upstream_fixture::FakeVault;
 
-const VAULT_TOKEN: &str = "triton-vault-token";
 const RESOLVED_SECRET: &str = "secret-resolved-from-vault";
 const BOT_TOKEN: &str = "12345:resolved-bot-token";
 const CORRELATION_KEY: &str = "32byte-correlation-key-for-test!";
@@ -37,32 +35,24 @@ fn manifest_path() -> String {
         .to_string()
 }
 
-async fn start_kv_vault() -> FakeVault {
-    FakeVault::start_kv_v2(
-        VAULT_TOKEN,
-        &[(
-            "kv/data/triton-test/telegram",
-            &[
-                ("webhook_secret", RESOLVED_SECRET),
-                ("bot_token", BOT_TOKEN),
-                (
-                    "senders",
-                    r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
-                ),
-                ("correlation_key", CORRELATION_KEY),
-            ],
-        )],
-    )
-    .await
-}
-
-fn env_with(vault: &FakeVault, telegram: &FakeTelegramApi) -> HashMap<String, String> {
+fn env_with(telegram: &FakeTelegramApi) -> HashMap<String, String> {
     HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_MANIFEST_PATH".to_string(), manifest_path()),
-        ("TRITON_VAULT_URL".to_string(), vault.url()),
-        ("TRITON_VAULT_TOKEN".to_string(), VAULT_TOKEN.to_string()),
         ("TRITON_TELEGRAM_API_BASE".to_string(), telegram.url()),
+        (
+            "TRITON_TG_WEBHOOK_SECRET".to_string(),
+            RESOLVED_SECRET.to_string(),
+        ),
+        ("TRITON_TG_BOT_TOKEN".to_string(), BOT_TOKEN.to_string()),
+        (
+            "TRITON_TG_SENDERS".to_string(),
+            r#"{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#.to_string(),
+        ),
+        (
+            "TRITON_TG_CORRELATION_KEY".to_string(),
+            CORRELATION_KEY.to_string(),
+        ),
     ])
 }
 
@@ -110,10 +100,8 @@ fn now_secs() -> u64 {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn narrate_button_round_trips_through_callback_query() {
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     // Step 1: trigger /narrate alice. Expect the courier to POST a
@@ -194,10 +182,8 @@ async fn forged_callback_token_is_rejected_with_phase_rejected() {
     // Token signed under a DIFFERENT key. Adapter's HMAC verify
     // must reject; we log `phase: rejected, result: error:auth`
     // and never re-dispatch.
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     let forged_key = b"a-totally-different-32byte-key!!";
@@ -246,10 +232,8 @@ async fn stale_callback_rejected_with_phase_rejected() {
     // We sign a VALID token under the right key, then attach it
     // to a callback_query whose `message.date` is 1 hour in the
     // past. The adapter must refuse before reaching the dispatcher.
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
 
     let valid_token = triton_correlation::encode(
@@ -309,10 +293,8 @@ async fn callback_without_message_date_fails_closed() {
     // Codex PR 23 review blocker: absence of the freshness anchor
     // must not bypass replay protection. A callback_query without
     // an embedded `message.date` gets 401 + a rejected audit.
-    let vault = start_kv_vault().await;
     let telegram = FakeTelegramApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&vault, &telegram)).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
 
     let valid_token = triton_correlation::encode(

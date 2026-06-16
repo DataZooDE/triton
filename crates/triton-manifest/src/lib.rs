@@ -413,7 +413,8 @@ pub enum ManifestError {
     /// FR-L-6 / NFR-S-5 / M-SECRETS-1: literal credential in prod.
     #[error(
         "literal credential at `{path}` is forbidden in production — \
-         use `vault://<path>#<field>` (M-SECRETS-1, FR-L-6)"
+         use an `env://<VARNAME>` ref injected by the substrate (GCP Secret \
+         Manager → kamal `.kamal/secrets`) (M-SECRETS-1, FR-L-6)"
     )]
     LiteralCredentialInProd { path: String },
     /// FR-L-4: only documented schema versions are accepted.

@@ -23,8 +23,7 @@ use triton_core::{Dispatcher, Metrics, RuntimeInfo, ToolRegistry, UpstreamDispat
 use triton_identity::{OidcConfig, OidcVerifier};
 use triton_manifest::{AdapterKind, InboundKind};
 use triton_rasterizer::{Client as RasterizerClient, ClientConfig as RasterizerConfig};
-use triton_secrets::{LiteralResolver, SecretResolver, VaultKvResolver, VaultToken};
-use triton_upstream::{ConsulClient, UpstreamConfig, UpstreamRouter, VaultClient};
+use triton_secrets::{LiteralResolver, SecretResolver};
 
 mod settings;
 mod tools;
@@ -153,37 +152,26 @@ async fn main() -> std::io::Result<()> {
     });
 
     let metrics = Arc::new(Metrics::new());
-    // Tool names claimed by `TRITON_STATIC_UPSTREAMS` (only honoured
-    // when no Consul/Vault is configured — the same gate as the
-    // static-upstream wiring below). The dispatcher prefers in-process
-    // tools, so registering one under a name the static map claims
-    // would silently shadow the upstream agent and make the mapped
-    // endpoint unreachable; those names are skipped at registration.
+    // Tool names claimed by `TRITON_STATIC_UPSTREAMS`. The dispatcher
+    // prefers in-process tools, so registering one under a name the
+    // static map claims would silently shadow the upstream agent and
+    // make the mapped endpoint unreachable; those names are skipped at
+    // registration.
     let static_upstream_tools: std::collections::HashSet<String> =
-        if settings.consul_url.is_none() && settings.vault_url.is_none() {
-            std::env::var("TRITON_STATIC_UPSTREAMS")
-                .ok()
-                .filter(|s| !s.is_empty())
-                .map(|spec| {
-                    spec.split(',')
-                        .filter_map(|kv| kv.split_once('='))
-                        .map(|(k, _)| k.trim().to_string())
-                        .filter(|k| !k.is_empty())
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            std::collections::HashSet::new()
-        };
+        std::env::var("TRITON_STATIC_UPSTREAMS")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map(|spec| {
+                spec.split(',')
+                    .filter_map(|kv| kv.split_once('='))
+                    .map(|(k, _)| k.trim().to_string())
+                    .filter(|k| !k.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
     let registry = Arc::new(build_registry(&static_upstream_tools));
     let mut dispatcher =
         Dispatcher::new(registry, settings.env.clone()).with_metrics(metrics.clone());
-
-    // Triton's Vault auth: a static token (TRITON_VAULT_TOKEN) OR
-    // Nomad workload identity (TRITON_VAULT_JWT_PATH + _ROLE → login
-    // at auth/<mount>/login, refreshed in-process). `None` means no
-    // Vault auth is configured. Exits on a half-configured auth.
-    let vault_token_source: Option<VaultToken> = build_vault_token_source(&settings);
 
     // Static-upstream OIDC signer: when a signing key + issuer + JWKS are all
     // configured, Triton mints a per-call RS256 JWT to agents (workload→workload
@@ -238,118 +226,67 @@ async fn main() -> std::io::Result<()> {
         }
     };
 
-    // Wire the upstream router if Consul + Vault (url + auth) are
-    // configured. Partial-wiring rules:
-    //   * consul + vault_url + auth  → upstream router on
-    //   * vault_url + auth, no consul → resolver only, no router
-    //   * consul without vault_url+auth → fatal (router needs Vault
-    //     for the per-call OIDC swap)
-    //   * vault_url without an auth method → fatal (auth gap)
-    //   * none → in-process tools only
-    match (
-        &settings.consul_url,
-        &settings.vault_url,
-        &vault_token_source,
-    ) {
-        (Some(consul), Some(vault), Some(ts)) => {
-            let router = UpstreamRouter::new(
-                ConsulClient::new(consul.clone()),
-                VaultClient::new(vault.clone(), ts.clone()),
-                UpstreamConfig {
-                    circuit_open_after: settings.circuit_open_after,
-                    circuit_cooldown: settings.circuit_cooldown,
-                    upstream_timeout: settings.upstream_timeout,
-                    vault_role: settings.vault_oidc_role.clone(),
-                    env_label: settings.env.clone(),
-                },
-            );
-            tracing::info!(consul, vault, "upstream router enabled");
-            dispatcher = dispatcher.with_upstream(Arc::new(router) as Arc<dyn UpstreamDispatch>);
-        }
-        (None, Some(vault), Some(_)) => {
-            tracing::info!(
-                vault,
-                "vault configured without consul; secret resolver enabled, upstream router off",
-            );
-        }
-        (Some(_), None, _) => {
-            tracing::error!(
-                "TRITON_CONSUL_URL requires TRITON_VAULT_URL (+ an auth method: TRITON_VAULT_TOKEN or TRITON_VAULT_JWT_PATH/_ROLE) — the upstream router needs Vault for per-call OIDC swap"
-            );
-            std::process::exit(2);
-        }
-        (_, Some(_), None) => {
-            tracing::error!(
-                "TRITON_VAULT_URL requires an auth method: set TRITON_VAULT_TOKEN, or TRITON_VAULT_JWT_PATH + TRITON_VAULT_JWT_ROLE (workload identity)"
-            );
-            std::process::exit(2);
-        }
-        (None, None, _) => {
-            match std::env::var("TRITON_STATIC_UPSTREAMS")
-                .ok()
-                .filter(|s| !s.is_empty())
-            {
-                Some(spec) => {
-                    // Dev "standalone sidecar" (issue #75, Mode 2): front a
-                    // fixed agent endpoint with no Consul/Vault.
-                    let token = std::env::var("TRITON_STATIC_UPSTREAM_TOKEN")
-                        .unwrap_or_else(|_| "dev-token".to_string());
-                    let su = triton_upstream::StaticUpstream::from_spec(
-                        &spec,
-                        token,
-                        settings.upstream_timeout,
-                    );
-                    // When a signer is configured, mint per-call RS256 JWTs
-                    // (production agents verify these) instead of the static
-                    // dev-token bearer.
-                    let su = if let Some(signer) = &static_signer {
-                        let aud = settings
-                            .static_upstream_aud
-                            .clone()
-                            .unwrap_or_else(|| format!("agents-{}", settings.env));
-                        let tenant = settings.static_upstream_tenant.clone().unwrap_or_default();
-                        let forward_principal = settings.static_upstream_forward_principal;
-                        // #114: empty allowlist → None (caps only); else the set.
-                        let scope_allowlist: Option<std::collections::HashSet<String>> =
-                            if settings.static_upstream_scope_allowlist.is_empty() {
-                                None
-                            } else {
-                                Some(
-                                    settings
-                                        .static_upstream_scope_allowlist
-                                        .iter()
-                                        .cloned()
-                                        .collect(),
-                                )
-                            };
-                        tracing::warn!(
-                            spec = %spec, aud = %aud, tenant = %tenant, forward_principal,
-                            scope_allowlist = ?settings.static_upstream_scope_allowlist,
-                            "TRITON_STATIC_UPSTREAMS set: dispatching by name with signed RS256 JWTs (no Consul/Vault)"
-                        );
-                        su.with_signer(
-                            signer.clone(),
-                            aud,
-                            tenant,
-                            forward_principal,
-                            scope_allowlist,
-                        )
+    // Wire the upstream dispatcher from the static `TRITON_STATIC_UPSTREAMS`
+    // map (`name=host:port,...`). Consul discovery + the Vault per-call
+    // OIDC swap were removed with the move off the HashiCorp stack to
+    // Kamal; this static map is the only discovery mechanism. Unset →
+    // the dispatcher serves in-process tools only.
+    match std::env::var("TRITON_STATIC_UPSTREAMS")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        Some(spec) => {
+            let token = std::env::var("TRITON_STATIC_UPSTREAM_TOKEN")
+                .unwrap_or_else(|_| "dev-token".to_string());
+            let su =
+                triton_upstream::StaticUpstream::from_spec(&spec, token, settings.upstream_timeout);
+            // When a signer is configured, mint per-call RS256 JWTs
+            // (production agents verify these via Triton's JWKS) instead
+            // of the static dev-token bearer — workload→workload auth
+            // without Vault.
+            let su = if let Some(signer) = &static_signer {
+                let aud = settings
+                    .static_upstream_aud
+                    .clone()
+                    .unwrap_or_else(|| format!("agents-{}", settings.env));
+                let tenant = settings.static_upstream_tenant.clone().unwrap_or_default();
+                let forward_principal = settings.static_upstream_forward_principal;
+                // #114: empty allowlist → None (caps only); else the set.
+                let scope_allowlist: Option<std::collections::HashSet<String>> =
+                    if settings.static_upstream_scope_allowlist.is_empty() {
+                        None
                     } else {
-                        tracing::warn!(
-                            spec = %spec,
-                            "TRITON_STATIC_UPSTREAMS set (dev): dispatching by name with the static bearer, no Consul/Vault"
-                        );
-                        su
+                        Some(
+                            settings
+                                .static_upstream_scope_allowlist
+                                .iter()
+                                .cloned()
+                                .collect(),
+                        )
                     };
-                    dispatcher =
-                        dispatcher.with_upstream(Arc::new(su) as Arc<dyn UpstreamDispatch>);
-                }
-                None => {
-                    tracing::warn!(
-                        "no upstream router configured; dispatcher serves in-process tools only"
-                    );
-                }
-            }
+                tracing::info!(
+                    spec = %spec, aud = %aud, tenant = %tenant, forward_principal,
+                    scope_allowlist = ?settings.static_upstream_scope_allowlist,
+                    "static upstream: dispatching by name with signed RS256 JWTs"
+                );
+                su.with_signer(
+                    signer.clone(),
+                    aud,
+                    tenant,
+                    forward_principal,
+                    scope_allowlist,
+                )
+            } else {
+                tracing::warn!(
+                    spec = %spec,
+                    "static upstream (dev): dispatching by name with the static bearer"
+                );
+                su
+            };
+            dispatcher = dispatcher.with_upstream(Arc::new(su) as Arc<dyn UpstreamDispatch>);
+        }
+        None => {
+            tracing::warn!("no upstream configured; dispatcher serves in-process tools only");
         }
     }
     let dispatcher = Arc::new(dispatcher);
@@ -428,22 +365,11 @@ async fn main() -> std::io::Result<()> {
     // hard on any build error so misconfigured secrets never serve
     // traffic (M-SECRETS-1 / FR-L-4).
     //
-    // The secret resolver is picked once for all adapters: Vault
-    // KV v2 when the substrate injected `TRITON_VAULT_URL` +
-    // `_TOKEN`, literal-only otherwise. PR 13's warn-and-skip on
-    // Vault refs is gone — a Vault ref without a configured Vault
-    // is now a fatal misconfiguration (Codex called this out as a
-    // PR 13 concern).
-    let resolver: Arc<dyn SecretResolver> = match (&settings.vault_url, &vault_token_source) {
-        (Some(url), Some(ts)) => {
-            tracing::info!(vault = %url, "secret resolver: vault kv v2");
-            Arc::new(VaultKvResolver::new(url.clone(), ts.clone()))
-        }
-        _ => {
-            tracing::info!("secret resolver: literal-only (no TRITON_VAULT_URL configured)");
-            Arc::new(LiteralResolver)
-        }
-    };
+    // Vault was decommissioned with the move to Kamal, so there is a
+    // single resolver: literals (dev) and `env://` refs injected by the
+    // substrate (GCP Secret Manager → kamal `.kamal/secrets`). A
+    // `vault://` ref in a manifest now fails boot closed.
+    let resolver: Arc<dyn SecretResolver> = Arc::new(LiteralResolver);
 
     let mut chat_router: Option<axum::Router> = None;
     // #95: adapters that support agent-initiated proactive sends are
@@ -1427,61 +1353,6 @@ fn build_registry(shadowed: &std::collections::HashSet<String>) -> ToolRegistry 
     #[cfg(feature = "dev-token")]
     register(Arc::new(tools::SubmittedForm));
     registry
-}
-
-/// Build Triton's Vault token source from settings. Returns `None`
-/// when no Vault auth is configured; exits the process on a
-/// half-configured auth (the substrate must see a misconfig fail
-/// closed). A static `TRITON_VAULT_TOKEN` wins over the
-/// workload-identity vars if both are set.
-fn build_vault_token_source(s: &Settings) -> Option<VaultToken> {
-    match (
-        s.vault_url.as_deref(),
-        s.vault_token.as_deref(),
-        s.vault_jwt_path.as_deref(),
-        s.vault_jwt_role.as_deref(),
-    ) {
-        // No Vault at all.
-        (None, None, None, None) => None,
-        // An auth method without a Vault URL is a misconfiguration.
-        (None, _, _, _) => {
-            tracing::error!("TRITON_VAULT_TOKEN / TRITON_VAULT_JWT_* set without TRITON_VAULT_URL");
-            std::process::exit(2);
-        }
-        // Static token (wins over workload identity if both given).
-        (Some(_), Some(token), jwt_path, jwt_role) => {
-            if jwt_path.is_some() || jwt_role.is_some() {
-                tracing::warn!(
-                    "TRITON_VAULT_TOKEN set alongside TRITON_VAULT_JWT_PATH/_ROLE; using the static token and ignoring workload identity"
-                );
-            }
-            Some(VaultToken::fixed(token))
-        }
-        // Workload identity: log in with the Nomad-issued JWT.
-        (Some(url), None, Some(jwt_path), Some(role)) => {
-            tracing::info!(
-                mount = %s.vault_auth_mount,
-                role,
-                "vault auth: workload identity (jwt login)"
-            );
-            Some(VaultToken::workload_identity(
-                url,
-                jwt_path,
-                s.vault_auth_mount.clone(),
-                role,
-            ))
-        }
-        // Half-configured workload identity.
-        (Some(_), None, Some(_), None) | (Some(_), None, None, Some(_)) => {
-            tracing::error!(
-                "TRITON_VAULT_JWT_PATH and TRITON_VAULT_JWT_ROLE must be set together (workload identity)"
-            );
-            std::process::exit(2);
-        }
-        // Vault URL but no auth method — the caller decides whether
-        // that's fatal (it is, when consul or a manifest needs Vault).
-        (Some(_), None, None, None) => None,
-    }
 }
 
 /// Extract `host` from `scheme://host[:port][/path]`. Returns
