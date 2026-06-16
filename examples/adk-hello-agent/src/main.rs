@@ -1,7 +1,10 @@
 //! A "hello world" upstream agent for Triton, built with adk-rust.
 //!
-//! Triton dispatches to this agent by POSTing the tool's args JSON to `/`
-//! with `Authorization: Bearer <vault-minted-oidc>` (skill references/01).
+//! Triton reaches this agent by the `host:port` an operator puts in its
+//! `TRITON_STATIC_UPSTREAMS` map (keyed by tool name) and dispatches by
+//! POSTing the tool's args JSON to `/` with `Authorization: Bearer
+//! <token>` (skill references/01) — the literal `dev-token` in dev, a
+//! per-call RS256 JWT (verified against Triton's JWKS) in production.
 //! The agent verifies the bearer, runs its adk-rust brain, and returns a
 //! canonical A2UI `surface` (references/02). Triton wraps/builds the
 //! response for whatever protocol the original caller used — REST, MCP,
@@ -71,8 +74,9 @@ async fn main() {
     };
 
     let app = Router::new()
-        // Triton always POSTs to `/` — it routed to us via Consul, so
-        // there is no per-tool path on our side (references/01).
+        // Triton always POSTs to `/` — it routed to us by the tool name
+        // in its static upstream map, so there is no per-tool path on
+        // our side (references/01).
         .route("/", post(handle_tool_call))
         .route(
             "/healthz",

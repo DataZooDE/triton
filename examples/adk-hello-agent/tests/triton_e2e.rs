@@ -2,19 +2,19 @@
 //! HTTP frontends (REST, MCP, A2A).
 //!
 //! No mocks (CLAUDE.md §1): this boots the **real** `triton` binary and
-//! the **real** `adk-hello-agent` binary over real TCP, with the tiny
-//! in-repo Consul/Vault fakes from `triton-tests` that speak the actual
-//! wire shapes. The agent runs its deterministic `StaticBrain` (no
-//! `ANTHROPIC_API_KEY`), so the greeting is fixed and assertable here;
-//! the live LLM path is covered by `live_llm.rs` (ignored by default).
+//! the **real** `adk-hello-agent` binary over real TCP. The agent is
+//! reached via Triton's static upstream map (`TRITON_STATIC_UPSTREAMS`)
+//! — no Consul, no Vault. The agent runs its deterministic `StaticBrain`
+//! (no `ANTHROPIC_API_KEY`), so the greeting is fixed and assertable
+//! here; the live LLM path is covered by `live_llm.rs` (ignored by
+//! default).
 //!
-//! Auth note: the agent verifies Triton's per-call bearer. Hermetically
-//! we have no real Vault minting real JWTs, so we run the agent in
-//! dev-token mode and have `FakeVault` mint the literal `dev-token`,
-//! which the agent accepts. The lethal-trifecta token *swap* is Triton's
-//! own invariant and is proven in `crates/triton-tests/tests/upstream.rs`
-//! (FakeAgent.bearers_seen); here we prove the agent is reachable and
-//! renders correctly through every frontend.
+//! Auth note: the agent verifies Triton's per-call bearer. With no OIDC
+//! signer configured Triton dispatches in dev-token mode, forwarding the
+//! literal `dev-token`, which the agent accepts. In production Triton
+//! mints a per-call RS256 JWT the agent verifies against Triton's JWKS;
+//! here we prove the agent is reachable and renders correctly through
+//! every frontend.
 //!
 //! Prereq: the `triton` binary must be built in the parent repo
 //! (`cargo build -p triton-bin` at the Triton root), and this crate's
@@ -25,10 +25,7 @@ use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use serde_json::json;
-use triton_tests::{
-    TritonProcess,
-    upstream_fixture::{FakeConsul, FakeVault},
-};
+use triton_tests::TritonProcess;
 
 /// The real agent binary, spawned on a free loopback port with the
 /// deterministic brain. `Drop` kills it.
@@ -88,28 +85,27 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// Boot Triton wired to the live agent via Consul + Vault fakes.
-async fn boot() -> (HelloAgent, FakeConsul, FakeVault, TritonProcess) {
+/// Boot Triton wired to the live agent via the static upstream map.
+/// The `hello` tool resolves to the agent's `host:port` — no Consul, no
+/// Vault. With no OIDC signer configured Triton forwards the literal
+/// `dev-token`, which the agent (dev-token mode) accepts.
+async fn boot() -> (HelloAgent, TritonProcess) {
     let agent = HelloAgent::start().await;
-    let consul = FakeConsul::start(&[("hello", agent.host_port())]).await;
-    // The agent (dev-token mode) accepts the literal `dev-token`, so the
-    // minted per-call token must be exactly that.
-    let vault = FakeVault::start_minting("dev-token").await;
 
     let env = HashMap::from([
         ("TRITON_ENV".into(), "nonprod".into()),
-        ("TRITON_CONSUL_URL".into(), consul.url()),
-        ("TRITON_VAULT_URL".into(), vault.url()),
-        ("TRITON_VAULT_TOKEN".into(), "triton-vault-token".into()),
-        ("TRITON_VAULT_OIDC_ROLE".into(), "agent-oidc-swap".into()),
+        (
+            "TRITON_STATIC_UPSTREAMS".into(),
+            format!("hello={}", agent.host_port()),
+        ),
     ]);
     let triton = TritonProcess::spawn_with_env(Duration::from_secs(10), env).await;
-    (agent, consul, vault, triton)
+    (agent, triton)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rest_reaches_the_agent() {
-    let (_agent, _consul, _vault, triton) = boot().await;
+    let (_agent, triton) = boot().await;
 
     let resp = reqwest::Client::new()
         .post(triton.rest_url("/v1/tools/hello"))
@@ -129,7 +125,7 @@ async fn rest_reaches_the_agent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mcp_reaches_the_agent() {
-    let (_agent, _consul, _vault, triton) = boot().await;
+    let (_agent, triton) = boot().await;
 
     let resp = reqwest::Client::new()
         .post(triton.mcp_url("/"))
@@ -158,7 +154,7 @@ async fn mcp_reaches_the_agent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a2a_reaches_the_agent() {
-    let (_agent, _consul, _vault, triton) = boot().await;
+    let (_agent, triton) = boot().await;
 
     let resp = reqwest::Client::new()
         .post(triton.a2a_url("/message:send"))

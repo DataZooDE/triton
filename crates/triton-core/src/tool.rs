@@ -2,11 +2,12 @@
 //! verb (`echo`, `compute_stats`, ...); the registry is the single
 //! lookup the dispatcher uses on every invocation (FR-D-1).
 //!
-//! PR 4 has tools live in-process (the trivial `echo`). PR 9 swaps
-//! the implementation for an upstream-router-backed tool that does
-//! Consul lookup + Vault token mint + HTTP/1.1 dispatch over the
-//! tailnet. Adapters and the dispatcher do not care which variant
-//! is registered — that's the point of the trait (open/closed).
+//! Tools may live in-process (the trivial `echo`) or be backed by an
+//! upstream router that resolves the tool name in the static upstream
+//! map (`TRITON_STATIC_UPSTREAMS`), mints a per-call RS256 JWT, and
+//! dispatches over HTTP/1.1 across the tailnet. Adapters and the
+//! dispatcher do not care which variant is registered — that's the
+//! point of the trait (open/closed).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -61,8 +62,8 @@ pub struct ToolDescriptor {
     pub input_schema: Value,
     pub returns_a2ui: bool,
     /// `true` for tools that aren't in the in-process registry but are
-    /// reachable via the upstream router (a Consul `agent:<name>`
-    /// service). Triton doesn't know their input schema, so `input_schema`
+    /// reachable via the upstream router (a `TRITON_STATIC_UPSTREAMS`
+    /// entry). Triton doesn't know their input schema, so `input_schema`
     /// is empty and `returns_a2ui` is assumed `true` (agents typically
     /// emit surfaces). Lets the Explorer tag them and still call them.
     #[serde(default)]

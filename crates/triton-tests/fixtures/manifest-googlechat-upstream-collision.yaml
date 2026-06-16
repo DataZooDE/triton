@@ -1,7 +1,8 @@
 # upstream-resolver Google Chat adapter whose resolver_tool collides
 # with an in-process tool name (`echo`). The adapter MUST refuse to
 # build: a resolver that resolves to an in-process tool would bypass
-# Consul + the Vault-minted token. Booting against this exits 2.
+# the static upstream router + the per-call RS256 JWT. Booting against
+# this exits 2.
 version: "0.2"
 
 adapters:

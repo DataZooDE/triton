@@ -238,8 +238,30 @@ async fn main() -> std::io::Result<()> {
         Some(spec) => {
             let token = std::env::var("TRITON_STATIC_UPSTREAM_TOKEN")
                 .unwrap_or_else(|_| "dev-token".to_string());
-            let su =
-                triton_upstream::StaticUpstream::from_spec(&spec, token, settings.upstream_timeout);
+            let su = triton_upstream::StaticUpstream::from_spec(
+                &spec,
+                token,
+                settings.upstream_timeout,
+                settings.circuit_open_after,
+                settings.circuit_cooldown,
+            );
+            // NFR-S-4 SSRF guard: outside `local` env, every mapped endpoint
+            // must be a loopback/private/tailnet target. A mis-templated or
+            // compromised `TRITON_STATIC_UPSTREAMS` pointing at a public or
+            // metadata host fails boot closed rather than dialling it with a
+            // freshly-minted agent bearer. (`local` keeps dev/CI frictionless.)
+            if settings.env != "local" {
+                let bad = su.undispatchable_endpoints();
+                if !bad.is_empty() {
+                    for (tool, ep) in &bad {
+                        tracing::error!(
+                            tool = %tool, endpoint = %ep,
+                            "TRITON_STATIC_UPSTREAMS endpoint is not a permitted loopback/private/tailnet target (NFR-S-4 egress allowlist)",
+                        );
+                    }
+                    std::process::exit(2);
+                }
+            }
             // When a signer is configured, mint per-call RS256 JWTs
             // (production agents verify these via Triton's JWKS) instead
             // of the static dev-token bearer — workload→workload auth

@@ -55,6 +55,8 @@ pub struct Settings {
     pub outbound_rate_limit_per_sec: u32,
     pub outbound_rate_limit_burst: u32,
     pub upstream_timeout: Duration,
+    pub circuit_open_after: u32,
+    pub circuit_cooldown: Duration,
     pub metrics_host: IpAddr,
     pub metrics_port: u16,
     pub manifest_path: Option<std::path::PathBuf>,
@@ -257,6 +259,16 @@ struct Cli {
     /// Per-upstream-call timeout in milliseconds.
     #[arg(long, env = "TRITON_UPSTREAM_TIMEOUT_MS", default_value_t = 10_000)]
     upstream_timeout_ms: u64,
+
+    /// Per-tool circuit-breaker open-after threshold (FR-U-3): consecutive
+    /// tool-side faults before the breaker trips open.
+    #[arg(long, env = "TRITON_CIRCUIT_OPEN_AFTER", default_value_t = 5)]
+    circuit_open_after: u32,
+
+    /// Per-tool circuit-breaker cooldown in milliseconds (FR-U-3) before a
+    /// half-open probe is allowed through.
+    #[arg(long, env = "TRITON_CIRCUIT_COOLDOWN_MS", default_value_t = 30_000)]
+    circuit_cooldown_ms: u64,
 
     /// Bind host for the tailnet-only `/metrics` listener. Set to
     /// the Tailscale interface in production. Defaults to
@@ -513,6 +525,8 @@ impl From<Cli> for Settings {
                 .filter(|s| !s.is_empty())
                 .collect(),
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
+            circuit_open_after: c.circuit_open_after,
+            circuit_cooldown: Duration::from_millis(c.circuit_cooldown_ms),
             metrics_host: c.metrics_host,
             metrics_port: c.metrics_port,
             manifest_path: c.manifest_path,

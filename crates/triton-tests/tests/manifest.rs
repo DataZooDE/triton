@@ -208,6 +208,46 @@ fn malformed_vault_ref_refused_at_parse() {
 }
 
 #[test]
+fn wellformed_vault_ref_fails_boot_closed_after_decommission() {
+    // Vault was decommissioned: a structurally VALID manifest whose
+    // credentials are well-formed `vault://` refs parses and passes
+    // validation, but boot MUST fail closed at secret resolution rather
+    // than silently start with an unresolved credential. Run under the
+    // default `local` env so the only failure mode is the resolver (no
+    // NFR-S-4 egress checks in the way), and confirm the message points
+    // the operator at the migration.
+    let manifest = fixture("manifest-vault-decommissioned.yaml")
+        .display()
+        .to_string();
+    let out = Command::new(locate_triton_binary())
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_MANIFEST_PATH", manifest)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("spawn triton");
+    assert!(
+        !out.status.success(),
+        "a well-formed vault:// credential MUST fail boot closed; exit: {:?}",
+        out.status.code()
+    );
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        logs.to_lowercase().contains("decommission"),
+        "boot failure must name the Vault decommission so the operator migrates to env://; got:\n{logs}"
+    );
+}
+
+#[test]
 fn unsupported_version_refused() {
     let err = Manifest::load(&fixture("manifest-wrong-version.yaml"))
         .expect_err("only documented versions accepted");

@@ -9,11 +9,12 @@ door.
 
 > **An upstream agent does not implement frontends.** REST, MCP, A2A and
 > the six chat channels are *Triton's* surfaces. This agent speaks exactly
-> one contract — `POST /` with a Vault-minted OIDC bearer, raw args JSON
-> in, a canonical A2UI `surface` out. Register the tool once (Consul
-> `tag:agent:hello` + the manifest fragment) and Triton fans it across
-> every frontend for free. The integration test *demonstrates* that; the
-> agent never codes a frontend.
+> one contract — `POST /` with a bearer Triton supplies (the literal
+> `dev-token` in dev, a per-call RS256 JWT in production), raw args JSON
+> in, a canonical A2UI `surface` out. Register the tool once (a
+> `TRITON_STATIC_UPSTREAMS` entry `hello=<host:port>` + the manifest
+> fragment) and Triton fans it across every frontend for free. The
+> integration test *demonstrates* that; the agent never codes a frontend.
 
 The normative wire contract this example implements — dispatch shape,
 sender-identity carriage in the bearer, response envelope, and the
@@ -37,8 +38,7 @@ contract. Triton owns every protocol; adk-rust owns only the thinking.
 | `src/agent.rs` | `Brain` trait. `LlmBrain` (real adk-rust `LlmAgent` + Anthropic) and `StaticBrain` (deterministic, no key). |
 | `src/main.rs` | Triton's `POST /` contract: verify the bearer, branch on `X-Triton-Tool`, run the brain (`hello`) or resolve a sender (`resolve_identity`), return a canonical A2UI `surface` or a `{sub, scopes, tenant}` reply. |
 | `adapter-manifest.fragment.yaml` | The `tools.hello` slice (+ a Telegram degrade example, + a commented `identity.kind: upstream` block) for the operator's `adapter.yaml`. |
-| `agent.nomad.hcl` | Nomad job: `tag:agent:hello`, OIDC verifier wiring, `ANTHROPIC_API_KEY` from Vault. |
-| `tests/triton_e2e.rs` | No-mock e2e: real Triton + real agent + Consul/Vault fakes; asserts the greeting through REST, MCP and A2A. |
+| `tests/triton_e2e.rs` | No-mock e2e: real Triton + real agent wired via `TRITON_STATIC_UPSTREAMS`; asserts the greeting through REST, MCP and A2A. |
 | `tests/resolver_e2e.rs` | No-mock e2e for `identity.kind: upstream` (FR-I-7): a WhatsApp inbound from an unknown sender resolves via `resolve_identity`, dispatches `hello` as the resolved principal, and couriers the reply; a refused sender rejects `401`. |
 | `tests/live_llm.rs` | The genuine LLM path, `#[ignore]`d (needs a key + network). |
 
@@ -131,4 +131,4 @@ triton-tests = { git = "https://github.com/DataZooDE/triton", rev = "<sha>" }
 ```
 
 Everything else (the `Brain` seam, the `POST /` handler, the manifest
-fragment, the Nomad job) is already self-contained.
+fragment) is already self-contained.

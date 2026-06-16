@@ -250,14 +250,19 @@ pub enum DegradeRule {
     CardV2,
 }
 
-/// A credential value: a Vault reference, an `env://` reference (both
-/// production-safe), or a literal string (dev-only). Parse-time we only
-/// classify the shape — production refusal of literals happens in
-/// [`Manifest::validate`]; `env://` and `vault://` refs are admitted.
+/// A credential value: an `env://` reference (the production-safe shape),
+/// a `vault://` reference (DECOMMISSIONED — see below), or a literal
+/// string (dev-only). Parse-time we only classify the shape — production
+/// refusal of literals happens in [`Manifest::validate`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SecretField {
-    /// Vault reference of the form `vault://<path>#<field>`, both
-    /// path and field non-empty (per spec §3.1.v0.2).
+    /// Vault reference of the form `vault://<path>#<field>`. Vault was
+    /// **decommissioned** with the move off the HashiCorp stack to Kamal,
+    /// so this variant no longer resolves: it is still *parsed* (both path
+    /// and field non-empty, per spec §3.1.v0.2) only so a stale manifest
+    /// gets a clear "Vault decommissioned — migrate to `env://`" boot error
+    /// rather than a confusing parse failure. Boot fails closed when the
+    /// resolver hits it (`triton-secrets::ResolveError::VaultDecommissioned`).
     Vault {
         path: String,
         field: String,

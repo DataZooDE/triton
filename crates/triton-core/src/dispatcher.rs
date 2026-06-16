@@ -122,10 +122,10 @@ impl Dispatcher {
     }
 
     /// Like [`Self::descriptors`], but also folds in upstream agents
-    /// discoverable via the router (Consul `agent:<name>` services),
+    /// from the static upstream map (`TRITON_STATIC_UPSTREAMS`),
     /// flagged `upstream: true`. In-process tools win on a name clash.
     /// Upstream discovery degrades to "just the in-process tools" if the
-    /// router/Consul is unavailable — listing never fails. Result is
+    /// router is unavailable — listing never fails. Result is
     /// name-sorted for a stable `GET /v1/tools` order.
     pub async fn descriptors_all(&self) -> Vec<ToolDescriptor> {
         let mut out = self.registry.descriptors();

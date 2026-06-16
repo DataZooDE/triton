@@ -1,9 +1,9 @@
 # upstream-resolver Google Chat adapter (FR-I-7). Identity is
 # delegated to a resolver tool reached through the upstream router:
 # the adapter calls `resolver_tool` with the platform sender id and
-# the tool returns {sub, scopes, tenant}. Requires Consul + Vault
-# wiring so the resolver agent is discoverable and gets a per-call
-# OIDC token.
+# the tool returns {sub, scopes, tenant}. The resolver agent is
+# reached via the static upstream map (`TRITON_STATIC_UPSTREAMS`) and
+# gets a per-call RS256 JWT.
 version: "0.2"
 
 adapters:
@@ -18,7 +18,7 @@ adapters:
       token: unused-in-pr-33
     identity:
       kind: upstream
-      # Consul service `agent:resolve_identity` answers the resolve.
+      # The `resolve_identity` static-upstream agent answers the resolve.
       resolver_tool: resolve_identity
     degrade:
       text: passthrough

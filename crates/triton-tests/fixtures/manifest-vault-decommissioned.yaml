@@ -1,0 +1,36 @@
+# A structurally VALID manifest whose credentials are well-formed
+# `vault://` refs. It parses and passes manifest validation, but boot
+# must fail CLOSED at secret resolution because Vault was decommissioned
+# (triton-secrets resolves only literals + env://). Guards that a stale
+# vault://-using manifest gets a clear decommission error, never silently
+# boots with an unresolved credential.
+version: "0.2"
+
+adapters:
+  telegram:
+    kind: telegram
+    inbound:
+      kind: webhook
+      signature: secret_token
+      secret: vault://kv/data/triton-test/telegram#webhook_secret
+    outbound:
+      kind: rest_api
+      token: vault://kv/data/triton-test/telegram#bot_token
+    identity:
+      kind: sender_table
+      table: vault://kv/data/triton-test/telegram#senders
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: vault://kv/data/triton-test/telegram#correlation_key
+
+tools:
+  echo:
+    surface_components: []
