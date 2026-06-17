@@ -250,8 +250,14 @@ async fn main() -> std::io::Result<()> {
             // compromised `TRITON_STATIC_UPSTREAMS` pointing at a public or
             // metadata host fails boot closed rather than dialling it with a
             // freshly-minted agent bearer. (`local` keeps dev/CI frictionless.)
+            // Hostname endpoints are trusted only under an operator-configured
+            // DNS suffix (default `.ts.net`) — logged once here for audit.
+            tracing::info!(
+                allowed_suffixes = ?settings.egress_allowed_suffixes,
+                "NFR-S-4 static-upstream egress allowlist: trusted hostname DNS suffixes",
+            );
             if settings.env != "local" {
-                let bad = su.undispatchable_endpoints();
+                let bad = su.undispatchable_endpoints(&settings.egress_allowed_suffixes);
                 if !bad.is_empty() {
                     for (tool, ep) in &bad {
                         tracing::error!(

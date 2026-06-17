@@ -149,11 +149,16 @@ impl StaticUpstream {
     /// refuses to start (outside `local` env) if any are returned, so a
     /// mis-templated `TRITON_STATIC_UPSTREAMS` fails closed rather than
     /// dialling an attacker/metadata host with a minted bearer.
-    pub fn undispatchable_endpoints(&self) -> Vec<(String, String)> {
+    ///
+    /// `allowed_suffixes` is the operator-configured set of trusted DNS
+    /// suffixes a hostname endpoint may end with (e.g. `[".ts.net"]` by
+    /// default, optionally widened to a private split-DNS domain like
+    /// `.int.data-zoo.de`). IP-literal rules are independent of it.
+    pub fn undispatchable_endpoints(&self, allowed_suffixes: &[String]) -> Vec<(String, String)> {
         let mut bad: Vec<(String, String)> = self
             .map
             .iter()
-            .filter(|(_, ep)| !endpoint_is_dispatchable(ep))
+            .filter(|(_, ep)| !endpoint_is_dispatchable(ep, allowed_suffixes))
             .map(|(t, ep)| (t.clone(), ep.clone()))
             .collect();
         bad.sort();
@@ -399,13 +404,21 @@ impl Breaker {
 
 /// SSRF guard for a `TRITON_STATIC_UPSTREAMS` `host:port` endpoint. IP
 /// literals must be loopback, RFC-1918 private, or CGNAT/Tailscale
-/// (100.64.0.0/10 v4, `fc00::/7` ULA v6). Hostnames are trusted ONLY under
-/// the tailnet `.ts.net` domain — an arbitrary hostname could resolve to a
-/// public or metadata IP, and non-canonical numeric forms (octal/hex/decimal)
-/// that `IpAddr` won't parse must not slip through the hostname path either.
-/// Public and link-local targets — notably `169.254.169.254` cloud metadata —
-/// are refused. (Was `.consul` before the Kamal migration; Codex review.)
-pub fn endpoint_is_dispatchable(endpoint: &str) -> bool {
+/// (100.64.0.0/10 v4, `fc00::/7` ULA v6). Hostnames are trusted ONLY when
+/// they end with one of `allowed_suffixes` — by default exactly `.ts.net`
+/// (Tailscale MagicDNS), optionally widened by the operator to a trusted
+/// private split-DNS domain (e.g. `.int.data-zoo.de`) via
+/// `TRITON_EGRESS_ALLOWED_SUFFIXES`. An arbitrary hostname could resolve to
+/// a public or metadata IP, and non-canonical numeric forms
+/// (octal/hex/decimal) that `IpAddr` won't parse must not slip through the
+/// hostname path either. Public and link-local targets — notably
+/// `169.254.169.254` cloud metadata — are refused. (Was `.consul` before the
+/// Kamal migration; Codex review.)
+///
+/// Suffix matching is case-insensitive and ignores a trailing dot on the
+/// host (the FQDN root). No DNS resolution happens here — the check is purely
+/// name-suffix based, so there is no resolve-vs-connect TOCTOU window.
+pub fn endpoint_is_dispatchable(endpoint: &str, allowed_suffixes: &[String]) -> bool {
     // Split off the port; tolerate a bracketed IPv6 host.
     let host = endpoint
         .rsplit_once(':')
@@ -413,12 +426,15 @@ pub fn endpoint_is_dispatchable(endpoint: &str) -> bool {
         .unwrap_or(endpoint);
     let host = host.trim_start_matches('[').trim_end_matches(']');
     match host.parse::<std::net::IpAddr>() {
-        // Not an IP literal → only trust tailnet DNS names. This also
-        // rejects non-canonical IP encodings (e.g. `0177.0.0.1`,
-        // `2130706433`) that `IpAddr` refuses to parse.
+        // Not an IP literal → only trust hostnames under an operator-allowed
+        // DNS suffix (default `.ts.net`). This also rejects non-canonical IP
+        // encodings (e.g. `0177.0.0.1`, `2130706433`) that `IpAddr` refuses
+        // to parse.
         Err(_) => {
             let h = host.trim_end_matches('.').to_ascii_lowercase();
-            h.ends_with(".ts.net")
+            allowed_suffixes
+                .iter()
+                .any(|suffix| h.ends_with(&suffix.to_ascii_lowercase()))
         }
         Ok(std::net::IpAddr::V4(v4)) => {
             if v4.is_loopback() || v4.is_private() {
@@ -441,6 +457,11 @@ mod tests {
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()
+    }
+
+    /// The default egress policy: tailnet `.ts.net` only.
+    fn default_suffixes() -> Vec<String> {
+        s(&[".ts.net"])
     }
 
     #[test]
@@ -480,38 +501,88 @@ mod tests {
 
     #[test]
     fn allows_loopback_private_and_tailnet_targets() {
-        assert!(endpoint_is_dispatchable("127.0.0.1:8080"));
-        assert!(endpoint_is_dispatchable("10.1.2.3:443"));
-        assert!(endpoint_is_dispatchable("192.168.0.5:80"));
-        assert!(endpoint_is_dispatchable("172.16.9.9:80"));
-        assert!(endpoint_is_dispatchable("100.96.1.2:8001")); // tailnet CGNAT
-        assert!(endpoint_is_dispatchable("carl.dz.tailnet.ts.net:8001")); // tailnet DNS
-        assert!(endpoint_is_dispatchable("[::1]:8080"));
-        assert!(endpoint_is_dispatchable("[fd7a:115c:a1e0::1]:8080")); // ULA
+        let p = default_suffixes();
+        assert!(endpoint_is_dispatchable("127.0.0.1:8080", &p));
+        assert!(endpoint_is_dispatchable("10.1.2.3:443", &p));
+        assert!(endpoint_is_dispatchable("192.168.0.5:80", &p));
+        assert!(endpoint_is_dispatchable("172.16.9.9:80", &p));
+        assert!(endpoint_is_dispatchable("100.96.1.2:8001", &p)); // tailnet CGNAT
+        assert!(endpoint_is_dispatchable("carl.dz.tailnet.ts.net:8001", &p)); // tailnet DNS
+        assert!(endpoint_is_dispatchable("[::1]:8080", &p));
+        assert!(endpoint_is_dispatchable("[fd7a:115c:a1e0::1]:8080", &p)); // ULA
     }
 
     #[test]
     fn refuses_public_and_metadata_targets() {
-        assert!(!endpoint_is_dispatchable("169.254.169.254:80")); // cloud metadata
-        assert!(!endpoint_is_dispatchable("1.2.3.4:80")); // public
-        assert!(!endpoint_is_dispatchable("8.8.8.8:53")); // public
-        assert!(!endpoint_is_dispatchable("[2606:4700:4700::1111]:443")); // public v6
+        let p = default_suffixes();
+        assert!(!endpoint_is_dispatchable("169.254.169.254:80", &p)); // cloud metadata
+        assert!(!endpoint_is_dispatchable("1.2.3.4:80", &p)); // public
+        assert!(!endpoint_is_dispatchable("8.8.8.8:53", &p)); // public
+        assert!(!endpoint_is_dispatchable("[2606:4700:4700::1111]:443", &p)); // public v6
     }
 
     #[test]
     fn refuses_arbitrary_hostnames_and_noncanonical_ip_encodings() {
+        let p = default_suffixes();
         // An arbitrary hostname could resolve to a public/metadata IP, and
         // non-canonical numeric encodings don't parse as an IP — neither may
         // take the hostname path.
-        assert!(!endpoint_is_dispatchable("evil.example:80"));
-        assert!(!endpoint_is_dispatchable("metadata.google.internal:80"));
-        assert!(!endpoint_is_dispatchable("0177.0.0.1:80")); // octal 127.0.0.1
-        assert!(!endpoint_is_dispatchable("2130706433:80")); // decimal 127.0.0.1
-        assert!(!endpoint_is_dispatchable("0x7f.0.0.1:80")); // hex
+        assert!(!endpoint_is_dispatchable("evil.example:80", &p));
+        assert!(!endpoint_is_dispatchable("metadata.google.internal:80", &p));
+        assert!(!endpoint_is_dispatchable("0177.0.0.1:80", &p)); // octal 127.0.0.1
+        assert!(!endpoint_is_dispatchable("2130706433:80", &p)); // decimal 127.0.0.1
+        assert!(!endpoint_is_dispatchable("0x7f.0.0.1:80", &p)); // hex
         // A `.ts.net`-suffixed lookalike under an attacker domain is still
         // not a tailnet name.
-        assert!(!endpoint_is_dispatchable("ts.net.evil.com:80"));
+        assert!(!endpoint_is_dispatchable("ts.net.evil.com:80", &p));
         // Trailing-dot + mixed case tailnet name is still accepted.
-        assert!(endpoint_is_dispatchable("Carl.DZ.Tailnet.TS.NET.:8001"));
+        assert!(endpoint_is_dispatchable("Carl.DZ.Tailnet.TS.NET.:8001", &p));
+    }
+
+    #[test]
+    fn rejects_private_dns_suffix_under_default_policy() {
+        // The substrate's split-DNS domain is NOT trusted unless the operator
+        // opts in — default policy is `.ts.net` only.
+        let p = default_suffixes();
+        assert!(!endpoint_is_dispatchable(
+            "carl.nonprod.int.data-zoo.de:8001",
+            &p
+        ));
+    }
+
+    #[test]
+    fn accepts_private_dns_suffix_when_operator_opts_in() {
+        // With the suffix added to the policy, the same host is dispatchable;
+        // `.ts.net` keeps working alongside it.
+        let p = s(&[".ts.net", ".int.data-zoo.de"]);
+        assert!(endpoint_is_dispatchable(
+            "carl.nonprod.int.data-zoo.de:8001",
+            &p
+        ));
+        assert!(endpoint_is_dispatchable(
+            "escurel.nonprod.int.data-zoo.de:443",
+            &p
+        ));
+        assert!(endpoint_is_dispatchable("carl.dz.tailnet.ts.net:8001", &p));
+        // Case-insensitive + trailing-dot still hold for the added suffix.
+        assert!(endpoint_is_dispatchable(
+            "Carl.NONPROD.INT.DATA-ZOO.DE.:8001",
+            &p
+        ));
+    }
+
+    #[test]
+    fn widening_the_policy_does_not_loosen_other_rules() {
+        // A public host stays rejected even with a private suffix allowed,
+        // and the IP-literal rules are untouched by the suffix list.
+        let p = s(&[".ts.net", ".int.data-zoo.de"]);
+        assert!(!endpoint_is_dispatchable("evil.example.com:80", &p));
+        assert!(!endpoint_is_dispatchable("169.254.169.254:80", &p)); // metadata
+        assert!(!endpoint_is_dispatchable("1.2.3.4:80", &p)); // public IP
+        assert!(endpoint_is_dispatchable("127.0.0.1:8080", &p)); // loopback
+        assert!(endpoint_is_dispatchable("10.1.2.3:443", &p)); // RFC-1918
+        assert!(endpoint_is_dispatchable("100.96.1.2:8001", &p)); // CGNAT
+        // A lookalike under an attacker domain is still not a match.
+        assert!(!endpoint_is_dispatchable("int.data-zoo.de.evil.com:80", &p));
     }
 }
