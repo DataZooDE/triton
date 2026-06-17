@@ -202,6 +202,7 @@ declare -a PAGES=(
   "A2UI diff|Invoke|03-a2ui-diff"
   "Manifest|Manifest|04-manifest"
   "Audit|Audit|05-audit"
+  "Trace|Available traces|05b-trace"
   "Metrics|Metrics|06-metrics"
   "Settings|Settings|07-settings"
 )
