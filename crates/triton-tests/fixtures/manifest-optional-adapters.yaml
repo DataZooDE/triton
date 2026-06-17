@@ -1,0 +1,64 @@
+# TRITON_OPTIONAL_ADAPTERS opt-in (triton #optional-adapters). Two chat
+# adapters baked into one manifest, mirroring the dual-image situation:
+#   * whatsapp — every credential is an injected env:// ref (boots).
+#   * telegram — its inbound.secret is env://TRITON_TELEGRAM_SECRET_TOKEN,
+#     which the test leaves UNSET. The internal image must skip telegram
+#     (TRITON_OPTIONAL_ADAPTERS=telegram) and still boot whatsapp; without
+#     the opt-in the missing secret must abort boot exactly as today.
+version: "0.2"
+
+adapters:
+  whatsapp:
+    kind: whatsapp_cloud
+    inbound:
+      kind: webhook
+      signature: hmac256
+      secret: env://TRITON_WA_APP_SECRET
+      verify_token: env://TRITON_WA_VERIFY_TOKEN
+    outbound:
+      kind: rest_api
+      token: env://TRITON_WA_ACCESS_TOKEN
+      phone_number_id: env://TRITON_WA_PHONE_NUMBER_ID
+    identity:
+      kind: sender_table
+      table: env://TRITON_WA_SENDER_TABLE
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: env://TRITON_WA_CORRELATION_KEY
+
+  telegram:
+    kind: telegram
+    inbound:
+      kind: webhook
+      signature: secret_token
+      # Deliberately points at a var the test does NOT inject.
+      secret: env://TRITON_TELEGRAM_SECRET_TOKEN
+    outbound:
+      kind: rest_api
+      token: bot-token-for-test
+    identity:
+      kind: sender_table
+      table: '{"42":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

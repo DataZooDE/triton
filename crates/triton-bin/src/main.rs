@@ -25,6 +25,7 @@ use triton_manifest::{AdapterKind, InboundKind};
 use triton_rasterizer::{Client as RasterizerClient, ClientConfig as RasterizerConfig};
 use triton_secrets::{LiteralResolver, SecretResolver};
 
+mod optional_adapters;
 mod settings;
 mod tools;
 use settings::Settings;
@@ -577,12 +578,12 @@ async fn main() -> std::io::Result<()> {
                                 socket_adapter_joins.push(h);
                             }
                             Err(e) => {
-                                tracing::error!(
-                                    adapter = %name,
-                                    error = %e,
-                                    "signal adapter build failed",
+                                optional_adapters::handle_build_error(
+                                    name,
+                                    &e,
+                                    &settings.optional_adapters,
+                                    "signal",
                                 );
-                                std::process::exit(2);
                             }
                         }
                     }
@@ -632,8 +633,12 @@ async fn main() -> std::io::Result<()> {
                                 socket_adapter_joins.push(h);
                             }
                             Err(e) => {
-                                tracing::error!(adapter = %name, error = %e, "discord gateway adapter build failed");
-                                std::process::exit(2);
+                                optional_adapters::handle_build_error(
+                                    name,
+                                    &e,
+                                    &settings.optional_adapters,
+                                    "discord gateway",
+                                );
                             }
                         }
                     }
@@ -689,8 +694,12 @@ async fn main() -> std::io::Result<()> {
                                 socket_adapter_joins.push(h);
                             }
                             Err(e) => {
-                                tracing::error!(adapter = %name, error = %e, "whatsapp bridge adapter build failed");
-                                std::process::exit(2);
+                                optional_adapters::handle_build_error(
+                                    name,
+                                    &e,
+                                    &settings.optional_adapters,
+                                    "whatsapp bridge",
+                                );
                             }
                         }
                     }
@@ -749,8 +758,12 @@ async fn main() -> std::io::Result<()> {
                                 socket_adapter_joins.push(h);
                             }
                             Err(e) => {
-                                tracing::error!(adapter = %name, error = %e, "telegram adapter build failed");
-                                std::process::exit(2);
+                                optional_adapters::handle_build_error(
+                                    name,
+                                    &e,
+                                    &settings.optional_adapters,
+                                    "telegram",
+                                );
                             }
                         }
                     }
@@ -823,8 +836,12 @@ async fn main() -> std::io::Result<()> {
                             });
                         }
                         Err(e) => {
-                            tracing::error!(adapter = %name, error = %e, "telegram adapter build failed");
-                            std::process::exit(2);
+                            optional_adapters::handle_build_error(
+                                name,
+                                &e,
+                                &settings.optional_adapters,
+                                "telegram",
+                            );
                         }
                     }
                 }
@@ -872,8 +889,12 @@ async fn main() -> std::io::Result<()> {
                             });
                         }
                         Err(e) => {
-                            tracing::error!(adapter = %name, error = %e, "google_chat adapter build failed");
-                            std::process::exit(2);
+                            optional_adapters::handle_build_error(
+                                name,
+                                &e,
+                                &settings.optional_adapters,
+                                "google_chat",
+                            );
                         }
                     }
                 }
@@ -896,8 +917,12 @@ async fn main() -> std::io::Result<()> {
                             });
                         }
                         Err(e) => {
-                            tracing::error!(adapter = %name, error = %e, "discord adapter build failed");
-                            std::process::exit(2);
+                            optional_adapters::handle_build_error(
+                                name,
+                                &e,
+                                &settings.optional_adapters,
+                                "discord",
+                            );
                         }
                     }
                 }
@@ -955,8 +980,12 @@ async fn main() -> std::io::Result<()> {
                             });
                         }
                         Err(e) => {
-                            tracing::error!(adapter = %name, error = %e, "whatsapp adapter build failed");
-                            std::process::exit(2);
+                            optional_adapters::handle_build_error(
+                                name,
+                                &e,
+                                &settings.optional_adapters,
+                                "whatsapp",
+                            );
                         }
                     }
                 }
@@ -1050,8 +1079,12 @@ async fn main() -> std::io::Result<()> {
                             });
                         }
                         Err(e) => {
-                            tracing::error!(adapter = %name, error = %e, "msteams adapter build failed");
-                            std::process::exit(2);
+                            optional_adapters::handle_build_error(
+                                name,
+                                &e,
+                                &settings.optional_adapters,
+                                "msteams",
+                            );
                         }
                     }
                 }
