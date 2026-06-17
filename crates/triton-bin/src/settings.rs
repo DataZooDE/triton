@@ -166,6 +166,14 @@ pub struct Settings {
     /// (the `triton_sender_scopes` claim). Empty → no allowlist (caps only);
     /// non-empty → forwarded scopes are intersected with this set.
     pub static_upstream_scope_allowlist: Vec<String>,
+    /// NFR-S-4: operator-configured DNS suffixes a `TRITON_STATIC_UPSTREAMS`
+    /// hostname endpoint may end with and still pass the egress allowlist.
+    /// Empty/unset → the strict default `[".ts.net"]` (Tailscale MagicDNS),
+    /// so behaviour is unchanged unless an operator explicitly opts in to a
+    /// trusted private split-DNS domain (e.g. `.int.data-zoo.de`). Entries
+    /// are trimmed, blanks dropped, and compared case-insensitively. This
+    /// only widens the hostname path — the IP-literal rules are unaffected.
+    pub egress_allowed_suffixes: Vec<String>,
 }
 
 impl Settings {
@@ -497,6 +505,16 @@ struct Cli {
         default_value = ""
     )]
     static_upstream_scope_allowlist: String,
+
+    /// NFR-S-4: comma-separated DNS suffixes the static-upstream egress
+    /// allowlist trusts for HOSTNAME endpoints (e.g.
+    /// `.ts.net,.int.data-zoo.de`). Empty/unset → the strict default
+    /// `.ts.net` only. An explicit operator opt-in for a private or
+    /// tailnet-backed domain (the substrate's split-DNS `*.int.data-zoo.de`
+    /// resolves to private host IPs). Does NOT relax the IP-literal rules
+    /// and performs no DNS resolution.
+    #[arg(long, env = "TRITON_EGRESS_ALLOWED_SUFFIXES", default_value = "")]
+    egress_allowed_suffixes: String,
 }
 
 impl From<Cli> for Settings {
@@ -524,6 +542,7 @@ impl From<Cli> for Settings {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            egress_allowed_suffixes: parse_egress_suffixes(&c.egress_allowed_suffixes),
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
             circuit_open_after: c.circuit_open_after,
             circuit_cooldown: Duration::from_millis(c.circuit_cooldown_ms),
@@ -564,5 +583,50 @@ impl From<Cli> for Settings {
             static_upstream_issuer: c.static_upstream_issuer,
             static_upstream_aud: c.static_upstream_aud,
         }
+    }
+}
+
+/// Parse `TRITON_EGRESS_ALLOWED_SUFFIXES` into the NFR-S-4 hostname egress
+/// allowlist. Comma-separated; entries are trimmed and blanks dropped. An
+/// empty/blank-only input falls back to the strict default `[".ts.net"]`, so
+/// the egress policy is unchanged unless an operator explicitly opts in.
+/// Lowercasing for comparison happens in the guard (`endpoint_is_dispatchable`),
+/// so the configured values are reported verbatim in the boot audit line.
+fn parse_egress_suffixes(raw: &str) -> Vec<String> {
+    let parsed: Vec<String> = raw
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if parsed.is_empty() {
+        vec![".ts.net".to_string()]
+    } else {
+        parsed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_egress_suffixes;
+
+    #[test]
+    fn egress_suffixes_default_to_tailnet_when_empty() {
+        assert_eq!(parse_egress_suffixes(""), vec![".ts.net".to_string()]);
+        // Whitespace / blank-only input is still the strict default.
+        assert_eq!(parse_egress_suffixes("   "), vec![".ts.net".to_string()]);
+        assert_eq!(parse_egress_suffixes(" , ,"), vec![".ts.net".to_string()]);
+    }
+
+    #[test]
+    fn egress_suffixes_parse_trim_and_drop_blanks() {
+        assert_eq!(
+            parse_egress_suffixes(".ts.net, .int.data-zoo.de ,"),
+            vec![".ts.net".to_string(), ".int.data-zoo.de".to_string()],
+        );
+        // A single explicit suffix replaces the default entirely.
+        assert_eq!(
+            parse_egress_suffixes(".int.data-zoo.de"),
+            vec![".int.data-zoo.de".to_string()],
+        );
     }
 }

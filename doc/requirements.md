@@ -497,6 +497,17 @@ for the worked walkthrough.
     (`login.botframework.com`, `accounts.google.com`). These paths
     are documented in the manifest and are the only public-internet
     egress permitted by the substrate ACL.
+  - **Static-upstream hostname allowlist:** the `TRITON_STATIC_UPSTREAMS`
+    SSRF guard trusts hostname endpoints only under an explicit DNS
+    suffix. The strict default is `.ts.net` (Tailscale MagicDNS); an
+    operator may widen it with `TRITON_EGRESS_ALLOWED_SUFFIXES`
+    (comma-separated, e.g. `.ts.net,.int.data-zoo.de`) to admit a
+    trusted private split-DNS domain — the substrate addresses every
+    service as `*.nonprod.int.data-zoo.de`, which resolves to private
+    host IPs behind kamal-proxy. This is an explicit operator opt-in: it
+    only widens the hostname path, never relaxes the IP-literal rules
+    (loopback / RFC-1918 / CGNAT / ULA only; public + metadata refused),
+    and performs no DNS resolution (purely name-suffix based, no TOCTOU).
 - **NFR-S-5 (v0.2)** All chat-channel adapter credentials (bot
   tokens, webhook secrets, service-account JSON, Azure identity
   references, identity tables, correlation keys) MUST be Vault

@@ -50,6 +50,20 @@ Content-Type: application/json
   current routing limits).
 - **Timeout:** `TRITON_UPSTREAM_TIMEOUT_MS` (default 10 000 ms) per
   call. Slow agents are reported as `upstream <tool> timed out`.
+- **Egress allowlist (NFR-S-4):** outside `env=local`, every mapped
+  `host:port` endpoint must pass an SSRF guard or the binary refuses to
+  boot. IP literals must be loopback / RFC-1918 private / CGNAT
+  (100.64.0.0/10) / IPv6 ULA (`fc00::/7`); public + metadata
+  (`169.254.169.254`) addresses are refused. **Hostnames** are trusted
+  only under a permitted DNS suffix — by default exactly `.ts.net`
+  (Tailscale MagicDNS). `TRITON_EGRESS_ALLOWED_SUFFIXES` (comma-separated,
+  e.g. `.ts.net,.int.data-zoo.de`) is the explicit operator opt-in to
+  also trust a private/tailnet-backed split-DNS domain (the substrate
+  addresses services as `*.nonprod.int.data-zoo.de`, resolving to private
+  host IPs behind kamal-proxy, which routes on the Host header — so the
+  endpoint must stay a hostname, not an IP). Empty/unset → the strict
+  `.ts.net`-only default. The list only widens the hostname path; it never
+  relaxes the IP-literal rules and triggers no DNS resolution.
 
 ## 3. Sender-identity carriage: the bearer, and only the bearer
 
