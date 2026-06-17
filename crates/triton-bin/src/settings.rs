@@ -174,6 +174,20 @@ pub struct Settings {
     /// are trimmed, blanks dropped, and compared case-insensitively. This
     /// only widens the hostname path — the IP-literal rules are unaffected.
     pub egress_allowed_suffixes: Vec<String>,
+    /// Adapter names (lowercased) the operator opts in to SKIPPING when
+    /// their declared `env://` credential secret is absent, instead of
+    /// failing the whole boot. Comma-separated in
+    /// `TRITON_OPTIONAL_ADAPTERS`; entries are trimmed, blanks dropped,
+    /// and lowercased here for case-insensitive matching. Empty/unset
+    /// (the default) ⇒ today's behaviour: ANY adapter build failure is
+    /// fatal. Used so a manifest baked into multiple images can carry an
+    /// adapter that only some of those images have the secret for (e.g.
+    /// the internal upstream-dispatcher image skips `telegram` while the
+    /// public gateway image — which sets nothing here — still fails loud
+    /// if its telegram secret goes missing). The skip is narrow: it
+    /// fires ONLY for a missing `env://` secret, never for any other
+    /// build error.
+    pub optional_adapters: Vec<String>,
 }
 
 impl Settings {
@@ -515,6 +529,19 @@ struct Cli {
     /// and performs no DNS resolution.
     #[arg(long, env = "TRITON_EGRESS_ALLOWED_SUFFIXES", default_value = "")]
     egress_allowed_suffixes: String,
+
+    /// Comma-separated adapter names (e.g. `telegram`) to SKIP (with a
+    /// warning) when their declared `env://` credential secret is unset,
+    /// instead of failing the whole boot. Empty/unset (default) ⇒ any
+    /// adapter build failure is fatal — today's behaviour. Only a
+    /// missing `env://` secret is skippable; every other failure stays
+    /// fatal even for a listed adapter. Lets a manifest baked into
+    /// multiple images carry an adapter only some images have the secret
+    /// for (the internal upstream-dispatcher skips `telegram`; the
+    /// public gateway sets nothing here, so a vanished telegram secret
+    /// still fails it loudly).
+    #[arg(long, env = "TRITON_OPTIONAL_ADAPTERS", default_value = "")]
+    optional_adapters: String,
 }
 
 impl From<Cli> for Settings {
@@ -543,6 +570,7 @@ impl From<Cli> for Settings {
                 .filter(|s| !s.is_empty())
                 .collect(),
             egress_allowed_suffixes: parse_egress_suffixes(&c.egress_allowed_suffixes),
+            optional_adapters: parse_optional_adapters(&c.optional_adapters),
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
             circuit_open_after: c.circuit_open_after,
             circuit_cooldown: Duration::from_millis(c.circuit_cooldown_ms),
@@ -605,9 +633,22 @@ fn parse_egress_suffixes(raw: &str) -> Vec<String> {
     }
 }
 
+/// Parse `TRITON_OPTIONAL_ADAPTERS` into the set of adapter names whose
+/// build may be skipped on a missing `env://` secret. Comma-separated;
+/// entries are trimmed, blanks dropped, and lowercased so the match in
+/// `optional_adapters::skip_reason` is case-insensitive regardless of
+/// manifest casing. Empty/blank-only input ⇒ an empty set, i.e. the
+/// default "fail on any adapter error" behaviour is unchanged.
+fn parse_optional_adapters(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::parse_egress_suffixes;
+    use super::{parse_egress_suffixes, parse_optional_adapters};
 
     #[test]
     fn egress_suffixes_default_to_tailnet_when_empty() {
@@ -627,6 +668,22 @@ mod tests {
         assert_eq!(
             parse_egress_suffixes(".int.data-zoo.de"),
             vec![".int.data-zoo.de".to_string()],
+        );
+    }
+
+    #[test]
+    fn optional_adapters_default_to_empty() {
+        // Unset / blank-only ⇒ no opt-in: fail on any adapter error.
+        assert!(parse_optional_adapters("").is_empty());
+        assert!(parse_optional_adapters("   ").is_empty());
+        assert!(parse_optional_adapters(" , ,").is_empty());
+    }
+
+    #[test]
+    fn optional_adapters_parse_trim_lowercase_drop_blanks() {
+        assert_eq!(
+            parse_optional_adapters(" Telegram , whatsapp ,"),
+            vec!["telegram".to_string(), "whatsapp".to_string()],
         );
     }
 }

@@ -709,7 +709,7 @@ pub enum BuildError {
     #[error("missing credential field `{0}`")]
     MissingCredential(&'static str),
     #[error("could not resolve credential field `{0}`: {1}")]
-    Resolve(&'static str, ResolveError),
+    Resolve(&'static str, #[source] ResolveError),
     #[error("identity.table failed to parse as sender JSON: {0}")]
     TableParse(String),
 }

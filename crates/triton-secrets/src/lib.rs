@@ -70,6 +70,22 @@ pub enum ResolveError {
     EnvNotSet { var: String },
 }
 
+impl ResolveError {
+    /// The declared `env://<VARNAME>` whose absence caused this error,
+    /// or `None` for any other failure (Vault decommissioned, etc.).
+    ///
+    /// This is the precise signal the binary's optional-adapter opt-in
+    /// keys off: only an `env://` ref that the substrate failed to inject
+    /// is eligible to be skipped (`TRITON_OPTIONAL_ADAPTERS`). Every
+    /// other resolution failure stays fatal.
+    pub fn missing_env_var(&self) -> Option<&str> {
+        match self {
+            ResolveError::EnvNotSet { var } => Some(var),
+            ResolveError::VaultDecommissioned { .. } => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{LiteralResolver, ResolveError, SecretResolver};

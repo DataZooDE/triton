@@ -19,6 +19,27 @@ The manifest is **opt-in**: a pure-REST deploy leaves `TRITON_MANIFEST_PATH`
 unset and ignores `/etc/triton/adapter.yaml`. The gateway deploy sets
 `TRITON_MANIFEST_PATH=/etc/triton/adapter.yaml` to enable the chat adapters.
 
+### `TRITON_OPTIONAL_ADAPTERS` — skip an adapter whose secret this image lacks
+
+The same baked `adapter.yaml` runs in two images. `dz-triton` (the internal
+upstream-dispatcher, which needs only the WhatsApp adapter for the outbound
+courier) does **not** carry the Telegram secret — and must not, or it could
+hijack the gateway's Telegram webhook. So it sets
+`TRITON_OPTIONAL_ADAPTERS=telegram` (comma-separated; also `--optional-adapters`,
+case-insensitive). When a listed adapter fails to build **specifically because
+a declared `env://` credential is unset**, Triton logs a `warn!` (naming the
+adapter + the missing var) and skips it, booting the rest.
+
+The opt-in is narrow and fail-safe:
+
+- It fires **only** for a missing `env://` secret. Any other build failure
+  (malformed manifest, bad value, a non-env missing credential, a `vault://`
+  ref) stays fatal even for a listed adapter.
+- An adapter **not** in the set stays fatal on every failure.
+- Default (unset/empty) ⇒ today's behaviour: any adapter build error aborts
+  boot. The public gateway sets nothing here, so if its Telegram secret ever
+  goes missing it still fails loudly rather than silently dropping ingress.
+
 ## Secrets — `env://`, from GCP Secret Manager (no Vault)
 
 Every credential in `deploy/triton/adapter.yaml` is an `env://VARNAME`
