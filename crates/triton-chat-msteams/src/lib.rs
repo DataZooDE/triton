@@ -595,6 +595,7 @@ async fn dispatch_message(
     let principal = Principal {
         sub: sub.clone(),
         scopes: scopes.clone(),
+        groups: Vec::new(),
         tenant: tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),

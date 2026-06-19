@@ -293,6 +293,19 @@ async fn main() -> std::io::Result<()> {
                                 .collect(),
                         )
                     };
+                // RBAC: empty group allowlist → None (caps only); else the set.
+                let group_allowlist: Option<std::collections::HashSet<String>> =
+                    if settings.static_upstream_group_allowlist.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            settings
+                                .static_upstream_group_allowlist
+                                .iter()
+                                .cloned()
+                                .collect(),
+                        )
+                    };
                 tracing::info!(
                     spec = %spec, aud = %aud, tenant = %tenant, forward_principal,
                     scope_allowlist = ?settings.static_upstream_scope_allowlist,
@@ -304,6 +317,7 @@ async fn main() -> std::io::Result<()> {
                     tenant,
                     forward_principal,
                     scope_allowlist,
+                    group_allowlist,
                 )
             } else {
                 tracing::warn!(

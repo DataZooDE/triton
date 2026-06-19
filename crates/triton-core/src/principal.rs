@@ -23,6 +23,12 @@ use serde::Serialize;
 pub struct Principal {
     pub sub: String,
     pub scopes: Vec<String>,
+    /// Group/role memberships of the resolved sender (from the inbound
+    /// token's groups/roles claim, or a resolver's identity result). Opt-in
+    /// forwarded by the static-upstream router as the NON-authoritative
+    /// private claim `triton_sender_groups` — never as `roles` (a downstream
+    /// like escurel derives admin from `roles`). Empty by default.
+    pub groups: Vec<String>,
     pub tenant: String,
     /// Raw bearer token. Never logged, never audited (FR-AU-3).
     /// Field is `pub` so the upstream router crate can read it; the
@@ -42,6 +48,7 @@ impl fmt::Debug for Principal {
         f.debug_struct("Principal")
             .field("sub", &self.sub)
             .field("scopes", &self.scopes)
+            .field("groups", &self.groups)
             .field("tenant", &self.tenant)
             .field("raw_token", &"<redacted>")
             .field("trace_id", &self.trace_id)
@@ -56,6 +63,7 @@ impl Principal {
         ToolPrincipal {
             sub: self.sub.clone(),
             scopes: self.scopes.clone(),
+            groups: self.groups.clone(),
             tenant: self.tenant.clone(),
             trace_id: self.trace_id.clone(),
         }
@@ -69,6 +77,7 @@ impl Principal {
 pub struct ToolPrincipal {
     pub sub: String,
     pub scopes: Vec<String>,
+    pub groups: Vec<String>,
     pub tenant: String,
     pub trace_id: String,
 }

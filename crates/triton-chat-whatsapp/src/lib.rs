@@ -76,6 +76,8 @@ pub struct SenderClaims {
     pub sub: String,
     #[serde(default)]
     pub scopes: Vec<String>,
+    #[serde(default)]
+    pub groups: Vec<String>,
     pub tenant: String,
 }
 
@@ -103,6 +105,8 @@ struct ResolvedPrincipal {
     sub: String,
     #[serde(default)]
     scopes: Vec<String>,
+    #[serde(default)]
+    groups: Vec<String>,
     tenant: String,
 }
 
@@ -879,11 +883,12 @@ async fn process_message(
     text: &str,
 ) -> Result<(), Response> {
     // FR-I-7 sender resolution → (sub, scopes, tenant).
-    let (sub, scopes, tenant) = match &adapter.identity {
+    let (sub, scopes, groups, tenant) = match &adapter.identity {
         IdentityMode::SenderTable(table) => match table.get(sender_key) {
             Some(claims) => (
                 claims.sub.clone(),
                 claims.scopes.clone(),
+                claims.groups.clone(),
                 claims.tenant.clone(),
             ),
             None => {
@@ -940,6 +945,7 @@ async fn process_message(
     let principal = Principal {
         sub,
         scopes,
+        groups,
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
@@ -1047,7 +1053,7 @@ async fn resolve_via_upstream(
     dispatcher: &Dispatcher,
     resolver_tool: &str,
     sender_key: &str,
-) -> Result<(String, Vec<String>, String), TritonError> {
+) -> Result<(String, Vec<String>, Vec<String>, String), TritonError> {
     if sender_key.is_empty() {
         return Err(TritonError::Auth(
             "empty sender for upstream resolver".into(),
@@ -1056,6 +1062,7 @@ async fn resolve_via_upstream(
     let bootstrap = Principal {
         sub: "identity-resolver".to_string(),
         scopes: vec!["resolve".to_string()],
+        groups: Vec::new(),
         tenant: "system".to_string(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
@@ -1072,7 +1079,12 @@ async fn resolve_via_upstream(
             "resolver returned empty sub or tenant".into(),
         ));
     }
-    Ok((resolved.sub, resolved.scopes, resolved.tenant))
+    Ok((
+        resolved.sub,
+        resolved.scopes,
+        resolved.groups,
+        resolved.tenant,
+    ))
 }
 
 fn route_command(text: &str, default_tool: &str) -> (String, Value) {

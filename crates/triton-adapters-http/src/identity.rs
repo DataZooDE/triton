@@ -141,6 +141,7 @@ fn forwarded_email_principal(email: &str) -> Principal {
         // The scope mirrors auth-portal-dz's session model — the
         // operator authenticated against Vault's `ops` realm.
         scopes: vec!["sso-ops".to_string()],
+        groups: Vec::new(),
         tenant: "ops".to_string(),
         // No raw bearer to forward: the upstream router's Vault
         // OIDC swap is intentionally unavailable on this path. Demo
@@ -159,6 +160,7 @@ fn verify_dev_or_reject(token: &str) -> Result<Principal, TritonError> {
     Ok(Principal {
         sub: "dev-user".into(),
         scopes: vec!["dev".into()],
+        groups: Vec::new(),
         tenant: "dev".into(),
         raw_token: token.into(),
         trace_id: uuid::Uuid::new_v4().to_string(),
