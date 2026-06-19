@@ -96,12 +96,21 @@ impl JwtSigner {
     /// authentication data, not authorization Triton granted, so a
     /// downstream must opt in to read it. Empty → omitted. Callers
     /// sanitise/cap before passing (see `static_upstream`).
+    /// `groups`, when non-empty, are emitted as a JSON array under the
+    /// NON-authoritative private claim `triton_sender_groups` (RBAC — the
+    /// resolved sender's groups, forwarded opt-in). Deliberately NOT the
+    /// `roles` claim: a downstream like escurel derives admin from `roles`,
+    /// so forwarding resolver-derived groups there would be a
+    /// privilege-escalation vector. A downstream consumes these by setting
+    /// its groups claim to `triton_sender_groups`. Empty → omitted.
+    /// Callers sanitise/cap/allowlist before passing (see `static_upstream`).
     pub fn sign(
         &self,
         audiences: &[&str],
         subject: &str,
         tenant: &str,
         scopes: &[String],
+        groups: &[String],
         ttl: Duration,
     ) -> Result<String, String> {
         let now = SystemTime::now()
@@ -121,6 +130,9 @@ impl JwtSigner {
         }
         if !scopes.is_empty() {
             claims["triton_sender_scopes"] = json!(scopes);
+        }
+        if !groups.is_empty() {
+            claims["triton_sender_groups"] = json!(groups);
         }
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(self.kid.clone());
@@ -176,6 +188,7 @@ mod tests {
                 &["agents-nonprod", "escurel-nonprod"],
                 "dz-triton-api",
                 "default",
+                &[],
                 &[],
                 Duration::from_secs(300),
             )

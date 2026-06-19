@@ -462,6 +462,7 @@ mod tests {
         Principal {
             sub: "tester".into(),
             scopes: Vec::new(),
+            groups: Vec::new(),
             tenant: "default".into(),
             raw_token: String::new(),
             trace_id: "trace-test".into(),

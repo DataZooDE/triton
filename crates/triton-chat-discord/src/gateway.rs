@@ -418,6 +418,7 @@ impl DiscordGatewayAdapter {
         let principal = Principal {
             sub: claims.sub.clone(),
             scopes: claims.scopes.clone(),
+            groups: Vec::new(),
             tenant: claims.tenant.clone(),
             raw_token: String::new(),
             trace_id: uuid::Uuid::new_v4().to_string(),

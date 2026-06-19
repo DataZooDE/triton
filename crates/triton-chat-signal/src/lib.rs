@@ -364,6 +364,9 @@ impl SignalAdapter {
         let principal = Principal {
             sub: claims.sub.clone(),
             scopes: claims.scopes.clone(),
+            // Chat-channel group forwarding is whatsapp-only in this PR;
+            // other adapters resolve no groups yet (empty → not forwarded).
+            groups: Vec::new(),
             tenant: claims.tenant.clone(),
             raw_token: String::new(),
             trace_id: uuid::Uuid::new_v4().to_string(),

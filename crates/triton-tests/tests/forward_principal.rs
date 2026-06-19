@@ -315,6 +315,111 @@ async fn forward_on_applies_scope_allowlist() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_on_carries_resolved_groups() {
+    // RBAC: the resolved sender's `groups` ride a NON-authoritative private
+    // claim `triton_sender_groups` (array) — NEVER `roles` (which a
+    // downstream like escurel derives admin from). A downstream sets its
+    // `groups_claim` to `triton_sender_groups` to consume them.
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "scopes": ["chat"],
+        "groups": ["team-acme", "moderator"],
+        "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for(&whatsapp, &agent, &resolver, true),
+    )
+    .await;
+
+    let resp = post_inbound(&proc, UNKNOWN_WA_ID, "hi").await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let bearer = wait_for(Duration::from_secs(5), || {
+        agent.bearers_seen().into_iter().next()
+    });
+    let claims = jwt_claims(&bearer);
+    assert_eq!(
+        claims["triton_sender_groups"],
+        json!(["team-acme", "moderator"]),
+        "resolved groups under the private claim: {claims}"
+    );
+    // Must NOT emit a `roles` claim — that would let escurel derive admin
+    // from a forwarded value.
+    assert!(
+        claims.get("roles").is_none(),
+        "must never emit `roles` (admin-derivation claim): {claims}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_off_omits_groups_by_default() {
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "groups": ["team-acme"],
+        "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for(&whatsapp, &agent, &resolver, false),
+    )
+    .await;
+
+    let resp = post_inbound(&proc, UNKNOWN_WA_ID, "hi").await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let bearer = wait_for(Duration::from_secs(5), || {
+        agent.bearers_seen().into_iter().next()
+    });
+    let claims = jwt_claims(&bearer);
+    assert!(
+        claims.get("triton_sender_groups").is_none(),
+        "no forwarded groups by default: {claims}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_on_applies_group_allowlist() {
+    // An operator allowlist blesses which groups may propagate.
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "groups": ["team-acme", "secret-cabal"],
+        "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+
+    let mut env = env_for(&whatsapp, &agent, &resolver, true);
+    env.insert(
+        "TRITON_STATIC_UPSTREAM_GROUP_ALLOWLIST".to_string(),
+        "team-acme".to_string(),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    let resp = post_inbound(&proc, UNKNOWN_WA_ID, "hi").await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let bearer = wait_for(Duration::from_secs(5), || {
+        agent.bearers_seen().into_iter().next()
+    });
+    let claims = jwt_claims(&bearer);
+    assert_eq!(
+        claims["triton_sender_groups"],
+        json!(["team-acme"]),
+        "only allowlisted groups forwarded (`secret-cabal` dropped): {claims}"
+    );
+}
+
 fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {

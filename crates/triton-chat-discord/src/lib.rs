@@ -591,6 +591,7 @@ async fn handle_message_component(
     let principal = Principal {
         sub: claims.sub.clone(),
         scopes: claims.scopes.clone(),
+        groups: Vec::new(),
         tenant: claims.tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
@@ -808,6 +809,7 @@ async fn handle_application_command(
     let principal = Principal {
         sub: claims.sub.clone(),
         scopes: claims.scopes.clone(),
+        groups: Vec::new(),
         tenant: claims.tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
@@ -1109,6 +1111,7 @@ async fn handle_modal_submit(
     let principal = Principal {
         sub: claims.sub.clone(),
         scopes: claims.scopes.clone(),
+        groups: Vec::new(),
         tenant: claims.tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),

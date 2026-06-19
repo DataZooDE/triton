@@ -38,10 +38,11 @@ const MAX_SCOPES: usize = 32;
 const MAX_SCOPE_LEN: usize = 64;
 const MAX_TENANT_LEN: usize = 128;
 
-/// Sanitise resolver-supplied scopes before they're signed into the
-/// `triton_sender_scopes` claim (#114): drop empty / whitespace-bearing /
-/// over-length values, apply the operator allowlist when configured, and
-/// cap the count. Pure so it's unit-testable.
+/// Sanitise resolver-supplied tokens (scopes or groups) before they're
+/// signed into the `triton_sender_scopes` / `triton_sender_groups` claim
+/// (#114 / RBAC): drop empty / whitespace-bearing / over-length values,
+/// apply the operator allowlist when configured, and cap the count. Pure so
+/// it's unit-testable.
 fn sanitise_scopes(scopes: &[String], allowlist: Option<&HashSet<String>>) -> Vec<String> {
     scopes
         .iter()
@@ -80,6 +81,11 @@ pub struct StaticUpstream {
     /// `principal.scopes ∩ allowlist`; `None` → caps only. Ignored unless
     /// `forward_principal`.
     forward_scope_allowlist: Option<HashSet<String>>,
+    /// RBAC: optional operator allowlist of groups that may be forwarded
+    /// (the `triton_sender_groups` claim). `Some` → forwarded groups are
+    /// `principal.groups ∩ allowlist`; `None` → caps only. Ignored unless
+    /// `forward_principal`.
+    forward_group_allowlist: Option<HashSet<String>>,
     /// FR-U-3/4 per-tool circuit breaker, keyed by tool name.
     breakers: RwLock<HashMap<String, Mutex<Breaker>>>,
     /// Consecutive tool-side faults that trip a breaker open.
@@ -118,6 +124,7 @@ impl StaticUpstream {
             tenant: String::new(),
             forward_principal: false,
             forward_scope_allowlist: None,
+            forward_group_allowlist: None,
             breakers: RwLock::new(HashMap::new()),
             circuit_open_after,
             circuit_cooldown,
@@ -135,12 +142,14 @@ impl StaticUpstream {
         tenant: impl Into<String>,
         forward_principal: bool,
         forward_scope_allowlist: Option<HashSet<String>>,
+        forward_group_allowlist: Option<HashSet<String>>,
     ) -> Self {
         self.signer = Some(signer);
         self.audience = audience.into();
         self.tenant = tenant.into();
         self.forward_principal = forward_principal;
         self.forward_scope_allowlist = forward_scope_allowlist;
+        self.forward_group_allowlist = forward_group_allowlist;
         self
     }
 
@@ -182,7 +191,9 @@ impl StaticUpstream {
                 // otherwise the deployment-static tenant and no scopes.
                 // #114: resolver-supplied values are sanitised/capped (and
                 // allowlisted) before signing — see `sanitise_scopes`.
-                let (tenant, scopes): (String, Vec<String>) = if self.forward_principal {
+                let (tenant, scopes, groups): (String, Vec<String>, Vec<String>) = if self
+                    .forward_principal
+                {
                     let tenant = if principal.tenant.len() <= MAX_TENANT_LEN {
                         principal.tenant.clone()
                     } else {
@@ -194,11 +205,15 @@ impl StaticUpstream {
                     };
                     let scopes =
                         sanitise_scopes(&principal.scopes, self.forward_scope_allowlist.as_ref());
-                    (tenant, scopes)
+                    // RBAC: same sanitise/cap/allowlist as scopes. Rides
+                    // `triton_sender_groups`, never `roles`.
+                    let groups =
+                        sanitise_scopes(&principal.groups, self.forward_group_allowlist.as_ref());
+                    (tenant, scopes, groups)
                 } else {
-                    (self.tenant.clone(), Vec::new())
+                    (self.tenant.clone(), Vec::new(), Vec::new())
                 };
-                s.sign(&auds, &principal.sub, &tenant, &scopes, TOKEN_TTL)
+                s.sign(&auds, &principal.sub, &tenant, &scopes, &groups, TOKEN_TTL)
                     .map_err(|e| TritonError::Tool(format!("mint upstream token: {e}")))
             }
             None => Ok(self.token.clone()),

@@ -939,6 +939,7 @@ async fn resolve_via_upstream(
     let bootstrap = Principal {
         sub: "identity-resolver".to_string(),
         scopes: vec!["resolve".to_string()],
+        groups: Vec::new(),
         tenant: "system".to_string(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
@@ -1030,6 +1031,7 @@ async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -
     let principal = Principal {
         sub,
         scopes,
+        groups: Vec::new(),
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
@@ -1280,6 +1282,7 @@ async fn handle_form_outcome(
             let principal = Principal {
                 sub,
                 scopes,
+                groups: Vec::new(),
                 tenant,
                 raw_token: String::new(),
                 trace_id: uuid::Uuid::new_v4().to_string(),
@@ -1523,6 +1526,7 @@ async fn handle_callback_query(
     let principal = Principal {
         sub,
         scopes,
+        groups: Vec::new(),
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),

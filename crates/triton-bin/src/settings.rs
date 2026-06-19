@@ -166,6 +166,11 @@ pub struct Settings {
     /// (the `triton_sender_scopes` claim). Empty → no allowlist (caps only);
     /// non-empty → forwarded scopes are intersected with this set.
     pub static_upstream_scope_allowlist: Vec<String>,
+    /// RBAC: allowlist of groups that may be forwarded on the minted token
+    /// (the `triton_sender_groups` claim, consumed by a downstream like
+    /// escurel via its `groups_claim`). Empty → no allowlist (caps only);
+    /// non-empty → forwarded groups are intersected with this set.
+    pub static_upstream_group_allowlist: Vec<String>,
     /// NFR-S-4: operator-configured DNS suffixes a `TRITON_STATIC_UPSTREAMS`
     /// hostname endpoint may end with and still pass the egress allowlist.
     /// Empty/unset → the strict default `[".ts.net"]` (Tailscale MagicDNS),
@@ -520,6 +525,16 @@ struct Cli {
     )]
     static_upstream_scope_allowlist: String,
 
+    /// RBAC: comma-separated allowlist of groups that may be forwarded on
+    /// the minted token (the `triton_sender_groups` claim, consumed by a
+    /// downstream like escurel via its `groups_claim`). Empty → caps only.
+    #[arg(
+        long,
+        env = "TRITON_STATIC_UPSTREAM_GROUP_ALLOWLIST",
+        default_value = ""
+    )]
+    static_upstream_group_allowlist: String,
+
     /// NFR-S-4: comma-separated DNS suffixes the static-upstream egress
     /// allowlist trusts for HOSTNAME endpoints (e.g.
     /// `.ts.net,.int.data-zoo.de`). Empty/unset → the strict default
@@ -565,6 +580,12 @@ impl From<Cli> for Settings {
             static_upstream_forward_principal: c.static_upstream_forward_principal,
             static_upstream_scope_allowlist: c
                 .static_upstream_scope_allowlist
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            static_upstream_group_allowlist: c
+                .static_upstream_group_allowlist
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())

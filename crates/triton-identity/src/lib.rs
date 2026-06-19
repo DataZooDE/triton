@@ -127,9 +127,11 @@ impl OidcVerifier {
             .map_err(|e| TritonError::Auth(format!("JWT verification failed: {e}")))?;
         let claims = token.claims;
         let scopes = claims.scopes();
+        let groups = claims.groups();
         Ok(Principal {
             sub: claims.sub,
             scopes,
+            groups,
             tenant: claims.tenant.unwrap_or_else(|| "-".to_string()),
             raw_token: raw_token.to_string(),
             trace_id: uuid::Uuid::new_v4().to_string(),
@@ -280,6 +282,13 @@ struct TokenClaims {
     scope: Option<String>,
     #[serde(default)]
     scp: Option<Vec<String>>,
+    /// Group/role memberships. Read from `roles` (the common OIDC/Keycloak
+    /// convention, and escurel's default groups claim), falling back to
+    /// `groups`. Carried on the [`Principal`] for opt-in forwarding.
+    #[serde(default)]
+    roles: Option<Vec<String>>,
+    #[serde(default)]
+    groups: Option<Vec<String>>,
 }
 
 impl TokenClaims {
@@ -289,6 +298,16 @@ impl TokenClaims {
         }
         if let Some(s) = &self.scope {
             return s.split_whitespace().map(str::to_string).collect();
+        }
+        Vec::new()
+    }
+
+    fn groups(&self) -> Vec<String> {
+        if let Some(g) = &self.roles {
+            return g.clone();
+        }
+        if let Some(g) = &self.groups {
+            return g.clone();
         }
         Vec::new()
     }
