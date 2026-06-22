@@ -28,6 +28,7 @@ triton-chat-msteams = { path = "../triton-chat-msteams" }
 triton-chat-signal = { path = "../triton-chat-signal" }
 triton-chat-whatsapp = { path = "../triton-chat-whatsapp" }
 axum = { workspace = true }
+futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

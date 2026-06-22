@@ -9,20 +9,23 @@
 //! variants map to HTTP statuses per architecture.md §8.3.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::http::header::ACCEPT;
 use axum::http::request::Parts;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use triton_core::a2ui::{build_envelope, extract_surface};
 use triton_core::audit::AuditBuffer;
-use triton_core::{A2uiVersion, Dispatcher, RuntimeInfo, TritonError, envelope};
+use triton_core::{A2uiVersion, Dispatcher, RuntimeInfo, StreamEvent, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
 
@@ -533,6 +536,19 @@ async fn invoke_tool(
         }
     };
     let trace_id = principal.trace_id.clone();
+
+    // Content negotiation (issue #132): `Accept: text/event-stream`
+    // streams the dispatch as SSE; every other caller keeps the
+    // byte-identical buffered JSON envelope below (open/closed). The
+    // dispatcher still emits exactly one ADR-6 audit line on either path.
+    if wants_sse(&parts) {
+        let events = state
+            .dispatcher
+            .invoke_streaming_with_bytes(&name, &body, principal, "rest")
+            .await;
+        return sse_response(events);
+    }
+
     match state
         .dispatcher
         .invoke_with_bytes(&name, &body, principal, "rest")
@@ -544,6 +560,36 @@ async fn invoke_tool(
         },
         Err(e) => error_response(&e, Some(trace_id.as_str())),
     }
+}
+
+/// True when any `Accept` media range names `text/event-stream` — the
+/// caller wants the SSE response path (issue #132). Kept separate from
+/// [`parse_a2ui_accept`] so the A2UI media-type negotiation is untouched.
+fn wants_sse(parts: &Parts) -> bool {
+    parts.headers.get_all(ACCEPT).iter().any(|v| {
+        v.to_str().is_ok_and(|s| {
+            s.split(',')
+                .any(|range| range.split(';').next().map(str::trim) == Some("text/event-stream"))
+        })
+    })
+}
+
+/// Render a stream of [`StreamEvent`]s as an axum SSE response. Each
+/// event becomes one `event: <name>` / `data: <compact-json>` frame.
+/// A ~15s keep-alive comment frame keeps proxies (kamal-proxy, nginx)
+/// from dropping a connection that idles while an upstream LLM
+/// synthesises — it never fires once the stream has terminated.
+fn sse_response(events: futures::stream::BoxStream<'static, StreamEvent>) -> Response {
+    let frames = events.map(|ev| {
+        Ok::<Event, std::convert::Infallible>(
+            Event::default()
+                .event(ev.event_name())
+                .data(ev.data().to_string()),
+        )
+    });
+    Sse::new(frames)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
 }
 
 /// Wrap a dispatch result into an A2UI envelope when the tool opted

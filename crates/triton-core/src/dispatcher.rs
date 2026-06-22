@@ -17,12 +17,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use futures::StreamExt;
+use futures::stream::{self, BoxStream};
 use serde_json::{Value, json};
 
 use crate::audit::{AuditPhase, AuditRecord, PostOutcome, emit, now_rfc3339};
 use crate::error::TritonError;
 use crate::metrics::Metrics;
 use crate::principal::Principal;
+use crate::stream::StreamEvent;
 use crate::tool::{ToolDescriptor, ToolRegistry};
 
 /// Hook the dispatcher calls when the in-process registry doesn't
@@ -173,6 +176,33 @@ impl Dispatcher {
             }
         };
         self.invoke(tool_name, args, principal, protocol).await
+    }
+
+    /// Streaming counterpart of [`Self::invoke_with_bytes`] for the SSE
+    /// response path (issue #132). Returns a stream of [`StreamEvent`]s
+    /// terminated by exactly one `Done` (success) or `Error` (failure).
+    ///
+    /// PR 2 delegates to the buffered [`Self::invoke_with_bytes`]: the
+    /// single ADR-6 dispatch audit line still fires exactly once, inside
+    /// `invoke`, and the lone result is adapted into one terminal event.
+    /// A genuinely incremental upstream drain — whose audit line moves to
+    /// stream *termination* via a finalizer — lands in a later increment;
+    /// the adapter-facing signature here stays stable across that change.
+    pub async fn invoke_streaming_with_bytes(
+        &self,
+        tool_name: &str,
+        body: &[u8],
+        principal: Principal,
+        protocol: &str,
+    ) -> BoxStream<'static, StreamEvent> {
+        let terminal = match self
+            .invoke_with_bytes(tool_name, body, principal, protocol)
+            .await
+        {
+            Ok(d) => StreamEvent::Done(d.result),
+            Err(e) => StreamEvent::Error(e),
+        };
+        stream::once(async move { terminal }).boxed()
     }
 
     /// Dispatch a tool call given pre-parsed args. Emits one audit

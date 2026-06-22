@@ -39,6 +39,10 @@ tower = { version = "0.5", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+# Stream combinators for the SSE response path (issue #132): BoxStream
+# in the upstream-dispatch trait, stream adapters in the dispatcher, and
+# axum Sse construction in the HTTP adapters.
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
