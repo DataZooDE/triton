@@ -338,3 +338,46 @@ async fn rest_sse_client_disconnect_audits_distinctly() {
         "client disconnect should be marked distinctly:\n{line}"
     );
 }
+
+/// When the caller negotiates BOTH SSE and an A2UI version, the terminal
+/// `done` frame carries the built A2UI envelope (not the raw surface),
+/// while `tool`/`token` progress frames pass through untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_sse_with_a2ui_wraps_terminal_done_in_envelope() {
+    let agent = FakeAgent::start_streaming_surface().await;
+    let triton = triton_with_upstream("grounded", &agent).await;
+
+    let resp = reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/grounded"))
+        .bearer_auth("dev-token")
+        // One Accept header negotiating both the stream and A2UI 0.9.
+        .header(
+            reqwest::header::ACCEPT,
+            "text/event-stream, application/json+a2ui;version=0.9",
+        )
+        .json(&serde_json::json!({ "q": "hi" }))
+        .send()
+        .await
+        .expect("POST streaming + a2ui");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.expect("body");
+
+    // Progress frames pass through.
+    assert!(body.contains("event: tool"), "missing tool frame:\n{body}");
+    assert!(
+        body.contains("event: token"),
+        "missing token frame:\n{body}"
+    );
+    // Terminal done carries the v0.9 envelope, not the raw surface.
+    assert!(body.contains("event: done"), "missing done frame:\n{body}");
+    assert!(
+        body.contains("\"version\":\"0.9\""),
+        "done frame should be the built A2UI 0.9 envelope:\n{body}"
+    );
+
+    let line = await_single_dispatch(&triton, "grounded").await;
+    assert!(
+        line.contains("\"result\":\"ok\""),
+        "clean A2UI stream should audit ok:\n{line}"
+    );
+}

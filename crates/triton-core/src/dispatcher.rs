@@ -218,12 +218,19 @@ impl Dispatcher {
     /// In-process tools and the no-upstream case don't stream: they run
     /// buffered, audit immediately (latency == total), and wrap the lone
     /// result into a one-item stream.
+    ///
+    /// `a2ui` is the caller's negotiated A2UI version (if any). When set,
+    /// the terminal `Done` payload is wrapped into the versioned envelope
+    /// — **before** the audit finalizer, so a tool that advertised A2UI
+    /// but emitted a non-surface turns the terminal into an `Error` that
+    /// the single audit line reflects (the finalizer stays outermost).
     pub async fn invoke_streaming_with_bytes(
         &self,
         tool_name: &str,
         body: &[u8],
         principal: Principal,
         protocol: &str,
+        a2ui: Option<crate::A2uiVersion>,
     ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
         let started = Instant::now();
         let args: Value = if body.is_empty() {
@@ -241,7 +248,21 @@ impl Dispatcher {
         // In-process tools (and the no-upstream fallback) are not
         // streaming sources: run them buffered, audit now, and emit a
         // single terminal `Done`. A pre-first-byte error audits inline.
-        if self.registry.get(tool_name).is_some() || self.upstream.is_none() {
+        if let Some(tool) = self.registry.get(tool_name) {
+            let returns_a2ui = tool.returns_a2ui();
+            let outcome = self.run(tool_name, args, &principal).await;
+            let latency_ms = started.elapsed().as_millis() as u64;
+            self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
+            let value = outcome?;
+            // Mirror the buffered path: only wrap when the tool opted in
+            // AND the caller negotiated A2UI.
+            let done = match (a2ui, returns_a2ui) {
+                (Some(version), true) => done_event_a2ui(value, version),
+                _ => StreamEvent::Done(value),
+            };
+            return Ok(stream::once(async move { done }).boxed());
+        }
+        if self.upstream.is_none() {
             let outcome = self.run(tool_name, args, &principal).await;
             let latency_ms = started.elapsed().as_millis() as u64;
             self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
@@ -261,6 +282,13 @@ impl Dispatcher {
                 started.elapsed().as_millis() as u64,
             )),
             Ok(inner) => {
+                // A2UI-wrap the terminal `Done` *inside* the finalizer so
+                // the audit observes the post-transform terminal (an agent
+                // advertised A2UI but emitted a non-surface → Error).
+                let inner = match a2ui {
+                    Some(version) => wrap_stream_a2ui(inner, version),
+                    None => inner,
+                };
                 // Everything the single audit line needs, captured by the
                 // finalizer that fires once at stream termination.
                 let metrics = self.metrics.clone();
@@ -547,6 +575,33 @@ fn status_for(e: &TritonError) -> u16 {
     // Single source of truth in TritonError so the audit status
     // matches what REST/A2A return (circuit_open → 503, timeout → 504).
     e.http_status()
+}
+
+/// Wrap a single result value into a terminal A2UI [`StreamEvent`],
+/// reusing the same `extract_surface`/`build_envelope` path as the
+/// buffered adapter. A non-surface payload becomes a terminal `Error`
+/// (mirrors the buffered path's `TritonError::Tool`), surfaced to the
+/// client as an `error` frame.
+fn done_event_a2ui(value: Value, version: crate::A2uiVersion) -> StreamEvent {
+    match crate::a2ui::extract_surface(&value) {
+        Ok(surface) => StreamEvent::Done(crate::a2ui::build_envelope(&surface, version.into())),
+        Err(e) => StreamEvent::Error(TritonError::Tool(format!("tool advertised A2UI but {e}"))),
+    }
+}
+
+/// Map a stream's terminal `Done` through [`done_event_a2ui`], passing
+/// `tool`/`token`/`error` frames through untouched. Used inside the
+/// audit finalizer so the wrapped terminal is what gets audited.
+fn wrap_stream_a2ui(
+    inner: BoxStream<'static, StreamEvent>,
+    version: crate::A2uiVersion,
+) -> BoxStream<'static, StreamEvent> {
+    inner
+        .map(move |ev| match ev {
+            StreamEvent::Done(v) => done_event_a2ui(v, version),
+            other => other,
+        })
+        .boxed()
 }
 
 /// Arguments for [`emit_stream_audit`]. Grouped into one struct so the

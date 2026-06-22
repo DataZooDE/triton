@@ -544,7 +544,7 @@ async fn invoke_tool(
     if wants_sse(&parts) {
         return match state
             .dispatcher
-            .invoke_streaming_with_bytes(&name, &body, principal, "rest")
+            .invoke_streaming_with_bytes(&name, &body, principal, "rest", requested)
             .await
         {
             // 200 stream open: frames flow, audit fires at termination.

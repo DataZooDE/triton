@@ -63,6 +63,10 @@ enum AgentMode {
     /// Stream a couple of frames, then drop the connection **without** a
     /// terminal `done`/`error` — exercises the upstream-truncation path.
     StreamingTruncated,
+    /// Like [`AgentMode::Streaming`], but the terminal `done` carries an
+    /// A2UI `{ surface: { components: [...] } }` payload so the streaming
+    /// A2UI-wrap path can be exercised end-to-end.
+    StreamingSurface,
 }
 
 impl FakeAgent {
@@ -95,6 +99,12 @@ impl FakeAgent {
     /// See [`AgentMode::StreamingTruncated`].
     pub async fn start_streaming_truncated() -> Self {
         Self::start(AgentMode::StreamingTruncated, 0, None).await
+    }
+
+    /// Emit an SSE stream whose terminal `done` carries an A2UI surface.
+    /// See [`AgentMode::StreamingSurface`].
+    pub async fn start_streaming_surface() -> Self {
+        Self::start(AgentMode::StreamingSurface, 0, None).await
     }
 
     async fn start(mode: AgentMode, fail_first: u32, fixed_response: Option<Value>) -> Self {
@@ -175,7 +185,8 @@ async fn handler(
         AgentMode::Echo
         | AgentMode::Returning
         | AgentMode::Streaming
-        | AgentMode::StreamingTruncated => false,
+        | AgentMode::StreamingTruncated
+        | AgentMode::StreamingSurface => false,
         AgentMode::AlwaysFail => true,
         AgentMode::FailingThenRecover => {
             let mut left = state.failures_remaining.lock().unwrap();
@@ -202,8 +213,22 @@ async fn handler(
         }
         AgentMode::Streaming => sse_response(streaming_frames(&value, true)),
         AgentMode::StreamingTruncated => sse_response(streaming_frames(&value, false)),
+        AgentMode::StreamingSurface => sse_response(streaming_surface_frames()),
         _ => Json(json!({ "echoed": value })).into_response(),
     }
+}
+
+/// Progress frames followed by a terminal `done` carrying an A2UI
+/// surface — the shape `extract_surface` parses.
+fn streaming_surface_frames() -> Vec<String> {
+    let done = json!({
+        "surface": { "components": [ { "kind": "text", "value": "Hello world" } ] }
+    });
+    vec![
+        "event: tool\ndata: {\"step\":\"search\",\"hits\":30}\n\n".to_string(),
+        "event: token\ndata: {\"delta\":\"Hello \"}\n\n".to_string(),
+        format!("event: done\ndata: {done}\n\n"),
+    ]
 }
 
 /// The SSE frames a streaming agent emits. When `terminal` is true the
