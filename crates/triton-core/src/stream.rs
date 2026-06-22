@@ -12,6 +12,12 @@
 //! it maps to [`StreamEvent::Tool`] so a newer upstream emitting an
 //! event Triton doesn't recognise is relayed rather than rejected.
 
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+
+use futures::stream::BoxStream;
+use futures::{Stream, StreamExt as _};
 use serde_json::{Value, json};
 
 use crate::error::TritonError;
@@ -107,6 +113,129 @@ fn parse_value(data: &str) -> Value {
     serde_json::from_str(data).unwrap_or_else(|_| Value::String(data.to_string()))
 }
 
+/// How a streamed invocation ended — the input to the single-fire
+/// finalizer that owns audit emission and circuit-breaker arming
+/// (issue #132). The dispatcher keys its one ADR-6 audit line off this;
+/// the upstream router keys its breaker update off the same value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Termination {
+    /// A terminal `Done` event passed through — clean success.
+    Completed,
+    /// A terminal `Error` event passed through — upstream failed after
+    /// the stream had already opened (200 headers flushed).
+    Failed,
+    /// The inner stream ended with no terminal event — the upstream
+    /// closed the connection early (truncation).
+    Truncated,
+    /// The consumer dropped the stream before any terminal event — the
+    /// client disconnected mid-stream.
+    Disconnected,
+}
+
+impl Termination {
+    /// Did the call complete cleanly? Only [`Termination::Completed`] is
+    /// a success; everything else is some flavour of failure/abort.
+    pub fn is_success(self) -> bool {
+        matches!(self, Termination::Completed)
+    }
+}
+
+/// Wall-clock timing handed to the finalizer at termination.
+#[derive(Debug, Clone, Copy)]
+pub struct Timing {
+    /// Time-to-first-event, or `None` if the stream terminated before
+    /// yielding anything.
+    pub ttfb: Option<Duration>,
+    /// Total wall-clock from when the stream was constructed to
+    /// termination.
+    pub total: Duration,
+}
+
+/// A stream combinator that runs a finalizer **exactly once** when its
+/// inner [`StreamEvent`] stream reaches a terminal state — whether that
+/// is a terminal `Done`/`Error` event, an early upstream close, or the
+/// consumer dropping the stream (client disconnect).
+///
+/// This is the mechanism that preserves ADR-6 ("exactly one audit line")
+/// under streaming: the outcome is only known when the stream closes, so
+/// the finalizer fires there. The same combinator drives the upstream
+/// router's per-tool circuit-breaker update. The finalizer is held in an
+/// `Option` and consumed by whichever of {terminal item, inner-`None`,
+/// `Drop`} happens first — so it can never fire twice or zero times.
+///
+/// Keep this the **outermost** combinator in any stack (e.g. after A2UI
+/// wrapping) — otherwise a client disconnect drops an inner layer first
+/// and the finalizer never observes it.
+pub struct Finalized<F: FnOnce(Termination, Timing)> {
+    inner: BoxStream<'static, StreamEvent>,
+    finalizer: Option<F>,
+    started: Instant,
+    first_at: Option<Instant>,
+}
+
+impl<F: FnOnce(Termination, Timing)> Finalized<F> {
+    /// Wrap `inner`, arranging `finalizer` to run once at termination.
+    /// The clock starts now.
+    pub fn new(inner: BoxStream<'static, StreamEvent>, finalizer: F) -> Self {
+        Self {
+            inner,
+            finalizer: Some(finalizer),
+            started: Instant::now(),
+            first_at: None,
+        }
+    }
+
+    fn fire(&mut self, term: Termination) {
+        if self.finalizer.is_some() {
+            let timing = Timing {
+                ttfb: self
+                    .first_at
+                    .map(|t| t.saturating_duration_since(self.started)),
+                total: self.started.elapsed(),
+            };
+            // `is_some` checked above, so the take/unwrap can't panic.
+            let f = self.finalizer.take().unwrap();
+            f(term, timing);
+        }
+    }
+}
+
+impl<F: FnOnce(Termination, Timing) + Unpin> Stream for Finalized<F> {
+    type Item = StreamEvent;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.poll_next_unpin(cx) {
+            Poll::Ready(Some(ev)) => {
+                if this.first_at.is_none() {
+                    this.first_at = Some(Instant::now());
+                }
+                if ev.is_terminal() {
+                    let term = match &ev {
+                        StreamEvent::Done(_) => Termination::Completed,
+                        _ => Termination::Failed,
+                    };
+                    this.fire(term);
+                }
+                Poll::Ready(Some(ev))
+            }
+            Poll::Ready(None) => {
+                this.fire(Termination::Truncated);
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<F: FnOnce(Termination, Timing)> Drop for Finalized<F> {
+    fn drop(&mut self) {
+        // Still armed → nobody reached a terminal event → the consumer
+        // dropped us mid-stream. That is a client disconnect.
+        self.fire(Termination::Disconnected);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::StreamEvent;
@@ -183,6 +312,83 @@ mod tests {
         match StreamEvent::parse("done", "not json") {
             StreamEvent::Done(v) => assert_eq!(v, json!("not json")),
             other => panic!("expected Done, got {other:?}"),
+        }
+    }
+
+    mod finalized {
+        use super::super::{Finalized, StreamEvent, Termination};
+        use futures::StreamExt;
+        use futures::stream::{self, BoxStream};
+        use serde_json::json;
+        use std::sync::{Arc, Mutex};
+
+        fn capture() -> (
+            Arc<Mutex<Vec<Termination>>>,
+            impl FnOnce(Termination, super::super::Timing),
+        ) {
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let sink = seen.clone();
+            (seen, move |term, _timing| sink.lock().unwrap().push(term))
+        }
+
+        fn events(evs: Vec<StreamEvent>) -> BoxStream<'static, StreamEvent> {
+            stream::iter(evs).boxed()
+        }
+
+        #[tokio::test]
+        async fn clean_done_fires_completed_exactly_once() {
+            let (seen, fin) = capture();
+            let inner = events(vec![
+                StreamEvent::Tool(json!({ "step": "search" })),
+                StreamEvent::Token("hi".into()),
+                StreamEvent::Done(json!({ "ok": true })),
+            ]);
+            let mut s = Finalized::new(inner, fin);
+            let mut count = 0;
+            while s.next().await.is_some() {
+                count += 1;
+            }
+            drop(s);
+            assert_eq!(count, 3, "all three events should pass through");
+            assert_eq!(*seen.lock().unwrap(), vec![Termination::Completed]);
+        }
+
+        #[tokio::test]
+        async fn terminal_error_fires_failed_once() {
+            let (seen, fin) = capture();
+            let inner = events(vec![
+                StreamEvent::Token("partial".into()),
+                StreamEvent::Error(crate::error::TritonError::Tool("boom".into())),
+            ]);
+            let mut s = Finalized::new(inner, fin);
+            while s.next().await.is_some() {}
+            drop(s);
+            assert_eq!(*seen.lock().unwrap(), vec![Termination::Failed]);
+        }
+
+        #[tokio::test]
+        async fn drop_before_terminal_fires_disconnected() {
+            let (seen, fin) = capture();
+            let inner = events(vec![
+                StreamEvent::Tool(json!({ "step": "search" })),
+                StreamEvent::Token("a".into()),
+                // No terminal event; consumer abandons mid-stream.
+            ]);
+            let mut s = Finalized::new(inner, fin);
+            // Pull one item, then drop without draining to the terminal.
+            let _ = s.next().await;
+            drop(s);
+            assert_eq!(*seen.lock().unwrap(), vec![Termination::Disconnected]);
+        }
+
+        #[tokio::test]
+        async fn inner_close_without_terminal_fires_truncated() {
+            let (seen, fin) = capture();
+            let inner = events(vec![StreamEvent::Token("only".into())]);
+            let mut s = Finalized::new(inner, fin);
+            while s.next().await.is_some() {}
+            drop(s);
+            assert_eq!(*seen.lock().unwrap(), vec![Termination::Truncated]);
         }
     }
 }

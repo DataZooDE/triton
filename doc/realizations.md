@@ -420,6 +420,40 @@ production deployment can avoid by knowing about it.
 Items discovered while building the production Rust port; each is
 a trap the next developer should not have to step in.
 
+- **Streaming (SSE) breaks "audit at call end" — fix it with a
+  drop-aware finalizer, not by auditing at first byte.** When a tool
+  result streams (issue #132), the outcome (clean done / mid-stream
+  error / client disconnect / upstream truncation) is only known when
+  the stream *closes*, which may be long after the HTTP 200 headers
+  flushed. To keep ADR-6's "exactly one dispatch audit line", wrap the
+  event stream in a combinator (`triton_core::stream::Finalized`) that
+  holds the finalizer in an `Option` and fires it from whichever of
+  {terminal `Done`/`Error` item, inner-`None`, `Drop`} happens first —
+  so it can never double-fire or zero-fire. Client disconnect is the
+  `Drop`-still-armed case; axum drops the response body's stream when
+  the peer goes away. The finalizer **must be the outermost** layer
+  (after any A2UI wrapping) or a disconnect drops an inner layer first
+  and never reaches it.
+- **A `Drop` finalizer cannot `.await`** — so anything it touches must
+  be sync. The per-tool circuit breaker map was `RwLock<HashMap<_,
+  Mutex<Breaker>>>`; the streaming path pre-resolves the slot to an
+  `Arc<Mutex<Breaker>>` *before* building the stream, so the finalizer
+  only takes a `std::sync::Mutex` (no async lookup) when it fires.
+- **`Accept: text/event-stream` is offered to the agent, but a plain
+  agent answers with JSON.** `StaticUpstream::invoke_streaming` always
+  sends the SSE `Accept`, but a non-streaming agent ignores it and
+  replies `application/json`. Branch on the *response* content-type:
+  decode SSE only when the agent actually streamed, otherwise buffer
+  the JSON body into a single terminal `done`. Forgetting this makes a
+  buffered upstream return an empty SSE body (zero frames → truncated).
+- **Pre-first-byte vs mid-stream errors split the error contract.** An
+  error known before the upstream's 200 (open breaker, connect fail,
+  non-2xx, unknown tool) returns `Err` from `invoke_streaming` →
+  ordinary HTTP error response + inline audit. An error *after* 200
+  rides as a terminal `event: error` frame (status already sent) and
+  audits at termination. `invoke_streaming` returning
+  `Result<Stream, _>` is what makes the boundary expressible.
+
 - **`cargo test -p triton-tests --test <name>` does not necessarily
   rebuild `target/debug/triton`.** The integration-test crate doesn't
   declare `triton-bin` as a Rust dependency (it discovers the binary

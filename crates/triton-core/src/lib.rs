@@ -31,7 +31,7 @@ pub use error::TritonError;
 pub use metrics::Metrics;
 pub use outbound::{OutboundCourier, OutboundRequest};
 pub use principal::{Principal, ToolPrincipal};
-pub use stream::StreamEvent;
+pub use stream::{Finalized, StreamEvent, Termination, Timing};
 pub use tool::{Tool, ToolDescriptor, ToolRegistry};
 
 /// A2UI envelope version requested by the caller (FR-A-3). Per ADR-4

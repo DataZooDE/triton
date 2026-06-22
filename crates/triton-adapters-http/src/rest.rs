@@ -542,11 +542,18 @@ async fn invoke_tool(
     // byte-identical buffered JSON envelope below (open/closed). The
     // dispatcher still emits exactly one ADR-6 audit line on either path.
     if wants_sse(&parts) {
-        let events = state
+        return match state
             .dispatcher
             .invoke_streaming_with_bytes(&name, &body, principal, "rest")
-            .await;
-        return sse_response(events);
+            .await
+        {
+            // 200 stream open: frames flow, audit fires at termination.
+            Ok(events) => sse_response(events),
+            // Pre-first-byte failure: no SSE headers flushed yet, so we
+            // can still answer with an ordinary HTTP error (audited once
+            // inside the dispatcher).
+            Err(e) => error_response(&e, Some(trace_id.as_str())),
+        };
     }
 
     match state

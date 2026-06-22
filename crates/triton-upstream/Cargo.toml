@@ -10,6 +10,7 @@ publish = false
 triton-core = { path = "../triton-core" }
 triton-identity = { path = "../triton-identity" }
 async-trait = "0.1"
+futures = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
