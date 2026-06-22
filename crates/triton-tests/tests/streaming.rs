@@ -7,8 +7,21 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use futures::StreamExt;
 use triton_tests::TritonProcess;
 use triton_tests::upstream_fixture::FakeAgent;
+
+/// Spawn a Triton whose `tool` routes to `agent`.
+async fn triton_with_upstream(tool: &str, agent: &FakeAgent) -> TritonProcess {
+    TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        HashMap::from([(
+            "TRITON_STATIC_UPSTREAMS".into(),
+            format!("{tool}={}", agent.host_port()),
+        )]),
+    )
+    .await
+}
 
 /// Audit lines on stdout for `tool` in the `dispatch` phase. Each test
 /// spawns its own `triton`, so the stdout buffer is isolated.
@@ -177,4 +190,151 @@ async fn mcp_ignores_event_stream_accept_and_stays_json() {
     );
     let body: serde_json::Value = resp.json().await.expect("json-rpc body");
     assert_eq!(body["jsonrpc"], "2.0");
+}
+
+/// A genuinely streaming upstream's `tool`/`token`/`done` frames are
+/// relayed incrementally to the client (TTFB measurably precedes the
+/// terminal frame), and the single ADR-6 audit line fires at termination
+/// with `result: ok` and a `ttfb_ms`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_sse_streaming_upstream_relays_incremental_frames() {
+    let agent = FakeAgent::start_streaming().await;
+    let triton = triton_with_upstream("grounded", &agent).await;
+
+    let start = Instant::now();
+    let resp = reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/grounded"))
+        .bearer_auth("dev-token")
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .json(&serde_json::json!({ "q": "hi" }))
+        .send()
+        .await
+        .expect("POST streaming");
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .starts_with("text/event-stream")
+    );
+
+    let mut stream = resp.bytes_stream();
+    let mut first_at: Option<Duration> = None;
+    let mut buf = String::new();
+    while let Some(chunk) = stream.next().await {
+        let bytes = chunk.expect("stream chunk");
+        if first_at.is_none() {
+            first_at = Some(start.elapsed());
+        }
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+    }
+    let total = start.elapsed();
+    let ttfb = first_at.expect("at least one chunk");
+
+    assert!(buf.contains("event: tool"), "missing tool frame:\n{buf}");
+    assert!(buf.contains("event: token"), "missing token frame:\n{buf}");
+    assert!(buf.contains("event: done"), "missing done frame:\n{buf}");
+    assert!(
+        buf.contains("\"echoed\""),
+        "done frame should echo the body:\n{buf}"
+    );
+    // Incremental: the first byte arrives well before the stream closes
+    // (the fake agent spaces frames ~15ms apart).
+    assert!(
+        total > ttfb + Duration::from_millis(20),
+        "frames should arrive over time; ttfb {ttfb:?} total {total:?}"
+    );
+
+    let line = await_single_dispatch(&triton, "grounded").await;
+    assert!(
+        line.contains("\"result\":\"ok\""),
+        "clean stream should audit ok:\n{line}"
+    );
+    assert!(
+        line.contains("\"ttfb_ms\""),
+        "streamed dispatch should record ttfb_ms:\n{line}"
+    );
+}
+
+/// An upstream that closes the stream before sending a terminal `done`
+/// is audited once as an error with the `upstream_truncated` detail.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_sse_upstream_truncation_audits_error_once() {
+    let agent = FakeAgent::start_streaming_truncated().await;
+    let triton = triton_with_upstream("grounded", &agent).await;
+
+    let resp = reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/grounded"))
+        .bearer_auth("dev-token")
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .json(&serde_json::json!({ "q": "hi" }))
+        .send()
+        .await
+        .expect("POST streaming");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.expect("body");
+    assert!(body.contains("event: token"), "expected progress frames");
+    assert!(
+        !body.contains("event: done"),
+        "truncated upstream must not produce a done frame:\n{body}"
+    );
+
+    let line = await_single_dispatch(&triton, "grounded").await;
+    assert!(
+        line.contains("\"result\":\"error:tool\""),
+        "truncation should audit as a tool error:\n{line}"
+    );
+    assert!(
+        line.contains("\"status_detail\":\"upstream_truncated\""),
+        "truncation should carry the upstream_truncated detail:\n{line}"
+    );
+}
+
+/// When the client disconnects mid-stream, the dispatcher still emits
+/// exactly one audit line — distinctly marked as a client disconnect,
+/// not a server error.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_sse_client_disconnect_audits_distinctly() {
+    let agent = FakeAgent::start_streaming().await;
+    let triton = triton_with_upstream("grounded", &agent).await;
+
+    {
+        let resp = reqwest::Client::new()
+            .post(triton.rest_url("/v1/tools/grounded"))
+            .bearer_auth("dev-token")
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .json(&serde_json::json!({ "q": "hi" }))
+            .send()
+            .await
+            .expect("POST streaming");
+        assert_eq!(resp.status(), 200);
+        // Read only the first chunk (the first frame), then drop the
+        // response — the remaining frames are still ~15ms apart, so the
+        // upstream stream is mid-flight when we bail.
+        let mut stream = resp.bytes_stream();
+        let _first = stream.next().await.expect("first chunk").expect("ok");
+        // `stream` (and the underlying connection) dropped here.
+    }
+
+    // Poll for the single disconnect-marked audit line.
+    let start = Instant::now();
+    let line = loop {
+        let lines = dispatch_lines_for(&triton, "grounded");
+        if let Some(l) = lines.first() {
+            assert_eq!(lines.len(), 1, "exactly one audit line, got:\n{lines:#?}");
+            break l.clone();
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!(
+                "no disconnect audit line within 3s; stdout:\n{:#?}",
+                triton.stdout_snapshot()
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert!(
+        line.contains("\"status_detail\":\"client_disconnect\""),
+        "client disconnect should be marked distinctly:\n{line}"
+    );
 }

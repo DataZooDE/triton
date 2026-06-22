@@ -6,11 +6,14 @@
 //! HashiCorp stack; `StaticUpstream` dispatches straight to a fixed
 //! `host:port`, so only [`FakeAgent`] is needed.
 
+use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::Json;
 use axum::Router;
+use axum::body::Body;
 use axum::extract::State;
 use axum::http::header::AUTHORIZATION;
 use axum::http::{HeaderMap, StatusCode};
@@ -51,6 +54,15 @@ enum AgentMode {
     AlwaysFail,
     FailingThenRecover,
     Returning,
+    /// Emit a `text/event-stream` response — `tool`/`token` progress
+    /// frames followed by a terminal `done`, each flushed separately
+    /// with a small delay so a consumer observes them incrementally
+    /// (issue #132). The `done` payload echoes the request body under
+    /// `echoed`, like [`AgentMode::Echo`].
+    Streaming,
+    /// Stream a couple of frames, then drop the connection **without** a
+    /// terminal `done`/`error` — exercises the upstream-truncation path.
+    StreamingTruncated,
 }
 
 impl FakeAgent {
@@ -71,6 +83,18 @@ impl FakeAgent {
     /// the tool result.
     pub async fn start_returning(body: Value) -> Self {
         Self::start(AgentMode::Returning, 0, Some(body)).await
+    }
+
+    /// Emit an incremental SSE stream (`tool`/`token`/`done`). See
+    /// [`AgentMode::Streaming`].
+    pub async fn start_streaming() -> Self {
+        Self::start(AgentMode::Streaming, 0, None).await
+    }
+
+    /// Emit a couple of SSE frames then drop without a terminal event.
+    /// See [`AgentMode::StreamingTruncated`].
+    pub async fn start_streaming_truncated() -> Self {
+        Self::start(AgentMode::StreamingTruncated, 0, None).await
     }
 
     async fn start(mode: AgentMode, fail_first: u32, fixed_response: Option<Value>) -> Self {
@@ -148,7 +172,10 @@ async fn handler(
 
     let mode = *state.mode.lock().unwrap();
     let should_fail = match mode {
-        AgentMode::Echo | AgentMode::Returning => false,
+        AgentMode::Echo
+        | AgentMode::Returning
+        | AgentMode::Streaming
+        | AgentMode::StreamingTruncated => false,
         AgentMode::AlwaysFail => true,
         AgentMode::FailingThenRecover => {
             let mut left = state.failures_remaining.lock().unwrap();
@@ -168,10 +195,51 @@ async fn handler(
             .into_response();
     }
 
-    if let AgentMode::Returning = mode {
-        let body = state.fixed_response.clone().unwrap_or(Value::Null);
-        return Json(body).into_response();
+    match mode {
+        AgentMode::Returning => {
+            let body = state.fixed_response.clone().unwrap_or(Value::Null);
+            Json(body).into_response()
+        }
+        AgentMode::Streaming => sse_response(streaming_frames(&value, true)),
+        AgentMode::StreamingTruncated => sse_response(streaming_frames(&value, false)),
+        _ => Json(json!({ "echoed": value })).into_response(),
     }
+}
 
-    Json(json!({ "echoed": value })).into_response()
+/// The SSE frames a streaming agent emits. When `terminal` is true the
+/// sequence ends with a `done` carrying `{ "echoed": <body> }` (mirroring
+/// the echo agent); otherwise it stops after the progress frames to
+/// simulate an upstream that closed early.
+fn streaming_frames(body: &Value, terminal: bool) -> Vec<String> {
+    let mut frames = vec![
+        "event: tool\ndata: {\"step\":\"search\",\"hits\":30}\n\n".to_string(),
+        "event: tool\ndata: {\"step\":\"acl\",\"kept\":12}\n\n".to_string(),
+        "event: token\ndata: {\"delta\":\"Hello \"}\n\n".to_string(),
+        "event: token\ndata: {\"delta\":\"world\"}\n\n".to_string(),
+    ];
+    if terminal {
+        let done = json!({ "echoed": body });
+        frames.push(format!("event: done\ndata: {done}\n\n"));
+    }
+    frames
+}
+
+/// Build a `text/event-stream` response that flushes each frame
+/// separately with a ~15ms gap, so a consumer measurably observes the
+/// frames arriving over time (TTFB < total).
+fn sse_response(frames: Vec<String>) -> axum::response::Response {
+    let body = Body::from_stream(futures::stream::unfold(
+        (frames.into_iter(), false),
+        |(mut it, started)| async move {
+            if started {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+            it.next()
+                .map(|frame| (Ok::<_, Infallible>(frame.into_bytes()), (it, true)))
+        },
+    ));
+    axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+        .body(body)
+        .unwrap()
 }
