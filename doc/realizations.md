@@ -453,6 +453,15 @@ a trap the next developer should not have to step in.
   rides as a terminal `event: error` frame (status already sent) and
   audits at termination. `invoke_streaming` returning
   `Result<Stream, _>` is what makes the boundary expressible.
+- **Dart (Explorer): don't `.transform(utf8.decoder)` a Dio stream
+  body.** Dio's `ResponseType.stream` body is `Stream<Uint8List>`;
+  `utf8.decoder` is a `StreamTransformer<List<int>, String>`, and the
+  runtime rejects the variance (`Utf8Decoder is not a subtype of
+  StreamTransformer<Uint8List, String>`). Buffer the raw bytes, find the
+  ASCII frame boundaries (`\n\n` / `\r\n\r\n`) in the byte buffer, and
+  `utf8.decode` each complete block — which also avoids splitting a
+  multi-byte char across chunk boundaries. See
+  `apps/explorer/lib/api/sse.dart`.
 
 - **`cargo test -p triton-tests --test <name>` does not necessarily
   rebuild `target/debug/triton`.** The integration-test crate doesn't
