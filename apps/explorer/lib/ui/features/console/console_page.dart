@@ -9,6 +9,7 @@ import '../../../api/a2a_client.dart';
 import '../../../api/mcp_client.dart';
 import '../../../api/models.dart';
 import '../../../api/rest_client.dart';
+import '../../../api/sse.dart';
 import '../../../providers/api_provider.dart';
 import '../../../providers/runtime_provider.dart';
 import '../../../widgets/a2ui/a2ui_renderer.dart';
@@ -96,6 +97,16 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   };
   _Protocol _activeTab = _Protocol.rest;
   bool _sending = false;
+
+  /// SSE streaming toggle (issue #132). When on (REST only today), Send
+  /// negotiates `Accept: text/event-stream` and renders `tool`/`token`
+  /// frames live before the terminal surface.
+  bool _streaming = false;
+
+  /// Live progress lines (`tool` frames) and accumulated `token` deltas
+  /// for the in-flight streamed call.
+  final List<String> _streamProgress = [];
+  final List<String> _streamTokens = [];
 
   @override
   void initState() {
@@ -319,6 +330,11 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
       setState(() => _envelopeError = 'Invalid JSON — fix before sending');
       return;
     }
+    // SSE path (REST only today): stream tool/token frames live.
+    if (_streaming && _protocol == _Protocol.rest) {
+      await _sendStreaming(body);
+      return;
+    }
     final p = _protocol;
     setState(() {
       _sending = true;
@@ -332,6 +348,67 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
     }
     setState(() {
       _results[p] = r;
+      _args = _argsFromBody(p, body);
+      _sending = false;
+      _hasInvokedAtLeastOnce = true;
+    });
+  }
+
+  /// Stream the current REST call (issue #132): consume the SSE frames,
+  /// surfacing `tool` progress and `token` deltas live, then settle the
+  /// response from the terminal `done` (or `error`).
+  Future<void> _sendStreaming(Map<String, dynamic> body) async {
+    const p = _Protocol.rest;
+    setState(() {
+      _sending = true;
+      _activeTab = p;
+      _streamProgress.clear();
+      _streamTokens.clear();
+    });
+    final client = ref.read(restClientProvider);
+    final a2ui = (_selected?.returnsA2ui ?? false) ? _a2uiVersion : null;
+    final sw = Stopwatch()..start();
+    Map<String, dynamic>? doneResult;
+    String? errMsg;
+    try {
+      await for (final f in client.invokeStreaming(
+        _selected!.name,
+        body,
+        a2uiVersion: a2ui,
+      )) {
+        if (!mounted) return;
+        switch (f.type) {
+          case StreamEventType.tool:
+            setState(() => _streamProgress.add(_pretty(f.data)));
+          case StreamEventType.token:
+            setState(() => _streamTokens.add(f.delta ?? ''));
+          case StreamEventType.done:
+            doneResult = (f.data is Map)
+                ? (f.data as Map).cast<String, dynamic>()
+                : null;
+          case StreamEventType.error:
+            errMsg = (f.data is Map && f.data['message'] is String)
+                ? f.data['message'] as String
+                : (f.data?.toString() ?? 'stream error');
+        }
+      }
+    } catch (e) {
+      errMsg = e.toString();
+    }
+    sw.stop();
+    if (!mounted) return;
+    // Match the buffered shape so the response view renders identically:
+    // the buffered REST result is `{ result: <toolresult>, … }`.
+    final result = InvocationResult(
+      raw: doneResult != null
+          ? <String, dynamic>{'result': doneResult}
+          : (errMsg != null ? <String, dynamic>{'error': errMsg} : const {}),
+      statusCode: errMsg == null ? 200 : 502,
+      elapsed: sw.elapsed,
+      error: errMsg,
+    );
+    setState(() {
+      _results[p] = result;
       _args = _argsFromBody(p, body);
       _sending = false;
       _hasInvokedAtLeastOnce = true;
@@ -782,6 +859,17 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                 label: const Text('Send to all 3'),
                 onPressed: _sending ? null : _sendAll,
               ),
+              if (_protocol == _Protocol.rest) ...[
+                const SizedBox(width: 12),
+                FilterChip(
+                  avatar: const Icon(Icons.stream, size: 16),
+                  label: const Text('Stream'),
+                  selected: _streaming,
+                  onSelected: _sending
+                      ? null
+                      : (v) => setState(() => _streaming = v),
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 24),
@@ -807,6 +895,10 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
             onSelectionChanged: (s) => setState(() => _activeTab = s.first),
           ),
           const SizedBox(height: 12),
+          if (_streamProgress.isNotEmpty || _streamTokens.isNotEmpty) ...[
+            _streamLiveView(context),
+            const SizedBox(height: 12),
+          ],
           _responseView(context, result),
 
           // Chat-channel degradation for A2UI tools.
@@ -823,6 +915,40 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
           const Divider(height: 1),
           const _ErrorTaxonomySection(),
         ],
+      ),
+    );
+  }
+
+  /// Live view of the in-flight SSE stream: `tool` progress lines and the
+  /// accumulated `token` deltas, shown above the settled response.
+  Widget _streamLiveView(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Icon(Icons.stream, size: 16),
+                const SizedBox(width: 6),
+                Text(
+                  'Live stream',
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+              ],
+            ),
+            if (_streamProgress.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              for (final p in _streamProgress)
+                Text('• $p', style: Theme.of(context).textTheme.bodySmall),
+            ],
+            if (_streamTokens.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              SelectableText(_streamTokens.join()),
+            ],
+          ],
+        ),
       ),
     );
   }
