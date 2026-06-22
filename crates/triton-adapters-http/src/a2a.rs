@@ -21,12 +21,15 @@ use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use triton_core::a2ui::{build_envelope, extract_surface};
+use triton_core::stream::{Finalized, Termination};
 use triton_core::{A2uiVersion, Dispatcher, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
+use crate::rest::{sse_response, wants_sse};
 
 /// Upper bound on retained tasks. Every inbound A2A call records one
 /// entry; without a cap the map grows for the life of the process
@@ -210,6 +213,40 @@ async fn message_send(State(state): State<A2aState>, parts: Parts, body: Bytes) 
     let tool_name = first.data.tool;
     let args = first.data.args;
     let trace_id = principal.trace_id.clone();
+
+    // Content negotiation (issue #132): `Accept: text/event-stream`
+    // streams the dispatch as SSE (`tool`/`token`/`done`/`error`
+    // frames). The task store is recorded at stream termination via a
+    // `Finalized` finalizer (Completed on a clean `done`, else Failed);
+    // every other caller keeps the buffered Message response below.
+    if wants_sse(&parts) {
+        return match state
+            .dispatcher
+            .invoke_streaming(&tool_name, args, principal, "a2a", requested)
+            .await
+        {
+            Ok(events) => {
+                let tasks = state.tasks.clone();
+                let task_trace = trace_id.clone();
+                let finalized = Finalized::new(events, move |term: Termination, _timing| {
+                    let task_state = if term.is_success() {
+                        TaskState::Completed
+                    } else {
+                        TaskState::Failed
+                    };
+                    tasks.record(&task_trace, task_state);
+                });
+                sse_response(finalized.boxed())
+            }
+            // Pre-first-byte failure: no SSE headers flushed yet, so we
+            // can answer with the ordinary A2A error Message (audited
+            // once inside the dispatcher).
+            Err(e) => {
+                state.tasks.record(&trace_id, TaskState::Failed);
+                a2a_error_with_trace(&e, &trace_id)
+            }
+        };
+    }
 
     match state
         .dispatcher

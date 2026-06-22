@@ -232,7 +232,6 @@ impl Dispatcher {
         protocol: &str,
         a2ui: Option<crate::A2uiVersion>,
     ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
-        let started = Instant::now();
         let args: Value = if body.is_empty() {
             Value::Object(Default::default())
         } else {
@@ -244,6 +243,22 @@ impl Dispatcher {
                 }
             }
         };
+        self.invoke_streaming(tool_name, args, principal, protocol, a2ui)
+            .await
+    }
+
+    /// Streaming dispatch on pre-parsed args (the A2A path), the
+    /// counterpart of [`Self::invoke`]. See
+    /// [`Self::invoke_streaming_with_bytes`] for the contract.
+    pub async fn invoke_streaming(
+        &self,
+        tool_name: &str,
+        args: Value,
+        principal: Principal,
+        protocol: &str,
+        a2ui: Option<crate::A2uiVersion>,
+    ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        let started = Instant::now();
 
         // In-process tools (and the no-upstream fallback) are not
         // streaming sources: run them buffered, audit now, and emit a

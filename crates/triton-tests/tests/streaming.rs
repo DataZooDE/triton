@@ -381,3 +381,92 @@ async fn rest_sse_with_a2ui_wraps_terminal_done_in_envelope() {
         "clean A2UI stream should audit ok:\n{line}"
     );
 }
+
+/// The A2A surface streams too (issue #132): `POST /message:send` with
+/// `Accept: text/event-stream` relays `tool`/`token`/`done` frames, and
+/// when `metadata.a2ui_version` is set the terminal `done` carries the
+/// built envelope. Exactly one `a2a` dispatch audit line fires.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a2a_sse_streams_frames_and_wraps_a2ui_done() {
+    let agent = FakeAgent::start_streaming_surface().await;
+    let triton = triton_with_upstream("grounded", &agent).await;
+
+    let resp = reqwest::Client::new()
+        .post(triton.a2a_url("/message:send"))
+        .bearer_auth("dev-token")
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .json(&serde_json::json!({
+            "parts": [ { "data": { "tool": "grounded", "args": { "q": "hi" } } } ],
+            "metadata": { "a2ui_version": "v0.9" }
+        }))
+        .send()
+        .await
+        .expect("POST /message:send streaming");
+
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .starts_with("text/event-stream"),
+        "A2A streaming should be an event stream"
+    );
+    let body = resp.text().await.expect("body");
+    assert!(body.contains("event: tool"), "missing tool frame:\n{body}");
+    assert!(
+        body.contains("event: token"),
+        "missing token frame:\n{body}"
+    );
+    assert!(body.contains("event: done"), "missing done frame:\n{body}");
+    assert!(
+        body.contains("\"version\":\"0.9\""),
+        "A2A done should carry the v0.9 envelope:\n{body}"
+    );
+
+    let line = await_single_dispatch(&triton, "grounded").await;
+    assert!(
+        line.contains("\"protocol\":\"a2a\""),
+        "audit should record the a2a protocol:\n{line}"
+    );
+    assert!(
+        line.contains("\"result\":\"ok\""),
+        "clean A2A stream should audit ok:\n{line}"
+    );
+}
+
+/// A2A pre-first-byte failure (open breaker / unreachable upstream) when
+/// SSE was negotiated still answers with the ordinary A2A error Message,
+/// not a half-open event stream.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a2a_sse_pre_first_byte_error_is_plain_message() {
+    // No upstream registered for this tool → unknown-tool validation.
+    let triton = TritonProcess::spawn_with(Duration::from_secs(5)).await;
+
+    let resp = reqwest::Client::new()
+        .post(triton.a2a_url("/message:send"))
+        .bearer_auth("dev-token")
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .json(&serde_json::json!({
+            "parts": [ { "data": { "tool": "nope", "args": {} } } ]
+        }))
+        .send()
+        .await
+        .expect("POST /message:send");
+
+    // Unknown tool with no upstream is a validation error (400), and the
+    // body is the ordinary A2A error JSON — never an SSE stream.
+    assert_eq!(resp.status(), 400);
+    let ct = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !ct.starts_with("text/event-stream"),
+        "pre-first-byte error must not open an event stream, got {ct:?}"
+    );
+    let body: serde_json::Value = resp.json().await.expect("json error");
+    assert_eq!(body["error"], "validation");
+}

@@ -572,7 +572,8 @@ async fn invoke_tool(
 /// True when any `Accept` media range names `text/event-stream` — the
 /// caller wants the SSE response path (issue #132). Kept separate from
 /// [`parse_a2ui_accept`] so the A2UI media-type negotiation is untouched.
-fn wants_sse(parts: &Parts) -> bool {
+/// Shared with the A2A adapter.
+pub(crate) fn wants_sse(parts: &Parts) -> bool {
     parts.headers.get_all(ACCEPT).iter().any(|v| {
         v.to_str().is_ok_and(|s| {
             s.split(',')
@@ -586,7 +587,8 @@ fn wants_sse(parts: &Parts) -> bool {
 /// A ~15s keep-alive comment frame keeps proxies (kamal-proxy, nginx)
 /// from dropping a connection that idles while an upstream LLM
 /// synthesises — it never fires once the stream has terminated.
-fn sse_response(events: futures::stream::BoxStream<'static, StreamEvent>) -> Response {
+/// Shared with the A2A adapter.
+pub(crate) fn sse_response(events: futures::stream::BoxStream<'static, StreamEvent>) -> Response {
     let frames = events.map(|ev| {
         Ok::<Event, std::convert::Infallible>(
             Event::default()
