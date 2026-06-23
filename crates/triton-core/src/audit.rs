@@ -90,6 +90,13 @@ pub struct AuditRecord<'a> {
     /// closed set; for dashboards/diagnosis only. Omitted when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<&'static str>,
+    /// Time-to-first-event in milliseconds, for streamed (SSE) dispatches
+    /// only (issue #132). `latency_ms` measures the *whole* stream to
+    /// termination; this captures how quickly the first byte reached the
+    /// client. Omitted on buffered dispatches so their lines stay
+    /// byte-identical.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttfb_ms: Option<u64>,
     pub trace_id: &'a str,
 }
 
@@ -143,6 +150,8 @@ pub struct AuditEntry {
     pub status_label: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ttfb_ms: Option<u64>,
     pub trace_id: String,
 }
 
@@ -164,6 +173,7 @@ impl<'a> From<&AuditRecord<'a>> for AuditEntry {
             status: r.status,
             status_label: r.status_label,
             status_detail: r.status_detail,
+            ttfb_ms: r.ttfb_ms,
             trace_id: r.trace_id.to_string(),
         }
     }

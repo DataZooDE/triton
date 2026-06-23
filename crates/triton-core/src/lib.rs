@@ -21,6 +21,7 @@ pub mod metrics;
 pub mod outbound;
 pub mod principal;
 pub mod ratelimit;
+pub mod stream;
 pub mod tool;
 pub mod trace;
 
@@ -30,6 +31,7 @@ pub use error::TritonError;
 pub use metrics::Metrics;
 pub use outbound::{OutboundCourier, OutboundRequest};
 pub use principal::{Principal, ToolPrincipal};
+pub use stream::{Finalized, StreamEvent, Termination, Timing};
 pub use tool::{Tool, ToolDescriptor, ToolRegistry};
 
 /// A2UI envelope version requested by the caller (FR-A-3). Per ADR-4

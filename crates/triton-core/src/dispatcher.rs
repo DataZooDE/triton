@@ -17,12 +17,15 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
+use futures::StreamExt;
+use futures::stream::{self, BoxStream};
 use serde_json::{Value, json};
 
 use crate::audit::{AuditPhase, AuditRecord, PostOutcome, emit, now_rfc3339};
 use crate::error::TritonError;
 use crate::metrics::Metrics;
 use crate::principal::Principal;
+use crate::stream::{Finalized, StreamEvent, Termination, Timing};
 use crate::tool::{ToolDescriptor, ToolRegistry};
 
 /// Hook the dispatcher calls when the in-process registry doesn't
@@ -48,6 +51,28 @@ pub trait UpstreamDispatch: Send + Sync {
         args: Value,
         principal: &Principal,
     ) -> Result<Value, TritonError>;
+
+    /// Streaming counterpart of [`Self::invoke`] (issue #132).
+    ///
+    /// `Ok(stream)` means the upstream accepted the call and a response
+    /// stream is open (200 headers flushed) — the stream yields typed
+    /// [`StreamEvent`]s terminated by exactly one `Done`/`Error`.
+    /// `Err(e)` is a *pre-first-byte* failure (unknown tool, open
+    /// breaker, connect error, non-2xx) the caller can still surface as
+    /// a normal HTTP error before committing to an SSE response.
+    ///
+    /// The default adapts the buffered [`Self::invoke`] into a single
+    /// terminal `Done` event (or a pre-first-byte `Err`), so the
+    /// in-process registry and non-streaming upstreams need no override.
+    async fn invoke_streaming(
+        &self,
+        tool: &str,
+        args: Value,
+        principal: &Principal,
+    ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        let value = self.invoke(tool, args, principal).await?;
+        Ok(stream::once(async move { StreamEvent::Done(value) }).boxed())
+    }
 
     /// Tool names of upstream agents discoverable right now (the keys
     /// of the `TRITON_STATIC_UPSTREAMS` map). Surfaced by `GET /v1/tools`
@@ -175,6 +200,144 @@ impl Dispatcher {
         self.invoke(tool_name, args, principal, protocol).await
     }
 
+    /// Streaming counterpart of [`Self::invoke_with_bytes`] for the SSE
+    /// response path (issue #132).
+    ///
+    /// `Ok(stream)` is an open response: the stream yields typed
+    /// [`StreamEvent`]s terminated by exactly one `Done`/`Error`, and the
+    /// single ADR-6 dispatch audit line is emitted at **stream
+    /// termination** (clean close, mid-stream error, or client
+    /// disconnect) via a [`Finalized`] combinator — so the audit
+    /// guarantee survives not knowing the outcome until close.
+    ///
+    /// `Err(e)` is a *pre-first-byte* failure (bad JSON, unknown tool,
+    /// open breaker, upstream connect error / non-2xx). It is audited
+    /// inline here, exactly once, and the adapter surfaces it as an
+    /// ordinary HTTP error response (no SSE headers flushed yet).
+    ///
+    /// In-process tools and the no-upstream case don't stream: they run
+    /// buffered, audit immediately (latency == total), and wrap the lone
+    /// result into a one-item stream.
+    ///
+    /// `a2ui` is the caller's negotiated A2UI version (if any). When set,
+    /// the terminal `Done` payload is wrapped into the versioned envelope
+    /// — **before** the audit finalizer, so a tool that advertised A2UI
+    /// but emitted a non-surface turns the terminal into an `Error` that
+    /// the single audit line reflects (the finalizer stays outermost).
+    pub async fn invoke_streaming_with_bytes(
+        &self,
+        tool_name: &str,
+        body: &[u8],
+        principal: Principal,
+        protocol: &str,
+        a2ui: Option<crate::A2uiVersion>,
+    ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        let args: Value = if body.is_empty() {
+            Value::Object(Default::default())
+        } else {
+            match serde_json::from_slice(body) {
+                Ok(v) => v,
+                Err(e) => {
+                    let err = TritonError::Validation(format!("invalid JSON body: {e}"));
+                    return Err(self.fail(tool_name, protocol, &principal, &err, 0));
+                }
+            }
+        };
+        self.invoke_streaming(tool_name, args, principal, protocol, a2ui)
+            .await
+    }
+
+    /// Streaming dispatch on pre-parsed args (the A2A path), the
+    /// counterpart of [`Self::invoke`]. See
+    /// [`Self::invoke_streaming_with_bytes`] for the contract.
+    pub async fn invoke_streaming(
+        &self,
+        tool_name: &str,
+        args: Value,
+        principal: Principal,
+        protocol: &str,
+        a2ui: Option<crate::A2uiVersion>,
+    ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        let started = Instant::now();
+
+        // In-process tools (and the no-upstream fallback) are not
+        // streaming sources: run them buffered, audit now, and emit a
+        // single terminal `Done`. A pre-first-byte error audits inline.
+        if let Some(tool) = self.registry.get(tool_name) {
+            let returns_a2ui = tool.returns_a2ui();
+            let outcome = self.run(tool_name, args, &principal).await;
+            let latency_ms = started.elapsed().as_millis() as u64;
+            self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
+            let value = outcome?;
+            // Mirror the buffered path: only wrap when the tool opted in
+            // AND the caller negotiated A2UI.
+            let done = match (a2ui, returns_a2ui) {
+                (Some(version), true) => done_event_a2ui(value, version),
+                _ => StreamEvent::Done(value),
+            };
+            return Ok(stream::once(async move { done }).boxed());
+        }
+        if self.upstream.is_none() {
+            let outcome = self.run(tool_name, args, &principal).await;
+            let latency_ms = started.elapsed().as_millis() as u64;
+            self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
+            let value = outcome?;
+            return Ok(stream::once(async move { StreamEvent::Done(value) }).boxed());
+        }
+
+        // Upstream path. A 200 stream defers its single audit line to
+        // termination; a pre-first-byte error audits inline and returns.
+        let upstream = self.upstream.as_ref().expect("upstream present");
+        match upstream.invoke_streaming(tool_name, args, &principal).await {
+            Err(e) => Err(self.fail(
+                tool_name,
+                protocol,
+                &principal,
+                &e,
+                started.elapsed().as_millis() as u64,
+            )),
+            Ok(inner) => {
+                // A2UI-wrap the terminal `Done` *inside* the finalizer so
+                // the audit observes the post-transform terminal (an agent
+                // advertised A2UI but emitted a non-surface → Error).
+                let inner = match a2ui {
+                    Some(version) => wrap_stream_a2ui(inner, version),
+                    None => inner,
+                };
+                // Everything the single audit line needs, captured by the
+                // finalizer that fires once at stream termination.
+                let metrics = self.metrics.clone();
+                let env = self.env.clone();
+                let protocol = protocol.to_string();
+                let tool = tool_name.to_string();
+                let sub = principal.sub.clone();
+                let tenant = principal.tenant.clone();
+                let trace_id = principal.trace_id.clone();
+                // Offset from request start to the moment the stream
+                // opened, so `ttfb`/`total` reflect the whole request, not
+                // just the post-200 window the combinator clocks.
+                let open_offset = started.elapsed();
+                let finalized = Finalized::new(inner, move |term: Termination, timing: Timing| {
+                    let total_ms = (open_offset + timing.total).as_millis() as u64;
+                    let ttfb_ms = timing.ttfb.map(|t| (open_offset + t).as_millis() as u64);
+                    emit_stream_audit(StreamAudit {
+                        metrics: &metrics,
+                        env: &env,
+                        protocol: &protocol,
+                        tool: &tool,
+                        sub: &sub,
+                        tenant: &tenant,
+                        trace_id: &trace_id,
+                        term,
+                        total_ms,
+                        ttfb_ms,
+                    });
+                });
+                Ok(finalized.boxed())
+            }
+        }
+    }
+
     /// Dispatch a tool call given pre-parsed args. Emits one audit
     /// line and translates panics inside the tool to
     /// `TritonError::Tool` so the audit guarantee holds.
@@ -245,6 +408,7 @@ impl Dispatcher {
             status,
             status_label: None,
             status_detail: None,
+            ttfb_ms: None,
             trace_id,
         });
     }
@@ -301,6 +465,7 @@ impl Dispatcher {
             status,
             status_label,
             status_detail: detail,
+            ttfb_ms: None,
             trace_id: &principal.trace_id,
         });
     }
@@ -371,6 +536,7 @@ impl Dispatcher {
             status: status_for(error),
             status_label: None,
             status_detail: None,
+            ttfb_ms: None,
             trace_id: &principal.trace_id,
         });
         // Reconstruct a parallel error so we can both audit and return.
@@ -414,6 +580,7 @@ impl Dispatcher {
             status,
             status_label: None,
             status_detail: None,
+            ttfb_ms: None,
             trace_id: &principal.trace_id,
         });
     }
@@ -423,6 +590,91 @@ fn status_for(e: &TritonError) -> u16 {
     // Single source of truth in TritonError so the audit status
     // matches what REST/A2A return (circuit_open → 503, timeout → 504).
     e.http_status()
+}
+
+/// Wrap a single result value into a terminal A2UI [`StreamEvent`],
+/// reusing the same `extract_surface`/`build_envelope` path as the
+/// buffered adapter. A non-surface payload becomes a terminal `Error`
+/// (mirrors the buffered path's `TritonError::Tool`), surfaced to the
+/// client as an `error` frame.
+fn done_event_a2ui(value: Value, version: crate::A2uiVersion) -> StreamEvent {
+    match crate::a2ui::extract_surface(&value) {
+        Ok(surface) => StreamEvent::Done(crate::a2ui::build_envelope(&surface, version.into())),
+        Err(e) => StreamEvent::Error(TritonError::Tool(format!("tool advertised A2UI but {e}"))),
+    }
+}
+
+/// Map a stream's terminal `Done` through [`done_event_a2ui`], passing
+/// `tool`/`token`/`error` frames through untouched. Used inside the
+/// audit finalizer so the wrapped terminal is what gets audited.
+fn wrap_stream_a2ui(
+    inner: BoxStream<'static, StreamEvent>,
+    version: crate::A2uiVersion,
+) -> BoxStream<'static, StreamEvent> {
+    inner
+        .map(move |ev| match ev {
+            StreamEvent::Done(v) => done_event_a2ui(v, version),
+            other => other,
+        })
+        .boxed()
+}
+
+/// Arguments for [`emit_stream_audit`]. Grouped into one struct so the
+/// terminal-state audit emission stays a single call with named fields
+/// rather than a long positional argument list.
+struct StreamAudit<'a> {
+    metrics: &'a Metrics,
+    env: &'a str,
+    protocol: &'a str,
+    tool: &'a str,
+    sub: &'a str,
+    tenant: &'a str,
+    trace_id: &'a str,
+    term: Termination,
+    total_ms: u64,
+    ttfb_ms: Option<u64>,
+}
+
+/// Emit the single ADR-6 dispatch audit line for a *streamed* invocation
+/// at its terminal state (issue #132). Called exactly once by the
+/// [`Finalized`] combinator's finalizer.
+///
+/// The outcome maps to the audit `result`/`status` like so:
+/// clean `Done` → `ok`/200; mid-stream `Error` → `error:tool`/502;
+/// upstream truncation → `error:tool`/502 (`status_detail:
+/// upstream_truncated`); client disconnect → `client_disconnect`/499.
+fn emit_stream_audit(a: StreamAudit<'_>) {
+    let (result, status, status_detail): (String, u16, Option<&'static str>) = match a.term {
+        Termination::Completed => ("ok".to_string(), 200, None),
+        Termination::Failed => ("error:tool".to_string(), 502, None),
+        Termination::Truncated => ("error:tool".to_string(), 502, Some("upstream_truncated")),
+        Termination::Disconnected => (
+            "client_disconnect".to_string(),
+            499,
+            Some("client_disconnect"),
+        ),
+    };
+    a.metrics.record_dispatch(a.tool, a.protocol, &result);
+    a.metrics.record_audit("dispatch");
+    emit(&AuditRecord {
+        kind: "audit",
+        phase: AuditPhase::Dispatch,
+        when: now_rfc3339(),
+        who: a.sub,
+        what: a.tool,
+        env: a.env,
+        result,
+        protocol: a.protocol,
+        tool: a.tool,
+        subject: a.sub,
+        tenant: a.tenant,
+        latency_ms: a.total_ms,
+        status,
+        status_label: None,
+        status_detail,
+        ttfb_ms: a.ttfb_ms,
+        trace_id: a.trace_id,
+    });
 }
 
 /// Stable JSON envelope adapters wrap around the dispatch result.

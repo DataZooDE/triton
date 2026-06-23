@@ -42,3 +42,6 @@ apps/explorer/linux/flutter/ephemeral/
 
 # rodney browser-smoke screenshots
 deploy/local-e2e/.rodney-out/
+
+# Antigravity CLI local session artifacts
+.antigravitycli/

@@ -24,10 +24,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures::stream::{BoxStream, StreamExt};
 use serde_json::Value;
 use tokio::sync::RwLock;
-use triton_core::{Principal, TritonError, UpstreamDispatch};
+use triton_core::stream::{Finalized, Termination};
+use triton_core::{Principal, StreamEvent, TritonError, UpstreamDispatch};
 use triton_identity::JwtSigner;
+
+use crate::sse::decode_sse;
 
 /// Upstream OIDC token TTL (NFR-S-3 cap is enforced by the signer too).
 const TOKEN_TTL: Duration = Duration::from_secs(300);
@@ -86,8 +90,12 @@ pub struct StaticUpstream {
     /// `principal.groups ∩ allowlist`; `None` → caps only. Ignored unless
     /// `forward_principal`.
     forward_group_allowlist: Option<HashSet<String>>,
-    /// FR-U-3/4 per-tool circuit breaker, keyed by tool name.
-    breakers: RwLock<HashMap<String, Mutex<Breaker>>>,
+    /// FR-U-3/4 per-tool circuit breaker, keyed by tool name. Each slot
+    /// is an `Arc<Mutex<…>>` so a streaming dispatch can hand the slot to
+    /// a `Finalized` finalizer that updates the breaker at stream
+    /// termination — including from `Drop` (client disconnect), where we
+    /// cannot `.await` a fresh map lookup (issue #132).
+    breakers: RwLock<HashMap<String, Arc<Mutex<Breaker>>>>,
     /// Consecutive tool-side faults that trip a breaker open.
     circuit_open_after: u32,
     /// How long a tripped breaker stays open before a half-open probe.
@@ -264,17 +272,25 @@ impl StaticUpstream {
             .map_err(|e| TritonError::Tool(format!("upstream {tool} decode: {e}")))
     }
 
-    async fn breaker_check(&self, tool: &str) -> BreakerPermission {
+    /// The per-tool breaker slot, creating it on first use. Returns an
+    /// `Arc` clone so callers (notably a streaming finalizer) can hold the
+    /// slot past the map's `RwLock` guard.
+    async fn breaker_slot(&self, tool: &str) -> Arc<Mutex<Breaker>> {
         // Hot path: read-only borrow first, only upgrade to write
         // if we need to install a new breaker.
         if let Some(slot) = self.breakers.read().await.get(tool) {
-            return slot.lock().unwrap().check_and_arm(self.circuit_cooldown);
+            return slot.clone();
         }
         let mut breakers = self.breakers.write().await;
-        let slot = breakers
+        breakers
             .entry(tool.to_string())
-            .or_insert_with(|| Mutex::new(Breaker::new()));
-        slot.get_mut().unwrap().check_and_arm(self.circuit_cooldown)
+            .or_insert_with(|| Arc::new(Mutex::new(Breaker::new())))
+            .clone()
+    }
+
+    async fn breaker_check(&self, tool: &str) -> BreakerPermission {
+        let slot = self.breaker_slot(tool).await;
+        slot.lock().unwrap().check_and_arm(self.circuit_cooldown)
     }
 
     async fn breaker_update(&self, tool: &str, was_half_open: bool, success: bool) {
@@ -317,6 +333,126 @@ impl UpstreamDispatch for StaticUpstream {
                 .await;
         }
         outcome
+    }
+
+    /// Streaming dispatch (issue #132): POST with
+    /// `Accept: text/event-stream` and relay the agent's SSE frames as
+    /// typed [`StreamEvent`]s.
+    ///
+    /// Pre-first-byte faults (open breaker, unknown tool, connect error,
+    /// non-2xx) return `Err` so the caller can answer with a normal HTTP
+    /// error — and those count against the breaker immediately. Once a
+    /// 200 stream is open, the breaker update moves to a `Finalized`
+    /// finalizer keyed off the stream's *terminal* state, so a healthy
+    /// agent that streams cleanly closes the breaker and a mid-stream
+    /// failure arms it — without the dispatcher needing to know the
+    /// breaker exists.
+    async fn invoke_streaming(
+        &self,
+        tool: &str,
+        args: Value,
+        principal: &Principal,
+    ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        let permission = self.breaker_check(tool).await;
+        if !permission.allowed {
+            return Err(TritonError::Tool(format!(
+                "circuit_open: {tool} (cooldown {}ms)",
+                self.circuit_cooldown.as_millis()
+            )));
+        }
+
+        let ep = match self.map.get(tool) {
+            Some(ep) => ep,
+            None => {
+                // Unknown tool is a caller fault (Validation), never an
+                // agent fault — leave the breaker untouched.
+                return Err(TritonError::Validation(format!("unknown tool: {tool}")));
+            }
+        };
+        let bearer = self.bearer(principal)?;
+
+        let send = self
+            .http
+            .post(format!("http://{ep}/"))
+            .bearer_auth(&bearer)
+            .header("X-Triton-Tool", tool)
+            .header(reqwest::header::ACCEPT, "text/event-stream")
+            .json(&args)
+            .send()
+            .await;
+        let resp = match send {
+            Ok(r) => r,
+            Err(e) => {
+                // Connect/timeout before any byte: an agent fault.
+                self.breaker_update(tool, permission.was_half_open, false)
+                    .await;
+                return Err(if e.is_timeout() {
+                    TritonError::Tool(format!("upstream {tool} timed out"))
+                } else {
+                    TritonError::Tool(format!("upstream {tool} unreachable: {e}"))
+                });
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            self.breaker_update(tool, permission.was_half_open, false)
+                .await;
+            return Err(TritonError::Tool(format!(
+                "upstream {tool} returned {status}"
+            )));
+        }
+
+        // Content negotiation: Triton always *offers* SSE, but a
+        // non-streaming agent may answer with plain JSON. In that case
+        // buffer its body into a single terminal `done` (the outcome is
+        // known immediately, so update the breaker synchronously here)
+        // instead of trying to SSE-decode a JSON document.
+        let is_sse = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.contains("text/event-stream"));
+        if !is_sse {
+            return match resp.json::<Value>().await {
+                Ok(v) => {
+                    self.breaker_update(tool, permission.was_half_open, true)
+                        .await;
+                    Ok(futures::stream::once(async move { StreamEvent::Done(v) }).boxed())
+                }
+                Err(e) => {
+                    self.breaker_update(tool, permission.was_half_open, false)
+                        .await;
+                    Err(TritonError::Tool(format!("upstream {tool} decode: {e}")))
+                }
+            };
+        }
+
+        // 200 + SSE → stream open. Pre-resolve the breaker slot so the
+        // finalizer (which may run from `Drop`) only touches a sync mutex.
+        let slot = self.breaker_slot(tool).await;
+        let open_after = self.circuit_open_after;
+        let was_half_open = permission.was_half_open;
+        let events = decode_sse(resp.bytes_stream());
+        let finalized = Finalized::new(events, move |term, _timing| match term {
+            Termination::Completed => slot
+                .lock()
+                .unwrap()
+                .observe(true, was_half_open, open_after),
+            Termination::Failed | Termination::Truncated => {
+                slot.lock()
+                    .unwrap()
+                    .observe(false, was_half_open, open_after)
+            }
+            // A client disconnect is not the agent's fault: only settle a
+            // half-open probe (so it can't wedge the breaker half-open);
+            // otherwise leave the breaker untouched.
+            Termination::Disconnected => {
+                if was_half_open {
+                    slot.lock().unwrap().observe(false, true, open_after);
+                }
+            }
+        });
+        Ok(finalized.boxed())
     }
 
     async fn list_agents(&self) -> Vec<String> {

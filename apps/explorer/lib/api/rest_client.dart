@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 
 import 'models.dart';
+import 'sse.dart';
 
 /// Talks to Triton's REST adapter (port 8003 in defaults).
 /// Per-method timeouts intentionally short — UI feedback should fire
@@ -172,4 +173,42 @@ class RestClient {
     Map<String, dynamic> args, {
     String? a2uiVersion,
   }) => sendRaw(buildRequest(name, args, a2uiVersion: a2uiVersion));
+
+  /// `POST /v1/tools/:name` negotiating `Accept: text/event-stream`
+  /// (issue #132): yields `tool`/`token`/`done`/`error` frames as the
+  /// upstream produces them. When `a2uiVersion` is set the Accept also
+  /// negotiates A2UI, so the terminal `done` carries the built envelope.
+  /// A pre-first-byte HTTP error is surfaced as a single terminal
+  /// [StreamEventType.error] frame so the caller has one uniform path.
+  Stream<StreamFrame> invokeStreaming(
+    String name,
+    Map<String, dynamic> args, {
+    String? a2uiVersion,
+  }) async* {
+    final accept = StringBuffer('text/event-stream');
+    if (a2uiVersion != null) {
+      accept.write(', application/json+a2ui; version=$a2uiVersion');
+    }
+    try {
+      final resp = await _dio.post<ResponseBody>(
+        '$baseUrl/v1/tools/$name',
+        data: args,
+        options: Options(
+          responseType: ResponseType.stream,
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': accept.toString(),
+            if (token != null && token!.isNotEmpty)
+              'Authorization': 'Bearer $token',
+          },
+        ),
+      );
+      yield* decodeSseFrames(resp.data!.stream);
+    } on DioException catch (e) {
+      final body = (e.response?.data is Map)
+          ? (e.response!.data as Map).cast<String, dynamic>()
+          : <String, dynamic>{'message': e.message ?? e.toString()};
+      yield StreamFrame(StreamEventType.error, body);
+    }
+  }
 }

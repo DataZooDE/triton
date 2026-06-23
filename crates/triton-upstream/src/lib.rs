@@ -11,6 +11,7 @@
 //! emits one `phase: dispatch` line per call around the
 //! `UpstreamDispatch::invoke`, so adapters here never emit audit lines.
 
+pub mod sse;
 pub mod static_upstream;
 
 pub use static_upstream::StaticUpstream;

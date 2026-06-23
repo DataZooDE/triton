@@ -454,8 +454,18 @@ async fn tcp_connect_ok(addr: SocketAddr) -> bool {
 /// (often months out of date). Prefer debug first so the harness never
 /// silently runs stale code. Discovered while debugging PR 4 — see
 /// `doc/realizations.md` §7.
+///
+/// When we fall back to the path walk (no `CARGO_BIN_EXE_triton`, i.e.
+/// `cargo test -p triton-tests …`), cargo does NOT rebuild `triton-bin`,
+/// so the located binary can predate the source under test. That has
+/// bitten us as a "flaky" test: a binary built between two features
+/// silently omits the newer one, and the assertion fails for the wrong
+/// reason. [`assert_binary_fresh`] turns that silent staleness into a
+/// loud, actionable panic.
 fn triton_binary_path() -> PathBuf {
     if let Some(p) = std::env::var_os("CARGO_BIN_EXE_triton") {
+        // Set only when the test lives in the binary's own package; cargo
+        // then guarantees a fresh build, so no staleness check is needed.
         return PathBuf::from(p);
     }
     let mut here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -463,12 +473,120 @@ fn triton_binary_path() -> PathBuf {
         let candidate_debug = here.join("target/debug/triton");
         let candidate_release = here.join("target/release/triton");
         if candidate_debug.exists() {
+            ensure_fresh_binary(&candidate_debug, &here, false);
             return candidate_debug;
         }
         if candidate_release.exists() {
+            ensure_fresh_binary(&candidate_release, &here, true);
             return candidate_release;
         }
         here.pop();
     }
     panic!("could not locate `triton` binary; run `cargo build` first");
+}
+
+/// Make sure the located `triton` binary reflects the code under test.
+///
+/// The harness discovers the binary by path (no `CARGO_BIN_EXE_triton`),
+/// and `cargo test -p triton-tests …` does NOT rebuild `triton-bin` — so
+/// the binary can silently predate a production source change. That has
+/// shown up as a "flaky" test: a binary built between two features omits
+/// the newer one and an assertion fails for the wrong reason (e.g. a
+/// token missing a `groups` claim that the code clearly emits). See
+/// `doc/realizations.md` §7.
+///
+/// Strategy:
+/// 1. A cheap mtime pre-check — if the binary is already newer than every
+///    build input (production `*.rs`, `Cargo.toml`, `Cargo.lock`), it's
+///    fresh; return immediately. This is the common case under
+///    `cargo test --workspace` (which rebuilds the binary up front), so
+///    there is zero overhead there.
+/// 2. Otherwise defer to cargo's own **content-hash** fingerprinting:
+///    run `cargo build` for the matching profile once. A bare
+///    `touch`/`git checkout` that bumps mtime without changing bytes is a
+///    fast no-op (so we never false-positive); genuinely-changed code is
+///    rebuilt before the harness spawns it. The build runs at most once
+///    per test process.
+///
+/// `release` selects the profile so a stale *release* binary is rebuilt
+/// with `--release` rather than silently left in place behind a debug
+/// rebuild (the harness prefers debug; release is only reached when no
+/// debug binary exists).
+fn ensure_fresh_binary(bin: &std::path::Path, workspace_root: &std::path::Path, release: bool) {
+    if let Ok(bin_mtime) = bin.metadata().and_then(|m| m.modified()) {
+        let mut newest: Option<std::time::SystemTime> = None;
+        newest_source_mtime(&workspace_root.join("crates"), &mut newest);
+        // Manifest/lockfile changes (deps, features) also invalidate the
+        // binary but aren't `*.rs`, so fold the workspace root inputs in.
+        for f in ["Cargo.toml", "Cargo.lock"] {
+            fold_mtime(&workspace_root.join(f), &mut newest);
+        }
+        if newest.is_none_or(|src| bin_mtime >= src) {
+            return; // binary is at least as new as every input → fresh
+        }
+    }
+
+    static BUILT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    let outcome = BUILT.get_or_init(|| {
+        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let mut args = vec!["build", "-p", "triton-bin"];
+        if release {
+            args.push("--release");
+        }
+        let out = Command::new(cargo)
+            .args(&args)
+            .output()
+            .map_err(|e| format!("spawning `cargo build {}`: {e}", args.join(" ")))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&out.stderr).into_owned())
+        }
+    });
+    if let Err(e) = outcome {
+        panic!(
+            "the `triton` binary looked stale and rebuilding it failed:\n{e}\n\
+             (run `cargo build -p triton-bin` yourself; see doc/realizations.md §7)"
+        );
+    }
+}
+
+/// Fold a single file's mtime into `newest` (best-effort; missing or
+/// unreadable files are ignored).
+fn fold_mtime(path: &std::path::Path, newest: &mut Option<std::time::SystemTime>) {
+    if let Ok(mtime) = path.metadata().and_then(|m| m.modified())
+        && newest.is_none_or(|n| mtime > n)
+    {
+        *newest = Some(mtime);
+    }
+}
+
+/// Recursively track the newest mtime among build inputs (`*.rs` and
+/// per-crate `Cargo.toml`) under `dir`, skipping `target` (build output)
+/// and the `triton-tests` crate itself (the binary doesn't depend on it,
+/// so editing a test/fixture must not read as a stale binary).
+/// Best-effort: unreadable entries are skipped.
+fn newest_source_mtime(dir: &std::path::Path, newest: &mut Option<std::time::SystemTime>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_dir() {
+            if path
+                .file_name()
+                .is_some_and(|n| n == "target" || n == "triton-tests")
+            {
+                continue;
+            }
+            newest_source_mtime(&path, newest);
+        } else if (path.extension().is_some_and(|e| e == "rs")
+            || path.file_name().is_some_and(|n| n == "Cargo.toml"))
+            && let Ok(mtime) = entry.metadata().and_then(|m| m.modified())
+            && newest.is_none_or(|n| mtime > n)
+        {
+            *newest = Some(mtime);
+        }
+    }
 }
