@@ -475,6 +475,22 @@ a trap the next developer should not have to step in.
   `cargo build --bin triton` recursively hits a target-lock deadlock
   inside cargo — not worth doing.) Discovered in PR 4.
 
+  **Self-heal (issue #132 follow-up).** This trap masqueraded as a
+  *flaky* test: a `triton` binary built between two features silently
+  omits the newer one, so an assertion fails for the wrong reason (the
+  symptom that bit `forward_principal` — a minted token missing its
+  `groups` claim because the spawned binary predated #131). The harness
+  now guards against it in `triton_binary_path` →
+  `ensure_fresh_binary`: a cheap mtime pre-check (binary newer than every
+  production `*.rs` under `crates/`, excluding `triton-tests` itself →
+  fresh, zero overhead — the `--workspace` case), and on *suspected*
+  staleness it runs `cargo build -p triton-bin` once per test process.
+  Crucially it defers the actual decision to cargo's **content-hash**
+  fingerprint, so a bare `touch`/`git checkout` that bumps mtime without
+  changing bytes is a fast no-op rather than a false failure. The
+  build.rs deadlock above doesn't apply — this runs at test *runtime*,
+  after cargo has released the compile lock.
+
 - **Integration-test harness MUST prefer `target/debug/triton` over
   `target/release/triton`.** `cargo test` rebuilds the debug binary;
   the release binary is whatever was last produced by
