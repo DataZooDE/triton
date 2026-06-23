@@ -473,11 +473,11 @@ fn triton_binary_path() -> PathBuf {
         let candidate_debug = here.join("target/debug/triton");
         let candidate_release = here.join("target/release/triton");
         if candidate_debug.exists() {
-            ensure_fresh_binary(&candidate_debug, &here);
+            ensure_fresh_binary(&candidate_debug, &here, false);
             return candidate_debug;
         }
         if candidate_release.exists() {
-            ensure_fresh_binary(&candidate_release, &here);
+            ensure_fresh_binary(&candidate_release, &here, true);
             return candidate_release;
         }
         here.pop();
@@ -497,30 +497,46 @@ fn triton_binary_path() -> PathBuf {
 ///
 /// Strategy:
 /// 1. A cheap mtime pre-check — if the binary is already newer than every
-///    production source, it's fresh; return immediately. This is the
-///    common case under `cargo test --workspace` (which rebuilds the
-///    binary up front), so there is zero overhead there.
+///    build input (production `*.rs`, `Cargo.toml`, `Cargo.lock`), it's
+///    fresh; return immediately. This is the common case under
+///    `cargo test --workspace` (which rebuilds the binary up front), so
+///    there is zero overhead there.
 /// 2. Otherwise defer to cargo's own **content-hash** fingerprinting:
-///    run `cargo build -p triton-bin` once. A bare `touch`/`git checkout`
-///    that bumps mtime without changing bytes is a fast no-op (so we never
-///    false-positive); genuinely-changed code is rebuilt before the
-///    harness spawns it. The build runs at most once per test process.
-fn ensure_fresh_binary(bin: &std::path::Path, workspace_root: &std::path::Path) {
+///    run `cargo build` for the matching profile once. A bare
+///    `touch`/`git checkout` that bumps mtime without changing bytes is a
+///    fast no-op (so we never false-positive); genuinely-changed code is
+///    rebuilt before the harness spawns it. The build runs at most once
+///    per test process.
+///
+/// `release` selects the profile so a stale *release* binary is rebuilt
+/// with `--release` rather than silently left in place behind a debug
+/// rebuild (the harness prefers debug; release is only reached when no
+/// debug binary exists).
+fn ensure_fresh_binary(bin: &std::path::Path, workspace_root: &std::path::Path, release: bool) {
     if let Ok(bin_mtime) = bin.metadata().and_then(|m| m.modified()) {
         let mut newest: Option<std::time::SystemTime> = None;
         newest_source_mtime(&workspace_root.join("crates"), &mut newest);
+        // Manifest/lockfile changes (deps, features) also invalidate the
+        // binary but aren't `*.rs`, so fold the workspace root inputs in.
+        for f in ["Cargo.toml", "Cargo.lock"] {
+            fold_mtime(&workspace_root.join(f), &mut newest);
+        }
         if newest.is_none_or(|src| bin_mtime >= src) {
-            return; // binary is at least as new as every source → fresh
+            return; // binary is at least as new as every input → fresh
         }
     }
 
     static BUILT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
     let outcome = BUILT.get_or_init(|| {
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+        let mut args = vec!["build", "-p", "triton-bin"];
+        if release {
+            args.push("--release");
+        }
         let out = Command::new(cargo)
-            .args(["build", "-p", "triton-bin"])
+            .args(&args)
             .output()
-            .map_err(|e| format!("spawning `cargo build -p triton-bin`: {e}"))?;
+            .map_err(|e| format!("spawning `cargo build {}`: {e}", args.join(" ")))?;
         if out.status.success() {
             Ok(())
         } else {
@@ -535,10 +551,21 @@ fn ensure_fresh_binary(bin: &std::path::Path, workspace_root: &std::path::Path) 
     }
 }
 
-/// Recursively track the newest mtime among `*.rs` files under `dir`,
-/// skipping `target` (build output) and the `triton-tests` crate itself
-/// (the binary doesn't depend on it, so editing a test/fixture must not
-/// read as a stale binary). Best-effort: unreadable entries are skipped.
+/// Fold a single file's mtime into `newest` (best-effort; missing or
+/// unreadable files are ignored).
+fn fold_mtime(path: &std::path::Path, newest: &mut Option<std::time::SystemTime>) {
+    if let Ok(mtime) = path.metadata().and_then(|m| m.modified())
+        && newest.is_none_or(|n| mtime > n)
+    {
+        *newest = Some(mtime);
+    }
+}
+
+/// Recursively track the newest mtime among build inputs (`*.rs` and
+/// per-crate `Cargo.toml`) under `dir`, skipping `target` (build output)
+/// and the `triton-tests` crate itself (the binary doesn't depend on it,
+/// so editing a test/fixture must not read as a stale binary).
+/// Best-effort: unreadable entries are skipped.
 fn newest_source_mtime(dir: &std::path::Path, newest: &mut Option<std::time::SystemTime>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -554,7 +581,8 @@ fn newest_source_mtime(dir: &std::path::Path, newest: &mut Option<std::time::Sys
                 continue;
             }
             newest_source_mtime(&path, newest);
-        } else if path.extension().is_some_and(|e| e == "rs")
+        } else if (path.extension().is_some_and(|e| e == "rs")
+            || path.file_name().is_some_and(|n| n == "Cargo.toml"))
             && let Ok(mtime) = entry.metadata().and_then(|m| m.modified())
             && newest.is_none_or(|n| mtime > n)
         {

@@ -14,6 +14,15 @@ use futures::Stream;
 use futures::stream::{self, BoxStream, StreamExt};
 use triton_core::StreamEvent;
 
+/// Cap on the unterminated (partial-frame) buffer. A well-behaved agent
+/// closes every frame with a blank line well under this; an upstream that
+/// streams bytes without a boundary would otherwise grow the buffer until
+/// OOM. On overflow we emit a terminal error and stop — Triton is an
+/// ingress gateway and must not let a single upstream exhaust its memory.
+/// 1 MiB is generous for an A2UI `done` envelope (UI components, not
+/// rasterised assets, which are produced server-side, not streamed).
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
 /// Internal accumulator threaded through [`futures::stream::unfold`].
 struct Decoder<S> {
     inner: S,
@@ -50,6 +59,19 @@ where
                 Some(Ok(chunk)) => {
                     st.buf.extend_from_slice(chunk.as_ref());
                     drain_frames(&mut st.buf, &mut st.pending);
+                    // After draining complete frames, whatever remains is a
+                    // single in-progress frame. If it has blown past the cap
+                    // the upstream is streaming without a boundary — fail the
+                    // stream rather than buffer unboundedly.
+                    if st.buf.len() > MAX_FRAME_BYTES {
+                        st.done = true;
+                        st.buf.clear();
+                        st.pending.push_back(StreamEvent::Error(
+                            triton_core::TritonError::Tool(format!(
+                                "upstream SSE frame exceeded {MAX_FRAME_BYTES} bytes without a boundary"
+                            )),
+                        ));
+                    }
                 }
                 Some(Err(e)) => {
                     // Transport fault after the stream opened: surface a
@@ -175,6 +197,24 @@ mod tests {
         let evs = collect(vec!["event: done\ndata: {\"ok\":true}"]).await;
         assert_eq!(evs.len(), 1);
         assert!(matches!(evs[0], StreamEvent::Done(_)));
+    }
+
+    #[tokio::test]
+    async fn caps_an_unbounded_frame_with_a_terminal_error() {
+        // An upstream that streams bytes without ever closing a frame must
+        // not grow the buffer without limit: we cap it and emit an error.
+        let huge = "x".repeat(MAX_FRAME_BYTES + 1024);
+        let evs = collect(vec![Box::leak(
+            format!("event: tool\ndata: {huge}").into_boxed_str(),
+        )])
+        .await;
+        assert_eq!(evs.len(), 1);
+        match &evs[0] {
+            StreamEvent::Error(e) => {
+                assert!(e.to_string().contains("exceeded"), "got {e}")
+            }
+            other => panic!("expected a terminal error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

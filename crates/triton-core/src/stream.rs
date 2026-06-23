@@ -171,6 +171,11 @@ pub struct Finalized<F: FnOnce(Termination, Timing)> {
     finalizer: Option<F>,
     started: Instant,
     first_at: Option<Instant>,
+    /// Set once a terminal `Done`/`Error` has been yielded. The stream
+    /// ends immediately after — a terminal event *means* close, so we
+    /// never relay events an upstream emits after its own terminal
+    /// (which would arrive under an already-settled audit/breaker).
+    terminated: bool,
 }
 
 impl<F: FnOnce(Termination, Timing)> Finalized<F> {
@@ -182,6 +187,7 @@ impl<F: FnOnce(Termination, Timing)> Finalized<F> {
             finalizer: Some(finalizer),
             started: Instant::now(),
             first_at: None,
+            terminated: false,
         }
     }
 
@@ -205,6 +211,12 @@ impl<F: FnOnce(Termination, Timing) + Unpin> Stream for Finalized<F> {
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
+        // A terminal event already closed the stream: end it and stop
+        // polling the inner stream (so post-terminal upstream frames are
+        // never relayed under a settled audit/breaker).
+        if this.terminated {
+            return Poll::Ready(None);
+        }
         match this.inner.poll_next_unpin(cx) {
             Poll::Ready(Some(ev)) => {
                 if this.first_at.is_none() {
@@ -216,6 +228,7 @@ impl<F: FnOnce(Termination, Timing) + Unpin> Stream for Finalized<F> {
                         _ => Termination::Failed,
                     };
                     this.fire(term);
+                    this.terminated = true;
                 }
                 Poll::Ready(Some(ev))
             }
@@ -350,6 +363,31 @@ mod tests {
             }
             drop(s);
             assert_eq!(count, 3, "all three events should pass through");
+            assert_eq!(*seen.lock().unwrap(), vec![Termination::Completed]);
+        }
+
+        #[tokio::test]
+        async fn ends_after_terminal_and_drops_post_terminal_events() {
+            // A misbehaving upstream emits frames AFTER its own `done`.
+            // Those must NOT be relayed — the terminal closes the stream.
+            let (seen, fin) = capture();
+            let inner = events(vec![
+                StreamEvent::Token("hi".into()),
+                StreamEvent::Done(json!({ "ok": true })),
+                StreamEvent::Token("leaked".into()),
+                StreamEvent::Tool(json!({ "late": true })),
+            ]);
+            let mut s = Finalized::new(inner, fin);
+            let mut kinds = Vec::new();
+            while let Some(ev) = s.next().await {
+                kinds.push(ev.event_name());
+            }
+            drop(s);
+            assert_eq!(
+                kinds,
+                vec!["token", "done"],
+                "must stop at the terminal `done`, dropping post-terminal frames"
+            );
             assert_eq!(*seen.lock().unwrap(), vec![Termination::Completed]);
         }
 

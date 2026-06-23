@@ -103,6 +103,13 @@ void main() {
       ).toList();
       expect(frames.single.type, StreamEventType.tool);
     });
+
+    test('caps an unbounded frame with a terminal error', () async {
+      final huge = 'event: tool\ndata: ${'x' * (1024 * 1024 + 1024)}';
+      final frames = await decodeSseFrames(_bytes([huge])).toList();
+      expect(frames.length, 1);
+      expect(frames.single.type, StreamEventType.error);
+    });
   });
 
   group('RestClient.invokeStreaming', () {

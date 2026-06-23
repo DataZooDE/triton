@@ -24,6 +24,12 @@ class StreamFrame {
       type == StreamEventType.done || type == StreamEventType.error;
 }
 
+/// Cap on the unterminated (partial-frame) buffer, mirroring the Rust
+/// decoder: a server that streams bytes without a frame boundary must not
+/// grow the client's memory without limit. On overflow we yield a
+/// terminal error frame and stop. 1 MiB is generous for a `done` envelope.
+const _maxFrameBytes = 1024 * 1024;
+
 /// Decode a raw SSE byte stream (Dio's `ResponseType.stream` body) into a
 /// stream of typed [StreamFrame]s. Frames are blank-line separated; a
 /// frame split across byte chunks is reassembled, and a trailing
@@ -46,6 +52,12 @@ Stream<StreamFrame> decodeSseFrames(Stream<List<int>> byteStream) async* {
       buffer.removeRange(0, b.offset + b.sep);
       final frame = _parseBlock(utf8.decode(block, allowMalformed: true));
       if (frame != null) yield frame;
+    }
+    if (buffer.length > _maxFrameBytes) {
+      yield StreamFrame(StreamEventType.error, {
+        'message': 'SSE frame exceeded $_maxFrameBytes bytes without a boundary',
+      });
+      return;
     }
   }
   if (buffer.isNotEmpty) {
