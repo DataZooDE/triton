@@ -39,6 +39,7 @@ capture = ["triton-adapters-http/capture"]
 
 [dev-dependencies]
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio = { workspace = true }
 async-trait = "0.1"
+futures = { workspace = true }

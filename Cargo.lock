@@ -2631,6 +2631,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "axum",
+ "futures",
  "mime_guess",
  "reqwest",
  "rust-embed",
