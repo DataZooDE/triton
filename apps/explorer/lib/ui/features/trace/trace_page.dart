@@ -5,6 +5,7 @@ import '../../../providers/api_provider.dart';
 import '../../../widgets/json_viewer.dart';
 import '../../../widgets/panel_help.dart';
 import '../../../api/friendly_error.dart';
+import '../../../api/trace_summary.dart';
 
 /// The **Trace** view (issue #75): one communication as a timeline,
 /// correlated by `trace_id`. Reads `GET /v1/trace/{id}` — the ordered
@@ -32,7 +33,17 @@ class _TracePageState extends ConsumerState<TracePage> {
   void _load() {
     final id = _ctrl.text.trim();
     if (id.isEmpty) return;
-    setState(() => _future = ref.read(restClientProvider).trace(id));
+    final f = ref.read(restClientProvider).trace(id);
+    // Block body (not `=> _future = ...`): an arrow closure returns the
+    // assigned Future, which setState rejects.
+    setState(() {
+      _future = f;
+    });
+  }
+
+  void _loadId(String id) {
+    _ctrl.text = id;
+    _load();
   }
 
   @override
@@ -55,9 +66,11 @@ class _TracePageState extends ConsumerState<TracePage> {
                 'phases, with latency and status — and, in dev builds, the '
                 'request/response/surface bodies at each hop.',
             how:
-                "Paste a trace_id (or send a call on the Console — it's "
-                'pre-filled here) and press Load. Bodies appear only when '
-                'Triton was built with the dev `capture` feature.',
+                'Pick a trace from "Available traces" below (the distinct '
+                'trace_ids in the audit ring buffer, newest first), or paste '
+                'a trace_id (the Console pre-fills its last call), then Load. '
+                'Bodies appear only when Triton was built with the dev '
+                '`capture` feature.',
           ),
           Padding(
             padding: const EdgeInsets.all(16),
@@ -83,8 +96,84 @@ class _TracePageState extends ConsumerState<TracePage> {
               ],
             ),
           ),
+          _availableTraces(context),
           const Divider(height: 1),
           Expanded(child: _body(context)),
+        ],
+      ),
+    );
+  }
+
+  /// The distinct trace_ids currently in the ring buffer (derived from
+  /// `/v1/audit`), newest first — click one to load its timeline without
+  /// needing to know the id up front.
+  Widget _availableTraces(BuildContext context) {
+    final async = ref.watch(availableTracesProvider);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                'Available traces',
+                style: Theme.of(context).textTheme.titleSmall,
+              ),
+              const SizedBox(width: 8),
+              async.maybeWhen(
+                data: (t) => Text(
+                  '(${t.length})',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                orElse: () => const SizedBox.shrink(),
+              ),
+              const Spacer(),
+              IconButton(
+                tooltip: 'Refresh available traces',
+                icon: const Icon(Icons.refresh, size: 18),
+                onPressed: () => ref.invalidate(availableTracesProvider),
+              ),
+            ],
+          ),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 160),
+            child: async.when(
+              loading: () => const Center(
+                child: Padding(
+                  padding: EdgeInsets.all(12),
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              ),
+              error: (e, _) => Padding(
+                padding: const EdgeInsets.all(8),
+                child: Text(
+                  friendlyApiError('Could not list traces', e),
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+              data: (traces) => traces.isEmpty
+                  ? const Padding(
+                      padding: EdgeInsets.all(8),
+                      child: Text(
+                        'No traces in the buffer yet — send a call on the '
+                        'Console, then Refresh.',
+                      ),
+                    )
+                  : ListView.builder(
+                      shrinkWrap: true,
+                      itemCount: traces.length,
+                      itemBuilder: (context, i) => _TraceTile(
+                        trace: traces[i],
+                        onTap: () => _loadId(traces[i].traceId),
+                      ),
+                    ),
+            ),
+          ),
         ],
       ),
     );
@@ -136,6 +225,35 @@ class _TracePageState extends ConsumerState<TracePage> {
           ],
         );
       },
+    );
+  }
+}
+
+class _TraceTile extends StatelessWidget {
+  const _TraceTile({required this.trace, required this.onTap});
+  final TraceSummary trace;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final subtitle = [
+      if (trace.protocol.isNotEmpty) trace.protocol,
+      if (trace.tool.isNotEmpty) trace.tool,
+      '${trace.count} phase${trace.count == 1 ? '' : 's'}',
+      if (trace.latestWhen.isNotEmpty) trace.latestWhen,
+    ].join(' · ');
+    return ListTile(
+      dense: true,
+      visualDensity: VisualDensity.compact,
+      leading: const Icon(Icons.timeline, size: 18),
+      title: Text(
+        trace.traceId,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontFamily: 'monospace'),
+      ),
+      subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+      onTap: onTap,
     );
   }
 }
