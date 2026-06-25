@@ -528,4 +528,74 @@ async fn rest_sse_idle_timeout_cuts_a_hung_upstream() {
         line.contains("\"result\":\"error:tool\""),
         "idle timeout should audit as a tool error:\n{line}"
     );
+    assert!(
+        line.contains("\"status_detail\":\"upstream_stream_idle_timeout\""),
+        "idle timeout should carry a machine-readable status_detail:\n{line}"
+    );
+}
+
+/// Codex security review: the per-frame idle timeout only bounds *gaps*,
+/// so an upstream that drips a keep-alive byte just under the idle window
+/// forever would pin the connection indefinitely. The total-duration cap
+/// (`TRITON_STREAM_MAX_DURATION_MS`) must cut it — the client gets a
+/// terminal `error` frame and the stream ends, with exactly one dispatch
+/// audit line `error:tool` and `status_detail: upstream_stream_max_duration`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_sse_max_duration_cuts_a_slow_drip_upstream() {
+    let agent = FakeAgent::start_streaming_slow_drip().await;
+    let triton = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        HashMap::from([
+            (
+                "TRITON_STATIC_UPSTREAMS".into(),
+                format!("grounded={}", agent.host_port()),
+            ),
+            // Generous idle window (the drip stays under it), short total cap.
+            ("TRITON_STREAM_IDLE_TIMEOUT_MS".into(), "2000".into()),
+            ("TRITON_STREAM_MAX_DURATION_MS".into(), "500".into()),
+        ]),
+    )
+    .await;
+
+    let started = Instant::now();
+    let resp = reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/grounded"))
+        .bearer_auth("dev-token")
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .json(&serde_json::json!({ "q": "hi" }))
+        .send()
+        .await
+        .expect("POST streaming");
+    assert_eq!(resp.status(), 200);
+
+    // The dripping agent never closes; only the total-duration cap ends it.
+    let body = resp.text().await.expect("read SSE body");
+    let elapsed = started.elapsed();
+
+    assert!(
+        body.contains("event: token"),
+        "expected progress frames:\n{body}"
+    );
+    assert!(
+        !body.contains("event: done"),
+        "a dripping upstream must not produce a done frame:\n{body}"
+    );
+    assert!(
+        body.contains("event: error") && body.contains("max duration"),
+        "expected a terminal max-duration error frame:\n{body}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "the 500ms total cap should end the stream well before any idle window (2s); took {elapsed:?}"
+    );
+
+    let line = await_single_dispatch(&triton, "grounded").await;
+    assert!(
+        line.contains("\"result\":\"error:tool\""),
+        "max duration should audit as a tool error:\n{line}"
+    );
+    assert!(
+        line.contains("\"status_detail\":\"upstream_stream_max_duration\""),
+        "max duration should carry a machine-readable status_detail:\n{line}"
+    );
 }

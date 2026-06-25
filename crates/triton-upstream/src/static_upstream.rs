@@ -108,6 +108,11 @@ pub struct StaticUpstream {
     /// TS-03: per-frame idle timeout for streamed upstream responses. If no
     /// byte arrives within this window the stream is failed closed.
     stream_idle_timeout: Duration,
+    /// Total wall-clock cap for a streamed response (Codex security review):
+    /// the idle timeout only bounds gaps, so a slow-drip upstream would
+    /// otherwise pin the connection forever. The stream is failed closed
+    /// once it runs past this regardless of how steadily bytes arrive.
+    stream_max_duration: Duration,
 }
 
 impl StaticUpstream {
@@ -119,6 +124,7 @@ impl StaticUpstream {
         token: String,
         timeout: Duration,
         stream_idle_timeout: Duration,
+        stream_max_duration: Duration,
         circuit_open_after: u32,
         circuit_cooldown: Duration,
     ) -> Self {
@@ -154,6 +160,7 @@ impl StaticUpstream {
             circuit_open_after,
             circuit_cooldown,
             stream_idle_timeout,
+            stream_max_duration,
         }
     }
 
@@ -459,13 +466,17 @@ impl UpstreamDispatch for StaticUpstream {
         let slot = self.breaker_slot(tool).await;
         let open_after = self.circuit_open_after;
         let was_half_open = permission.was_half_open;
-        let events = decode_sse(resp.bytes_stream(), self.stream_idle_timeout);
+        let events = decode_sse(
+            resp.bytes_stream(),
+            self.stream_idle_timeout,
+            self.stream_max_duration,
+        );
         let finalized = Finalized::new(events, move |term, _timing| match term {
             Termination::Completed => slot
                 .lock()
                 .unwrap()
                 .observe(true, was_half_open, open_after),
-            Termination::Failed | Termination::Truncated => {
+            Termination::Failed { .. } | Termination::Truncated => {
                 slot.lock()
                     .unwrap()
                     .observe(false, was_half_open, open_after)
@@ -615,8 +626,12 @@ pub fn endpoint_is_dispatchable(endpoint: &str, allowed_suffixes: &[String]) -> 
     let Some((host, port)) = endpoint.rsplit_once(':') else {
         return false;
     };
-    if port.parse::<u16>().is_err() {
-        return false;
+    // The port MUST parse as a u16 (rejects `host:`, `host:notaport`,
+    // `host:99999`) and MUST be non-zero — `:0` is a valid u16 but an
+    // unusable endpoint, so fail it closed here rather than at dial time.
+    match port.parse::<u16>() {
+        Ok(0) | Err(_) => return false,
+        Ok(_) => {}
     }
     let host = host.trim_start_matches('[').trim_end_matches(']');
     match host.parse::<std::net::IpAddr>() {
@@ -626,9 +641,20 @@ pub fn endpoint_is_dispatchable(endpoint: &str, allowed_suffixes: &[String]) -> 
         // to parse.
         Err(_) => {
             let h = host.trim_end_matches('.').to_ascii_lowercase();
-            allowed_suffixes
-                .iter()
-                .any(|suffix| h.ends_with(&suffix.to_ascii_lowercase()))
+            allowed_suffixes.iter().any(|suffix| {
+                // Match on a DNS label boundary. A suffix configured without
+                // a leading dot (operator footgun, e.g. `ts.net`) would
+                // otherwise admit `evilts.net` via a raw `ends_with`; force a
+                // leading dot so only a full label boundary matches. This also
+                // refuses the bare apex (`ts.net` itself) as a host.
+                let suffix = suffix.to_ascii_lowercase();
+                let dotted = if suffix.starts_with('.') {
+                    suffix
+                } else {
+                    format!(".{suffix}")
+                };
+                h.ends_with(&dotted)
+            })
         }
         Ok(std::net::IpAddr::V4(v4)) => {
             if v4.is_loopback() || v4.is_private() {
@@ -761,6 +787,30 @@ mod tests {
         assert!(!endpoint_is_dispatchable("carl.ts.net:8001 ", &p));
         // A well-formed allowed endpoint still passes.
         assert!(endpoint_is_dispatchable("carl.ts.net:8001", &p));
+    }
+
+    #[test]
+    fn rejects_zero_port() {
+        // Codex review nit: `:0` parses as a valid u16 but is an unusable
+        // endpoint — it dials at runtime, fails, and adds breaker/audit
+        // noise. Fail it closed at boot like any other malformed authority.
+        let p = default_suffixes();
+        assert!(!endpoint_is_dispatchable("127.0.0.1:0", &p));
+        assert!(!endpoint_is_dispatchable("carl.ts.net:0", &p));
+        assert!(!endpoint_is_dispatchable("[::1]:0", &p));
+    }
+
+    #[test]
+    fn suffix_allowlist_matches_only_on_label_boundary() {
+        // Codex review nit: a suffix configured WITHOUT a leading dot
+        // (operator footgun) must not match a different domain that merely
+        // ends with those bytes — `ts.net` must not admit `evilts.net`.
+        let p = s(&["ts.net"]); // no leading dot
+        assert!(!endpoint_is_dispatchable("evilts.net:443", &p));
+        // A real label-boundary match still works under the same policy.
+        assert!(endpoint_is_dispatchable("carl.ts.net:8001", &p));
+        // The bare apex itself is not a host under the suffix.
+        assert!(!endpoint_is_dispatchable("ts.net:443", &p));
     }
 
     #[test]

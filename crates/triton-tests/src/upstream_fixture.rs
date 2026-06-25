@@ -71,6 +71,11 @@ enum AgentMode {
     /// another byte and never close the connection. Exercises TS-03: the
     /// per-frame idle timeout must fail the stream closed.
     StreamingHang,
+    /// Stream a couple of progress frames, then **drip** a keep-alive
+    /// comment byte every ~20ms forever, never sending a terminal event.
+    /// The steady trickle keeps resetting the idle timer, so only the
+    /// total-duration cap can stop it (Codex security review).
+    StreamingSlowDrip,
 }
 
 impl FakeAgent {
@@ -115,6 +120,12 @@ impl FakeAgent {
     /// no close). See [`AgentMode::StreamingHang`].
     pub async fn start_streaming_hang() -> Self {
         Self::start(AgentMode::StreamingHang, 0, None).await
+    }
+
+    /// Emit a couple of progress frames then drip keep-alive bytes forever
+    /// (no terminal). See [`AgentMode::StreamingSlowDrip`].
+    pub async fn start_streaming_slow_drip() -> Self {
+        Self::start(AgentMode::StreamingSlowDrip, 0, None).await
     }
 
     async fn start(mode: AgentMode, fail_first: u32, fixed_response: Option<Value>) -> Self {
@@ -197,7 +208,8 @@ async fn handler(
         | AgentMode::Streaming
         | AgentMode::StreamingTruncated
         | AgentMode::StreamingSurface
-        | AgentMode::StreamingHang => false,
+        | AgentMode::StreamingHang
+        | AgentMode::StreamingSlowDrip => false,
         AgentMode::AlwaysFail => true,
         AgentMode::FailingThenRecover => {
             let mut left = state.failures_remaining.lock().unwrap();
@@ -226,6 +238,7 @@ async fn handler(
         AgentMode::StreamingTruncated => sse_response(streaming_frames(&value, false)),
         AgentMode::StreamingSurface => sse_response(streaming_surface_frames()),
         AgentMode::StreamingHang => sse_response_hanging(streaming_frames(&value, false)),
+        AgentMode::StreamingSlowDrip => sse_response_slow_drip(streaming_frames(&value, false)),
         _ => Json(json!({ "echoed": value })).into_response(),
     }
 }
@@ -299,6 +312,35 @@ fn sse_response_hanging(frames: Vec<String>) -> axum::response::Response {
     // further bytes and no EOF.
     use futures::StreamExt as _;
     let body = Body::from_stream(framed.chain(futures::stream::pending()));
+    axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+        .body(body)
+        .unwrap()
+}
+
+/// Like [`sse_response`], but after flushing the frames it drips a
+/// keep-alive comment frame (`: ping`) every ~20ms **forever**, never
+/// emitting a terminal event. The steady trickle resets the per-frame
+/// idle timer indefinitely, so only the total-duration cap can end it.
+fn sse_response_slow_drip(frames: Vec<String>) -> axum::response::Response {
+    let framed = futures::stream::unfold(
+        (frames.into_iter(), false),
+        |(mut it, started)| async move {
+            if started {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+            it.next()
+                .map(|frame| (Ok::<_, Infallible>(frame.into_bytes()), (it, true)))
+        },
+    );
+    let drip = futures::stream::unfold((), |()| async move {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        // A comment frame: bytes arrive (resetting the idle timer) but
+        // decode to no event.
+        Some((Ok::<_, Infallible>(b": ping\n\n".to_vec()), ()))
+    });
+    use futures::StreamExt as _;
+    let body = Body::from_stream(framed.chain(drip));
     axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
         .body(body)
