@@ -36,6 +36,9 @@ tiny-skia = { workspace = true }
 axum = { workspace = true, features = ["multipart", "ws"] }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+# Derive the RSA public modulus/exponent so FakeGoogleJwks can also serve
+# a realistic OIDC JWKS (oauth2/v3/certs shape) for the #134 OIDC path.
+rsa = "0.9"
 getrandom = "0.2"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 hex = "0.4"

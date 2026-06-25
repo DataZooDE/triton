@@ -336,13 +336,26 @@ impl FakeGoogleJwks {
         let cert_map_body = serde_json::json!({
             &kid_str: FAKE_GOOGLE_TEST_CERT_PEM
         });
-        let router = Router::new().route(
-            "/service_accounts/v1/metadata/x509/chat@system.gserviceaccount.com",
-            axum::routing::get(move || {
-                let body = cert_map_body.clone();
-                async move { Json(body) }
-            }),
-        );
+        // Realistic OIDC JWKS (`oauth2/v3/certs` shape) built from the SAME
+        // key, so the #134 OIDC path verifies an `accounts.google.com`
+        // token against a JWKS keyset exactly like production — not just
+        // the legacy x509 cert-map.
+        let jwks_body = jwks_from_pkcs8_pem(FAKE_GOOGLE_TEST_PRIVATE_KEY_PEM, &kid_str);
+        let router = Router::new()
+            .route(
+                "/service_accounts/v1/metadata/x509/chat@system.gserviceaccount.com",
+                axum::routing::get(move || {
+                    let body = cert_map_body.clone();
+                    async move { Json(body) }
+                }),
+            )
+            .route(
+                "/oauth2/v3/certs",
+                axum::routing::get(move || {
+                    let body = jwks_body.clone();
+                    async move { Json(body) }
+                }),
+            );
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
@@ -368,6 +381,12 @@ impl FakeGoogleJwks {
         )
     }
 
+    /// JWKS-shaped keyset endpoint (`oauth2/v3/certs`), the source the
+    /// current Google Chat console's OIDC tokens verify against (#134).
+    pub fn oidc_jwks_uri(&self) -> String {
+        format!("{}/oauth2/v3/certs", self.url())
+    }
+
     /// Sign a JWT using the fixture's private key, with `kid` set
     /// to the served cert's id (so the adapter's keyset lookup hits
     /// the right key).
@@ -384,6 +403,32 @@ impl FakeGoogleJwks {
         header.kid = Some(kid.to_string());
         jsonwebtoken::encode(&header, &claims, &self.signing_key).expect("sign jwt")
     }
+}
+
+/// Build a JWKS document (`{"keys":[{kty,use,alg,kid,n,e}]}`) from a
+/// PKCS#8 RSA private key PEM — the modulus/exponent are base64url
+/// (no pad) per RFC 7518, matching what Google's `oauth2/v3/certs`
+/// serves.
+fn jwks_from_pkcs8_pem(pkcs8_pem: &str, kid: &str) -> Value {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use rsa::RsaPrivateKey;
+    use rsa::pkcs8::DecodePrivateKey;
+    use rsa::traits::PublicKeyParts;
+
+    let key = RsaPrivateKey::from_pkcs8_pem(pkcs8_pem).expect("pkcs8 rsa key parses");
+    let n = URL_SAFE_NO_PAD.encode(key.n().to_bytes_be());
+    let e = URL_SAFE_NO_PAD.encode(key.e().to_bytes_be());
+    serde_json::json!({
+        "keys": [{
+            "kty": "RSA",
+            "use": "sig",
+            "alg": "RS256",
+            "kid": kid,
+            "n": n,
+            "e": e,
+        }]
+    })
 }
 
 /// A second, ALWAYS-different RSA signer so the forged-signature
