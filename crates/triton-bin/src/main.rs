@@ -377,10 +377,17 @@ async fn main() -> std::io::Result<()> {
              ONLY safe when Triton binds loopback (issue #67)."
         );
     }
-    let identity = Arc::new(IdentityProvider::with_forwarded_auth(
-        oidc_verifier,
-        settings.trust_forwarded_auth,
-    ));
+    // Accepted dev token, read directly from the env (like
+    // TRITON_STATIC_UPSTREAM_TOKEN) so the credential never lands in the
+    // Debug-derived Settings struct. Default keeps the historical literal;
+    // an operator sets a secret, or empty to disable the dev-token path.
+    // Only consulted when the `dev-token` feature is compiled in AND no
+    // OIDC verifier is configured (OIDC always wins, ADR-10).
+    let dev_token = std::env::var("TRITON_DEV_TOKEN").unwrap_or_else(|_| "dev-token".to_string());
+    let identity = Arc::new(
+        IdentityProvider::with_forwarded_auth(oidc_verifier, settings.trust_forwarded_auth)
+            .with_dev_token(dev_token),
+    );
 
     let manifest_arc = manifest.as_ref().map(|m| Arc::new(m.clone()));
     let rest_state = RestState {
