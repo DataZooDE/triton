@@ -102,6 +102,8 @@ mod telegram_dashboard;
 mod telegram_form;
 #[path = "../telegram_longpoll.rs"]
 mod telegram_longpoll;
+#[path = "../telegram_longpoll_dashboard.rs"]
+mod telegram_longpoll_dashboard;
 #[path = "../telegram_surface.rs"]
 mod telegram_surface;
 #[path = "../telegram_upstream_identity.rs"]
