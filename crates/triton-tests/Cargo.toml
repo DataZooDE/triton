@@ -27,6 +27,8 @@ triton-manifest = { path = "../triton-manifest" }
 triton-correlation = { path = "../triton-correlation" }
 triton-core = { path = "../triton-core" }
 triton-rasterizer = { path = "../triton-rasterizer" }
+# Decode the rasterizer's PNG output to assert rendered text ink (#135).
+tiny-skia = { workspace = true }
 
 # Real OIDC fixture: Ed25519 keypair + JWT sign + tiny axum issuer
 # serving discovery + JWKS. No mocks per CLAUDE.md §1.
