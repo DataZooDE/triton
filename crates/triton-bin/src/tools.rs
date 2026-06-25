@@ -8,9 +8,12 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use triton_core::a2ui::{
-    Component, DashboardTile, FormField, FormFieldKind, SelectionOption, Surface,
-};
+use triton_core::a2ui::{Component, Surface};
+// These component types are only used by the `dev-token`-gated
+// `demo_panel` tool below, so importing them unconditionally warns in a
+// production (`--no-default-features`) build.
+#[cfg(feature = "dev-token")]
+use triton_core::a2ui::{DashboardTile, FormField, FormFieldKind, SelectionOption};
 use triton_core::{Tool, ToolPrincipal, TritonError};
 
 pub struct Echo;

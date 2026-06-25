@@ -34,6 +34,16 @@ async fn capture(req: Request, next: Next) -> Response {
     let req = Request::from_parts(parts, Body::from(req_bytes));
 
     let resp = next.run(req).await;
+
+    // Never buffer a streaming (SSE) response (TS-04): `to_bytes` would
+    // hold the whole body until the stream closes, defeating incremental
+    // delivery (issue #132). Pass it through untouched — the trace_id
+    // lives in the terminal frame, not a top-level field, so there's
+    // nothing to key a capture on anyway.
+    if is_event_stream(&resp) {
+        return resp;
+    }
+
     let (rparts, rbody) = resp.into_parts();
     let resp_bytes = to_bytes(rbody, MAX_BODY).await.unwrap_or_default();
     let resp_json: Value = serde_json::from_slice(&resp_bytes).unwrap_or(Value::Null);
@@ -44,6 +54,14 @@ async fn capture(req: Request, next: Next) -> Response {
     }
 
     Response::from_parts(rparts, Body::from(resp_bytes))
+}
+
+/// True when the response is an SSE stream that must not be buffered.
+fn is_event_stream(resp: &Response) -> bool {
+    resp.headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.contains("text/event-stream"))
 }
 
 fn protocol_of(path: &str) -> &'static str {

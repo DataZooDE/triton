@@ -56,6 +56,15 @@ jobs:
           RUST_BACKTRACE: 1
         run: cargo test --workspace --locked
 
+      # The dev-only `capture` feature (Explorer Trace view) is off in the
+      # default build, so the line above never exercises it. Run the embed
+      # trio tests with it enabled so the capture middleware — including
+      # the TS-04 "must not buffer SSE" guard — stays green.
+      - name: cargo test (capture feature)
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo test --locked -p triton-embed --features capture
+
       # ACC-13 — exercise the external-consumer smoke as a
       # SEPARATE Cargo workspace so the harness's `pub` surface
       # stays consumable from non-workspace crates. The example

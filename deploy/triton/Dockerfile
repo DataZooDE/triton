@@ -25,13 +25,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends pkg-config \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 
-# Default features include `dev-token`; the demo uses oauth2-proxy
-# in front for auth (substrate ADR-0011), so the Bearer-JWT verifier
-# inside Triton stays unused. We keep dev-token on so an operator
-# can also paste a token in the SPA's Settings page for ad-hoc
-# diagnostics — production-hardened (no dev-token) builds come when
-# we wire real OIDC verification end-to-end.
-RUN cargo build --release -p triton-bin
+# Production-hardened by default (TS-02): build WITHOUT `dev-token`
+# (`--no-default-features`) so the binary rejects any non-OIDC bearer at
+# the identity boundary (ADR-10 / FR-I-5) — the well-known `dev-token`
+# affordance is compiled out entirely, not just left to config.
+#
+# A nonprod/demo image can opt the affordance back in with
+# `--build-arg DEV_TOKEN=dev-token`; pair it with a non-guessable
+# `TRITON_DEV_TOKEN` at deploy (see crates/triton-adapters-http/identity).
+ARG DEV_TOKEN=""
+RUN cargo build --release -p triton-bin --no-default-features \
+    ${DEV_TOKEN:+--features "$DEV_TOKEN"}
 
 # ----- stage 2: runtime -----
 FROM gcr.io/distroless/cc-debian12:nonroot
