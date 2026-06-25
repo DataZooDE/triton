@@ -570,11 +570,27 @@ impl Breaker {
 /// host (the FQDN root). No DNS resolution happens here — the check is purely
 /// name-suffix based, so there is no resolve-vs-connect TOCTOU window.
 pub fn endpoint_is_dispatchable(endpoint: &str, allowed_suffixes: &[String]) -> bool {
-    // Split off the port; tolerate a bracketed IPv6 host.
-    let host = endpoint
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(endpoint);
+    // TS-01 fail-closed: the endpoint is parsed naively into `host:port`,
+    // but `do_dispatch` feeds it to reqwest as `http://{endpoint}/`. A `@`
+    // turns the "host" into URL *userinfo* and the real host is whatever
+    // follows it (e.g. `carl.ts.net:x@169.254.169.254` → connect to the
+    // metadata IP while the suffix check sees `carl.ts.net`). Reject any
+    // authority that isn't a clean `host:port`: no userinfo, path, query,
+    // fragment, or whitespace.
+    if endpoint.contains(['@', '/', '?', '#']) || endpoint.chars().any(|c| c.is_ascii_whitespace())
+    {
+        return false;
+    }
+    // Require an explicit, numeric port. `rsplit_once(':')` splits on the
+    // LAST colon so a bracketed IPv6 host keeps its inner colons; the part
+    // after it MUST parse as a u16 (this also rejects `host:` and
+    // `host:notaport`). A bare hostname with no port is rejected too.
+    let Some((host, port)) = endpoint.rsplit_once(':') else {
+        return false;
+    };
+    if port.parse::<u16>().is_err() {
+        return false;
+    }
     let host = host.trim_start_matches('[').trim_end_matches(']');
     match host.parse::<std::net::IpAddr>() {
         // Not an IP literal → only trust hostnames under an operator-allowed
@@ -688,6 +704,36 @@ mod tests {
         assert!(!endpoint_is_dispatchable("ts.net.evil.com:80", &p));
         // Trailing-dot + mixed case tailnet name is still accepted.
         assert!(endpoint_is_dispatchable("Carl.DZ.Tailnet.TS.NET.:8001", &p));
+    }
+
+    #[test]
+    fn refuses_userinfo_smuggling_and_malformed_authority() {
+        // TS-01: `rsplit_once(':')` treats everything before the last colon
+        // as the host, so an allowed suffix in URL *userinfo* would slip past
+        // the guard while reqwest connects to the real host after `@`. The
+        // guard must fail closed on userinfo and any non-`host:port` authority.
+        let p = default_suffixes();
+        // Userinfo smuggling → reqwest would connect to the metadata IP.
+        assert!(!endpoint_is_dispatchable(
+            "carl.ts.net:8001@169.254.169.254",
+            &p
+        ));
+        assert!(!endpoint_is_dispatchable(
+            "carl.ts.net:x@169.254.169.254",
+            &p
+        ));
+        assert!(!endpoint_is_dispatchable("carl.ts.net@169.254.169.254", &p));
+        // A non-numeric / empty port is not a valid authority.
+        assert!(!endpoint_is_dispatchable("carl.ts.net:notaport", &p));
+        assert!(!endpoint_is_dispatchable("carl.ts.net:", &p));
+        assert!(!endpoint_is_dispatchable("carl.ts.net:99999", &p)); // > u16
+        // Path / query / fragment / whitespace smuggling.
+        assert!(!endpoint_is_dispatchable("carl.ts.net:8001/../@evil", &p));
+        assert!(!endpoint_is_dispatchable("carl.ts.net:8001?x=1", &p));
+        assert!(!endpoint_is_dispatchable("carl.ts.net:8001#frag", &p));
+        assert!(!endpoint_is_dispatchable("carl.ts.net:8001 ", &p));
+        // A well-formed allowed endpoint still passes.
+        assert!(endpoint_is_dispatchable("carl.ts.net:8001", &p));
     }
 
     #[test]
