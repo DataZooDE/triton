@@ -168,3 +168,45 @@ async fn concurrent_requests_dont_deadlock() {
         assert_eq!(s, 200, "expected 200; got {s}");
     }
 }
+
+/// Issue #135 regression — end-to-end. The rendered dashboard PNG must
+/// contain visible text glyphs, not just empty colored boxes. We decode
+/// the PNG the real sidecar produced and count near-black opaque pixels:
+/// the template draws every glyph in slate-900 and everything else is
+/// light, so dark pixels are text ink. With no font loaded this was ~0.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dashboard_png_contains_visible_text() {
+    let raster = RasterizerProcess::spawn().await;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+
+    let body = json!({
+        "title": "Supplier Risk",
+        "tiles": [
+            { "label": "Score", "value": "8 8 8 8 8", "trend": "+12%" },
+            { "label": "Open findings", "value": "3", "trend": null }
+        ]
+    });
+    let resp = client
+        .post(format!("{}/v1/dashboard.png", raster.url()))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 200);
+    let png = resp.bytes().await.expect("body bytes").to_vec();
+
+    let pm = tiny_skia::Pixmap::decode_png(&png).expect("decode rasterizer PNG");
+    let dark = pm
+        .pixels()
+        .iter()
+        .filter(|p| p.red() < 80 && p.green() < 80 && p.blue() < 80 && p.alpha() > 200)
+        .count();
+    assert!(
+        dark > 300,
+        "rendered dashboard must contain visible text glyphs (#135); found only {dark} \
+         dark text-ink pixels — empty colored boxes again?",
+    );
+}
