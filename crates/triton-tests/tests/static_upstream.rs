@@ -209,3 +209,33 @@ fn nonlocal_env_refuses_a_public_static_upstream_endpoint() {
         String::from_utf8_lossy(&out.stderr),
     );
 }
+
+#[test]
+fn nonlocal_env_refuses_a_userinfo_smuggled_endpoint() {
+    // TS-01: an allowed `.ts.net` suffix in URL userinfo must not slip past
+    // the SSRF guard — reqwest would treat `carl.ts.net:x` as userinfo and
+    // connect to the metadata IP after `@`, leaking the minted bearer. The
+    // boot guard must refuse it just like a bare public endpoint.
+    let out = std::process::Command::new(triton_binary())
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_ENV", "nonprod")
+        .env(
+            "TRITON_STATIC_UPSTREAMS",
+            "evil=carl.ts.net:8001@169.254.169.254",
+        )
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("spawn triton");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a userinfo-smuggled static-upstream endpoint MUST refuse to boot under nonprod; stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr),
+    );
+}

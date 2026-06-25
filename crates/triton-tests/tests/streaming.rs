@@ -470,3 +470,62 @@ async fn a2a_sse_pre_first_byte_error_is_plain_message() {
     let body: serde_json::Value = resp.json().await.expect("json error");
     assert_eq!(body["error"], "validation");
 }
+
+/// TS-03: a hung upstream (opens the SSE response, sends progress frames,
+/// then never sends another byte and never closes) must be cut by the
+/// per-frame idle timeout — the client gets a terminal `error` frame and
+/// the stream ends, with exactly one dispatch audit line `error:tool`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_sse_idle_timeout_cuts_a_hung_upstream() {
+    let agent = FakeAgent::start_streaming_hang().await;
+    let triton = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        HashMap::from([
+            (
+                "TRITON_STATIC_UPSTREAMS".into(),
+                format!("grounded={}", agent.host_port()),
+            ),
+            ("TRITON_STREAM_IDLE_TIMEOUT_MS".into(), "300".into()),
+        ]),
+    )
+    .await;
+
+    let started = Instant::now();
+    let resp = reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/grounded"))
+        .bearer_auth("dev-token")
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .json(&serde_json::json!({ "q": "hi" }))
+        .send()
+        .await
+        .expect("POST streaming");
+    assert_eq!(resp.status(), 200);
+
+    // The hung agent never closes; only Triton's idle timeout ends the
+    // stream. `text()` therefore returns once that terminal error flushes.
+    let body = resp.text().await.expect("read SSE body");
+    let elapsed = started.elapsed();
+
+    assert!(
+        body.contains("event: token"),
+        "expected progress frames:\n{body}"
+    );
+    assert!(
+        !body.contains("event: done"),
+        "a hung upstream must not produce a done frame:\n{body}"
+    );
+    assert!(
+        body.contains("event: error") && body.contains("idle timeout"),
+        "expected a terminal idle-timeout error frame:\n{body}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "idle timeout (300ms) should end the stream well before any total timeout; took {elapsed:?}"
+    );
+
+    let line = await_single_dispatch(&triton, "grounded").await;
+    assert!(
+        line.contains("\"result\":\"error:tool\""),
+        "idle timeout should audit as a tool error:\n{line}"
+    );
+}

@@ -45,3 +45,6 @@ deploy/local-e2e/.rodney-out/
 
 # Antigravity CLI local session artifacts
 .antigravitycli/
+
+# Antigravity delegate session artifacts (model responses)
+.antigravity-delegate/

@@ -37,6 +37,12 @@ use triton_identity::OidcVerifier;
 /// relies on. Lowercase to match `http::HeaderName::from_static`.
 const FORWARDED_EMAIL_HEADER: HeaderName = HeaderName::from_static("x-forwarded-email");
 
+/// The default accepted dev token when `TRITON_DEV_TOKEN` is unset —
+/// preserves the historical literal so existing dev workflows and tests
+/// keep working. Operators set `TRITON_DEV_TOKEN` to a non-guessable
+/// secret (or empty, to disable the dev-token path entirely).
+const DEFAULT_DEV_TOKEN: &str = "dev-token";
+
 #[derive(Clone)]
 pub struct IdentityProvider {
     oidc: Option<Arc<OidcVerifier>>,
@@ -45,6 +51,12 @@ pub struct IdentityProvider {
     /// Triton binds loopback inside a Nomad alloc and the only thing
     /// that can set the header is a sidecar in the shared netns.
     trust_forwarded_auth: bool,
+    /// The accepted dev token (`TRITON_DEV_TOKEN`, default `dev-token`).
+    /// Only consulted on the dev-token path — feature-gated AND only when
+    /// no OIDC verifier is configured (OIDC always wins, ADR-10). An empty
+    /// value disables the dev-token path entirely (rejects every bearer):
+    /// a kill-switch even in a `dev-token` build.
+    dev_token: String,
 }
 
 impl IdentityProvider {
@@ -55,6 +67,7 @@ impl IdentityProvider {
         Self {
             oidc,
             trust_forwarded_auth: false,
+            dev_token: DEFAULT_DEV_TOKEN.to_string(),
         }
     }
 
@@ -67,7 +80,16 @@ impl IdentityProvider {
         Self {
             oidc,
             trust_forwarded_auth,
+            dev_token: DEFAULT_DEV_TOKEN.to_string(),
         }
+    }
+
+    /// Override the accepted dev token (from `TRITON_DEV_TOKEN`). Builder
+    /// so existing constructor call sites — and the ~70 tests that send
+    /// `Bearer dev-token` — are unchanged. Empty disables the path.
+    pub fn with_dev_token(mut self, token: String) -> Self {
+        self.dev_token = token;
+        self
     }
 
     pub async fn verify(&self, parts: &Parts) -> Result<Principal, TritonError> {
@@ -88,7 +110,7 @@ impl IdentityProvider {
         }
 
         let token = bearer_from(parts)?;
-        verify_dev_or_reject(token)
+        verify_dev_or_reject(token, &self.dev_token)
     }
 }
 
@@ -153,8 +175,10 @@ fn forwarded_email_principal(email: &str) -> Principal {
 }
 
 #[cfg(feature = "dev-token")]
-fn verify_dev_or_reject(token: &str) -> Result<Principal, TritonError> {
-    if token != "dev-token" {
+fn verify_dev_or_reject(token: &str, expected: &str) -> Result<Principal, TritonError> {
+    // An empty `expected` disables the dev-token path (kill-switch) and
+    // also prevents an empty `Bearer ` from matching an empty token.
+    if expected.is_empty() || token != expected {
         return Err(TritonError::Auth("unknown token".into()));
     }
     Ok(Principal {
@@ -168,7 +192,7 @@ fn verify_dev_or_reject(token: &str) -> Result<Principal, TritonError> {
 }
 
 #[cfg(not(feature = "dev-token"))]
-fn verify_dev_or_reject(_token: &str) -> Result<Principal, TritonError> {
+fn verify_dev_or_reject(_token: &str, _expected: &str) -> Result<Principal, TritonError> {
     Err(TritonError::Auth(
         "no OIDC verifier configured and dev-token disabled at build time (ADR-10)".into(),
     ))

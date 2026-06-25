@@ -55,6 +55,7 @@ pub struct Settings {
     pub outbound_rate_limit_per_sec: u32,
     pub outbound_rate_limit_burst: u32,
     pub upstream_timeout: Duration,
+    pub stream_idle_timeout: Duration,
     pub circuit_open_after: u32,
     pub circuit_cooldown: Duration,
     pub metrics_host: IpAddr,
@@ -283,9 +284,19 @@ struct Cli {
     #[arg(long, env = "TRITON_OUTBOUND_RATE_LIMIT_BURST", default_value_t = 50)]
     outbound_rate_limit_burst: u32,
 
-    /// Per-upstream-call timeout in milliseconds.
+    /// Per-upstream-call timeout in milliseconds. This is the *total*
+    /// request timeout for buffered (non-streaming) dispatch; the streaming
+    /// path uses it only as a connect timeout (see below).
     #[arg(long, env = "TRITON_UPSTREAM_TIMEOUT_MS", default_value_t = 10_000)]
     upstream_timeout_ms: u64,
+
+    /// Per-frame idle timeout for streamed (SSE) upstream responses, in
+    /// milliseconds (TS-03). The streaming client carries no total timeout
+    /// so a legitimately long stream isn't killed; instead, if no byte
+    /// arrives within this window the stream is failed closed and the
+    /// per-tool breaker arms. Default 60s.
+    #[arg(long, env = "TRITON_STREAM_IDLE_TIMEOUT_MS", default_value_t = 60_000)]
+    stream_idle_timeout_ms: u64,
 
     /// Per-tool circuit-breaker open-after threshold (FR-U-3): consecutive
     /// tool-side faults before the breaker trips open.
@@ -593,6 +604,7 @@ impl From<Cli> for Settings {
             egress_allowed_suffixes: parse_egress_suffixes(&c.egress_allowed_suffixes),
             optional_adapters: parse_optional_adapters(&c.optional_adapters),
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
+            stream_idle_timeout: Duration::from_millis(c.stream_idle_timeout_ms),
             circuit_open_after: c.circuit_open_after,
             circuit_cooldown: Duration::from_millis(c.circuit_cooldown_ms),
             metrics_host: c.metrics_host,
