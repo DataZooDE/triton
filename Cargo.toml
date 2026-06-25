@@ -64,3 +64,17 @@ tiny-skia = { version = "0.11", default-features = false, features = ["std", "pn
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
+
+# Dev/test profile — tuned for CI link-memory, not interactive debugging.
+# The workspace builds ~60 integration-test binaries, each statically
+# linking the full dependency tree; with cargo's default `debug = 2`
+# (full DWARF) those binaries are 80–180 MB and linking several in
+# parallel spikes RAM enough to OOM the public GitHub runner (16 GB),
+# losing the whole job mid-link. `line-tables-only` keeps file:line in
+# panic backtraces (what we actually use) while cutting binary size and
+# link memory ~60%; `split-debuginfo = "unpacked"` leaves DWARF in the
+# `.o` files so the linker never merges it into the binary. `test`
+# inherits these from `dev`.
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "unpacked"

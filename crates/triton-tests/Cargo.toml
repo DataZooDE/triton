@@ -5,6 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish = false
+# CI link-memory (doc/realizations.md §7): the ~58 files under `tests/`
+# would each compile to a SEPARATE test binary, every one statically
+# linking the full dependency tree (~58 fat debug links). Disable
+# auto-discovery and aggregate them into ONE `it` binary (tests/it/main.rs
+# `mod`-includes each file) so the workspace test build does a single link
+# instead of 58. Tests are unchanged — each file is just a module now.
+autotests = false
+
+[[test]]
+name = "it"
+path = "tests/it/main.rs"
 
 [dependencies]
 tokio = { workspace = true }
