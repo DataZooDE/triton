@@ -446,21 +446,9 @@ async fn main() -> std::io::Result<()> {
         let needs_rasterizer = manifest
             .as_ref()
             .map(|m| {
-                m.adapters.values().any(|a| {
-                    // Only the WEBHOOK rasterizing adapters dial the
-                    // rasterizer. The socket variants (Discord Gateway,
-                    // WhatsApp Web bridge) reply text-only and never
-                    // receive a rasterizer client, so a bridge-only
-                    // deploy must not be forced to configure one
-                    // (Codex review).
-                    a.inbound.kind == InboundKind::Webhook
-                        && matches!(
-                            a.kind,
-                            AdapterKind::Telegram
-                                | AdapterKind::Discord
-                                | AdapterKind::WhatsappCloud
-                        )
-                })
+                m.adapters
+                    .values()
+                    .any(|a| adapter_ships_dashboards(a.kind, a.inbound.kind))
             })
             .unwrap_or(false);
         if needs_rasterizer {
@@ -1476,6 +1464,26 @@ fn is_unix_socket_addr(addr: &str) -> bool {
     addr.starts_with("unix://")
 }
 
+/// Whether an adapter can ship a rasterised dashboard PNG and therefore
+/// needs the out-of-process rasterizer client (FR-A-11). This is a
+/// property of the OUTBOUND media capability, **not** the inbound
+/// transport: Telegram's Bot-API `sendPhoto` is identical on webhook and
+/// long-poll, so a long-poll Telegram deploy needs the rasterizer too
+/// (#135 follow-up — previously gated to `webhook` only, silently
+/// degrading every long-poll dashboard to text). Discord webhook and
+/// WhatsApp Cloud webhook ship rasterised dashboards; the socket/bridge
+/// variants (Discord Gateway, WhatsApp Web) reply text-only and need no
+/// rasterizer, so a bridge-only deploy isn't forced to configure one.
+fn adapter_ships_dashboards(kind: AdapterKind, inbound: InboundKind) -> bool {
+    match kind {
+        AdapterKind::Telegram => {
+            matches!(inbound, InboundKind::Webhook | InboundKind::LongPoll)
+        }
+        AdapterKind::Discord | AdapterKind::WhatsappCloud => inbound == InboundKind::Webhook,
+        _ => false,
+    }
+}
+
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt;
@@ -1486,6 +1494,57 @@ fn init_tracing() {
         .with_target(false)
         .json()
         .init();
+}
+
+#[cfg(test)]
+mod rasterizer_gate_tests {
+    use super::adapter_ships_dashboards;
+    use triton_manifest::{AdapterKind, InboundKind};
+
+    #[test]
+    fn telegram_ships_dashboards_on_webhook_and_long_poll() {
+        // The #135 follow-up: long-poll Telegram was wrongly excluded.
+        assert!(adapter_ships_dashboards(
+            AdapterKind::Telegram,
+            InboundKind::Webhook
+        ));
+        assert!(adapter_ships_dashboards(
+            AdapterKind::Telegram,
+            InboundKind::LongPoll
+        ));
+    }
+
+    #[test]
+    fn discord_and_whatsapp_cloud_ship_dashboards_only_on_webhook() {
+        for kind in [AdapterKind::Discord, AdapterKind::WhatsappCloud] {
+            assert!(adapter_ships_dashboards(kind, InboundKind::Webhook));
+            // Their socket/bridge variants reply text-only.
+            assert!(!adapter_ships_dashboards(kind, InboundKind::Socket));
+        }
+    }
+
+    #[test]
+    fn text_only_adapters_never_need_the_rasterizer() {
+        // WhatsApp Web is a socket bridge; Signal/MsTeams/GoogleChat
+        // render their own card formats, not a rasterised PNG.
+        for kind in [
+            AdapterKind::WhatsappWeb,
+            AdapterKind::Signal,
+            AdapterKind::MsTeams,
+            AdapterKind::GoogleChat,
+        ] {
+            for inbound in [
+                InboundKind::Webhook,
+                InboundKind::Socket,
+                InboundKind::LongPoll,
+            ] {
+                assert!(
+                    !adapter_ships_dashboards(kind, inbound),
+                    "{kind:?}/{inbound:?} should not need the rasterizer"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
