@@ -26,6 +26,10 @@ use triton_tests::upstream_fixture::FakeAgent;
 
 const AUDIENCE: &str = "1234567890";
 const GOOGLE_ISS: &str = "chat@system.gserviceaccount.com";
+/// Issuer of the token the **current** Google Chat console sends — a
+/// standard Google OIDC ID token (#134), not the legacy service-account
+/// flavor above.
+const GOOGLE_OIDC_ISS: &str = "https://accounts.google.com";
 
 fn manifest_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -119,6 +123,64 @@ async fn valid_jwt_message_dispatches_inline_response() {
     });
     assert_eq!(post["status_label"], "posted");
     assert_eq!(post["result"], "ok");
+}
+
+/// #134: a token from the **current** Google Chat console — a standard
+/// Google OIDC ID token (`iss = https://accounts.google.com`, `aud =`
+/// the App URL, keys from Google's OIDC JWKS) — MUST be accepted,
+/// exactly like the legacy service-account token. This drives the
+/// realistic OIDC path end to end: the App-URL audience and the
+/// JWKS-shaped `oauth2/v3/certs` keyset (not the legacy x509 cert-map).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oidc_issuer_jwt_message_dispatches_inline_response() {
+    // App URL the modern Chat console uses as the token `aud`; matches
+    // `inbound.audience` in the OIDC manifest fixture.
+    const OIDC_AUDIENCE: &str = "https://triton.example.com/google_chat/webhook";
+    let oidc_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-google-chat-oidc-test.yaml")
+        .display()
+        .to_string();
+
+    let jwks = FakeGoogleJwks::start().await;
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), oidc_manifest),
+        // Point at the JWKS-shaped certs endpoint — the real OIDC source.
+        (
+            "TRITON_GOOGLE_CHAT_JWKS_URI".to_string(),
+            jwks.oidc_jwks_uri(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let now = unix_now();
+    let token = jwks.sign_jwt(json!({
+        "iss": GOOGLE_OIDC_ISS,
+        "aud": OIDC_AUDIENCE,
+        "iat": now,
+        "exp": now + 600,
+        "sub": "1029384756",
+    }));
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&message_event("users/99", "hello from the OIDC console"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(
+        resp.status().is_success(),
+        "OIDC-issuer token must be accepted (#134), got {}",
+        resp.status()
+    );
+
+    let audit = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["protocol"] == "messenger:google_chat"
+    });
+    assert_eq!(audit["who"], "alice");
+    assert_eq!(audit["result"], "ok");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

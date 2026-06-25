@@ -1,11 +1,18 @@
 //! Google Chat inbound JWT verification (FR-I-8 + FR-I-3).
 //!
 //! Google posts events to our webhook with `Authorization: Bearer
-//! <JWT>` where the JWT is signed by `chat@system.gserviceaccount.com`.
-//! The canonical key source is the v1 `metadata/x509/...` endpoint,
-//! which serves a JSON object whose values are PEM-wrapped X.509
-//! certificates rather than the JWKS-formatted JSON our OIDC
-//! verifier consumes. We accept BOTH shapes:
+//! <JWT>`. Depending on how the Chat app was created the token comes in
+//! one of two flavors (see [`ACCEPTED_ISSUERS`]): the **current** console
+//! sends a standard Google **OIDC ID token** (`iss =
+//! https://accounts.google.com`, keys at `oauth2/v3/certs`), while
+//! **legacy** apps send a service-account token (`iss =
+//! chat@system.gserviceaccount.com`, keys at the x509 metadata
+//! endpoint). The operator points `TRITON_GOOGLE_CHAT_JWKS_URI` at the
+//! matching keyset (#134).
+//!
+//! The x509 endpoint serves a JSON object whose values are PEM-wrapped
+//! X.509 certificates rather than the JWKS-formatted JSON the OIDC certs
+//! endpoint serves. We accept BOTH shapes:
 //!
 //!   1. **PEM-cert map** (canonical): `{ "<kid>": "-----BEGIN
 //!      CERTIFICATE-----\n...\n-----END CERTIFICATE-----" }` — the
@@ -33,7 +40,27 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::{Mutex, RwLock};
 
-const GOOGLE_CHAT_ISSUER: &str = "chat@system.gserviceaccount.com";
+/// Issuers we accept on an inbound Google Chat JWT. Google signs the
+/// webhook token in one of two flavors, depending on how the Chat app
+/// was created:
+///   * **OIDC** (current console): a standard Google ID token,
+///     `iss = https://accounts.google.com` (some tokens omit the scheme).
+///     Keys live at Google's OIDC JWKS (`oauth2/v3/certs`).
+///   * **Service account** (legacy): `iss =
+///     chat@system.gserviceaccount.com`, keys at the x509 metadata
+///     endpoint.
+///
+/// Both are Google issuers; the real guards are the signature (against
+/// the configured JWKS) and the `aud` claim (this app's audience), so
+/// accepting either issuer is safe — and it matches Google's documented
+/// verification for Chat HTTP endpoints (#134). Which flavor actually
+/// verifies is determined by `TRITON_GOOGLE_CHAT_JWKS_URI` (a token whose
+/// `kid` isn't in the configured keyset is rejected).
+const ACCEPTED_ISSUERS: &[&str] = &[
+    "https://accounts.google.com",
+    "accounts.google.com",
+    "chat@system.gserviceaccount.com",
+];
 /// Clock skew Google's docs implicitly allow on inbound JWTs (the
 /// platform stamps `iat`/`exp` against its own clock, which can
 /// drift up to a few minutes). We allow 5 minutes each direction.
@@ -132,7 +159,7 @@ impl GoogleJwtVerifier {
         // FR-I-3 single-alg validation form (see triton-identity
         // for why we don't widen `validation.algorithms`).
         let mut validation = Validation::new(Algorithm::RS256);
-        validation.set_issuer(&[GOOGLE_CHAT_ISSUER]);
+        validation.set_issuer(ACCEPTED_ISSUERS);
         validation.set_audience(&[&self.config.audience]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         validation.leeway = CLOCK_SKEW_SECS;
@@ -144,7 +171,7 @@ impl GoogleJwtVerifier {
         // these, but a future bump that loosens defaults would
         // silently let an off-issuer token through. Explicit checks
         // here keep the intent in code.
-        if claims.iss != GOOGLE_CHAT_ISSUER {
+        if !ACCEPTED_ISSUERS.contains(&claims.iss.as_str()) {
             return Err(VerifyError::BadIssuer(claims.iss));
         }
         if claims.aud != self.config.audience {
@@ -278,5 +305,16 @@ mod tests {
     fn parse_keyset_rejects_garbage() {
         let body = json!("not an object");
         assert!(parse_keyset(&body).is_err());
+    }
+
+    #[test]
+    fn accepts_both_oidc_and_service_account_issuers() {
+        // #134: the current console's OIDC issuer must be accepted
+        // alongside the legacy service-account one.
+        assert!(ACCEPTED_ISSUERS.contains(&"https://accounts.google.com"));
+        assert!(ACCEPTED_ISSUERS.contains(&"accounts.google.com"));
+        assert!(ACCEPTED_ISSUERS.contains(&"chat@system.gserviceaccount.com"));
+        // A non-Google issuer must NOT be in the set.
+        assert!(!ACCEPTED_ISSUERS.contains(&"https://evil.example.com"));
     }
 }

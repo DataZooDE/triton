@@ -1,0 +1,37 @@
+# #134 integration manifest — Google Chat app created in the CURRENT
+# console, which sends a standard Google OIDC ID token. The `aud` is the
+# App URL (the HTTP endpoint), and keys come from Google's OIDC JWKS
+# (`oauth2/v3/certs`), not the legacy x509 cert-map. Otherwise identical
+# to manifest-google-chat-test.yaml.
+version: "0.2"
+
+adapters:
+  google_chat:
+    kind: google_chat
+    inbound:
+      kind: webhook
+      signature: google_oidc_jwt
+      # Modern OIDC token `aud` is the App URL (the configured HTTP
+      # endpoint), not a project number.
+      audience: "https://triton.example.com/google_chat/webhook"
+    outbound:
+      kind: rest_api
+      token: unused-in-pr-33
+    identity:
+      kind: sender_table
+      table: '{"users/99":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: card_v2
+      selections: card_v2
+      forms: card_v2
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

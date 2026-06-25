@@ -10,8 +10,8 @@
 //! Scope (PR 33):
 //!
 //!   * Inbound auth: validate the JWT against Google's published
-//!     certs (RS256, `iss == chat@system.gserviceaccount.com`,
-//!     `aud == manifest.audience`). FR-I-8 constant-time semantics
+//!     certs (RS256, `iss` ∈ Google's OIDC / service-account issuers
+//!     per #134, `aud == manifest.audience`). FR-I-8 constant-time semantics
 //!     come from the cryptographic verifier itself, not byte
 //!     comparisons we own — the only constant-time-relevant
 //!     surface is "did the signature verify?" which jsonwebtoken

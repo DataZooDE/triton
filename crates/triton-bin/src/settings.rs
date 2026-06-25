@@ -395,16 +395,19 @@ struct Cli {
     #[arg(long, env = "TRITON_COURIER_TIMEOUT_MS", default_value_t = 10_000)]
     courier_timeout_ms: u64,
 
-    /// JWKS URI used by the Google Chat adapter to fetch the Google
-    /// service-account certificates it verifies inbound JWTs
-    /// against. Production stays at the canonical Google URL (the
-    /// only host on the NFR-S-4 egress allowlist for this adapter).
-    /// Integration tests override this to point at an in-repo
-    /// `FakeGoogleJwks`.
+    /// JWKS URI the Google Chat adapter fetches the verifying keys from.
+    /// Defaults to Google's **OIDC** certs (`oauth2/v3/certs`) — what the
+    /// current Chat console's tokens are signed with (#134). A **legacy**
+    /// service-account deploy overrides this with the x509 metadata
+    /// endpoint
+    /// (`…/service_accounts/v1/metadata/x509/chat@system.gserviceaccount.com`).
+    /// Both hosts are `www.googleapis.com` (the only host on the NFR-S-4
+    /// egress allowlist for this adapter). Integration tests override this
+    /// to point at an in-repo `FakeGoogleJwks`.
     #[arg(
         long,
         env = "TRITON_GOOGLE_CHAT_JWKS_URI",
-        default_value = "https://www.googleapis.com/service_accounts/v1/metadata/x509/chat@system.gserviceaccount.com"
+        default_value = "https://www.googleapis.com/oauth2/v3/certs"
     )]
     google_chat_jwks_uri: String,
 
