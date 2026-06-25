@@ -16,6 +16,19 @@ jobs:
     name: cargo fmt + clippy + test (workspace)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      # CI reliability (see doc/realizations.md §7): cap peak build memory
+      # so a parallel-link spike across the workspace's test binaries can't
+      # OOM and lose the runner mid-job.
+      #   * Incremental compilation gains nothing on an ephemeral runner and
+      #     bloats `target` + memory — turn it off.
+      #   * Bound build parallelism so at most 2 heavy links run at once
+      #     (the public runner has 4 cores / 16 GB; 4 concurrent debug links
+      #     were the spike). Combined with the slimmed dev debuginfo profile
+      #     and the consolidated `triton-tests` binary, this keeps the link
+      #     phase comfortably under the memory ceiling.
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
     steps:
       - uses: actions/checkout@v4
 

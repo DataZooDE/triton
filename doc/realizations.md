@@ -420,6 +420,40 @@ production deployment can avoid by knowing about it.
 Items discovered while building the production Rust port; each is
 a trap the next developer should not have to step in.
 
+- **"Flaky" CI that loses the runner mid-`cargo test --workspace` is an
+  OOM during the test *link*, not a flaky test.** Symptom: the Rust job
+  is marked `failure` with the cargo steps at `conclusion: null` (runner
+  lost, not a non-zero exit), it dies ~1–3 min in with **no test output**
+  and an empty failure log, and a re-run usually passes. Root cause: the
+  workspace built ~58 *separate* `triton-tests` integration binaries, each
+  statically linking the full dep tree (reqwest+rustls, axum, tokio,
+  jsonwebtoken, every chat crate, the rasterizer…) with cargo's default
+  `debug = 2` (full DWARF) → **80–180 MB binaries**; linking several in
+  parallel (`-j4` on the 16 GB public runner) spikes RAM past the ceiling
+  and the OOM killer reaps the runner agent. It's intermittent because it
+  depends on whether two heavy links overlap at peak. It even hit a
+  *frontend-only* PR, which is the tell: the cost is in the workspace
+  compile/link, independent of what changed. Three fixes, applied
+  together:
+  1. **Slim dev/test debuginfo** — `[profile.dev] debug =
+     "line-tables-only"` + `split-debuginfo = "unpacked"`. Keeps
+     `file:line` in panic backtraces (what we use) while cutting binary
+     size **~70%** (triton 180→53 MB; a test binary 90→23 MB) and link
+     memory with it.
+  2. **Bound CI build memory** — `CARGO_INCREMENTAL=0` (useless on an
+     ephemeral runner, bloats `target`+RAM) and `CARGO_BUILD_JOBS=2` (cap
+     concurrent links) in the job `env`.
+  3. **One integration binary, not 58** — `triton-tests` sets
+     `autotests = false` and aggregates every `tests/*.rs` into a single
+     `it` binary (`tests/it/main.rs` `#[path]`-`mod`s each file). The
+     workspace test build now does ONE fat link instead of 58. Safe
+     because the files have no in-process `std::env::set_var` (would race
+     when run in one process) and no crate-root-only inner attributes;
+     verified by the full suite (255 tests) passing in the single binary.
+  To add an integration test: drop a `tests/<name>.rs` and add a `mod`
+  line to `tests/it/main.rs` (it won't be picked up otherwise —
+  `autotests = false`).
+
 - **Streaming (SSE) breaks "audit at call end" — fix it with a
   drop-aware finalizer, not by auditing at first byte.** When a tool
   result streams (issue #132), the outcome (clean done / mid-stream
