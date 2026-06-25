@@ -9,6 +9,7 @@
 //! here, so a newer agent vocabulary is relayed rather than rejected.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use futures::Stream;
 use futures::stream::{self, BoxStream, StreamExt};
@@ -35,7 +36,13 @@ struct Decoder<S> {
 /// one [`StreamEvent`] per complete SSE frame. A transport error
 /// mid-stream becomes a terminal `Error` event; a clean close flushes any
 /// trailing frame and ends.
-pub fn decode_sse<S, B, E>(inner: S) -> BoxStream<'static, StreamEvent>
+///
+/// `idle_timeout` bounds the wait for the *next* byte chunk (TS-03): the
+/// streaming upstream client carries no total timeout (so a legitimately
+/// long stream isn't killed), so a hung/silent upstream is instead cut
+/// here — if no byte arrives within the window we emit a terminal `Error`
+/// and stop, which the dispatcher's `Finalized` maps to a breaker arm.
+pub fn decode_sse<S, B, E>(inner: S, idle_timeout: Duration) -> BoxStream<'static, StreamEvent>
 where
     S: Stream<Item = Result<B, E>> + Send + 'static,
     B: AsRef<[u8]>,
@@ -47,7 +54,7 @@ where
         pending: VecDeque::new(),
         done: false,
     };
-    stream::unfold(state, |mut st| async move {
+    stream::unfold(state, move |mut st| async move {
         loop {
             if let Some(ev) = st.pending.pop_front() {
                 return Some((ev, st));
@@ -55,7 +62,22 @@ where
             if st.done {
                 return None;
             }
-            match st.inner.next().await {
+            let next = match tokio::time::timeout(idle_timeout, st.inner.next()).await {
+                Ok(next) => next,
+                Err(_elapsed) => {
+                    // No byte within the idle window → treat the upstream as
+                    // hung and fail the stream closed.
+                    st.done = true;
+                    st.pending.push_back(StreamEvent::Error(
+                        triton_core::TritonError::Tool(format!(
+                            "upstream stream idle timeout ({}ms without a frame)",
+                            idle_timeout.as_millis()
+                        )),
+                    ));
+                    continue;
+                }
+            };
+            match next {
                 Some(Ok(chunk)) => {
                     st.buf.extend_from_slice(chunk.as_ref());
                     drain_frames(&mut st.buf, &mut st.pending);
@@ -164,7 +186,28 @@ mod tests {
                 .into_iter()
                 .map(|c| Ok::<_, std::convert::Infallible>(c.as_bytes().to_vec())),
         );
-        decode_sse(s).collect::<Vec<_>>().await
+        // A generous idle timeout — these tests exercise framing, not idleness.
+        decode_sse(s, Duration::from_secs(60))
+            .collect::<Vec<_>>()
+            .await
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_emits_terminal_error() {
+        // A stream that yields one frame then hangs forever must not pin the
+        // consumer: the idle timeout fires and closes the stream with an error.
+        let s = stream::once(async {
+            Ok::<_, std::convert::Infallible>(b"event: tool\ndata: {}\n\n".to_vec())
+        })
+        .chain(stream::pending());
+        let evs = decode_sse(s, Duration::from_millis(50))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(evs.first(), Some(StreamEvent::Tool(_))));
+        match evs.last() {
+            Some(StreamEvent::Error(e)) => assert!(e.to_string().contains("idle timeout"), "{e}"),
+            other => panic!("expected a terminal idle-timeout error, got {other:?}"),
+        }
     }
 
     #[tokio::test]

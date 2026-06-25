@@ -61,6 +61,11 @@ pub struct StaticUpstream {
     map: HashMap<String, String>,
     token: String,
     http: reqwest::Client,
+    /// Client for the streaming path (TS-03): a connect timeout but NO
+    /// total `.timeout()`, so a legitimately long SSE response isn't cut
+    /// off mid-stream. Hung/silent upstreams are bounded by a per-frame
+    /// idle timeout (`stream_idle_timeout`) inside `decode_sse` instead.
+    http_stream: reqwest::Client,
     /// When set, each call's bearer is a freshly-signed RS256 JWT (aud =
     /// `audience`, sub = the caller principal) instead of the static `token`.
     signer: Option<Arc<JwtSigner>>,
@@ -100,6 +105,9 @@ pub struct StaticUpstream {
     circuit_open_after: u32,
     /// How long a tripped breaker stays open before a half-open probe.
     circuit_cooldown: Duration,
+    /// TS-03: per-frame idle timeout for streamed upstream responses. If no
+    /// byte arrives within this window the stream is failed closed.
+    stream_idle_timeout: Duration,
 }
 
 impl StaticUpstream {
@@ -110,6 +118,7 @@ impl StaticUpstream {
         spec: &str,
         token: String,
         timeout: Duration,
+        stream_idle_timeout: Duration,
         circuit_open_after: u32,
         circuit_cooldown: Duration,
     ) -> Self {
@@ -123,10 +132,18 @@ impl StaticUpstream {
             .timeout(timeout)
             .build()
             .expect("reqwest client");
+        // Streaming client: bound only the connect (so an unreachable agent
+        // still fails fast pre-first-byte), never the total request — the
+        // idle timeout in `decode_sse` is what bounds a hung stream.
+        let http_stream = reqwest::Client::builder()
+            .connect_timeout(timeout)
+            .build()
+            .expect("reqwest streaming client");
         Self {
             map,
             token,
             http,
+            http_stream,
             signer: None,
             audience: String::new(),
             tenant: String::new(),
@@ -136,6 +153,7 @@ impl StaticUpstream {
             breakers: RwLock::new(HashMap::new()),
             circuit_open_after,
             circuit_cooldown,
+            stream_idle_timeout,
         }
     }
 
@@ -372,7 +390,7 @@ impl UpstreamDispatch for StaticUpstream {
         let bearer = self.bearer(principal)?;
 
         let send = self
-            .http
+            .http_stream
             .post(format!("http://{ep}/"))
             .bearer_auth(&bearer)
             .header("X-Triton-Tool", tool)
@@ -413,16 +431,25 @@ impl UpstreamDispatch for StaticUpstream {
             .and_then(|v| v.to_str().ok())
             .is_some_and(|ct| ct.contains("text/event-stream"));
         if !is_sse {
-            return match resp.json::<Value>().await {
-                Ok(v) => {
+            // Buffered read over the no-total-timeout streaming client, so
+            // bound it with the idle timeout too (a non-streaming agent that
+            // hangs mid-body would otherwise pin the connection).
+            let body = tokio::time::timeout(self.stream_idle_timeout, resp.json::<Value>()).await;
+            return match body {
+                Ok(Ok(v)) => {
                     self.breaker_update(tool, permission.was_half_open, true)
                         .await;
                     Ok(futures::stream::once(async move { StreamEvent::Done(v) }).boxed())
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     self.breaker_update(tool, permission.was_half_open, false)
                         .await;
                     Err(TritonError::Tool(format!("upstream {tool} decode: {e}")))
+                }
+                Err(_elapsed) => {
+                    self.breaker_update(tool, permission.was_half_open, false)
+                        .await;
+                    Err(TritonError::Tool(format!("upstream {tool} timed out")))
                 }
             };
         }
@@ -432,7 +459,7 @@ impl UpstreamDispatch for StaticUpstream {
         let slot = self.breaker_slot(tool).await;
         let open_after = self.circuit_open_after;
         let was_half_open = permission.was_half_open;
-        let events = decode_sse(resp.bytes_stream());
+        let events = decode_sse(resp.bytes_stream(), self.stream_idle_timeout);
         let finalized = Finalized::new(events, move |term, _timing| match term {
             Termination::Completed => slot
                 .lock()

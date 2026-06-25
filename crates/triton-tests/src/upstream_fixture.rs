@@ -67,6 +67,10 @@ enum AgentMode {
     /// A2UI `{ surface: { components: [...] } }` payload so the streaming
     /// A2UI-wrap path can be exercised end-to-end.
     StreamingSurface,
+    /// Stream a couple of progress frames, then **hang** — never send
+    /// another byte and never close the connection. Exercises TS-03: the
+    /// per-frame idle timeout must fail the stream closed.
+    StreamingHang,
 }
 
 impl FakeAgent {
@@ -105,6 +109,12 @@ impl FakeAgent {
     /// See [`AgentMode::StreamingSurface`].
     pub async fn start_streaming_surface() -> Self {
         Self::start(AgentMode::StreamingSurface, 0, None).await
+    }
+
+    /// Emit a couple of progress frames then hang forever (no terminal,
+    /// no close). See [`AgentMode::StreamingHang`].
+    pub async fn start_streaming_hang() -> Self {
+        Self::start(AgentMode::StreamingHang, 0, None).await
     }
 
     async fn start(mode: AgentMode, fail_first: u32, fixed_response: Option<Value>) -> Self {
@@ -186,7 +196,8 @@ async fn handler(
         | AgentMode::Returning
         | AgentMode::Streaming
         | AgentMode::StreamingTruncated
-        | AgentMode::StreamingSurface => false,
+        | AgentMode::StreamingSurface
+        | AgentMode::StreamingHang => false,
         AgentMode::AlwaysFail => true,
         AgentMode::FailingThenRecover => {
             let mut left = state.failures_remaining.lock().unwrap();
@@ -214,6 +225,7 @@ async fn handler(
         AgentMode::Streaming => sse_response(streaming_frames(&value, true)),
         AgentMode::StreamingTruncated => sse_response(streaming_frames(&value, false)),
         AgentMode::StreamingSurface => sse_response(streaming_surface_frames()),
+        AgentMode::StreamingHang => sse_response_hanging(streaming_frames(&value, false)),
         _ => Json(json!({ "echoed": value })).into_response(),
     }
 }
@@ -263,6 +275,30 @@ fn sse_response(frames: Vec<String>) -> axum::response::Response {
                 .map(|frame| (Ok::<_, Infallible>(frame.into_bytes()), (it, true)))
         },
     ));
+    axum::response::Response::builder()
+        .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+        .body(body)
+        .unwrap()
+}
+
+/// Like [`sse_response`], but after flushing the frames the body stream
+/// **never yields again and never closes** — simulating a hung upstream.
+/// The client's per-frame idle timeout (TS-03) is what must cut it.
+fn sse_response_hanging(frames: Vec<String>) -> axum::response::Response {
+    let framed = futures::stream::unfold(
+        (frames.into_iter(), false),
+        |(mut it, started)| async move {
+            if started {
+                tokio::time::sleep(Duration::from_millis(15)).await;
+            }
+            it.next()
+                .map(|frame| (Ok::<_, Infallible>(frame.into_bytes()), (it, true)))
+        },
+    );
+    // Append a never-ready tail so the connection stays open with no
+    // further bytes and no EOF.
+    use futures::StreamExt as _;
+    let body = Body::from_stream(framed.chain(futures::stream::pending()));
     axum::response::Response::builder()
         .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
         .body(body)
