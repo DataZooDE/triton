@@ -42,7 +42,18 @@ struct Decoder<S> {
 /// long stream isn't killed), so a hung/silent upstream is instead cut
 /// here — if no byte arrives within the window we emit a terminal `Error`
 /// and stop, which the dispatcher's `Finalized` maps to a breaker arm.
-pub fn decode_sse<S, B, E>(inner: S, idle_timeout: Duration) -> BoxStream<'static, StreamEvent>
+///
+/// `max_duration` bounds the *total* wall-clock of the stream (Codex
+/// security review): the idle timeout only bounds gaps, so an upstream
+/// that drips one byte just under the idle window forever would otherwise
+/// pin the connection indefinitely. Once the deadline passes we emit a
+/// terminal `Error` and stop, regardless of how steadily bytes arrive.
+/// Both limits carry a distinct machine `status_detail`.
+pub fn decode_sse<S, B, E>(
+    inner: S,
+    idle_timeout: Duration,
+    max_duration: Duration,
+) -> BoxStream<'static, StreamEvent>
 where
     S: Stream<Item = Result<B, E>> + Send + 'static,
     B: AsRef<[u8]>,
@@ -54,6 +65,7 @@ where
         pending: VecDeque::new(),
         done: false,
     };
+    let deadline = tokio::time::Instant::now() + max_duration;
     stream::unfold(state, move |mut st| async move {
         loop {
             if let Some(ev) = st.pending.pop_front() {
@@ -62,18 +74,34 @@ where
             if st.done {
                 return None;
             }
-            let next = match tokio::time::timeout(idle_timeout, st.inner.next()).await {
+            // Total-duration cap: a slow-drip upstream keeps resetting the
+            // idle timer, so bound the whole stream too.
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                st.done = true;
+                st.pending.push_back(max_duration_error(max_duration));
+                continue;
+            }
+            // Wait at most until whichever limit is sooner, then classify.
+            let wait = idle_timeout.min(deadline - now);
+            let next = match tokio::time::timeout(wait, st.inner.next()).await {
                 Ok(next) => next,
                 Err(_elapsed) => {
-                    // No byte within the idle window → treat the upstream as
-                    // hung and fail the stream closed.
                     st.done = true;
-                    st.pending.push_back(StreamEvent::Error(
-                        triton_core::TritonError::Tool(format!(
-                            "upstream stream idle timeout ({}ms without a frame)",
-                            idle_timeout.as_millis()
-                        )),
-                    ));
+                    let ev = if tokio::time::Instant::now() >= deadline {
+                        max_duration_error(max_duration)
+                    } else {
+                        // No byte within the idle window → treat the upstream
+                        // as hung and fail the stream closed.
+                        StreamEvent::error_with_detail(
+                            triton_core::TritonError::Tool(format!(
+                                "upstream stream idle timeout ({}ms without a frame)",
+                                idle_timeout.as_millis()
+                            )),
+                            "upstream_stream_idle_timeout",
+                        )
+                    };
+                    st.pending.push_back(ev);
                     continue;
                 }
             };
@@ -88,19 +116,20 @@ where
                     if st.buf.len() > MAX_FRAME_BYTES {
                         st.done = true;
                         st.buf.clear();
-                        st.pending.push_back(StreamEvent::Error(
+                        st.pending.push_back(StreamEvent::error_with_detail(
                             triton_core::TritonError::Tool(format!(
                                 "upstream SSE frame exceeded {MAX_FRAME_BYTES} bytes without a boundary"
                             )),
+                            "upstream_stream_frame_overflow",
                         ));
                     }
                 }
                 Some(Err(e)) => {
-                    // Transport fault after the stream opened: surface a
-                    // terminal error event and stop.
+                    // Transport fault after the stream opened: a pass-through
+                    // upstream fault (no Triton-imposed detail).
                     st.done = true;
                     st.pending
-                        .push_back(StreamEvent::Error(triton_core::TritonError::Tool(format!(
+                        .push_back(StreamEvent::error(triton_core::TritonError::Tool(format!(
                             "upstream stream error: {e}"
                         ))));
                 }
@@ -117,6 +146,17 @@ where
         }
     })
     .boxed()
+}
+
+/// The terminal error for a stream that ran past its total-duration cap.
+fn max_duration_error(max_duration: Duration) -> StreamEvent {
+    StreamEvent::error_with_detail(
+        triton_core::TritonError::Tool(format!(
+            "upstream stream exceeded max duration ({}ms)",
+            max_duration.as_millis()
+        )),
+        "upstream_stream_max_duration",
+    )
 }
 
 /// Pull every complete (blank-line-terminated) frame out of `buf` into
@@ -186,8 +226,8 @@ mod tests {
                 .into_iter()
                 .map(|c| Ok::<_, std::convert::Infallible>(c.as_bytes().to_vec())),
         );
-        // A generous idle timeout — these tests exercise framing, not idleness.
-        decode_sse(s, Duration::from_secs(60))
+        // Generous idle + total caps — these tests exercise framing, not limits.
+        decode_sse(s, Duration::from_secs(60), Duration::from_secs(3600))
             .collect::<Vec<_>>()
             .await
     }
@@ -200,13 +240,46 @@ mod tests {
             Ok::<_, std::convert::Infallible>(b"event: tool\ndata: {}\n\n".to_vec())
         })
         .chain(stream::pending());
-        let evs = decode_sse(s, Duration::from_millis(50))
+        let evs = decode_sse(s, Duration::from_millis(50), Duration::from_secs(3600))
             .collect::<Vec<_>>()
             .await;
         assert!(matches!(evs.first(), Some(StreamEvent::Tool(_))));
         match evs.last() {
-            Some(StreamEvent::Error(e)) => assert!(e.to_string().contains("idle timeout"), "{e}"),
+            Some(StreamEvent::Error { error, detail }) => {
+                assert!(error.to_string().contains("idle timeout"), "{error}");
+                assert_eq!(*detail, Some("upstream_stream_idle_timeout"));
+            }
             other => panic!("expected a terminal idle-timeout error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn max_duration_cuts_a_slow_drip_stream() {
+        // An upstream that drips a comment byte every 20ms keeps resetting
+        // the idle timer forever, so only the total-duration cap can stop it
+        // (Codex security review). With a 200ms idle window and a 150ms total
+        // cap, the stream must terminate with a max-duration error.
+        let drip = stream::unfold((), |()| async {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            Some((
+                Ok::<_, std::convert::Infallible>(b": ping\n\n".to_vec()),
+                (),
+            ))
+        });
+        let started = tokio::time::Instant::now();
+        let evs = decode_sse(drip, Duration::from_millis(200), Duration::from_millis(150))
+            .collect::<Vec<_>>()
+            .await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the total-duration cap must end the drip promptly"
+        );
+        match evs.last() {
+            Some(StreamEvent::Error { error, detail }) => {
+                assert!(error.to_string().contains("max duration"), "{error}");
+                assert_eq!(*detail, Some("upstream_stream_max_duration"));
+            }
+            other => panic!("expected a terminal max-duration error, got {other:?}"),
         }
     }
 
@@ -253,8 +326,9 @@ mod tests {
         .await;
         assert_eq!(evs.len(), 1);
         match &evs[0] {
-            StreamEvent::Error(e) => {
-                assert!(e.to_string().contains("exceeded"), "got {e}")
+            StreamEvent::Error { error, detail } => {
+                assert!(error.to_string().contains("exceeded"), "got {error}");
+                assert_eq!(*detail, Some("upstream_stream_frame_overflow"));
             }
             other => panic!("expected a terminal error, got {other:?}"),
         }

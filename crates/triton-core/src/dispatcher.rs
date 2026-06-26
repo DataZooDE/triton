@@ -600,7 +600,7 @@ fn status_for(e: &TritonError) -> u16 {
 fn done_event_a2ui(value: Value, version: crate::A2uiVersion) -> StreamEvent {
     match crate::a2ui::extract_surface(&value) {
         Ok(surface) => StreamEvent::Done(crate::a2ui::build_envelope(&surface, version.into())),
-        Err(e) => StreamEvent::Error(TritonError::Tool(format!("tool advertised A2UI but {e}"))),
+        Err(e) => StreamEvent::error(TritonError::Tool(format!("tool advertised A2UI but {e}"))),
     }
 }
 
@@ -646,7 +646,10 @@ struct StreamAudit<'a> {
 fn emit_stream_audit(a: StreamAudit<'_>) {
     let (result, status, status_detail): (String, u16, Option<&'static str>) = match a.term {
         Termination::Completed => ("ok".to_string(), 200, None),
-        Termination::Failed => ("error:tool".to_string(), 502, None),
+        // A Triton-imposed stream limit (idle/max-duration/overflow)
+        // carries a machine `status_detail`; a pass-through upstream
+        // fault leaves it `None`.
+        Termination::Failed { detail } => ("error:tool".to_string(), 502, detail),
         Termination::Truncated => ("error:tool".to_string(), 502, Some("upstream_truncated")),
         Termination::Disconnected => (
             "client_disconnect".to_string(),

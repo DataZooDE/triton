@@ -38,23 +38,62 @@ pub enum StreamEvent {
     /// Terminal failure raised *after* the stream opened (200 headers
     /// already flushed). Surfaced to the client as a terminal `error`
     /// frame and reflected in the single audit line.
-    Error(TritonError),
+    ///
+    /// `detail` is a stable, machine-readable reason for a
+    /// *Triton-imposed* stream limit (idle timeout, max duration, frame
+    /// overflow) that the dispatcher surfaces as the audit `status_detail`
+    /// so operators can tell a gateway-cut stream from a pass-through
+    /// upstream `error` frame (Codex security review). `None` for a
+    /// pass-through upstream fault.
+    Error {
+        error: TritonError,
+        detail: Option<&'static str>,
+    },
 }
 
 impl StreamEvent {
+    /// Terminal error with no machine `status_detail` — a pass-through
+    /// upstream fault (an upstream `error` frame, a transport error, an
+    /// A2UI-wrap failure).
+    pub fn error(error: TritonError) -> Self {
+        Self::Error {
+            error,
+            detail: None,
+        }
+    }
+
+    /// Terminal error carrying a stable, machine-readable `status_detail`
+    /// for a Triton-imposed stream limit.
+    pub fn error_with_detail(error: TritonError, detail: &'static str) -> Self {
+        Self::Error {
+            error,
+            detail: Some(detail),
+        }
+    }
+
+    /// The machine-readable `status_detail` carried by a terminal error,
+    /// if any. `None` for every non-error event and for pass-through
+    /// upstream errors.
+    pub fn failure_detail(&self) -> Option<&'static str> {
+        match self {
+            Self::Error { detail, .. } => *detail,
+            _ => None,
+        }
+    }
+
     /// The SSE `event:` name for this variant.
     pub fn event_name(&self) -> &'static str {
         match self {
             Self::Tool(_) => "tool",
             Self::Token(_) => "token",
             Self::Done(_) => "done",
-            Self::Error(_) => "error",
+            Self::Error { .. } => "error",
         }
     }
 
     /// True for the two stream-closing variants.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Done(_) | Self::Error(_))
+        matches!(self, Self::Done(_) | Self::Error { .. })
     }
 
     /// The `data:` payload as a JSON value.
@@ -62,7 +101,9 @@ impl StreamEvent {
         match self {
             Self::Tool(v) | Self::Done(v) => v.clone(),
             Self::Token(delta) => json!({ "delta": delta }),
-            Self::Error(e) => json!({ "error": e.class(), "message": e.to_string() }),
+            Self::Error { error, .. } => {
+                json!({ "error": error.class(), "message": error.to_string() })
+            }
         }
     }
 
@@ -99,7 +140,9 @@ impl StreamEvent {
                     .and_then(Value::as_str)
                     .map(str::to_string)
                     .unwrap_or_else(|| data.to_string());
-                Self::Error(TritonError::Tool(msg))
+                // A pass-through upstream `error` frame: a Tool fault with
+                // no Triton-imposed `status_detail`.
+                Self::error(TritonError::Tool(msg))
             }
             // "tool" and any unrecognised name → opaque progress.
             _ => Self::Tool(parse_value(data)),
@@ -122,8 +165,11 @@ pub enum Termination {
     /// A terminal `Done` event passed through — clean success.
     Completed,
     /// A terminal `Error` event passed through — upstream failed after
-    /// the stream had already opened (200 headers flushed).
-    Failed,
+    /// the stream had already opened (200 headers flushed). `detail`
+    /// carries the terminal event's machine-readable `status_detail` (a
+    /// Triton-imposed stream limit) when present, else `None` for a
+    /// pass-through upstream fault.
+    Failed { detail: Option<&'static str> },
     /// The inner stream ended with no terminal event — the upstream
     /// closed the connection early (truncation).
     Truncated,
@@ -225,7 +271,11 @@ impl<F: FnOnce(Termination, Timing) + Unpin> Stream for Finalized<F> {
                 if ev.is_terminal() {
                     let term = match &ev {
                         StreamEvent::Done(_) => Termination::Completed,
-                        _ => Termination::Failed,
+                        // The only other terminal is `Error`; carry its
+                        // machine-readable detail through to the audit.
+                        _ => Termination::Failed {
+                            detail: ev.failure_detail(),
+                        },
                     };
                     this.fire(term);
                     this.terminated = true;
@@ -285,7 +335,7 @@ mod tests {
 
     #[test]
     fn error_frame_carries_class_and_message() {
-        let ev = StreamEvent::Error(TritonError::Tool("upstream boom".into()));
+        let ev = StreamEvent::error(TritonError::Tool("upstream boom".into()));
         assert!(ev.is_terminal());
         assert_eq!(
             ev.to_sse_frame(),
@@ -396,12 +446,39 @@ mod tests {
             let (seen, fin) = capture();
             let inner = events(vec![
                 StreamEvent::Token("partial".into()),
-                StreamEvent::Error(crate::error::TritonError::Tool("boom".into())),
+                StreamEvent::error(crate::error::TritonError::Tool("boom".into())),
             ]);
             let mut s = Finalized::new(inner, fin);
             while s.next().await.is_some() {}
             drop(s);
-            assert_eq!(*seen.lock().unwrap(), vec![Termination::Failed]);
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec![Termination::Failed { detail: None }]
+            );
+        }
+
+        #[tokio::test]
+        async fn terminal_error_detail_threads_to_termination() {
+            // A Triton-imposed stream limit carries a machine-readable
+            // detail; the finalizer must surface it so the audit can set
+            // `status_detail` (Codex security review).
+            let (seen, fin) = capture();
+            let inner = events(vec![
+                StreamEvent::Token("partial".into()),
+                StreamEvent::error_with_detail(
+                    crate::error::TritonError::Tool("idle".into()),
+                    "upstream_stream_idle_timeout",
+                ),
+            ]);
+            let mut s = Finalized::new(inner, fin);
+            while s.next().await.is_some() {}
+            drop(s);
+            assert_eq!(
+                *seen.lock().unwrap(),
+                vec![Termination::Failed {
+                    detail: Some("upstream_stream_idle_timeout")
+                }]
+            );
         }
 
         #[tokio::test]

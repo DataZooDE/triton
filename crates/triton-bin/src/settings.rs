@@ -56,6 +56,7 @@ pub struct Settings {
     pub outbound_rate_limit_burst: u32,
     pub upstream_timeout: Duration,
     pub stream_idle_timeout: Duration,
+    pub stream_max_duration: Duration,
     pub circuit_open_after: u32,
     pub circuit_cooldown: Duration,
     pub metrics_host: IpAddr,
@@ -297,6 +298,15 @@ struct Cli {
     /// per-tool breaker arms. Default 60s.
     #[arg(long, env = "TRITON_STREAM_IDLE_TIMEOUT_MS", default_value_t = 60_000)]
     stream_idle_timeout_ms: u64,
+
+    /// Total wall-clock cap on a streamed upstream response, in
+    /// milliseconds (Codex security review). The idle timeout above only
+    /// bounds gaps between bytes, so a hostile upstream dripping bytes just
+    /// under that window could pin a connection indefinitely; this bounds
+    /// the whole stream regardless of byte cadence. Generous by default so
+    /// a legitimately long generation isn't killed. Default 10 minutes.
+    #[arg(long, env = "TRITON_STREAM_MAX_DURATION_MS", default_value_t = 600_000)]
+    stream_max_duration_ms: u64,
 
     /// Per-tool circuit-breaker open-after threshold (FR-U-3): consecutive
     /// tool-side faults before the breaker trips open.
@@ -608,6 +618,7 @@ impl From<Cli> for Settings {
             optional_adapters: parse_optional_adapters(&c.optional_adapters),
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
             stream_idle_timeout: Duration::from_millis(c.stream_idle_timeout_ms),
+            stream_max_duration: Duration::from_millis(c.stream_max_duration_ms),
             circuit_open_after: c.circuit_open_after,
             circuit_cooldown: Duration::from_millis(c.circuit_cooldown_ms),
             metrics_host: c.metrics_host,

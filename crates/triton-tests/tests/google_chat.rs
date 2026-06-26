@@ -30,6 +30,10 @@ const GOOGLE_ISS: &str = "chat@system.gserviceaccount.com";
 /// standard Google OIDC ID token (#134), not the legacy service-account
 /// flavor above.
 const GOOGLE_OIDC_ISS: &str = "https://accounts.google.com";
+/// The Chat platform service account Google stamps into the `email`
+/// claim of the OIDC-flavor token — the discriminator that proves the
+/// token was minted for Chat and not by some other Google caller.
+const CHAT_PLATFORM_SA: &str = "chat@system.gserviceaccount.com";
 
 fn manifest_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -161,6 +165,11 @@ async fn oidc_issuer_jwt_message_dispatches_inline_response() {
         "iat": now,
         "exp": now + 600,
         "sub": "1029384756",
+        // Google stamps the Chat platform service account here; it is
+        // the only Chat-specific proof on the OIDC flavor (the issuer
+        // is shared by every Google ID token).
+        "email": CHAT_PLATFORM_SA,
+        "email_verified": true,
     }));
 
     let resp = reqwest::Client::new()
@@ -181,6 +190,70 @@ async fn oidc_issuer_jwt_message_dispatches_inline_response() {
     });
     assert_eq!(audit["who"], "alice");
     assert_eq!(audit["result"], "ok");
+}
+
+/// Codex security review (#141 follow-up): the OIDC issuer
+/// `accounts.google.com` is shared by EVERY Google-minted ID token —
+/// anyone with a Google service account can mint one via IAM
+/// `generateIdToken` with `aud` = our PUBLIC App URL. Without a
+/// Chat-specific discriminator, such a token would authenticate as the
+/// Chat platform and let a forged body impersonate any enrolled sender.
+/// Google's documented guard is the `email` claim: it MUST be the Chat
+/// platform service account. A correctly-signed, correct-`aud` OIDC
+/// token whose `email` is some other Google service account MUST be
+/// rejected.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oidc_token_from_other_service_account_is_rejected() {
+    const OIDC_AUDIENCE: &str = "https://triton.example.com/google_chat/webhook";
+    let oidc_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-google-chat-oidc-test.yaml")
+        .display()
+        .to_string();
+
+    let jwks = FakeGoogleJwks::start().await;
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), oidc_manifest),
+        (
+            "TRITON_GOOGLE_CHAT_JWKS_URI".to_string(),
+            jwks.oidc_jwks_uri(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    // Genuinely Google-signed (our fixture key stands in for Google's
+    // OIDC key), correct issuer, correct App-URL audience — but minted
+    // for the ATTACKER's service account, not the Chat platform.
+    let now = unix_now();
+    let token = jwks.sign_jwt(json!({
+        "iss": GOOGLE_OIDC_ISS,
+        "aud": OIDC_AUDIENCE,
+        "iat": now,
+        "exp": now + 600,
+        "sub": "1029384756",
+        "email": "attacker@evil-project.iam.gserviceaccount.com",
+        "email_verified": true,
+    }));
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {token}"))
+        // Forged body claiming an enrolled sender.
+        .json(&message_event("users/99", "impersonation attempt"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert_eq!(
+        resp.status(),
+        401,
+        "OIDC token from a non-Chat service account must be rejected"
+    );
+
+    let rejected = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "rejected" && v["protocol"] == "messenger:google_chat"
+    });
+    assert_eq!(rejected["result"], "error:auth");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

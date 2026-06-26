@@ -244,6 +244,7 @@ async fn main() -> std::io::Result<()> {
                 token,
                 settings.upstream_timeout,
                 settings.stream_idle_timeout,
+                settings.stream_max_duration,
                 settings.circuit_open_after,
                 settings.circuit_cooldown,
             );

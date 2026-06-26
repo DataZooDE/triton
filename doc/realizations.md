@@ -1098,3 +1098,18 @@ a trap the next developer should not have to step in.
   note the two `match adapter.kind` loops in `triton-bin` (socket vs
   webhook) and the manifest `phone_number_id` rule all keyed off the old
   kind — grep for every `WhatsappWeb` before assuming the split is done.
+
+- **A Google OIDC ID token proves *Google signed it*, not *who asked*.**
+  #141 widened the google_chat verifier to accept `iss =
+  accounts.google.com` (the modern console flavor). But that issuer is
+  shared by *every* Google-minted ID token, and the `aud` is the webhook's
+  **public** App URL — anyone with a Google service account can mint a
+  token for it via IAM `generateIdToken`. Since the sender identity is then
+  read from the *unsigned* request body, that's a clean impersonation
+  bypass. The Chat-specific discriminator Google documents is the `email`
+  claim = `chat@system.gserviceaccount.com`; the verifier must require it
+  whenever `iss` is the generic OIDC issuer (the legacy `iss =
+  chat@system…` flavor is self-proving and needs no extra check). Rule of
+  thumb: when an inbound credential's issuer/audience aren't both unique to
+  *this* caller, you need a per-actor claim too — signature + audience
+  alone is not authentication.

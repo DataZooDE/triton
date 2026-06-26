@@ -50,17 +50,34 @@ use tokio::sync::{Mutex, RwLock};
 ///     chat@system.gserviceaccount.com`, keys at the x509 metadata
 ///     endpoint.
 ///
-/// Both are Google issuers; the real guards are the signature (against
-/// the configured JWKS) and the `aud` claim (this app's audience), so
-/// accepting either issuer is safe — and it matches Google's documented
-/// verification for Chat HTTP endpoints (#134). Which flavor actually
-/// verifies is determined by `TRITON_GOOGLE_CHAT_JWKS_URI` (a token whose
-/// `kid` isn't in the configured keyset is rejected).
+/// Both are Google issuers, but they are NOT equally self-proving:
+///   * The **service-account** issuer IS the Chat platform identity
+///     (`chat@system.gserviceaccount.com`) — only Google can sign with
+///     that issuer, so the issuer alone proves the token came from Chat.
+///   * The **OIDC** issuer `accounts.google.com` is shared by *every*
+///     Google-minted ID token. Anyone with a Google service account can
+///     mint one (IAM `generateIdToken`) with `aud` set to our **public**
+///     App URL — which is not a secret. So issuer + `aud` is NOT enough
+///     on this flavor: the Chat-specific proof is the `email` claim,
+///     which Google sets to the Chat platform service account. We require
+///     it (see [`CHAT_PLATFORM_SA`] in `verify`); without it a third
+///     party's Google ID token would authenticate as Chat and a forged
+///     request body could impersonate any enrolled sender (Codex security
+///     review, #141 follow-up).
+///
+/// Which flavor actually verifies is also bounded by the signature
+/// (against the configured JWKS) and `TRITON_GOOGLE_CHAT_JWKS_URI` (a
+/// token whose `kid` isn't in the configured keyset is rejected).
 const ACCEPTED_ISSUERS: &[&str] = &[
     "https://accounts.google.com",
     "accounts.google.com",
-    "chat@system.gserviceaccount.com",
+    CHAT_PLATFORM_SA,
 ];
+/// The Chat platform's service-account identity. It is BOTH the legacy
+/// issuer and the `email` claim Google stamps into the modern OIDC
+/// token — the discriminator that proves an `accounts.google.com` token
+/// was minted for Chat rather than by any other Google caller.
+const CHAT_PLATFORM_SA: &str = "chat@system.gserviceaccount.com";
 /// Clock skew Google's docs implicitly allow on inbound JWTs (the
 /// platform stamps `iat`/`exp` against its own clock, which can
 /// drift up to a few minutes). We allow 5 minutes each direction.
@@ -94,6 +111,12 @@ pub struct GoogleChatClaims {
     pub aud: String,
     #[serde(default)]
     pub sub: String,
+    /// On the OIDC flavor Google sets this to the Chat platform service
+    /// account; it is the discriminator that proves the token was minted
+    /// for Chat (see [`CHAT_PLATFORM_SA`]). Absent on the legacy flavor,
+    /// where the issuer itself carries that proof.
+    #[serde(default)]
+    pub email: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -110,6 +133,8 @@ pub enum VerifyError {
     BadIssuer(String),
     #[error("unexpected audience")]
     BadAudience,
+    #[error("OIDC token not minted for the Chat platform (email `{0}`)")]
+    NotChatPlatform(String),
     #[error("jwks fetch: {0}")]
     JwksFetch(String),
     #[error("jwks parse: {0}")]
@@ -176,6 +201,15 @@ impl GoogleJwtVerifier {
         }
         if claims.aud != self.config.audience {
             return Err(VerifyError::BadAudience);
+        }
+        // #141 follow-up (Codex security review): on the OIDC flavor the
+        // issuer `accounts.google.com` is shared by every Google ID token
+        // and `aud` is our public App URL, so neither proves the token
+        // came from Chat. Require the Chat-specific `email` claim. The
+        // legacy issuer IS `chat@system.gserviceaccount.com`, so a token
+        // whose issuer already equals it needs no further actor check.
+        if claims.iss != CHAT_PLATFORM_SA && claims.email != CHAT_PLATFORM_SA {
+            return Err(VerifyError::NotChatPlatform(claims.email));
         }
         Ok(claims)
     }
