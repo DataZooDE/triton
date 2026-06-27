@@ -57,6 +57,23 @@ fn sanitise_scopes(scopes: &[String], allowlist: Option<&HashSet<String>>) -> Ve
         .collect()
 }
 
+/// Parse the authority out of a `ui://<authority>/<path>` resource URI
+/// (#143 B). The authority is the owning upstream's registry key. A
+/// missing scheme or empty authority is a caller fault (`Validation`),
+/// never an agent fault — it must not trip a breaker.
+fn parse_ui_authority(uri: &str) -> Result<&str, TritonError> {
+    let rest = uri
+        .strip_prefix("ui://")
+        .ok_or_else(|| TritonError::Validation(format!("not a ui:// resource uri: {uri}")))?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.is_empty() {
+        return Err(TritonError::Validation(format!(
+            "ui:// resource uri has no authority: {uri}"
+        )));
+    }
+    Ok(authority)
+}
+
 pub struct StaticUpstream {
     map: HashMap<String, String>,
     token: String,
@@ -297,6 +314,51 @@ impl StaticUpstream {
             .map_err(|e| TritonError::Tool(format!("upstream {tool} decode: {e}")))
     }
 
+    /// MCP-Apps `resources/read` proxy (#143 B). Resolves the `ui://`
+    /// authority through the same static map as tool dispatch, then POSTs
+    /// the existing header-routed wire shape with `X-Triton-MCP:
+    /// resources/read` and body `{ "uri": <uri> }`. Returns the upstream's
+    /// `{ contents: [...] }` verbatim. Same bearer-minting as a tool call.
+    /// `Validation` for an unknown owner (caller fault); `Tool` for an
+    /// agent-side fault so the breaker counts it.
+    async fn do_read_resource(
+        &self,
+        authority: &str,
+        uri: &str,
+        principal: &Principal,
+    ) -> Result<Value, TritonError> {
+        let ep = self.map.get(authority).ok_or_else(|| {
+            TritonError::Validation(format!("unknown resource owner: {authority}"))
+        })?;
+        let bearer = self.bearer(principal)?;
+        let resp = self
+            .http
+            .post(format!("http://{ep}/"))
+            .bearer_auth(&bearer)
+            .header("X-Triton-MCP", "resources/read")
+            .json(&serde_json::json!({ "uri": uri }))
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    TritonError::Tool(format!("upstream {authority} resources/read timed out"))
+                } else {
+                    TritonError::Tool(format!(
+                        "upstream {authority} resources/read unreachable: {e}"
+                    ))
+                }
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(TritonError::Tool(format!(
+                "upstream {authority} resources/read returned {status}"
+            )));
+        }
+        resp.json().await.map_err(|e| {
+            TritonError::Tool(format!("upstream {authority} resources/read decode: {e}"))
+        })
+    }
+
     /// The per-tool breaker slot, creating it on first use. Returns an
     /// `Arc` clone so callers (notably a streaming finalizer) can hold the
     /// slot past the map's `RwLock` guard.
@@ -355,6 +417,39 @@ impl UpstreamDispatch for StaticUpstream {
         let success = outcome.is_ok();
         if success || count_failure {
             self.breaker_update(tool, permission.was_half_open, success)
+                .await;
+        }
+        outcome
+    }
+
+    /// MCP-Apps `resources/read` proxy (#143 B). Resolves the `ui://`
+    /// authority, then guards the proxied hop with the same per-tool
+    /// circuit breaker as a tool call (keyed on the authority) so a sick
+    /// renderer fails fast. Bearer minting + SSRF guard (enforced at boot
+    /// on every mapped endpoint) + audit all apply identically.
+    async fn read_resource(&self, uri: &str, principal: &Principal) -> Result<Value, TritonError> {
+        // Caller-fault validation up front, before arming the breaker.
+        let authority = parse_ui_authority(uri)?;
+        if !self.map.contains_key(authority) {
+            return Err(TritonError::Validation(format!(
+                "unknown resource owner: {authority}"
+            )));
+        }
+
+        let permission = self.breaker_check(authority).await;
+        if !permission.allowed {
+            return Err(TritonError::Tool(format!(
+                "circuit_open: {authority} (cooldown {}ms)",
+                self.circuit_cooldown.as_millis()
+            )));
+        }
+
+        let outcome = self.do_read_resource(authority, uri, principal).await;
+
+        let count_failure = matches!(outcome, Err(TritonError::Tool(_)));
+        let success = outcome.is_ok();
+        if success || count_failure {
+            self.breaker_update(authority, permission.was_half_open, success)
                 .await;
         }
         outcome
@@ -672,8 +767,23 @@ pub fn endpoint_is_dispatchable(endpoint: &str, allowed_suffixes: &[String]) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_SCOPES, endpoint_is_dispatchable, sanitise_scopes};
+    use super::{MAX_SCOPES, endpoint_is_dispatchable, parse_ui_authority, sanitise_scopes};
     use std::collections::HashSet;
+
+    #[test]
+    fn ui_authority_extracts_owner_and_rejects_junk() {
+        // Authority is everything between `ui://` and the first `/?#`.
+        assert_eq!(parse_ui_authority("ui://peacock/r1").unwrap(), "peacock");
+        assert_eq!(parse_ui_authority("ui://peacock").unwrap(), "peacock");
+        assert_eq!(
+            parse_ui_authority("ui://peacock/reports/42?v=1#frag").unwrap(),
+            "peacock"
+        );
+        // Wrong scheme / empty authority are caller faults.
+        assert!(parse_ui_authority("https://peacock/r1").is_err());
+        assert!(parse_ui_authority("ui:///r1").is_err());
+        assert!(parse_ui_authority("peacock/r1").is_err());
+    }
 
     fn s(v: &[&str]) -> Vec<String> {
         v.iter().map(|x| x.to_string()).collect()

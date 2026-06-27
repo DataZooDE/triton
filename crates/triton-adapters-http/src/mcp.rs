@@ -187,7 +187,10 @@ async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes) -> Respon
             let response = tools_call(id.clone(), params, principal, &state).await;
             return maybe_respond(id_present, id, |_| response);
         }
-        "resources/read" => Box::new(move |id| resources_read(id, &params)),
+        "resources/read" => {
+            let response = resources_read(id.clone(), &params, principal, &state).await;
+            return maybe_respond(id_present, id, |_| response);
+        }
         other => {
             let err = TritonError::Validation(format!("unknown method: {other}"));
             state.dispatcher.record_rejection(
@@ -351,10 +354,17 @@ async fn tools_call(
     }
 }
 
-fn resources_read(id: Value, params: &Value) -> Response {
-    let uri = params["uri"].as_str().unwrap_or("");
-    match uri {
-        "ui://triton/runtime.html" => rpc_ok(
+async fn resources_read(
+    id: Value,
+    params: &Value,
+    principal: triton_core::Principal,
+    state: &McpState,
+) -> Response {
+    let uri = params["uri"].as_str().unwrap_or("").to_string();
+    // The `ui://triton/...` runtime resource is served locally — no
+    // upstream owns it (FR-A-6 stub).
+    if uri == "ui://triton/runtime.html" {
+        return rpc_ok(
             id,
             json!({
                 "contents": [{
@@ -366,12 +376,15 @@ fn resources_read(id: Value, params: &Value) -> Response {
                     "text": "<!-- triton runtime stub; see realizations.md §1 -->"
                 }]
             }),
-        ),
-        other => rpc_error(
-            id,
-            CODE_INVALID_PARAMS,
-            &format!("unknown resource uri: {other}"),
-        ),
+        );
+    }
+    // Issue #143 (B): any other `ui://` URI is proxied to its owning
+    // upstream (resolved by authority through the dispatch registry),
+    // reusing the same bearer-mint + SSRF + breaker + audit as a
+    // `tools/call`. An unknown owner surfaces as a JSON-RPC error.
+    match state.dispatcher.read_resource(&uri, principal).await {
+        Ok(d) => rpc_ok(id, d.result),
+        Err(e) => rpc_error(id, code_for(&e), &e.to_string()),
     }
 }
 

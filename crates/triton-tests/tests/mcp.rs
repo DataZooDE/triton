@@ -371,6 +371,100 @@ async fn tools_call_passes_through_meta_ui_resource_uri() {
     );
 }
 
+/// Issue #143 (B): `resources/read` of an upstream-owned `ui://` URI
+/// proxies to the owning upstream and returns its bundle bytes; an
+/// unknown owner still errors; the proxied call carries the minted
+/// bearer + `X-Triton-MCP: resources/read` and emits one audit line.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resources_read_proxies_to_owning_upstream() {
+    let agent = FakeAgent::start_mcp_apps().await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        HashMap::from([
+            ("TRITON_ENV".to_string(), "nonprod".to_string()),
+            (
+                "TRITON_STATIC_UPSTREAMS".to_string(),
+                // The tool key AND the `ui://` authority key both point at
+                // peacock; resolution reuses the same registry (#143 B).
+                format!("render_report={ep},peacock={ep}", ep = agent.host_port()),
+            ),
+        ]),
+    )
+    .await;
+
+    // Owned URI → proxied bundle.
+    let (status, body) = rpc_request(
+        &proc,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 11,
+            "method": "resources/read",
+            "params": { "uri": "ui://peacock/r1" }
+        }),
+        Some("dev-token"),
+    )
+    .await;
+    assert!(status.is_success(), "status: {status}, body: {body}");
+    let contents = body["result"]["contents"]
+        .as_array()
+        .unwrap_or_else(|| panic!("contents array: {body}"));
+    assert_eq!(contents[0]["uri"], "ui://peacock/r1", "{body}");
+    assert_eq!(contents[0]["mimeType"], "text/html", "{body}");
+    assert!(
+        contents[0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("peacock bundle"),
+        "upstream bundle not returned: {body}"
+    );
+
+    // The upstream saw the MCP-Apps verb + a minted bearer.
+    assert_eq!(
+        agent.mcp_verbs_seen(),
+        vec![Some("resources/read".to_string())],
+        "upstream did not see the resources/read verb"
+    );
+    assert_eq!(agent.bearers_seen(), vec!["dev-token".to_string()]);
+
+    // One audit line for the proxied read, keyed on the URI.
+    let audit = wait_for_audit_matching(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["tool"] == "ui://peacock/r1"
+    });
+    assert_eq!(audit["protocol"], "mcp");
+    assert_eq!(audit["result"], "ok");
+
+    // The stub stays served locally (no upstream hop).
+    let (_, stub) = rpc_request(
+        &proc,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 12,
+            "method": "resources/read",
+            "params": { "uri": "ui://triton/runtime.html" }
+        }),
+        Some("dev-token"),
+    )
+    .await;
+    assert_eq!(stub["result"]["contents"][0]["mimeType"], "text/html");
+
+    // Unknown owner → JSON-RPC error, no panic.
+    let (_, unknown) = rpc_request(
+        &proc,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 13,
+            "method": "resources/read",
+            "params": { "uri": "ui://ghost/x" }
+        }),
+        Some("dev-token"),
+    )
+    .await;
+    assert!(
+        unknown["error"]["code"].is_number(),
+        "unknown owner should error: {unknown}"
+    );
+}
+
 fn wait_for_audit_matching<F>(
     proc: &TritonProcess,
     deadline: Duration,
