@@ -463,6 +463,23 @@ async fn main() -> std::io::Result<()> {
             // needed — the upstream endpoint is already SSRF-guarded at
             // boot by the static-upstreams allowlist, and the render is
             // dispatched through the normal bearer/breaker/audit path.
+            //
+            // #143 review ([MEDIUM]): fail boot if the named tool isn't
+            // routable, instead of letting every dashboard fail only at
+            // render time. The tool must be in the in-process registry or
+            // the static-upstream map.
+            let routable = dispatcher
+                .descriptors_all()
+                .await
+                .iter()
+                .any(|d| &d.name == tool);
+            if !routable {
+                tracing::error!(
+                    tool = %tool,
+                    "TRITON_RASTERIZE_UPSTREAM names a tool that is not registered; add it to TRITON_STATIC_UPSTREAMS",
+                );
+                std::process::exit(2);
+            }
             tracing::info!(
                 tool = %tool,
                 "dashboard rasterisation delegated to upstream tool (#143 D)",

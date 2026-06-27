@@ -135,6 +135,54 @@ Manifest (operator side): `identity.kind: upstream` +
 `doc/upstream-agent-contract.md` §5; worked round-trip:
 `examples/adk-hello-agent/` (`resolve_identity` + `tests/resolver_e2e.rs`).
 
+## MCP-Apps surfaces (optional — #143)
+
+If your agent is an interactive renderer (returns a `ui://` HTML
+resource a host renders in a sandboxed iframe), Triton proxies four
+extra surfaces to you. All ride the **same** `POST /` endpoint, the
+same minted Bearer, and the same principal as a normal tool call —
+they're distinguished by an `X-Triton-MCP` header instead of
+`X-Triton-Tool`. Triton applies its SSRF guard, circuit breaker, and
+one audit line to each, exactly like `tools/call`.
+
+1. **Return a UI resource link.** Put it on your tool *result's*
+   `_meta.ui.resourceUri` (plus any sibling `_meta.ui.*` fields):
+
+   ```json
+   { "report_id": "r1",
+     "_meta": { "ui": { "resourceUri": "ui://peacock/r1" } } }
+   ```
+
+   Triton lifts `_meta.ui` onto the `tools/call` response `_meta` so the
+   host can load the resource. The authority (`peacock`) is **your
+   registry key** — see below.
+
+2. **Serve the resource.** Triton forwards `resources/read` to you as
+   `POST /` with `X-Triton-MCP: resources/read` and body
+   `{ "uri": "ui://peacock/r1" }`. Reply with
+   `{ "contents": [{ "uri", "mimeType", "text"|"blob" }] }`.
+
+3. **Re-render.** An in-iframe `callServerTool('my_tool', {abs params})`
+   arrives as an ordinary `tools/call` (header `X-Triton-Tool`). Renders
+   are **stateless** — params are absolute, never deltas.
+
+4. **Model-context push.** `updateModelContext` arrives as `POST /` with
+   `X-Triton-MCP: updateModelContext` and the iframe's compact
+   `{report_id, params, salient_summary}` record as the body, **verbatim**
+   (Triton never inspects or expands it).
+
+**Registration gotcha:** the `ui://<authority>/…` authority is resolved
+through the *same* `TRITON_STATIC_UPSTREAMS` map as tool dispatch. So
+register the authority as its own key alongside your tool keys, both
+pointing at your endpoint:
+`render_report=peacock.tailnet.ts.net:8080,peacock=peacock.tailnet.ts.net:8080`.
+
+**PNG rasterisation delegation (#143 D):** expose a `render_a2ui_to_png`
+tool that takes the dashboard spec `{title, tiles}` and returns
+`{ "png_base64": "<base64 PNG>" }`. An operator opts a deployment in with
+`TRITON_RASTERIZE_UPSTREAM=render_a2ui_to_png`; Triton's chat surface then
+dispatches to you instead of its in-tree sidecar.
+
 ## A minimal conformant agent
 
 `templates/upstream-agent-axum/` is a working skeleton: one axum

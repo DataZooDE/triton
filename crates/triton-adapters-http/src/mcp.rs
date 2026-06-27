@@ -187,6 +187,7 @@ async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes) -> Respon
             let response = tools_call(id.clone(), params, principal, &state).await;
             return maybe_respond(id_present, id, |_| response);
         }
+        "resources/list" => Box::new(resources_list),
         "resources/read" => {
             let response = resources_read(id.clone(), &params, principal, &state).await;
             return maybe_respond(id_present, id, |_| response);
@@ -329,8 +330,21 @@ async fn tools_call(
             // result's `_meta.ui.*`. Capture it before any A2UI wrap
             // rewrites `d.result`, so it can be surfaced on the
             // `tools/call` response `_meta` for the host to render.
-            // Unknown `ui.*` siblings are preserved verbatim.
-            let ui_meta = d.result.get("_meta").and_then(|m| m.get("ui")).cloned();
+            // Unknown `ui.*` siblings are preserved verbatim, but only a
+            // structured object is reflected (#143 review, [MEDIUM]):
+            // refuse to mirror an arbitrary scalar/array blob a hostile
+            // upstream might stuff under `_meta.ui` to bloat the response.
+            // (The cross-upstream `resourceUri` confused-deputy surface
+            // noted in review is bounded by the trust model — every
+            // upstream is operator-registered in TRITON_STATIC_UPSTREAMS
+            // and any caller can already reach any registered tool — and
+            // documented in realizations.md §7.)
+            let ui_meta = d
+                .result
+                .get("_meta")
+                .and_then(|m| m.get("ui"))
+                .filter(|ui| ui.is_object())
+                .cloned();
             if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
                 return rpc_error(id, code_for(&e), &e.to_string());
             }
@@ -358,13 +372,36 @@ async fn tools_call(
     }
 }
 
+/// Minimal `resources/list` (#143 review, [NIT]): `initialize` advertises
+/// a `resources` capability, so the method must exist rather than 404.
+/// Only the local runtime stub is enumerable; upstream-owned `ui://`
+/// resources are loaded on demand via `resources/read` (#143 B), not
+/// listed here (upstream enumeration is optional in v1).
+fn resources_list(id: Value) -> Response {
+    rpc_ok(
+        id,
+        json!({
+            "resources": [{
+                "uri": "ui://triton/runtime.html",
+                "name": "triton-runtime",
+                "mimeType": "text/html"
+            }]
+        }),
+    )
+}
+
 async fn resources_read(
     id: Value,
     params: &Value,
     principal: triton_core::Principal,
     state: &McpState,
 ) -> Response {
-    let uri = params["uri"].as_str().unwrap_or("").to_string();
+    // #143 review ([LOW]): reject a missing/non-string `uri` instead of
+    // defaulting to "" and surfacing a vaguer downstream error.
+    let Some(uri) = params["uri"].as_str() else {
+        return rpc_error(id, CODE_INVALID_PARAMS, "params.uri MUST be a string");
+    };
+    let uri = uri.to_string();
     // The `ui://triton/...` runtime resource is served locally — no
     // upstream owns it (FR-A-6 stub).
     if uri == "ui://triton/runtime.html" {
@@ -409,8 +446,13 @@ async fn update_model_context(
     };
     let uri = uri.to_string();
     // The record rides through untouched — Triton MUST NOT inspect or
-    // expand it (#143 C). Missing `record` relays JSON `null`.
-    let record = params.get("record").cloned().unwrap_or(Value::Null);
+    // expand it (#143 C). #143 review ([LOW]): require the `record`
+    // member to be present (its value is still forwarded verbatim,
+    // including an explicit `null`), rather than silently relaying a
+    // synthesised `null` when the caller omitted it.
+    let Some(record) = params.get("record").cloned() else {
+        return rpc_error(id, CODE_INVALID_PARAMS, "params.record MUST be present");
+    };
     match state
         .dispatcher
         .update_model_context(&uri, record, principal)
