@@ -317,6 +317,13 @@ async fn tools_call(
     {
         Ok(mut d) => {
             let trace_id = d.trace_id.clone();
+            // Issue #143 (A): an MCP-Apps upstream (e.g. peacock's
+            // `render_report`) returns its UI resource link under the
+            // result's `_meta.ui.*`. Capture it before any A2UI wrap
+            // rewrites `d.result`, so it can be surfaced on the
+            // `tools/call` response `_meta` for the host to render.
+            // Unknown `ui.*` siblings are preserved verbatim.
+            let ui_meta = d.result.get("_meta").and_then(|m| m.get("ui")).cloned();
             if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
                 return rpc_error(id, code_for(&e), &e.to_string());
             }
@@ -326,13 +333,17 @@ async fn tools_call(
             // text-only MCP client sees something sensible and a
             // structured client gets the same dict REST/A2A get.
             let env_v = envelope(&d);
+            let mut meta = json!({ "trace_id": trace_id });
+            if let Some(ui) = ui_meta {
+                meta["ui"] = ui;
+            }
             rpc_ok(
                 id,
                 json!({
                     "content": [{ "type": "text", "text": env_v.to_string() }],
                     "structuredContent": env_v,
                     "isError": false,
-                    "_meta": { "trace_id": trace_id }
+                    "_meta": meta
                 }),
             )
         }

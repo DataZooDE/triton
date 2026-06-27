@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
+use triton_tests::upstream_fixture::FakeAgent;
 
 const RPC_URL_PATH: &str = "/"; // MCP root endpoint
 
@@ -305,6 +306,69 @@ async fn unknown_method_emits_rejection_audit() {
     });
     assert_eq!(rejected["protocol"], "mcp");
     assert_eq!(rejected["result"], "error:validation");
+}
+
+/// Issue #143 (A): when an upstream tool result carries MCP-Apps
+/// `_meta.ui.*` fields (e.g. peacock's `render_report` returns
+/// `_meta.ui.resourceUri = ui://peacock/r1`), Triton's MCP adapter MUST
+/// surface them on the `tools/call` response `_meta`, alongside the
+/// existing `trace_id`, without dropping unknown `ui.*` keys.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tools_call_passes_through_meta_ui_resource_uri() {
+    let agent = FakeAgent::start_returning(json!({
+        "report_id": "r1",
+        "_meta": {
+            "ui": {
+                "resourceUri": "ui://peacock/r1",
+                "preferredFrame": { "width": 720, "height": 480 }
+            }
+        }
+    }))
+    .await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        HashMap::from([
+            ("TRITON_ENV".to_string(), "nonprod".to_string()),
+            (
+                "TRITON_STATIC_UPSTREAMS".to_string(),
+                format!("render_report={}", agent.host_port()),
+            ),
+        ]),
+    )
+    .await;
+
+    let (status, body) = rpc_request(
+        &proc,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": { "name": "render_report", "arguments": { "q": "suppliers" } }
+        }),
+        Some("dev-token"),
+    )
+    .await;
+    assert!(status.is_success(), "status: {status}, body: {body}");
+
+    let meta = &body["result"]["_meta"];
+    // trace_id stays put.
+    assert!(meta["trace_id"].is_string(), "trace_id missing: {body}");
+    // The upstream's `_meta.ui.*` is lifted onto the response `_meta.ui`,
+    // unknown sibling keys (`preferredFrame`) preserved verbatim.
+    assert_eq!(
+        meta["ui"]["resourceUri"], "ui://peacock/r1",
+        "resourceUri not passed through: {body}"
+    );
+    assert_eq!(
+        meta["ui"]["preferredFrame"]["width"], 720,
+        "unknown ui.* key dropped: {body}"
+    );
+    // The structured envelope still carries the full result, including
+    // its own `_meta` (back-compat for structured clients).
+    assert_eq!(
+        body["result"]["structuredContent"]["result"]["report_id"], "r1",
+        "structured result changed: {body}"
+    );
 }
 
 fn wait_for_audit_matching<F>(
