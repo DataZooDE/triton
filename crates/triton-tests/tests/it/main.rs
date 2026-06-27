@@ -98,6 +98,8 @@ mod telegram_callback;
 mod telegram_courier;
 #[path = "../telegram_dashboard.rs"]
 mod telegram_dashboard;
+#[path = "../telegram_dashboard_upstream.rs"]
+mod telegram_dashboard_upstream;
 #[path = "../telegram_form.rs"]
 mod telegram_form;
 #[path = "../telegram_longpoll.rs"]

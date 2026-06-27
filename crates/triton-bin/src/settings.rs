@@ -116,6 +116,12 @@ pub struct Settings {
     /// the operator MUST set this to a `*.<tailnet>` hostname or
     /// boot fails (NFR-S-4 egress allowlist).
     pub rasterizer_url: String,
+    /// #143 (D): opt in to delegating chat dashboard rasterisation to a
+    /// registered upstream tool (e.g. `render_a2ui_to_png`) instead of
+    /// the in-tree sidecar. `None` ⇒ use the sidecar (default,
+    /// non-breaking). When set, the named tool is dispatched per render
+    /// through the normal upstream path (bearer/SSRF/breaker/audit).
+    pub rasterize_upstream: Option<String>,
     /// OIDC `client_id` the Flutter explorer should use for its PKCE
     /// login. Reported at `GET /v1/runtime` so the SPA doesn't bake
     /// it in. `None` ⇒ the operator hasn't enabled the explorer in
@@ -498,6 +504,12 @@ struct Cli {
     )]
     rasterizer_url: String,
 
+    /// #143 (D): name of a registered upstream tool to delegate chat
+    /// dashboard rasterisation to (e.g. `render_a2ui_to_png`). Unset ⇒
+    /// the in-tree rasterizer sidecar is used (default, non-breaking).
+    #[arg(long, env = "TRITON_RASTERIZE_UPSTREAM")]
+    rasterize_upstream: Option<String>,
+
     /// RSA private key signing static-upstream JWTs (workload→workload auth
     /// without Vault): a raw PEM, or base64-encoded PEM (so a multi-line key
     /// rides a single env var / Kamal env-file line). With
@@ -647,6 +659,12 @@ impl From<Cli> for Settings {
             ),
             explorer_client_id: c.explorer_client_id,
             rasterizer_url: c.rasterizer_url,
+            // Treat an empty env value as "unset" so `TRITON_RASTERIZE_UPSTREAM=`
+            // doesn't accidentally select an empty tool name.
+            rasterize_upstream: c
+                .rasterize_upstream
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             trust_forwarded_auth: c.trust_forwarded_auth,
             single_port: matches!(
                 c.single_port.trim().to_ascii_lowercase().as_str(),
