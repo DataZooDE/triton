@@ -465,6 +465,126 @@ async fn resources_read_proxies_to_owning_upstream() {
     );
 }
 
+/// Issue #143 (C): an in-iframe `callServerTool('render_report', {abs})`
+/// reaches Triton as a normal `tools/call` and MUST dispatch to the
+/// owning upstream as a fresh, stateless call — absolute params, never
+/// deltas — each re-render returning the UI resource link. Two
+/// re-renders with different absolute params hit the upstream twice with
+/// exactly the bodies sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn call_server_tool_redispatches_with_absolute_params() {
+    let agent = FakeAgent::start_mcp_apps().await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        HashMap::from([
+            ("TRITON_ENV".to_string(), "nonprod".to_string()),
+            (
+                "TRITON_STATIC_UPSTREAMS".to_string(),
+                format!("render_report={}", agent.host_port()),
+            ),
+        ]),
+    )
+    .await;
+
+    for (id, region) in [(21, "emea"), (22, "apac")] {
+        let (status, body) = rpc_request(
+            &proc,
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": {
+                    "name": "render_report",
+                    "arguments": { "region": region, "limit": 50 }
+                }
+            }),
+            Some("dev-token"),
+        )
+        .await;
+        assert!(status.is_success(), "status: {status}, body: {body}");
+        // Each re-render hands back the (re-rendered) UI resource link.
+        assert_eq!(
+            body["result"]["_meta"]["ui"]["resourceUri"],
+            "ui://peacock/r1"
+        );
+    }
+
+    // Two fresh dispatches, each carrying its absolute params verbatim.
+    let bodies = agent.bodies_seen();
+    assert_eq!(
+        bodies.len(),
+        2,
+        "expected two stateless dispatches: {bodies:?}"
+    );
+    assert_eq!(bodies[0]["region"], "emea");
+    assert_eq!(bodies[0]["limit"], 50);
+    assert_eq!(bodies[1]["region"], "apac");
+    // Plain tool calls — no MCP-Apps verb header.
+    assert_eq!(agent.mcp_verbs_seen(), vec![None, None]);
+}
+
+/// Issue #143 (C): a host's `updateModelContext` record pushed from the
+/// iframe MUST be relayed to the owning upstream **unmodified** — Triton
+/// neither inspects nor expands the compact `{report_id, params,
+/// salient_summary}` payload. Routing is by the resource `uri`; the
+/// record rides `X-Triton-MCP: updateModelContext` byte-for-byte, under
+/// the same minted bearer + audit as any dispatch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_model_context_relays_record_unmodified() {
+    let agent = FakeAgent::start_mcp_apps().await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        HashMap::from([
+            ("TRITON_ENV".to_string(), "nonprod".to_string()),
+            (
+                "TRITON_STATIC_UPSTREAMS".to_string(),
+                format!("peacock={}", agent.host_port()),
+            ),
+        ]),
+    )
+    .await;
+
+    let record = json!({
+        "report_id": "r1",
+        "params": { "region": "emea", "limit": 50 },
+        "salient_summary": "3 high-risk suppliers; top: Acme (0.91)"
+    });
+    let (status, body) = rpc_request(
+        &proc,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 31,
+            "method": "updateModelContext",
+            "params": { "uri": "ui://peacock/r1", "record": record }
+        }),
+        Some("dev-token"),
+    )
+    .await;
+    assert!(status.is_success(), "status: {status}, body: {body}");
+    assert_eq!(body["result"]["relayed"], true, "not relayed: {body}");
+
+    // The upstream saw the verb and the record verbatim — no wrapping.
+    assert_eq!(
+        agent.mcp_verbs_seen(),
+        vec![Some("updateModelContext".to_string())]
+    );
+    let seen = agent.bodies_seen();
+    assert_eq!(seen.len(), 1, "expected one relay: {seen:?}");
+    assert_eq!(
+        seen[0], record,
+        "record was modified in flight: {:?}",
+        seen[0]
+    );
+    assert_eq!(agent.bearers_seen(), vec!["dev-token".to_string()]);
+
+    // One audit line for the relay, keyed on the resource URI.
+    let audit = wait_for_audit_matching(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["tool"] == "ui://peacock/r1"
+    });
+    assert_eq!(audit["protocol"], "mcp");
+    assert_eq!(audit["result"], "ok");
+}
+
 fn wait_for_audit_matching<F>(
     proc: &TritonProcess,
     deadline: Duration,

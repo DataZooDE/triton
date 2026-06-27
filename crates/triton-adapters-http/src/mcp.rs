@@ -191,6 +191,10 @@ async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes) -> Respon
             let response = resources_read(id.clone(), &params, principal, &state).await;
             return maybe_respond(id_present, id, |_| response);
         }
+        "updateModelContext" => {
+            let response = update_model_context(id.clone(), &params, principal, &state).await;
+            return maybe_respond(id_present, id, |_| response);
+        }
         other => {
             let err = TritonError::Validation(format!("unknown method: {other}"));
             state.dispatcher.record_rejection(
@@ -383,6 +387,35 @@ async fn resources_read(
     // reusing the same bearer-mint + SSRF + breaker + audit as a
     // `tools/call`. An unknown owner surfaces as a JSON-RPC error.
     match state.dispatcher.read_resource(&uri, principal).await {
+        Ok(d) => rpc_ok(id, d.result),
+        Err(e) => rpc_error(id, code_for(&e), &e.to_string()),
+    }
+}
+
+/// Issue #143 (C): relay an in-iframe `updateModelContext` record to the
+/// owning upstream. Params: `{ uri, record }` — `uri` is the `ui://`
+/// resource the iframe was loaded from (its authority routes the relay);
+/// `record` is the compact `{report_id, params, salient_summary}` payload
+/// forwarded **unmodified**. The host owns the model-context channel; the
+/// upstream's ack is relayed back.
+async fn update_model_context(
+    id: Value,
+    params: &Value,
+    principal: triton_core::Principal,
+    state: &McpState,
+) -> Response {
+    let Some(uri) = params["uri"].as_str() else {
+        return rpc_error(id, CODE_INVALID_PARAMS, "params.uri MUST be a string");
+    };
+    let uri = uri.to_string();
+    // The record rides through untouched — Triton MUST NOT inspect or
+    // expand it (#143 C). Missing `record` relays JSON `null`.
+    let record = params.get("record").cloned().unwrap_or(Value::Null);
+    match state
+        .dispatcher
+        .update_model_context(&uri, record, principal)
+        .await
+    {
         Ok(d) => rpc_ok(id, d.result),
         Err(e) => rpc_error(id, code_for(&e), &e.to_string()),
     }

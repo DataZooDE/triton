@@ -87,6 +87,23 @@ pub trait UpstreamDispatch: Send + Sync {
         )))
     }
 
+    /// MCP-Apps (#143 C): relay an in-iframe `updateModelContext` record
+    /// to the owning upstream (resolved from the resource `uri`'s
+    /// authority) **unmodified** — the implementation MUST NOT inspect or
+    /// expand the compact `{report_id, params, salient_summary}` payload.
+    /// The default has no upstream and reports the URI as unknown.
+    async fn update_model_context(
+        &self,
+        uri: &str,
+        record: Value,
+        principal: &Principal,
+    ) -> Result<Value, TritonError> {
+        let _ = (record, principal);
+        Err(TritonError::Validation(format!(
+            "unknown resource uri: {uri}"
+        )))
+    }
+
     /// Tool names of upstream agents discoverable right now (the keys
     /// of the `TRITON_STATIC_UPSTREAMS` map). Surfaced by `GET /v1/tools`
     /// so clients can discover agents that aren't in the in-process
@@ -396,6 +413,33 @@ impl Dispatcher {
         let started = Instant::now();
         let outcome = match &self.upstream {
             Some(upstream) => upstream.read_resource(uri, &principal).await,
+            None => Err(TritonError::Validation(format!(
+                "unknown resource uri: {uri}"
+            ))),
+        };
+        let latency_ms = started.elapsed().as_millis() as u64;
+        self.audit_dispatch(uri, "mcp", &principal, latency_ms, &outcome);
+        outcome.map(|result| Dispatch {
+            result,
+            trace_id: principal.trace_id,
+            latency_ms,
+            returns_a2ui: false,
+        })
+    }
+
+    /// MCP-Apps (#143 C): relay an iframe `updateModelContext` record to
+    /// the owning upstream (routed by the resource `uri`) unmodified,
+    /// emitting the same single `phase: dispatch` audit line keyed on the
+    /// URI. The `record` is passed straight through — never inspected.
+    pub async fn update_model_context(
+        &self,
+        uri: &str,
+        record: Value,
+        principal: Principal,
+    ) -> Result<Dispatch, TritonError> {
+        let started = Instant::now();
+        let outcome = match &self.upstream {
+            Some(upstream) => upstream.update_model_context(uri, record, &principal).await,
             None => Err(TritonError::Validation(format!(
                 "unknown resource uri: {uri}"
             ))),

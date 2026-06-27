@@ -359,6 +359,51 @@ impl StaticUpstream {
         })
     }
 
+    /// MCP-Apps `updateModelContext` relay (#143 C). POSTs the iframe's
+    /// `record` to the owning upstream **verbatim** under `X-Triton-MCP:
+    /// updateModelContext`. The record is the request body untouched —
+    /// Triton neither inspects nor expands it. Same bearer minting and
+    /// error classification as `do_read_resource`.
+    async fn do_update_model_context(
+        &self,
+        authority: &str,
+        record: Value,
+        principal: &Principal,
+    ) -> Result<Value, TritonError> {
+        let ep = self.map.get(authority).ok_or_else(|| {
+            TritonError::Validation(format!("unknown resource owner: {authority}"))
+        })?;
+        let bearer = self.bearer(principal)?;
+        let resp = self
+            .http
+            .post(format!("http://{ep}/"))
+            .bearer_auth(&bearer)
+            .header("X-Triton-MCP", "updateModelContext")
+            .json(&record)
+            .send()
+            .await
+            .map_err(|e| {
+                if e.is_timeout() {
+                    TritonError::Tool(format!("upstream {authority} updateModelContext timed out"))
+                } else {
+                    TritonError::Tool(format!(
+                        "upstream {authority} updateModelContext unreachable: {e}"
+                    ))
+                }
+            })?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(TritonError::Tool(format!(
+                "upstream {authority} updateModelContext returned {status}"
+            )));
+        }
+        resp.json().await.map_err(|e| {
+            TritonError::Tool(format!(
+                "upstream {authority} updateModelContext decode: {e}"
+            ))
+        })
+    }
+
     /// The per-tool breaker slot, creating it on first use. Returns an
     /// `Arc` clone so callers (notably a streaming finalizer) can hold the
     /// slot past the map's `RwLock` guard.
@@ -445,6 +490,44 @@ impl UpstreamDispatch for StaticUpstream {
         }
 
         let outcome = self.do_read_resource(authority, uri, principal).await;
+
+        let count_failure = matches!(outcome, Err(TritonError::Tool(_)));
+        let success = outcome.is_ok();
+        if success || count_failure {
+            self.breaker_update(authority, permission.was_half_open, success)
+                .await;
+        }
+        outcome
+    }
+
+    /// MCP-Apps `updateModelContext` relay (#143 C). Resolves the `ui://`
+    /// authority, guards the relay with the same per-authority breaker as
+    /// `read_resource`, and forwards the `record` verbatim. The record is
+    /// never inspected — routing uses only the `uri`.
+    async fn update_model_context(
+        &self,
+        uri: &str,
+        record: Value,
+        principal: &Principal,
+    ) -> Result<Value, TritonError> {
+        let authority = parse_ui_authority(uri)?;
+        if !self.map.contains_key(authority) {
+            return Err(TritonError::Validation(format!(
+                "unknown resource owner: {authority}"
+            )));
+        }
+
+        let permission = self.breaker_check(authority).await;
+        if !permission.allowed {
+            return Err(TritonError::Tool(format!(
+                "circuit_open: {authority} (cooldown {}ms)",
+                self.circuit_cooldown.as_millis()
+            )));
+        }
+
+        let outcome = self
+            .do_update_model_context(authority, record, principal)
+            .await;
 
         let count_failure = matches!(outcome, Err(TritonError::Tool(_)));
         let success = outcome.is_ok();
