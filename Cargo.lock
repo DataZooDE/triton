@@ -2427,7 +2427,6 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
- "tokio",
  "tower-http",
  "tracing",
  "triton-chat-discord",
@@ -2520,7 +2519,6 @@ name = "triton-chat-msteams"
 version = "0.0.1"
 dependencies = [
  "axum",
- "chrono",
  "jsonwebtoken",
  "reqwest",
  "serde",
@@ -2608,7 +2606,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "uuid",
 ]
 
 [[package]]
@@ -2645,7 +2642,6 @@ dependencies = [
 name = "triton-identity"
 version = "0.0.1"
 dependencies = [
- "async-trait",
  "base64",
  "jsonwebtoken",
  "rand 0.8.6",
@@ -2926,7 +2922,6 @@ checksum = "ddd74a9687298c6858e9b88ec8935ec45d22e8fd5e6394fa1bd4e99a87789c76"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
- "serde_core",
  "wasm-bindgen",
 ]
 
