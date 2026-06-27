@@ -4,6 +4,31 @@ The skill version tracks the consumer-facing contract, not the Triton
 binary version. The Triton repo's checked-out git ref is the true
 version pin (see `SKILL.md` → "How this skill is installed").
 
+## 0.4.0 — MCP-Apps proxying + PNG-rasterisation delegation (#143)
+
+Adds the consumer contract for an interactive **upstream renderer**
+(e.g. peacock) behind Triton's MCP ingress. New material in `01`:
+
+- **`_meta.ui.*` pass-through.** Return your `ui://` resource link on the
+  tool result's `_meta.ui.resourceUri`; Triton lifts it onto the
+  `tools/call` response `_meta` for the host.
+- **`resources/read` proxy.** Triton forwards `resources/read` of a
+  `ui://<authority>/…` URI to you as `POST /` with
+  `X-Triton-MCP: resources/read`; reply with `{ contents: [...] }`.
+- **`callServerTool` / `updateModelContext`.** Re-renders arrive as
+  ordinary stateless `tools/call`s; `updateModelContext` records are
+  relayed to you verbatim under `X-Triton-MCP: updateModelContext`.
+- **Registration gotcha.** The `ui://` authority resolves through the
+  same `TRITON_STATIC_UPSTREAMS` map — register the authority as its own
+  key alongside your tool keys.
+- **`render_a2ui_to_png` delegation.** Expose the tool returning
+  `{ png_base64 }`; operators opt in with
+  `TRITON_RASTERIZE_UPSTREAM=render_a2ui_to_png` to route chat dashboard
+  rasterisation to you instead of the in-tree sidecar.
+
+The pre-existing wire shape, A2UI envelopes, OIDC verification, and test
+harness are unchanged; these surfaces are additive and opt-in.
+
 ## 0.3.0 — Consul/Vault → StaticUpstream + RS256-JWT + env:// (Kamal migration)
 
 Catches the consumer contract up to the move off the HashiCorp stack

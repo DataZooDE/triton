@@ -420,6 +420,49 @@ production deployment can avoid by knowing about it.
 Items discovered while building the production Rust port; each is
 a trap the next developer should not have to step in.
 
+- **MCP-Apps `_meta.ui.*` rides on the tool *result*, not the dispatch
+  envelope — and it must be lifted, not just preserved.** (#143 A) An
+  upstream renderer returns its `ui://` resource link under
+  `result._meta.ui.resourceUri`. Triton's MCP `tools/call` already kept the
+  whole result intact inside `structuredContent.result`, so the data was
+  technically there — but a host reads the resource link from the
+  *response* `_meta`, where it wasn't. Lift `result._meta.ui` onto the
+  `tools/call` response `_meta` (next to `trace_id`), and copy the whole
+  `ui` object so unknown `ui.*` siblings a newer host understands aren't
+  silently dropped. Capture it *before* any A2UI wrap rewrites the result.
+
+- **A `ui://<authority>/…` resource is routed by reusing the tool
+  registry, so the authority must be registered as its own key.** (#143 B)
+  `resources/read ui://peacock/r1` resolves `peacock` through the same
+  `TRITON_STATIC_UPSTREAMS` map as tool dispatch — there is no separate
+  owner→endpoint table. So an operator whose `peacock` upstream owns the
+  tool `render_report` must register *both* keys at the same endpoint:
+  `render_report=host:port,peacock=host:port`. The breaker for proxied
+  `resources/read` / `updateModelContext` is keyed on the *authority*
+  (`peacock`), a different slot from the tool-name breaker — intentional,
+  but don't expect a tripped `render_report` breaker to also stop reads.
+
+- **`callServerTool` needs no Triton code; `updateModelContext` must not be
+  inspected.** (#143 C) An in-iframe `callServerTool` reaches Triton as a
+  plain `tools/call` (the host translates it), so the stateless re-render
+  contract is just the existing dispatch path — resist adding a bespoke
+  method. `updateModelContext`, by contrast, is relayed to the owning
+  upstream *verbatim*: route by the `uri` authority only, POST the `record`
+  as the body untouched. The moment you `serde` the record into a typed
+  struct you risk dropping a field a newer renderer added — keep it a raw
+  `Value` passthrough.
+
+- **Delegating rasterisation to an upstream means the PNG crosses a JSON
+  boundary, so it's base64.** (#143 D) The sidecar returns `image/png`
+  bytes directly; an upstream `render_a2ui_to_png` tool returns a JSON tool
+  result, so the bytes ride as `png_base64`. The `DashboardRasterizer`
+  trait hides which path is in use, but its `render` had to grow a
+  `&Principal` arg the sidecar ignores — the upstream path needs it to mint
+  the per-call token. When delegating, skip the sidecar-URL egress check:
+  the upstream endpoint is already SSRF-guarded at boot by the
+  static-upstreams allowlist, and re-checking a URL that isn't used would
+  reject a perfectly good config.
+
 - **"Flaky" CI that loses the runner mid-`cargo test --workspace` is an
   OOM during the test *link*, not a flaky test.** Symptom: the Rust job
   is marked `failure` with the cargo steps at `conclusion: null` (runner
