@@ -40,7 +40,7 @@ use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
 use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
-use triton_rasterizer::{Client as RasterizerClient, DashboardRequest, RasterizerError};
+use triton_rasterizer::{DashboardRasterizer, DashboardRequest, RasterizerError};
 use triton_secrets::{ResolveError, SecretResolver};
 
 const PROTOCOL: &str = "messenger:telegram";
@@ -144,11 +144,13 @@ pub struct TelegramAdapter {
     inbound_tool: String,
     dispatcher: Arc<Dispatcher>,
     courier: CourierClient,
-    /// PR 36: optional handle to the out-of-process rasterizer
-    /// service (FR-A-11). `None` when no rasterizer URL was
-    /// configured — Dashboard components then fall back to the
+    /// PR 36: optional dashboard rasterizer (FR-A-11). Either the
+    /// in-tree sidecar `Client` or an upstream-delegating
+    /// `UpstreamRasterizer` (#143 D) — the adapter only sees the
+    /// [`DashboardRasterizer`] trait. `None` when no rasterizer was
+    /// configured: Dashboard components then fall back to the
     /// pre-PR-36 deferred-text path so users still see something.
-    rasterizer: Option<RasterizerClient>,
+    rasterizer: Option<Arc<dyn DashboardRasterizer>>,
     /// PR 24: per-adapter rate limit (NFR-P-3 first tier).
     /// Consumed BEFORE body parse or sender lookup so a noisy
     /// bot — or attacker who has the secret token — can't
@@ -177,17 +179,18 @@ impl TelegramAdapter {
     /// [`SecretResolver`] (literal or `env://` ref), and produce a
     /// runnable adapter. Called once at boot per declared adapter.
     ///
-    /// `rasterizer` (PR 36) is the optional out-of-process
-    /// dashboard renderer. `None` falls back to a deferred-text
-    /// placeholder for `Component::Dashboard` (same shape as PR
-    /// 27); `Some(client)` ships rasterised PNGs via `sendPhoto`.
+    /// `rasterizer` (PR 36) is the optional dashboard renderer —
+    /// the sidecar client or an upstream-delegating one (#143 D).
+    /// `None` falls back to a deferred-text placeholder for
+    /// `Component::Dashboard`; `Some(_)` ships rasterised PNGs via
+    /// `sendPhoto`.
     pub async fn from_manifest(
         name: &str,
         adapter: &Adapter,
         resolver: &dyn SecretResolver,
         dispatcher: Arc<Dispatcher>,
         courier_config: CourierConfig,
-        rasterizer: Option<RasterizerClient>,
+        rasterizer: Option<Arc<dyn DashboardRasterizer>>,
     ) -> Result<Self, BuildError> {
         if adapter.kind != AdapterKind::Telegram {
             return Err(BuildError::WrongKind);
@@ -1795,7 +1798,7 @@ async fn rasterize_dashboard(
     adapter: &TelegramAdapter,
     principal: &Principal,
     tool_name: &str,
-    rasterizer: &RasterizerClient,
+    rasterizer: &Arc<dyn DashboardRasterizer>,
     dash: &surface_mapper::RasterDashboard,
 ) -> Result<Vec<u8>, RasterizerError> {
     // Logging discipline (spec §Constraints): NEVER log full tile
@@ -1811,7 +1814,7 @@ async fn rasterize_dashboard(
         tiles: dash.tiles.clone(),
     };
     let start = std::time::Instant::now();
-    let result = rasterizer.render(&req).await;
+    let result = rasterizer.render(&req, principal).await;
     let latency_ms = start.elapsed().as_millis() as u64;
     match &result {
         Ok(_) => {

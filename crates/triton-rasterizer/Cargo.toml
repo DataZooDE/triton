@@ -30,7 +30,9 @@ path = "src/bin/triton-rasterizer.rs"
 
 [dependencies]
 triton-core = { path = "../triton-core" }
+async-trait = "0.1"
 axum = { workspace = true }
+base64 = "0.22"
 reqwest = { workspace = true }
 resvg = { workspace = true }
 serde = { workspace = true }

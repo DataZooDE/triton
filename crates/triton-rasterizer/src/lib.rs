@@ -21,8 +21,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use triton_core::a2ui::DashboardTile;
 
+pub mod delegate;
 pub mod render;
 pub mod svg;
+
+pub use delegate::{DashboardRasterizer, UpstreamRasterizer};
 
 /// Hard ceiling on Dashboard input. DoS guard at the rasterizer
 /// edge — refusing oversize payloads at the HTTP boundary keeps

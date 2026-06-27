@@ -22,7 +22,10 @@ use triton_chat_telegram::{CourierConfig, TelegramAdapter};
 use triton_core::{Dispatcher, Metrics, RuntimeInfo, ToolRegistry, UpstreamDispatch};
 use triton_identity::{OidcConfig, OidcVerifier};
 use triton_manifest::{AdapterKind, InboundKind};
-use triton_rasterizer::{Client as RasterizerClient, ClientConfig as RasterizerConfig};
+use triton_rasterizer::{
+    Client as RasterizerClient, ClientConfig as RasterizerConfig, DashboardRasterizer,
+    UpstreamRasterizer,
+};
 use triton_secrets::{LiteralResolver, SecretResolver};
 
 mod optional_adapters;
@@ -443,7 +446,7 @@ async fn main() -> std::io::Result<()> {
     // existing OIDC integration tests that don't enable chat
     // adapters (see realizations.md §7 "NFR-S-4 egress checks belong
     // next to the adapter that needs the egress").
-    let rasterizer_client: Option<RasterizerClient> = {
+    let rasterizer_client: Option<Arc<dyn DashboardRasterizer>> = {
         let needs_rasterizer = manifest
             .as_ref()
             .map(|m| {
@@ -452,7 +455,23 @@ async fn main() -> std::io::Result<()> {
                     .any(|a| adapter_ships_dashboards(a.kind, a.inbound.kind))
             })
             .unwrap_or(false);
-        if needs_rasterizer {
+        if !needs_rasterizer {
+            None
+        } else if let Some(tool) = &settings.rasterize_upstream {
+            // #143 (D): delegate rasterisation to a registered upstream
+            // tool instead of the sidecar. No sidecar URL egress check is
+            // needed — the upstream endpoint is already SSRF-guarded at
+            // boot by the static-upstreams allowlist, and the render is
+            // dispatched through the normal bearer/breaker/audit path.
+            tracing::info!(
+                tool = %tool,
+                "dashboard rasterisation delegated to upstream tool (#143 D)",
+            );
+            Some(
+                Arc::new(UpstreamRasterizer::new(dispatcher.clone(), tool.clone()))
+                    as Arc<dyn DashboardRasterizer>,
+            )
+        } else {
             // NFR-S-4: the rasterizer is a network dependency in
             // the adapter hot path. Default `http://127.0.0.1:9320`
             // is fine for local dev; outside `local` env the
@@ -497,7 +516,7 @@ async fn main() -> std::io::Result<()> {
                 base: settings.rasterizer_url.clone(),
                 ..Default::default()
             }) {
-                Ok(c) => Some(c),
+                Ok(c) => Some(Arc::new(c) as Arc<dyn DashboardRasterizer>),
                 Err(e) => {
                     tracing::error!(
                         rasterizer_url = %settings.rasterizer_url,
@@ -507,8 +526,6 @@ async fn main() -> std::io::Result<()> {
                     std::process::exit(2);
                 }
             }
-        } else {
-            None
         }
     };
     if let Some(m) = &manifest {

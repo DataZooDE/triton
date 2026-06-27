@@ -65,7 +65,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
-use triton_rasterizer::{Client as RasterizerClient, DashboardRequest, RasterizerError};
+use triton_rasterizer::{DashboardRasterizer, DashboardRequest, RasterizerError};
 use triton_secrets::{ResolveError, SecretResolver};
 
 pub const PROTOCOL: &str = "messenger:discord";
@@ -111,7 +111,7 @@ pub struct DiscordAdapter {
     /// `None` falls back to the pre-PR-38 deferred-text path for
     /// `Component::Dashboard`. `Some(client)` ships rasterised
     /// PNGs as multipart interaction-response attachments.
-    rasterizer: Option<RasterizerClient>,
+    rasterizer: Option<Arc<dyn DashboardRasterizer>>,
 }
 
 impl DiscordAdapter {
@@ -120,7 +120,7 @@ impl DiscordAdapter {
         adapter: &Adapter,
         resolver: &dyn SecretResolver,
         dispatcher: Arc<Dispatcher>,
-        rasterizer: Option<RasterizerClient>,
+        rasterizer: Option<Arc<dyn DashboardRasterizer>>,
     ) -> Result<Self, BuildError> {
         if adapter.kind != AdapterKind::Discord {
             return Err(BuildError::WrongKind);
@@ -1441,7 +1441,7 @@ async fn rasterize_dashboard(
     adapter: &Arc<DiscordAdapter>,
     principal: &Principal,
     tool_name: &str,
-    rasterizer: &RasterizerClient,
+    rasterizer: &Arc<dyn DashboardRasterizer>,
     dash: &surface_mapper::RasterDashboard,
 ) -> Result<Vec<u8>, RasterizerError> {
     // Logging discipline: NEVER log raw tile contents at info level.
@@ -1457,7 +1457,7 @@ async fn rasterize_dashboard(
         tiles: dash.tiles.clone(),
     };
     let start = std::time::Instant::now();
-    let result = rasterizer.render(&req).await;
+    let result = rasterizer.render(&req, principal).await;
     let latency_ms = start.elapsed().as_millis() as u64;
     match &result {
         Ok(_) => {

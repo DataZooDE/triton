@@ -62,7 +62,7 @@ use triton_core::{
 use triton_manifest::{
     Adapter, AdapterKind, IdentityKind, SignatureScheme, TemplateCategory, TemplateDecl,
 };
-use triton_rasterizer::{Client as RasterizerClient, DashboardRequest, RasterizerError};
+use triton_rasterizer::{DashboardRasterizer, DashboardRequest, RasterizerError};
 use triton_secrets::{ResolveError, SecretResolver};
 
 pub const PROTOCOL: &str = "messenger:whatsapp";
@@ -159,7 +159,7 @@ pub struct WhatsAppAdapter {
     /// `Component::Dashboard`. `Some(client)` uploads the rendered
     /// PNG to WhatsApp's media endpoint and sends an `image`
     /// message carrying the returned media_id.
-    rasterizer: Option<RasterizerClient>,
+    rasterizer: Option<Arc<dyn DashboardRasterizer>>,
     /// #94: Meta-approved message templates, keyed by category, from
     /// the manifest's `templates` map. Triton owns template selection;
     /// proactive sends outside the service window resolve a template
@@ -194,7 +194,7 @@ impl WhatsAppAdapter {
         resolver: &dyn SecretResolver,
         dispatcher: Arc<Dispatcher>,
         courier_config: CourierConfig,
-        rasterizer: Option<RasterizerClient>,
+        rasterizer: Option<Arc<dyn DashboardRasterizer>>,
     ) -> Result<Self, BuildError> {
         if adapter.kind != AdapterKind::WhatsappCloud {
             return Err(BuildError::WrongKind);
@@ -1297,7 +1297,7 @@ async fn rasterize_dashboard(
     adapter: &WhatsAppAdapter,
     principal: &Principal,
     tool_name: &str,
-    rasterizer: &RasterizerClient,
+    rasterizer: &Arc<dyn DashboardRasterizer>,
     dash: &surface_mapper::RasterDashboard,
 ) -> Result<Vec<u8>, RasterizerError> {
     tracing::info!(
@@ -1311,7 +1311,7 @@ async fn rasterize_dashboard(
         tiles: dash.tiles.clone(),
     };
     let start = std::time::Instant::now();
-    let result = rasterizer.render(&req).await;
+    let result = rasterizer.render(&req, principal).await;
     let latency_ms = start.elapsed().as_millis() as u64;
     match &result {
         Ok(_) => {
