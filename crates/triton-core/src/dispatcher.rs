@@ -74,6 +74,19 @@ pub trait UpstreamDispatch: Send + Sync {
         Ok(stream::once(async move { StreamEvent::Done(value) }).boxed())
     }
 
+    /// MCP-Apps (#143 B): proxy a `resources/read` of an upstream-owned
+    /// `ui://<authority>/...` URI to the owning upstream and return its
+    /// `{ contents: [...] }`. The `<authority>` is resolved through the
+    /// same registry used for tool dispatch. The default has no upstream
+    /// and reports the URI as unknown (the in-process registry serves
+    /// only the `ui://triton/...` stub, handled in the adapter).
+    async fn read_resource(&self, uri: &str, principal: &Principal) -> Result<Value, TritonError> {
+        let _ = principal;
+        Err(TritonError::Validation(format!(
+            "unknown resource uri: {uri}"
+        )))
+    }
+
     /// Tool names of upstream agents discoverable right now (the keys
     /// of the `TRITON_STATIC_UPSTREAMS` map). Surfaced by `GET /v1/tools`
     /// so clients can discover agents that aren't in the in-process
@@ -366,6 +379,34 @@ impl Dispatcher {
             trace_id: principal.trace_id,
             latency_ms,
             returns_a2ui,
+        })
+    }
+
+    /// MCP-Apps (#143 B): proxy `resources/read` of an upstream-owned
+    /// `ui://` URI through the upstream router, emitting the same single
+    /// audit line (`phase: dispatch`) a `tools/call` would — keyed on the
+    /// resource URI as `tool`. The adapter handles the `ui://triton/...`
+    /// stub itself; everything else lands here. With no upstream wired the
+    /// URI is unknown.
+    pub async fn read_resource(
+        &self,
+        uri: &str,
+        principal: Principal,
+    ) -> Result<Dispatch, TritonError> {
+        let started = Instant::now();
+        let outcome = match &self.upstream {
+            Some(upstream) => upstream.read_resource(uri, &principal).await,
+            None => Err(TritonError::Validation(format!(
+                "unknown resource uri: {uri}"
+            ))),
+        };
+        let latency_ms = started.elapsed().as_millis() as u64;
+        self.audit_dispatch(uri, "mcp", &principal, latency_ms, &outcome);
+        outcome.map(|result| Dispatch {
+            result,
+            trace_id: principal.trace_id,
+            latency_ms,
+            returns_a2ui: false,
         })
     }
 

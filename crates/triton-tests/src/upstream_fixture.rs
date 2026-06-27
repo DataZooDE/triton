@@ -41,6 +41,9 @@ struct FakeAgentState {
     /// `X-Triton-Tool` header per request (`None` when absent) — lets
     /// tests pin the dispatch-header contract.
     tools_seen: Mutex<Vec<Option<String>>>,
+    /// `X-Triton-MCP` header per request (`None` when absent) — pins the
+    /// MCP-Apps verb-routing contract (#143 B/C).
+    mcp_verbs_seen: Mutex<Vec<Option<String>>>,
     bodies_seen: Mutex<Vec<Value>>,
     hits: Mutex<u32>,
     failures_remaining: Mutex<u32>,
@@ -76,6 +79,16 @@ enum AgentMode {
     /// The steady trickle keeps resetting the idle timer, so only the
     /// total-duration cap can stop it (Codex security review).
     StreamingSlowDrip,
+    /// MCP-Apps upstream (#143). Routes on the `X-Triton-MCP` header:
+    /// * absent (a normal tool call) → `{ report_id, _meta.ui.resourceUri }`
+    ///   so the `tools/call` pass-through (A) and `callServerTool` (C) paths
+    ///   have a UI-bearing result.
+    /// * `resources/read` → `{ contents: [{ uri, mimeType, text }] }` echoing
+    ///   the requested `uri` from the body (B).
+    /// * `updateModelContext` → `{ "relayed": true }`; the pushed record is
+    ///   captured verbatim in `bodies_seen` so the relay can be asserted
+    ///   byte-for-byte (C).
+    McpApps,
 }
 
 impl FakeAgent {
@@ -128,11 +141,18 @@ impl FakeAgent {
         Self::start(AgentMode::StreamingSlowDrip, 0, None).await
     }
 
+    /// A full MCP-Apps upstream that serves tool calls, `resources/read`,
+    /// and `updateModelContext` off the `X-Triton-MCP` header (#143).
+    pub async fn start_mcp_apps() -> Self {
+        Self::start(AgentMode::McpApps, 0, None).await
+    }
+
     async fn start(mode: AgentMode, fail_first: u32, fixed_response: Option<Value>) -> Self {
         let state = Arc::new(FakeAgentState {
             mode: Mutex::new(mode),
             bearers_seen: Mutex::new(Vec::new()),
             tools_seen: Mutex::new(Vec::new()),
+            mcp_verbs_seen: Mutex::new(Vec::new()),
             bodies_seen: Mutex::new(Vec::new()),
             hits: Mutex::new(0),
             failures_remaining: Mutex::new(fail_first),
@@ -164,6 +184,12 @@ impl FakeAgent {
     /// dispatcher omitted it.
     pub fn tools_seen(&self) -> Vec<Option<String>> {
         self.state.tools_seen.lock().unwrap().clone()
+    }
+
+    /// The `X-Triton-MCP` verb header of each request, `None` where absent
+    /// (e.g. a plain tool call). Pins the MCP-Apps routing contract.
+    pub fn mcp_verbs_seen(&self) -> Vec<Option<String>> {
+        self.state.mcp_verbs_seen.lock().unwrap().clone()
     }
 
     /// JSON bodies of every request this agent received, in order.
@@ -198,6 +224,11 @@ async fn handler(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     state.tools_seen.lock().unwrap().push(tool);
+    let mcp_verb = headers
+        .get("X-Triton-MCP")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    state.mcp_verbs_seen.lock().unwrap().push(mcp_verb.clone());
     let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     state.bodies_seen.lock().unwrap().push(value.clone());
 
@@ -209,7 +240,8 @@ async fn handler(
         | AgentMode::StreamingTruncated
         | AgentMode::StreamingSurface
         | AgentMode::StreamingHang
-        | AgentMode::StreamingSlowDrip => false,
+        | AgentMode::StreamingSlowDrip
+        | AgentMode::McpApps => false,
         AgentMode::AlwaysFail => true,
         AgentMode::FailingThenRecover => {
             let mut left = state.failures_remaining.lock().unwrap();
@@ -239,7 +271,35 @@ async fn handler(
         AgentMode::StreamingSurface => sse_response(streaming_surface_frames()),
         AgentMode::StreamingHang => sse_response_hanging(streaming_frames(&value, false)),
         AgentMode::StreamingSlowDrip => sse_response_slow_drip(streaming_frames(&value, false)),
+        AgentMode::McpApps => mcp_apps_response(mcp_verb.as_deref(), &value),
         _ => Json(json!({ "echoed": value })).into_response(),
+    }
+}
+
+/// MCP-Apps responder (#143), routing on the `X-Triton-MCP` verb:
+/// no verb → a UI-bearing tool result; `resources/read` → a bundle whose
+/// `uri` echoes the request; `updateModelContext` → an ack (the record is
+/// already captured in `bodies_seen` for byte-for-byte relay assertions).
+fn mcp_apps_response(verb: Option<&str>, body: &Value) -> axum::response::Response {
+    match verb {
+        Some("resources/read") => {
+            let uri = body.get("uri").and_then(Value::as_str).unwrap_or("");
+            Json(json!({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": "text/html",
+                    "text": format!("<html><body>peacock bundle for {uri}</body></html>")
+                }]
+            }))
+            .into_response()
+        }
+        Some("updateModelContext") => Json(json!({ "relayed": true })).into_response(),
+        // A normal tool call (`render_report` / `callServerTool`).
+        _ => Json(json!({
+            "report_id": "r1",
+            "_meta": { "ui": { "resourceUri": "ui://peacock/r1" } }
+        }))
+        .into_response(),
     }
 }
 
