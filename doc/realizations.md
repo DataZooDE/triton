@@ -452,6 +452,27 @@ a trap the next developer should not have to step in.
   struct you risk dropping a field a newer renderer added — keep it a raw
   `Value` passthrough.
 
+- **A returned `_meta.ui.resourceUri` is a confused-deputy surface, but a
+  bounded one.** (#143 review) Upstream A's tool result can name
+  `ui://B/...`; when the host then calls `resources/read`, Triton routes it
+  to upstream B with the caller's principal. This does *not* cross a
+  privilege boundary in today's model — every upstream is operator-pinned
+  in `TRITON_STATIC_UPSTREAMS`, and any authenticated caller can already
+  call any registered tool directly — so it's accepted, not fixed. The
+  cheap defence we *do* apply: only reflect `_meta.ui` when it's a JSON
+  object (refuse a scalar/array blob), so a hostile upstream can't bloat
+  the response through that key. If a per-caller tool ACL ever lands, the
+  reflected authority must be re-bound to the tool's owning upstream.
+
+- **A delegated renderer needs the sidecar's size cap re-applied by hand.**
+  (#143 review) The sidecar `Client::render` caps the response body at
+  `MAX_RESPONSE_BYTES` (2 MiB). The delegated path buffers the upstream
+  JSON via `resp.json()` (no cap — a pre-existing trait of *every* upstream
+  call) and then base64-decodes `png_base64`. `UpstreamRasterizer` re-adds
+  the cap on both the encoded string and the decoded bytes; without it a
+  broken/hostile renderer forces two large allocations. If you add more
+  delegated-binary tools, port this guard — `resp.json()` won't do it.
+
 - **Delegating rasterisation to an upstream means the PNG crosses a JSON
   boundary, so it's base64.** (#143 D) The sidecar returns `image/png`
   bytes directly; an upstream `render_a2ui_to_png` tool returns a JSON tool

@@ -585,6 +585,106 @@ async fn update_model_context_relays_record_unmodified() {
     assert_eq!(audit["result"], "ok");
 }
 
+/// #143 review ([NIT]): `initialize` advertises a `resources`
+/// capability, so `resources/list` must exist (not 404) and enumerate
+/// the local runtime stub.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resources_list_enumerates_runtime_stub() {
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), HashMap::new()).await;
+    let (status, body) = rpc_request(
+        &proc,
+        json!({ "jsonrpc": "2.0", "id": 41, "method": "resources/list", "params": {} }),
+        Some("dev-token"),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    let resources = body["result"]["resources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("resources array: {body}"));
+    assert!(
+        resources
+            .iter()
+            .any(|r| r["uri"] == "ui://triton/runtime.html"),
+        "runtime stub not listed: {body}"
+    );
+}
+
+/// #143 review ([LOW]): a missing/non-string `resources/read` `uri` is a
+/// JSON-RPC invalid-params error, not a silent `""` lookup.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resources_read_rejects_non_string_uri() {
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), HashMap::new()).await;
+    let (_, body) = rpc_request(
+        &proc,
+        json!({ "jsonrpc": "2.0", "id": 42, "method": "resources/read", "params": { "uri": 7 } }),
+        Some("dev-token"),
+    )
+    .await;
+    assert_eq!(
+        body["error"]["code"], -32602,
+        "expected invalid-params: {body}"
+    );
+}
+
+/// #143 review ([LOW]): `updateModelContext` requires the `record` member
+/// to be present (its value is still forwarded verbatim).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn update_model_context_requires_record() {
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), HashMap::new()).await;
+    let (_, body) = rpc_request(
+        &proc,
+        json!({
+            "jsonrpc": "2.0", "id": 43, "method": "updateModelContext",
+            "params": { "uri": "ui://peacock/r1" }
+        }),
+        Some("dev-token"),
+    )
+    .await;
+    assert_eq!(
+        body["error"]["code"], -32602,
+        "expected invalid-params: {body}"
+    );
+}
+
+/// #143 review ([MEDIUM]): only a structured `_meta.ui` *object* is
+/// reflected onto the response `_meta`; a scalar/array blob a hostile
+/// upstream stuffs under `_meta.ui` is dropped.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tools_call_ignores_non_object_meta_ui() {
+    let agent = FakeAgent::start_returning(json!({
+        "ok": true,
+        "_meta": { "ui": "x".repeat(64) }
+    }))
+    .await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        HashMap::from([
+            ("TRITON_ENV".to_string(), "nonprod".to_string()),
+            (
+                "TRITON_STATIC_UPSTREAMS".to_string(),
+                format!("render_report={}", agent.host_port()),
+            ),
+        ]),
+    )
+    .await;
+    let (status, body) = rpc_request(
+        &proc,
+        json!({
+            "jsonrpc": "2.0", "id": 44, "method": "tools/call",
+            "params": { "name": "render_report", "arguments": {} }
+        }),
+        Some("dev-token"),
+    )
+    .await;
+    assert!(status.is_success(), "{body}");
+    // trace_id present; no `ui` reflected (it wasn't an object).
+    assert!(body["result"]["_meta"]["trace_id"].is_string(), "{body}");
+    assert!(
+        body["result"]["_meta"]["ui"].is_null(),
+        "non-object _meta.ui must not be reflected: {body}"
+    );
+}
+
 fn wait_for_audit_matching<F>(
     proc: &TritonProcess,
     deadline: Duration,

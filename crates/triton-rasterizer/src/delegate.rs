@@ -110,8 +110,31 @@ impl DashboardRasterizer for UpstreamRasterizer {
             .ok_or_else(|| {
                 RasterizerError::Server(format!("{} returned no png_base64 field", self.tool))
             })?;
-        base64::engine::general_purpose::STANDARD
+        // Cap parity with the sidecar's `MAX_RESPONSE_BYTES` (#143 review,
+        // [HIGH]): a broken or hostile renderer must not force an oversized
+        // PNG buffer. Reject on the *encoded* length first (base64 inflates
+        // ~4/3, so this bounds the decoded output without allocating it),
+        // then re-check the decoded length as a belt-and-braces guard.
+        let max = crate::MAX_RESPONSE_BYTES;
+        if b64.len() > max / 3 * 4 + 4 {
+            return Err(RasterizerError::Server(format!(
+                "{} png exceeds {max}-byte cap (encoded {} bytes)",
+                self.tool,
+                b64.len()
+            )));
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
             .decode(b64)
-            .map_err(|e| RasterizerError::Server(format!("bad base64 png from {}: {e}", self.tool)))
+            .map_err(|e| {
+                RasterizerError::Server(format!("bad base64 png from {}: {e}", self.tool))
+            })?;
+        if bytes.len() > max {
+            return Err(RasterizerError::Server(format!(
+                "{} png exceeds {max}-byte cap ({} bytes)",
+                self.tool,
+                bytes.len()
+            )));
+        }
+        Ok(bytes)
     }
 }
