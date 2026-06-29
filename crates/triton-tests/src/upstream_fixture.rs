@@ -294,6 +294,19 @@ fn mcp_apps_response(verb: Option<&str>, body: &Value) -> axum::response::Respon
             .into_response()
         }
         Some("updateModelContext") => Json(json!({ "relayed": true })).into_response(),
+        // Schema discovery — Triton introspects upstreams so clients can build
+        // input forms from the real argument schema.
+        Some("tools/list") => Json(json!({
+            "tools": [{
+                "name": "render_report",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": { "report_id": { "type": "string" } },
+                    "required": ["report_id"]
+                }
+            }]
+        }))
+        .into_response(),
         // A normal tool call (`render_report` / `callServerTool`).
         _ => Json(json!({
             "report_id": "r1",

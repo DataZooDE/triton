@@ -359,6 +359,41 @@ impl StaticUpstream {
         })
     }
 
+    /// `tools/list` introspection: POST the header-routed wire shape with
+    /// `X-Triton-MCP: tools/list` to one upstream endpoint and parse the
+    /// `{ tools: [{ name, inputSchema }] }` it answers, so `/v1/tools` can
+    /// surface an agent's real argument schema. Returns `None` on any fault
+    /// (the agent may not implement it) — discovery is best-effort and never
+    /// fails the listing.
+    async fn do_list_tools(&self, ep: &str, bearer: &str) -> Option<Vec<(String, Value)>> {
+        let resp = self
+            .http
+            .post(format!("http://{ep}/"))
+            .bearer_auth(bearer)
+            .header("X-Triton-MCP", "tools/list")
+            .json(&serde_json::json!({}))
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let body: Value = resp.json().await.ok()?;
+        let tools = body.get("tools")?.as_array()?;
+        let mut out = Vec::new();
+        for t in tools {
+            if let Some(name) = t.get("name").and_then(Value::as_str) {
+                let schema = t
+                    .get("inputSchema")
+                    .or_else(|| t.get("input_schema"))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                out.push((name.to_string(), schema));
+            }
+        }
+        Some(out)
+    }
+
     /// MCP-Apps `updateModelContext` relay (#143 C). POSTs the iframe's
     /// `record` to the owning upstream **verbatim** under `X-Triton-MCP:
     /// updateModelContext`. The record is the request body untouched —
@@ -675,6 +710,35 @@ impl UpstreamDispatch for StaticUpstream {
         let mut v: Vec<String> = self.map.keys().cloned().collect();
         v.sort();
         v
+    }
+
+    async fn agent_schemas(&self) -> HashMap<String, Value> {
+        // One bearer for all probes; a synthetic principal (there is no real
+        // caller at listing time). Without a signer this is the static token.
+        let principal = Principal {
+            sub: "triton-introspect".to_string(),
+            scopes: Vec::new(),
+            groups: Vec::new(),
+            tenant: self.tenant.clone(),
+            raw_token: String::new(),
+            trace_id: String::new(),
+        };
+        let bearer = match self.bearer(&principal) {
+            Ok(b) => b,
+            Err(_) => return HashMap::new(),
+        };
+        // Probe each unique endpoint once — a multi-tool agent serves several
+        // tool names from one endpoint.
+        let endpoints: HashSet<&String> = self.map.values().collect();
+        let mut out = HashMap::new();
+        for ep in endpoints {
+            if let Some(tools) = self.do_list_tools(ep, &bearer).await {
+                for (name, schema) in tools {
+                    out.insert(name, schema);
+                }
+            }
+        }
+        out
     }
 }
 

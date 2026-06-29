@@ -74,6 +74,40 @@ async fn mcp_tools_list_includes_upstream_agents() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn v1_tools_surfaces_upstream_input_schema_via_introspection() {
+    // The agent answers `X-Triton-MCP: tools/list` with its real argument
+    // schema; Triton introspects it so `/v1/tools` carries that schema (not
+    // `{}`), letting the Explorer build an input form.
+    let agent = FakeAgent::start_mcp_apps().await;
+    let env = HashMap::from([(
+        "TRITON_STATIC_UPSTREAMS".into(),
+        format!("render_report={}", agent.host_port()),
+    )]);
+    let triton = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    let body: Value = reqwest::Client::new()
+        .get(triton.rest_url("/v1/tools"))
+        .bearer_auth("dev-token")
+        .send()
+        .await
+        .expect("GET /v1/tools")
+        .json()
+        .await
+        .expect("json");
+    let tools = body["tools"].as_array().expect("tools array");
+    let rr = tools
+        .iter()
+        .find(|t| t["name"] == "render_report")
+        .expect("render_report listed");
+    assert_eq!(rr["upstream"], json!(true));
+    assert_eq!(
+        rr["input_schema"]["properties"]["report_id"]["type"],
+        json!("string"),
+        "upstream schema should be introspected into /v1/tools; got: {rr}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn listing_degrades_when_no_upstream_configured() {
     // Dev-token mode, no static upstreams: /v1/tools still works, just
     // the in-process tools, none flagged upstream.

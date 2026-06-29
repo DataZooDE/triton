@@ -113,6 +113,16 @@ pub trait UpstreamDispatch: Send + Sync {
     async fn list_agents(&self) -> Vec<String> {
         Vec::new()
     }
+
+    /// Input schemas for upstream agents that answer a `tools/list`
+    /// introspection (`X-Triton-MCP: tools/list`), keyed by tool name. Lets
+    /// `GET /v1/tools` surface an upstream agent's real argument schema
+    /// instead of an empty object, so clients can build input forms. Agents
+    /// that don't answer are simply absent — discovery must never fail the
+    /// listing. The default returns nothing.
+    async fn agent_schemas(&self) -> std::collections::HashMap<String, Value> {
+        std::collections::HashMap::new()
+    }
 }
 
 #[derive(Debug)]
@@ -187,13 +197,18 @@ impl Dispatcher {
         if let Some(upstream) = &self.upstream {
             let known: std::collections::HashSet<String> =
                 out.iter().map(|d| d.name.clone()).collect();
+            // Best-effort `tools/list` introspection so upstream agents carry
+            // their real argument schema (empty object when an agent doesn't
+            // answer — discovery never fails the listing).
+            let schemas = upstream.agent_schemas().await;
             for name in upstream.list_agents().await {
                 if !known.contains(&name) {
+                    let input_schema = schemas.get(&name).cloned().unwrap_or_else(|| json!({}));
                     out.push(ToolDescriptor {
                         name,
-                        input_schema: json!({}),
-                        // Triton can't know an agent's schema; assume it
-                        // may emit a surface so the UI offers A2UI.
+                        input_schema,
+                        // Assume an upstream may emit a surface so the UI
+                        // offers A2UI rendering.
                         returns_a2ui: true,
                         upstream: true,
                     });
