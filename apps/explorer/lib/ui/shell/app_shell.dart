@@ -23,8 +23,8 @@ class AppShell extends StatefulWidget {
 }
 
 enum _Pane {
-  dashboard,
   console,
+  dashboard,
   trace,
   a2uiDiff,
   manifest,
@@ -34,11 +34,12 @@ enum _Pane {
 }
 
 class _AppShellState extends State<AppShell> {
-  _Pane _pane = _Pane.dashboard;
+  // Chat is the central entry point.
+  _Pane _pane = _Pane.console;
 
   static const _items = <_NavItem>[
+    _NavItem(_Pane.console, Icons.forum_outlined, Icons.forum, 'Chat'),
     _NavItem(_Pane.dashboard, Icons.home_outlined, Icons.home, 'Dashboard'),
-    _NavItem(_Pane.console, Icons.terminal_outlined, Icons.terminal, 'Console'),
     _NavItem(_Pane.trace, Icons.timeline_outlined, Icons.timeline, 'Trace'),
     _NavItem(
       _Pane.a2uiDiff,
@@ -73,8 +74,8 @@ class _AppShellState extends State<AppShell> {
     final body = IndexedStack(
       index: _pane.index,
       children: const [
-        DashboardPage(),
         ConsolePage(),
+        DashboardPage(),
         TracePage(),
         A2uiDiffPage(),
         ManifestPage(),
