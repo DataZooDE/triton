@@ -101,6 +101,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The release `dart2js` compile of a CanvasKit app peaks above the
+      # runner's RAM and gets OOM-killed early (abnormal exit, no diagnostic;
+      # the same toolchain builds fine on a higher-RAM machine). Add swap so it
+      # can spill instead of dying.
+      - name: Add swap space
+        working-directory: /
+        run: |
+          sudo fallocate -l 10G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
