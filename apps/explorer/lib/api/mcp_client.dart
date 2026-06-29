@@ -147,6 +147,7 @@ class McpClient {
         traceId: traceId,
         error: err?['message'] as String?,
         errorCode: err?['code'] as int?,
+        uiResourceUri: InvocationResult.uiFrom(result),
       );
     } on DioException catch (e) {
       sw.stop();

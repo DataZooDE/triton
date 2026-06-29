@@ -127,6 +127,55 @@ void main() {
       ));
       expect(find.textContaining('unknown v0.9 type: mystery'), findsOneWidget);
     });
+
+    testWidgets('renders report kinds: kpi, table, vega(png)', (tester) async {
+      // 1x1 transparent PNG.
+      const png =
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: A2UIv09Renderer(
+            envelope: const {
+              'version': '0.9',
+              'stream': [
+                {'type': 'kpi', 'label': 'Total revenue', 'value': '\$1.2M'},
+                {
+                  'type': 'table',
+                  'columns': ['month', 'revenue'],
+                  'rows': [
+                    ['1997-01', '1000'],
+                    ['1997-02', '1200'],
+                  ],
+                },
+                {'type': 'vega', 'title': 'Revenue', 'png_base64': png},
+              ],
+            },
+          ),
+        ),
+      ));
+      expect(find.text('Total revenue'), findsOneWidget);
+      expect(find.text('\$1.2M'), findsOneWidget);
+      expect(find.byType(DataTable), findsOneWidget);
+      expect(find.text('1997-02'), findsOneWidget);
+      expect(find.byType(Image), findsOneWidget);
+    });
+
+    testWidgets('vega without png shows a placeholder', (tester) async {
+      await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(
+          body: A2UIv09Renderer(
+            envelope: {
+              'version': '0.9',
+              'stream': [
+                {'type': 'vega', 'title': 'Revenue'},
+              ],
+            },
+          ),
+        ),
+      ));
+      expect(find.textContaining('chart (open the embedded report'),
+          findsOneWidget);
+    });
   });
 
   group('A2UIRenderer dispatch', () {

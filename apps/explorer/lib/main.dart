@@ -7,6 +7,7 @@ import 'auth/login_screen.dart';
 import 'providers/api_provider.dart';
 import 'providers/runtime_provider.dart';
 import 'theme/app_theme.dart';
+import 'ui/features/surface/generic_surface_page.dart';
 import 'ui/shell/app_shell.dart';
 
 Future<void> main() async {
@@ -59,11 +60,25 @@ class TritonExplorerApp extends ConsumerWidget {
     final unlocked = auth.status == AuthStatus.loggedIn ||
         hasManualToken ||
         (runtime.hasValue && runtime.value!.env.isNotEmpty);
+
+    // Generic-surface mode: `?surface=<tool>` renders that tool's A2UI
+    // surface chrome-free (an embeddable dashboard) instead of the full
+    // Explorer shell. `&title=` is an optional heading.
+    final surfaceTool =
+        kIsWeb ? Uri.base.queryParameters['surface']?.trim() : null;
+    final Widget unlockedHome =
+        (surfaceTool != null && surfaceTool.isNotEmpty)
+            ? GenericSurfacePage(
+                tool: surfaceTool,
+                title: kIsWeb ? Uri.base.queryParameters['title'] : null,
+              )
+            : const AppShell();
+
     return MaterialApp(
       title: 'Triton Explorer',
       debugShowCheckedModeBanner: false,
       theme: ExplorerTheme.light(),
-      home: unlocked ? const AppShell() : const LoginScreen(),
+      home: unlocked ? unlockedHome : const LoginScreen(),
     );
   }
 }

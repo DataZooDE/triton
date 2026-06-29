@@ -150,6 +150,7 @@ class RestClient {
         statusCode: r.statusCode ?? 0,
         elapsed: sw.elapsed,
         traceId: r.data?['trace_id'] as String?,
+        uiResourceUri: InvocationResult.uiFrom(r.data),
       );
     } on DioException catch (e) {
       sw.stop();

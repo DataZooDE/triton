@@ -13,6 +13,7 @@ import '../../../api/sse.dart';
 import '../../../providers/api_provider.dart';
 import '../../../providers/runtime_provider.dart';
 import '../../../widgets/a2ui/a2ui_renderer.dart';
+import '../../../widgets/a2ui/ui_resource_view.dart';
 import '../../../widgets/chat_channel_previews.dart';
 import '../../../widgets/json_viewer.dart';
 import '../../../widgets/panel_help.dart';
@@ -172,21 +173,26 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
 
   // ── client + frame helpers ──────────────────────────────────────────
 
-  WireRequest _buildFor(_Protocol p, Map<String, dynamic> args) {
+  /// Build a frame for the active call. [tool] overrides the selected tool —
+  /// a rendered surface button may target a *different* tool (e.g. an agent's
+  /// surface offering a `render_report` button that dispatches to the Peacock
+  /// upstream), which the stateless round-trip must honour.
+  WireRequest _buildFor(_Protocol p, Map<String, dynamic> args, {String? tool}) {
+    final name = tool ?? _selected!.name;
     final a2ui = (_selected?.returnsA2ui ?? false) ? _a2uiVersion : null;
     switch (p) {
       case _Protocol.rest:
         return ref
             .read(restClientProvider)
-            .buildRequest(_selected!.name, args, a2uiVersion: a2ui);
+            .buildRequest(name, args, a2uiVersion: a2ui);
       case _Protocol.mcp:
         return ref
             .read(mcpClientProvider)
-            .buildRequest(_selected!.name, args, a2uiVersion: a2ui);
+            .buildRequest(name, args, a2uiVersion: a2ui);
       case _Protocol.a2a:
         return ref
             .read(a2aClientProvider)
-            .buildRequest(_selected!.name, args, a2uiVersion: a2ui);
+            .buildRequest(name, args, a2uiVersion: a2ui);
     }
   }
 
@@ -448,7 +454,7 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   Future<void> _onA2uiAction(String tool, Map<String, dynamic> args) async {
     final p = _activeTab;
     setState(() => _sending = true);
-    final r = await _sendFrame(p, _buildFor(p, args));
+    final r = await _sendFrame(p, _buildFor(p, args, tool: tool));
     if (!mounted) return;
     setState(() {
       _results[p] = r;
@@ -1018,6 +1024,23 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                 version: _a2uiVersion,
                 onAction: _onA2uiAction,
               ),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+        // MCP-Apps: an interactive upstream (e.g. a Peacock report) returns a
+        // `ui://` resource on `_meta.ui.resourceUri`. Embed it inline — Triton
+        // proxies `resources/read` to the owning upstream (#143).
+        if (r.uiResourceUri != null) ...[
+          Text(
+            'Embedded report — ${r.uiResourceUri}',
+            style: Theme.of(context).textTheme.titleSmall,
+          ),
+          const SizedBox(height: 6),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: UiResourceView(uri: r.uiResourceUri!),
             ),
           ),
           const SizedBox(height: 12),
