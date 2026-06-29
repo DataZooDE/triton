@@ -4,7 +4,12 @@ import 'package:flutter/material.dart';
 /// VM, where there is no DOM to host an `<iframe>`; show the resource's HTML
 /// source instead. The web build ([html_embed_web.dart]) mounts the live,
 /// sandboxed iframe.
-Widget embedHtml(String html, {required String viewId, double height = 600}) {
+Widget embedHtml(
+  String html, {
+  required String viewId,
+  double height = 600,
+  Future<Object?> Function(String name, Object? args)? onCallServerTool,
+}) {
   return SizedBox(
     height: height,
     child: Card(

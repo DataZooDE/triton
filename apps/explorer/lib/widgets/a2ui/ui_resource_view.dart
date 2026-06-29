@@ -91,6 +91,26 @@ class _UiResourceViewState extends ConsumerState<UiResourceView> {
         child: Text('No content returned for this resource.'),
       );
     }
-    return embedHtml(h, viewId: _viewId, height: widget.height);
+    return embedHtml(
+      h,
+      viewId: _viewId,
+      height: widget.height,
+      onCallServerTool: _callServerTool,
+    );
+  }
+
+  /// The MCP-Apps host bridge: the embedded runtime asks us to call a tool
+  /// (e.g. `render_report` to fetch its rows / re-render on drill); dispatch it
+  /// through Triton over MCP and hand back the result the runtime renders.
+  Future<Object?> _callServerTool(String name, Object? args) async {
+    final argsMap =
+        (args is Map) ? args.cast<String, dynamic>() : <String, dynamic>{};
+    final r = await ref.read(mcpClientProvider).invoke(name, argsMap);
+    // `raw` is the MCP `structuredContent`, under which Triton nests the
+    // upstream's own MCP tool result (`{_meta, structuredContent:{rows…}}`).
+    // Hand the runtime that inner result — it's the exact shape its standalone
+    // HTTP path consumes (`data.structuredContent.rows`).
+    final inner = r.raw['result'];
+    return inner is Map ? inner : r.raw;
   }
 }
