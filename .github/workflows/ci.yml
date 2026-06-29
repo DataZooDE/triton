@@ -104,6 +104,10 @@ jobs:
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
+          # Pin the version: a floating `stable` regressed the release
+          # `dart2js` web build (it crashed ~14s in, no diagnostic, while the
+          # pinned toolchain compiles cleanly). Bump deliberately.
+          flutter-version: 3.44.4
           channel: stable
           cache: true
 
