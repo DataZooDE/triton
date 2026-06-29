@@ -15,6 +15,39 @@ import 'package:flutter/material.dart';
 /// whenever the HTML changes (see `UiResourceView`).
 final Set<String> _registered = <String>{};
 
+class _McpRequest {
+  _McpRequest(this.reqId, this.name, this.args);
+  final String? reqId;
+  final String name;
+  final Object? args;
+}
+
+/// Parse an `mcp:callServerTool` message. `event.data` may arrive either as a
+/// Dart `Map` (dart:html deserialises some structured clones) or as a raw JS
+/// object — handle both. Returns null for anything else.
+_McpRequest? _readMcpRequest(Object raw) {
+  if (raw is Map) {
+    if (raw['type'] != 'mcp:callServerTool') return null;
+    return _McpRequest(
+      raw['reqId']?.toString(),
+      raw['name']?.toString() ?? '',
+      raw['arguments'],
+    );
+  }
+  try {
+    final obj = raw as JSObject;
+    final type = (obj.getProperty('type'.toJS) as JSString?)?.toDart;
+    if (type != 'mcp:callServerTool') return null;
+    return _McpRequest(
+      (obj.getProperty('reqId'.toJS) as JSString?)?.toDart,
+      (obj.getProperty('name'.toJS) as JSString?)?.toDart ?? '',
+      obj.getProperty('arguments'.toJS).dartify(),
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 /// Embed self-contained HTML in a **sandboxed** `<iframe>` on Flutter web.
 /// The iframe is fed via `srcdoc`, so it loads no external URL; the `sandbox`
 /// attribute isolates the embedded upstream report from the Explorer, while
@@ -44,30 +77,14 @@ Widget embedHtml(
         ..style.height = '100%'
         ..setAttribute('sandbox', 'allow-scripts');
       if (onCallServerTool != null) {
-        // The posted value is a JS object (dart:html doesn't deep-convert it),
-        // so read/write it through js_util.
         html.window.onMessage.listen((event) async {
-          // Read the posted JS object via js_interop (dart:html hands it over
-          // unconverted); reply with a plain Dart Map (dart:html serialises
-          // that to a JS object natively — don't mix in a jsify'd value).
-          String? reqId;
-          String name;
-          Object? args;
-          try {
-            final raw = event.data;
-            if (raw == null) return;
-            final obj = raw as JSObject;
-            final type = (obj.getProperty('type'.toJS) as JSString?)?.toDart;
-            if (type != 'mcp:callServerTool') return;
-            reqId = (obj.getProperty('reqId'.toJS) as JSString?)?.toDart;
-            name = (obj.getProperty('name'.toJS) as JSString?)?.toDart ?? '';
-            args = obj.getProperty('arguments'.toJS).dartify();
-          } catch (_) {
-            return; // not an MCP-Apps message we recognise
-          }
+          final raw = event.data;
+          if (raw == null) return;
+          final reading = _readMcpRequest(raw);
+          if (reading == null) return; // not a callServerTool message
           Object? result;
           try {
-            result = await onCallServerTool(name, args);
+            result = await onCallServerTool(reading.name, reading.args);
           } catch (e) {
             result = {
               'error': {'message': e.toString()},
@@ -75,7 +92,7 @@ Widget embedHtml(
           }
           el.contentWindow?.postMessage({
             'type': 'mcp:callServerTool:result',
-            'reqId': reqId,
+            'reqId': reading.reqId,
             'result': result,
           }, '*');
         });
