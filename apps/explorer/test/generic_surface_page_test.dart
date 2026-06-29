@@ -1,18 +1,23 @@
-// The chrome-free generic-surface page invokes a tool over REST, renders its
+// The chrome-free generic-surface page invokes a tool over MCP, renders its
 // A2UI v0.9 surface, and routes surface-button taps back through invoke (so a
-// cross-tool button dispatches correctly). No trait doubles: a real RestClient
-// over a fake Dio adapter, as in console_roundtrip_test.
+// cross-tool button dispatches correctly). MCP is the surface that carries
+// MCP-Apps results. No trait doubles: a real McpClient over a fake Dio
+// adapter, as in the other client tests.
+
+import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:triton_explorer/api/rest_client.dart';
+import 'package:triton_explorer/api/mcp_client.dart';
+import 'package:triton_explorer/api/runtime_config.dart';
 import 'package:triton_explorer/providers/api_provider.dart';
+import 'package:triton_explorer/providers/runtime_provider.dart';
 import 'package:triton_explorer/ui/features/surface/generic_surface_page.dart';
 
-class _SurfaceAdapter implements HttpClientAdapter {
+class _McpSurfaceAdapter implements HttpClientAdapter {
   final List<String> calledTools = [];
 
   @override
@@ -21,15 +26,32 @@ class _SurfaceAdapter implements HttpClientAdapter {
     Stream<List<int>>? body,
     Future<void>? cancel,
   ) async {
-    final tool = options.path.split('/').last;
+    final req = (options.data as Map).cast<String, dynamic>();
+    final params = (req['params'] as Map).cast<String, dynamic>();
+    final tool = params['name'] as String;
     calledTools.add(tool);
-    // A narration + a button that dispatches to a *different* tool.
+    // MCP tools/call result: structuredContent carries the v0.9 stream nested
+    // under `result` (the real wire shape) — a narration plus a button that
+    // dispatches to a *different* tool.
+    final result = {
+      'structuredContent': {
+        'result': {
+          'stream': [
+            {'type': 'narration', 'text': 'hello from $tool'},
+            {
+              'type': 'button',
+              'label': 'Open report',
+              'action': {
+                'tool': 'render_report',
+                'args': {'report_id': 'r1'},
+              },
+            },
+          ],
+        },
+      },
+    };
     return ResponseBody.fromString(
-      '{"latency_ms":0,"result":{"stream":['
-      '{"type":"narration","text":"hello from $tool"},'
-      '{"type":"button","label":"Open report",'
-      '"action":{"tool":"render_report","args":{"report_id":"r1"}}}'
-      ']}}',
+      jsonEncode({'jsonrpc': '2.0', 'id': req['id'], 'result': result}),
       200,
       headers: {
         Headers.contentTypeHeader: ['application/json'],
@@ -48,14 +70,23 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
     final dio = Dio();
-    final adapter = _SurfaceAdapter();
+    final adapter = _McpSurfaceAdapter();
     dio.httpClientAdapter = adapter;
 
     await tester.pumpWidget(
       ProviderScope(
         overrides: [
-          restClientProvider.overrideWith(
-            (ref) => RestClient(dio, baseUrl: 'http://t', token: 'dev-token'),
+          mcpClientProvider.overrideWith(
+            (ref) => McpClient(dio, baseUrl: 'http://t', token: 'dev-token'),
+          ),
+          // The page waits for runtime discovery before its first invoke.
+          runtimeConfigProvider.overrideWith(
+            (ref) async => RuntimeConfig(
+              env: 'test',
+              packageVersion: '0',
+              binarySha: '0',
+              mcpBase: '/mcp',
+            ),
           ),
         ],
         child: const MaterialApp(home: GenericSurfacePage(tool: 'assistant')),

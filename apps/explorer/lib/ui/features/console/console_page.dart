@@ -179,7 +179,13 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   /// upstream), which the stateless round-trip must honour.
   WireRequest _buildFor(_Protocol p, Map<String, dynamic> args, {String? tool}) {
     final name = tool ?? _selected!.name;
-    final a2ui = (_selected?.returnsA2ui ?? false) ? _a2uiVersion : null;
+    // Only negotiate A2UI when calling the *selected* tool. A surface button
+    // that targets a different tool (e.g. a `render_report` renderer) must get
+    // the raw result — forcing a surface build on a renderer's output errors,
+    // and its `_meta.ui.resourceUri` is what we embed instead.
+    final sameTool = name == _selected?.name;
+    final a2ui =
+        (sameTool && (_selected?.returnsA2ui ?? false)) ? _a2uiVersion : null;
     switch (p) {
       case _Protocol.rest:
         return ref
