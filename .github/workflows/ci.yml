@@ -108,10 +108,15 @@ jobs:
       - name: Add swap space
         working-directory: /
         run: |
-          sudo fallocate -l 10G /swapfile
+          # The runner already ships a small /swapfile — replace it with a
+          # bigger one so dart2js can spill.
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 14G /swapfile
           sudo chmod 600 /swapfile
           sudo mkswap /swapfile
           sudo swapon /swapfile
+          free -h
 
       - name: Install Flutter
         uses: subosito/flutter-action@v2
