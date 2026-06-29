@@ -117,4 +117,7 @@ jobs:
         run: flutter test
 
       - name: flutter build web --release
-        run: flutter build web --release
+        # `--no-wasm-dry-run` skips the extra wasm compile the toolchain runs
+        # alongside dart2js; we don't ship --wasm, and the double compile
+        # spikes peak memory enough to OOM-kill dart2js on the CI runner.
+        run: flutter build web --release --no-wasm-dry-run
