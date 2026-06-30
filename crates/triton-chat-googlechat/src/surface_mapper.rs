@@ -22,7 +22,7 @@
 //! mid-component, so italic markers stay balanced.
 
 use serde_json::Value;
-use triton_core::a2ui::{Component, Surface, extract_surface};
+use triton_core::a2ui::{Component, FormFieldKind, Surface, extract_surface};
 
 /// Google Chat caps message text at ~32,000 chars; we use byte
 /// count as a conservative proxy.
@@ -208,29 +208,85 @@ pub fn build_inline_response(msg: &RenderedMessage, workspace_addon: bool) -> Va
     text_reply_body(&msg.text, workspace_addon)
 }
 
-/// The `function` name stamped on a rendered button's `onClick.action`
-/// and echoed back on the `CARD_CLICKED` event. The per-button
-/// `(tool, args)` rides a single signed correlation token in the
-/// `ct` parameter, so this name is constant.
-pub const BUTTON_ACTION_FUNCTION: &str = "agent_button";
-/// Parameter key carrying the signed correlation token on a button.
+/// The `function` name stamped on every interactive `onClick.action` and
+/// echoed back on the `CARD_CLICKED` event. The component's
+/// `(tool, base_args)` rides a single signed correlation token in the
+/// `ct` parameter; any typed/selected values arrive separately in the
+/// event's `formInputs`. The name is constant — the callback only reads
+/// the token + form inputs.
+pub const BUTTON_ACTION_FUNCTION: &str = "agent_action";
+/// Parameter key carrying the signed correlation token.
 pub const BUTTON_TOKEN_PARAM: &str = "ct";
 
-/// An interactive `Button` lifted off a Surface, with the `(tool, args)`
-/// the click must re-invoke. The adapter signs `(tool, args)` into a
-/// correlation token (it holds the key; this stays key-free) and renders
-/// it via [`build_card_message`].
+/// A single form field to render as a Cards v2 input.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ButtonSpec {
+pub struct FormFieldSpec {
+    pub name: String,
     pub label: String,
-    pub tool: String,
-    pub args: Value,
+    /// `true` → render a SWITCH (boolean); else a text input.
+    pub boolean: bool,
 }
 
-/// Extract the interactive `Button` components from a dispatch result's
-/// A2UI surface, in order. Empty when the result isn't a surface or has
-/// no buttons (caller then sends a plain text reply).
-pub fn buttons_from_result(result: &Value) -> Vec<ButtonSpec> {
+/// An interactive component lifted off a Surface. The adapter signs each
+/// one's `(tool, base_args)` into a correlation token (it holds the key;
+/// this stays key-free) and renders the matching Cards v2 widget(s) via
+/// [`build_interactive_card`]. On the `CARD_CLICKED` submit it verifies
+/// the token and re-dispatches `tool` with `base_args` ⊕ the user's
+/// `formInputs`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InteractiveSpec {
+    /// One-tap preset → re-invoke `tool` with fixed `args`.
+    Button {
+        label: String,
+        tool: String,
+        args: Value,
+    },
+    /// Pick-one dropdown → re-invoke `tool` with the chosen value bound to
+    /// `args_key` (delivered via `formInputs`).
+    Selection {
+        prompt: String,
+        options: Vec<(String, String)>,
+        tool: String,
+        args_key: String,
+    },
+    /// Multi-field form → re-invoke `tool` with each field's typed value
+    /// (delivered via `formInputs`, keyed by field name).
+    Form {
+        title: String,
+        submit_label: String,
+        fields: Vec<FormFieldSpec>,
+        tool: String,
+    },
+}
+
+impl InteractiveSpec {
+    /// The tool this component re-invokes.
+    pub fn tool(&self) -> &str {
+        match self {
+            InteractiveSpec::Button { tool, .. }
+            | InteractiveSpec::Selection { tool, .. }
+            | InteractiveSpec::Form { tool, .. } => tool,
+        }
+    }
+
+    /// The args signed into the correlation token. For a `Button` this is
+    /// the full preset args; for `Selection`/`Form` it is empty — the
+    /// user-supplied values arrive on the submit's `formInputs` and are
+    /// merged then. Those values are query parameters, not a trust
+    /// decision, so they need no signature; the token only fixes the
+    /// **tool** (and any preset args) against tampering.
+    pub fn base_args(&self) -> Value {
+        match self {
+            InteractiveSpec::Button { args, .. } => args.clone(),
+            _ => serde_json::json!({}),
+        }
+    }
+}
+
+/// Extract the interactive components (`Button` / `Selection` / `Form`)
+/// from a dispatch result's A2UI surface, in order. Empty when the result
+/// isn't a surface or has none (caller then sends a plain text reply).
+pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
     let Ok(surface) = extract_surface(result) else {
         return Vec::new();
     };
@@ -238,46 +294,154 @@ pub fn buttons_from_result(result: &Value) -> Vec<ButtonSpec> {
         .components
         .iter()
         .filter_map(|c| match c {
-            Component::Button { label, tool, args } => Some(ButtonSpec {
+            Component::Button { label, tool, args } => Some(InteractiveSpec::Button {
                 label: label.clone(),
                 tool: tool.clone(),
                 args: args.clone(),
+            }),
+            Component::Selection {
+                prompt,
+                options,
+                tool,
+                args_key,
+            } => Some(InteractiveSpec::Selection {
+                prompt: prompt.clone(),
+                options: options
+                    .iter()
+                    .map(|o| (o.label.clone(), o.value.clone()))
+                    .collect(),
+                tool: tool.clone(),
+                args_key: args_key.clone(),
+            }),
+            Component::Form {
+                title,
+                fields,
+                submit_label,
+                tool,
+            } => Some(InteractiveSpec::Form {
+                title: title.clone(),
+                submit_label: submit_label.clone(),
+                fields: fields
+                    .iter()
+                    .map(|f| FormFieldSpec {
+                        name: f.name.clone(),
+                        label: f.label.clone(),
+                        boolean: matches!(f.kind, FormFieldKind::Boolean),
+                    })
+                    .collect(),
+                tool: tool.clone(),
             }),
             _ => None,
         })
         .collect()
 }
 
-/// Build a Cards v2 reply that carries the rendered `text` plus a button
-/// row. Each `(label, token)` becomes a Cards v2 button whose
-/// `onClick.action` re-invokes the app with the signed correlation
-/// `token` in the [`BUTTON_TOKEN_PARAM`] parameter — Google echoes that
-/// parameter back on the `CARD_CLICKED` event, where the adapter
-/// HMAC-verifies it and re-dispatches. `workspace_addon` selects the
-/// reply envelope, exactly like [`text_reply_body`].
-pub fn build_card_message(
+/// One Cards v2 action button carrying the signed correlation `token`.
+fn action_button(label: &str, token: &str) -> Value {
+    serde_json::json!({
+        "text": label,
+        "onClick": {
+            "action": {
+                "function": BUTTON_ACTION_FUNCTION,
+                "parameters": [ { "key": BUTTON_TOKEN_PARAM, "value": token } ]
+            }
+        }
+    })
+}
+
+/// Build a Cards v2 reply carrying `text` plus the interactive widgets.
+/// Each `(spec, token)` renders to a button / dropdown / form whose submit
+/// `onClick.action` carries the signed `token`; Google echoes it (plus any
+/// `formInputs`) on the `CARD_CLICKED` event, where the adapter verifies
+/// and re-dispatches. `workspace_addon` selects the reply envelope.
+pub fn build_interactive_card(
     text: &str,
-    signed_buttons: &[(String, String)],
+    signed: &[(InteractiveSpec, String)],
     workspace_addon: bool,
 ) -> Value {
-    let buttons: Vec<Value> = signed_buttons
-        .iter()
-        .map(|(label, token)| {
-            serde_json::json!({
-                "text": label,
-                "onClick": {
-                    "action": {
-                        "function": BUTTON_ACTION_FUNCTION,
-                        "parameters": [ { "key": BUTTON_TOKEN_PARAM, "value": token } ]
+    let mut widgets: Vec<Value> = Vec::new();
+    // Consecutive plain buttons group into one buttonList row.
+    let mut pending: Vec<Value> = Vec::new();
+    for (spec, token) in signed {
+        match spec {
+            InteractiveSpec::Button { label, .. } => {
+                pending.push(action_button(label, token));
+            }
+            InteractiveSpec::Selection {
+                prompt,
+                options,
+                args_key,
+                ..
+            } => {
+                if !pending.is_empty() {
+                    widgets.push(serde_json::json!({ "buttonList": { "buttons": pending } }));
+                    pending = Vec::new();
+                }
+                let items: Vec<Value> = options
+                    .iter()
+                    .map(|(label, value)| serde_json::json!({ "text": label, "value": value }))
+                    .collect();
+                widgets.push(serde_json::json!({
+                    "selectionInput": {
+                        "name": args_key,
+                        "label": prompt,
+                        "type": "DROPDOWN",
+                        "items": items
+                    }
+                }));
+                widgets.push(serde_json::json!({
+                    "buttonList": { "buttons": [ action_button("Submit", token) ] }
+                }));
+            }
+            InteractiveSpec::Form {
+                title,
+                submit_label,
+                fields,
+                ..
+            } => {
+                if !pending.is_empty() {
+                    widgets.push(serde_json::json!({ "buttonList": { "buttons": pending } }));
+                    pending = Vec::new();
+                }
+                if !title.is_empty() {
+                    widgets.push(serde_json::json!({
+                        "decoratedText": { "text": title }
+                    }));
+                }
+                for f in fields {
+                    if f.boolean {
+                        widgets.push(serde_json::json!({
+                            "selectionInput": {
+                                "name": f.name,
+                                "label": f.label,
+                                "type": "SWITCH",
+                                "items": [ { "text": f.label, "value": "true" } ]
+                            }
+                        }));
+                    } else {
+                        widgets.push(serde_json::json!({
+                            "textInput": { "name": f.name, "label": f.label }
+                        }));
                     }
                 }
-            })
-        })
-        .collect();
+                let submit = if submit_label.is_empty() {
+                    "Submit"
+                } else {
+                    submit_label
+                };
+                widgets.push(serde_json::json!({
+                    "buttonList": { "buttons": [ action_button(submit, token) ] }
+                }));
+            }
+        }
+    }
+    if !pending.is_empty() {
+        widgets.push(serde_json::json!({ "buttonList": { "buttons": pending } }));
+    }
     let mut message = serde_json::json!({
         "cardsV2": [ {
             "cardId": "agent-actions",
-            "card": { "sections": [ { "widgets": [ { "buttonList": { "buttons": buttons } } ] } ] }
+            "card": { "sections": [ { "widgets": widgets } ] }
         } ]
     });
     if !text.is_empty() {
@@ -521,45 +685,128 @@ mod tests {
     }
 
     #[test]
-    fn buttons_are_lifted_off_the_surface() {
+    fn interactive_components_are_lifted_off_the_surface() {
         let result = serde_json::json!({
             "surface": { "components": [
                 { "kind": "text", "value": "hi" },
                 { "kind": "button", "label": "Ask again",
-                  "tool": "assistant", "args": { "question": "redo?" } }
+                  "tool": "assistant", "args": { "question": "redo?" } },
+                { "kind": "selection", "prompt": "Pick a supplier",
+                  "options": [ { "label": "Alpine", "value": "Tell me about Alpine" } ],
+                  "tool": "assistant", "args_key": "question" },
+                { "kind": "form", "title": "Allocate", "submit_label": "Go",
+                  "fields": [
+                    { "name": "material", "label": "Material", "kind": "string", "required": true },
+                    { "name": "urgent", "label": "Urgent?", "kind": "boolean", "required": false }
+                  ],
+                  "tool": "assistant" }
             ] }
         });
-        let buttons = buttons_from_result(&result);
-        assert_eq!(buttons.len(), 1);
-        assert_eq!(buttons[0].label, "Ask again");
-        assert_eq!(buttons[0].tool, "assistant");
-        assert_eq!(buttons[0].args, serde_json::json!({ "question": "redo?" }));
-        // A non-surface result yields no buttons.
-        assert!(buttons_from_result(&serde_json::json!({ "echo": "x" })).is_empty());
+        let specs = interactive_from_result(&result);
+        assert_eq!(specs.len(), 3);
+        assert!(matches!(specs[0], InteractiveSpec::Button { .. }));
+        assert!(matches!(specs[1], InteractiveSpec::Selection { .. }));
+        match &specs[2] {
+            InteractiveSpec::Form { fields, .. } => {
+                assert_eq!(fields.len(), 2);
+                assert!(!fields[0].boolean);
+                assert!(fields[1].boolean);
+            }
+            other => panic!("expected a form, got {other:?}"),
+        }
+        // Button signs its preset args; selection/form sign empty base args.
+        assert_eq!(
+            specs[0].base_args(),
+            serde_json::json!({ "question": "redo?" })
+        );
+        assert_eq!(specs[1].base_args(), serde_json::json!({}));
+        // A non-surface result yields nothing.
+        assert!(interactive_from_result(&serde_json::json!({ "echo": "x" })).is_empty());
     }
 
     #[test]
-    fn card_message_carries_text_and_a_signed_button() {
-        let signed = vec![("Ask again".to_string(), "BODY.MAC".to_string())];
-        let body = build_card_message("the answer", &signed, false);
+    fn card_groups_buttons_and_renders_selection_and_form() {
+        let signed = vec![
+            (
+                InteractiveSpec::Button {
+                    label: "Ask again".into(),
+                    tool: "assistant".into(),
+                    args: serde_json::json!({ "question": "redo?" }),
+                },
+                "BTN.MAC".to_string(),
+            ),
+            (
+                InteractiveSpec::Selection {
+                    prompt: "Pick a supplier".into(),
+                    options: vec![("Alpine".into(), "Tell me about Alpine".into())],
+                    tool: "assistant".into(),
+                    args_key: "question".into(),
+                },
+                "SEL.MAC".to_string(),
+            ),
+            (
+                InteractiveSpec::Form {
+                    title: "Allocate".into(),
+                    submit_label: "Go".into(),
+                    fields: vec![FormFieldSpec {
+                        name: "material".into(),
+                        label: "Material".into(),
+                        boolean: false,
+                    }],
+                    tool: "assistant".into(),
+                },
+                "FORM.MAC".to_string(),
+            ),
+        ];
+        let body = build_interactive_card("the answer", &signed, false);
         assert_eq!(body["text"], serde_json::json!("the answer"));
-        let btn =
-            &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
+        let widgets = body["cardsV2"][0]["card"]["sections"][0]["widgets"]
+            .as_array()
+            .expect("widgets array");
+        // The plain button row.
+        let btn = &widgets[0]["buttonList"]["buttons"][0];
         assert_eq!(btn["text"], serde_json::json!("Ask again"));
         assert_eq!(
-            btn["onClick"]["action"]["function"],
-            serde_json::json!(BUTTON_ACTION_FUNCTION)
+            btn["onClick"]["action"]["parameters"][0]["value"],
+            serde_json::json!("BTN.MAC")
         );
-        let param = &btn["onClick"]["action"]["parameters"][0];
-        assert_eq!(param["key"], serde_json::json!(BUTTON_TOKEN_PARAM));
-        assert_eq!(param["value"], serde_json::json!("BODY.MAC"));
+        // A dropdown widget exists with the args_key as its name.
+        let has_dropdown = widgets.iter().any(|w| {
+            w["selectionInput"]["name"] == serde_json::json!("question")
+                && w["selectionInput"]["type"] == serde_json::json!("DROPDOWN")
+        });
+        assert!(
+            has_dropdown,
+            "expected a selectionInput dropdown; got {body}"
+        );
+        // A text input named after the form field exists.
+        let has_text_input = widgets
+            .iter()
+            .any(|w| w["textInput"]["name"] == serde_json::json!("material"));
+        assert!(has_text_input, "expected a textInput; got {body}");
+        // The form submit carries the form token.
+        let has_form_submit = widgets.iter().any(|w| {
+            w["buttonList"]["buttons"][0]["text"] == serde_json::json!("Go")
+                && w["buttonList"]["buttons"][0]["onClick"]["action"]["parameters"][0]["value"]
+                    == serde_json::json!("FORM.MAC")
+        });
+        assert!(
+            has_form_submit,
+            "expected the form submit button; got {body}"
+        );
     }
 
     #[test]
-    fn card_message_addon_envelope_nests_cardsv2() {
-        let signed = vec![("Go".to_string(), "T".to_string())];
-        let body = build_card_message("hi", &signed, true);
-        // No top-level cardsV2/text on the add-on flavor — it's nested.
+    fn card_addon_envelope_nests_cardsv2() {
+        let signed = vec![(
+            InteractiveSpec::Button {
+                label: "Go".into(),
+                tool: "assistant".into(),
+                args: serde_json::json!({}),
+            },
+            "T".to_string(),
+        )];
+        let body = build_interactive_card("hi", &signed, true);
         assert!(body.get("cardsV2").is_none());
         assert!(body.get("text").is_none());
         let msg = &body["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"];

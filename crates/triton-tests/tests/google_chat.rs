@@ -107,6 +107,26 @@ fn sign_button(tool: &str, args: Value) -> String {
         .expect("encode correlation token")
 }
 
+/// A `CARD_CLICKED` from a Selection/Form submit: the signed token plus the
+/// user's `formInputs` (the chosen/typed values, keyed by widget name).
+fn card_clicked_form_event(sender_name: &str, token: &str, inputs: &[(&str, &str)]) -> Value {
+    let form_inputs: serde_json::Map<String, Value> = inputs
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.to_string(),
+                json!({ "stringInputs": { "value": [value] } }),
+            )
+        })
+        .collect();
+    json!({
+        "type": "CARD_CLICKED",
+        "user": { "name": sender_name },
+        "common": { "parameters": { "ct": token }, "formInputs": form_inputs },
+        "space": { "name": "spaces/AAA", "type": "DM" }
+    })
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn valid_jwt_message_dispatches_inline_response() {
     let jwks = FakeGoogleJwks::start().await;
@@ -220,6 +240,51 @@ async fn card_clicked_forged_token_is_rejected() {
         v["kind"] == "audit" && v["phase"] == "rejected" && v["protocol"] == "messenger:google_chat"
     });
     assert_eq!(rejected["result"], "error:auth");
+}
+
+/// A Selection/Form submit: the `CARD_CLICKED` carries a token signed with
+/// EMPTY base args plus the user's `formInputs`. The adapter verifies the
+/// token (fixing the tool), merges the form values onto the args, and
+/// re-dispatches — so the typed/selected value reaches the tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn card_clicked_form_submit_merges_inputs() {
+    let jwks = FakeGoogleJwks::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&jwks)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let jwt = jwks.sign_jwt(standard_claims());
+    // A form/selection signs the tool with empty base args; the value
+    // arrives in formInputs.
+    let token = sign_button("echo", json!({}));
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&card_clicked_form_event(
+            "users/99",
+            &token,
+            &[("message", "typed in the form")],
+        ))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    // echo received the merged form value.
+    let body: Value = resp.json().await.expect("response body");
+    assert!(
+        body["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("typed in the form"),
+        "expected the form input merged into the dispatch; got: {body}"
+    );
+
+    let audit = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["protocol"] == "messenger:google_chat"
+    });
+    assert_eq!(audit["who"], "alice");
+    assert_eq!(audit["result"], "ok");
 }
 
 /// #134: a token from the **current** Google Chat console — a standard

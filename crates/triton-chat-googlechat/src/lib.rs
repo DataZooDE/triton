@@ -351,6 +351,24 @@ struct GoogleChatEvent {
 struct EventCommon {
     #[serde(default)]
     parameters: std::collections::HashMap<String, String>,
+    /// Selection/Form input values the user typed or chose, keyed by the
+    /// widget `name`. Present on a `CARD_CLICKED` from a dropdown or form.
+    #[serde(default, rename = "formInputs")]
+    form_inputs: std::collections::HashMap<String, FormInput>,
+}
+
+/// One `formInputs` entry. Google nests the value under `stringInputs`
+/// (text inputs, dropdowns, switches); we read the first value.
+#[derive(Debug, Default, Deserialize)]
+struct FormInput {
+    #[serde(default, rename = "stringInputs")]
+    string_inputs: Option<StringInputs>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StringInputs {
+    #[serde(default)]
+    value: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -386,6 +404,24 @@ impl GoogleChatEvent {
             }
         }
         None
+    }
+
+    /// The Selection/Form input values from a `CARD_CLICKED`, as
+    /// `{ name: first_value }`. Empty for a plain button click. These are
+    /// merged onto the token's signed base args before re-dispatch — they
+    /// are user-supplied query parameters, not a trust decision.
+    fn form_inputs(&self) -> Vec<(String, String)> {
+        let Some(common) = &self.common else {
+            return Vec::new();
+        };
+        common
+            .form_inputs
+            .iter()
+            .filter_map(|(name, input)| {
+                let v = input.string_inputs.as_ref()?.value.first()?;
+                Some((name.clone(), v.clone()))
+            })
+            .collect()
     }
 }
 
@@ -541,7 +577,7 @@ async fn handle_webhook(
                 );
                 return (StatusCode::BAD_REQUEST, "missing action").into_response();
             };
-            let (tool, args) = match triton_correlation::decode_with_cap(
+            let (tool, mut args) = match triton_correlation::decode_with_cap(
                 token,
                 &adapter.correlation_key,
                 CARD_CORRELATION_CAP,
@@ -559,6 +595,22 @@ async fn handle_webhook(
                     return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
                 }
             };
+            // Merge any Selection/Form values the user supplied onto the
+            // token's signed base args (the token fixed the TOOL; the
+            // values are user query params bound by the named-query layer).
+            let inputs = event.form_inputs();
+            if !inputs.is_empty() {
+                let map = match &mut args {
+                    Value::Object(m) => m,
+                    other => {
+                        *other = Value::Object(Default::default());
+                        other.as_object_mut().unwrap()
+                    }
+                };
+                for (k, v) in inputs {
+                    map.insert(k, Value::String(v));
+                }
+            }
             let sender = event
                 .user
                 .as_ref()
@@ -668,34 +720,34 @@ async fn handle_webhook(
                         "google_chat surface mapper: rendered text exceeded cap; truncated",
                     );
                 }
-                // Sign each interactive Button's (tool, args) into a
-                // correlation token and render it as a Cards v2 action; on
-                // click Google echoes the token back on CARD_CLICKED, where
-                // we HMAC-verify and re-dispatch. A button whose token
-                // would exceed the cap is dropped (logged), never sent.
-                let signed: Vec<(String, String)> = surface_mapper::buttons_from_result(
-                    &dispatch.result,
-                )
-                .into_iter()
-                .filter_map(|b| {
-                    match triton_correlation::encode_with_cap(
-                        &b.tool,
-                        &b.args,
-                        &adapter.correlation_key,
-                        CARD_CORRELATION_CAP,
-                    ) {
-                        Ok(token) => Some((b.label, token)),
-                        Err(e) => {
-                            tracing::warn!(tool = b.tool, error = %e, "google_chat: dropping button (correlation token too large)");
-                            None
-                        }
-                    }
-                })
-                .collect();
+                // Sign each interactive component's (tool, base_args) into a
+                // correlation token and render it as a Cards v2 widget
+                // (button / dropdown / form); on submit Google echoes the
+                // token (plus any typed/selected formInputs) on CARD_CLICKED,
+                // where we HMAC-verify and re-dispatch. A component whose
+                // token would exceed the cap is dropped (logged), never sent.
+                let signed: Vec<(surface_mapper::InteractiveSpec, String)> =
+                    surface_mapper::interactive_from_result(&dispatch.result)
+                        .into_iter()
+                        .filter_map(|spec| {
+                            match triton_correlation::encode_with_cap(
+                                spec.tool(),
+                                &spec.base_args(),
+                                &adapter.correlation_key,
+                                CARD_CORRELATION_CAP,
+                            ) {
+                                Ok(token) => Some((spec, token)),
+                                Err(e) => {
+                                    tracing::warn!(tool = spec.tool(), error = %e, "google_chat: dropping interactive component (correlation token too large)");
+                                    None
+                                }
+                            }
+                        })
+                        .collect();
                 let body = if signed.is_empty() {
                     surface_mapper::build_inline_response(&rendered, workspace_addon)
                 } else {
-                    surface_mapper::build_card_message(&rendered.text, &signed, workspace_addon)
+                    surface_mapper::build_interactive_card(&rendered.text, &signed, workspace_addon)
                 };
                 adapter.dispatcher.record_post(
                     &tool_name,
