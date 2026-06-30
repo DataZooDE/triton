@@ -76,6 +76,7 @@ class InvocationResult {
     this.error,
     this.errorCode,
     this.taskState,
+    this.uiResourceUri,
   });
 
   final Map<String, dynamic> raw;
@@ -83,6 +84,24 @@ class InvocationResult {
   final Duration elapsed;
   final String? traceId;
   final String? error;
+
+  /// An MCP-Apps UI resource the result points at, lifted from the tool
+  /// result's `_meta.ui.resourceUri` (e.g. `ui://peacock/<report>`). Set
+  /// when the upstream is an interactive renderer (#143); the Console can
+  /// fetch it via `resources/read` and embed it in a sandboxed iframe.
+  /// Null for ordinary tools.
+  final String? uiResourceUri;
+
+  /// Lift `_meta.ui.resourceUri` out of a (possibly wrapped) tool result.
+  /// Accepts either the inner tool result or a REST envelope that nests it
+  /// under `result`.
+  static String? uiFrom(Map<String, dynamic>? result) {
+    if (result == null) return null;
+    final inner = (result['result'] as Map?)?.cast<String, dynamic>() ?? result;
+    final ui = (inner['_meta'] as Map?)?['ui'];
+    final uri = (ui as Map?)?['resourceUri'];
+    return (uri is String && uri.isNotEmpty) ? uri : null;
+  }
 
   /// MCP JSON-RPC error code (e.g. -32602 validation, -32001 auth).
   /// MCP signals tool/auth/validation failures inside an HTTP-200

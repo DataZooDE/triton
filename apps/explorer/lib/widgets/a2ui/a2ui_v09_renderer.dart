@@ -1,9 +1,13 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 /// A2UI v0.9 renderer. **No shared base** with v0.8 per ADR-4. The
 /// envelope uses lowercase `type`, no `Component` wrapper, action
 /// data inlined. Components: text / narration / button / selection /
-/// form / dashboard.
+/// form / dashboard, plus the report kinds kpi / table / vega (so a
+/// report renderer's surface — e.g. Peacock — renders natively).
 class A2UIv09Renderer extends StatelessWidget {
   const A2UIv09Renderer({
     super.key,
@@ -112,6 +116,27 @@ class A2UIv09Renderer extends StatelessWidget {
                 ))
             .toList(growable: false);
         return _Dashboard(title: title, tiles: tiles);
+      case 'kpi':
+        return _Kpi(
+          label: (map['label'] as String?) ?? '',
+          value: (map['value'] ?? '').toString(),
+          trend: map['trend'] as String?,
+        );
+      case 'table':
+        final columns = ((map['columns'] as List?) ?? const [])
+            .map((c) => c.toString())
+            .toList(growable: false);
+        final rows = ((map['rows'] as List?) ?? const [])
+            .map((r) => ((r as List?) ?? const [])
+                .map((c) => c?.toString() ?? '')
+                .toList(growable: false))
+            .toList(growable: false);
+        return _DataTableView(columns: columns, rows: rows);
+      case 'vega':
+        return _Vega(
+          title: map['title'] as String?,
+          pngBase64: map['png_base64'] as String?,
+        );
       default:
         return _unknown('unknown v0.9 type: $type');
     }
@@ -295,6 +320,113 @@ class _FormStateView extends State<_Form> {
         },
       ),
     );
+  }
+}
+
+/// A single headline metric (a report's `kpi` component).
+class _Kpi extends StatelessWidget {
+  const _Kpi({required this.label, required this.value, this.trend});
+  final String label;
+  final String value;
+  final String? trend;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      )),
+              const SizedBox(height: 4),
+              Text(value, style: Theme.of(context).textTheme.headlineSmall),
+              if (trend != null) ...[
+                const SizedBox(height: 2),
+                Text(trend!, style: Theme.of(context).textTheme.bodySmall),
+              ],
+            ],
+          ),
+        ),
+      );
+}
+
+/// A report's `table` component → a scrollable `DataTable`.
+class _DataTableView extends StatelessWidget {
+  const _DataTableView({required this.columns, required this.rows});
+  final List<String> columns;
+  final List<List<String>> rows;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: DataTable(
+            columns: [
+              for (final c in columns) DataColumn(label: Text(c)),
+            ],
+            rows: [
+              for (final r in rows)
+                DataRow(cells: [
+                  for (var i = 0; i < columns.length; i++)
+                    DataCell(Text(i < r.length ? r[i] : '')),
+                ]),
+            ],
+          ),
+        ),
+      );
+}
+
+/// A report's `vega` chart. A full Vega-Lite renderer is out of scope for
+/// the SPA; when the producer ships a rasterised `png_base64` (Peacock does)
+/// we show it, otherwise a placeholder pointing at the embedded report.
+class _Vega extends StatelessWidget {
+  const _Vega({this.title, this.pngBase64});
+  final String? title;
+  final String? pngBase64;
+
+  @override
+  Widget build(BuildContext context) {
+    final bytes = _decode(pngBase64);
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (title != null && title!.isNotEmpty) ...[
+              Text(title!, style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 8),
+            ],
+            if (bytes != null)
+              Image.memory(bytes, fit: BoxFit.contain)
+            else
+              Text(
+                'chart (open the embedded report to view)',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      fontStyle: FontStyle.italic,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static Uint8List? _decode(String? b64) {
+    if (b64 == null || b64.isEmpty) return null;
+    final cleaned = b64.contains(',') ? b64.split(',').last : b64;
+    try {
+      return base64Decode(cleaned);
+    } catch (_) {
+      return null;
+    }
   }
 }
 

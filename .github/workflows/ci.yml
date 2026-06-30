@@ -101,9 +101,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The release `dart2js` compile of a CanvasKit app peaks above the
+      # runner's RAM and gets OOM-killed early (abnormal exit, no diagnostic;
+      # the same toolchain builds fine on a higher-RAM machine). Add swap so it
+      # can spill instead of dying.
+      - name: Add swap space
+        working-directory: /
+        run: |
+          # The runner already ships a small /swapfile — replace it with a
+          # bigger one so dart2js can spill.
+          sudo swapoff -a || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 14G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
+
       - name: Install Flutter
         uses: subosito/flutter-action@v2
         with:
+          # Pin the version: a floating `stable` regressed the release
+          # `dart2js` web build (it crashed ~14s in, no diagnostic, while the
+          # pinned toolchain compiles cleanly). Bump deliberately.
+          flutter-version: 3.44.4
           channel: stable
           cache: true
 
@@ -117,4 +138,7 @@ jobs:
         run: flutter test
 
       - name: flutter build web --release
-        run: flutter build web --release
+        # `--no-wasm-dry-run` skips the extra wasm compile the toolchain runs
+        # alongside dart2js; we don't ship --wasm, and the double compile
+        # spikes peak memory enough to OOM-kill dart2js on the CI runner.
+        run: flutter build web --release --no-wasm-dry-run
