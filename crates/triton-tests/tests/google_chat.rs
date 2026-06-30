@@ -245,6 +245,24 @@ async fn oidc_token_from_workspace_addon_actor_is_accepted() {
         resp.status()
     );
 
+    // The reply MUST use the Workspace Add-on envelope — a bare `{text}`
+    // is rejected by the add-on runtime ("Cannot find field: text in
+    // RenderActions/DataActions/Card"). The message text rides inside
+    // hostAppDataAction → chatDataAction → createMessageAction.
+    let body: Value = resp.json().await.expect("response body");
+    assert!(
+        body.get("text").is_none(),
+        "add-on reply must NOT be a bare {{text}}; got: {body}"
+    );
+    let reply_text = body["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"]
+        ["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected add-on createMessageAction envelope; got: {body}"));
+    assert!(
+        reply_text.contains("hello from a workspace add-on"),
+        "expected the echoed text inside the add-on envelope; got: {reply_text}"
+    );
+
     let audit = wait_for_audit(&proc, Duration::from_secs(2), |v| {
         v["kind"] == "audit" && v["phase"] == "dispatch" && v["protocol"] == "messenger:google_chat"
     });

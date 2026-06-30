@@ -161,12 +161,44 @@ fn truncate_to_char_boundary(s: &str, max: usize) -> &str {
     &s[..end]
 }
 
-/// Build the inline-response JSON body Google Chat expects. For PR
-/// 33 we use the single-`text` field — Google Chat reads the
-/// webhook's HTTP 200 response body and delivers `text` to the
-/// space.
-pub fn build_inline_response(msg: &RenderedMessage) -> Value {
-    serde_json::json!({ "text": msg.text })
+/// Wrap a plain-text reply in the JSON envelope Google Chat expects on
+/// the synchronous-response path. The shape depends on how the Chat app
+/// is deployed:
+///
+///   * **classic / dedicated Chat app** (`workspace_addon = false`) — a
+///     bare Chat `Message`: `{ "text": … }`.
+///   * **Workspace Add-on** (`workspace_addon = true`) — the message
+///     nested in a host-app data action:
+///     `{ "hostAppDataAction": { "chatDataAction": { "createMessageAction":
+///        { "message": { "text": … } } } } }`.
+///
+/// The add-on runtime parses the response as `RenderActions` /
+/// `DataActions` / `Card` and rejects a bare `{text}` ("Cannot find
+/// field: text"), so the two cannot share one shape. The caller picks
+/// the flavor from the verified inbound token
+/// ([`crate::jwt_verifier::GoogleChatClaims::is_workspace_addon`]) — an
+/// add-on always signs with the Workspace Add-ons service agent, so the
+/// token is the authoritative signal and no operator config is needed.
+pub fn text_reply_body(text: &str, workspace_addon: bool) -> Value {
+    if workspace_addon {
+        serde_json::json!({
+            "hostAppDataAction": {
+                "chatDataAction": {
+                    "createMessageAction": { "message": { "text": text } }
+                }
+            }
+        })
+    } else {
+        serde_json::json!({ "text": text })
+    }
+}
+
+/// Build the inline-response JSON body Google Chat expects. Google Chat
+/// reads the webhook's HTTP 200 response body and delivers the rendered
+/// text to the space. `workspace_addon` selects the reply envelope (see
+/// [`text_reply_body`]).
+pub fn build_inline_response(msg: &RenderedMessage, workspace_addon: bool) -> Value {
+    text_reply_body(&msg.text, workspace_addon)
 }
 
 #[cfg(test)]
@@ -354,5 +386,52 @@ mod tests {
         };
         let r = render(&s).expect("renders");
         assert_eq!(r.text, "1\n\n*2*\n\n3\n\n*4*");
+    }
+
+    #[test]
+    fn classic_reply_is_a_bare_text_message() {
+        let body = text_reply_body("hello", false);
+        assert_eq!(body, serde_json::json!({ "text": "hello" }));
+    }
+
+    #[test]
+    fn workspace_addon_reply_is_a_host_app_data_action() {
+        // A Workspace Add-on rejects a bare {text}; the message must be
+        // nested in hostAppDataAction → chatDataAction → createMessageAction.
+        let body = text_reply_body("hello", true);
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "hostAppDataAction": {
+                    "chatDataAction": {
+                        "createMessageAction": { "message": { "text": "hello" } }
+                    }
+                }
+            })
+        );
+        // The add-on envelope must NOT carry a top-level `text` (that's
+        // exactly what the add-on runtime rejects).
+        assert!(body.get("text").is_none());
+    }
+
+    #[test]
+    fn build_inline_response_selects_envelope_by_flavor() {
+        let msg = RenderedMessage {
+            text: "answer".into(),
+            deferred_buttons: 0,
+            deferred_selections: 0,
+            deferred_forms: 0,
+            deferred_dashboards: 0,
+            truncated: false,
+        };
+        assert_eq!(
+            build_inline_response(&msg, false),
+            serde_json::json!({ "text": "answer" })
+        );
+        assert_eq!(
+            build_inline_response(&msg, true)["hostAppDataAction"]["chatDataAction"]["createMessageAction"]
+                ["message"]["text"],
+            serde_json::json!("answer")
+        );
     }
 }

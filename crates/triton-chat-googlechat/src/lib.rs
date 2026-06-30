@@ -366,7 +366,7 @@ async fn handle_webhook(
             return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
         }
     };
-    let _claims = match adapter.verifier.verify(raw).await {
+    let claims = match adapter.verifier.verify(raw).await {
         Ok(c) => c,
         Err(e) => {
             // Never log the JWT body. Map the typed error to a
@@ -381,6 +381,11 @@ async fn handle_webhook(
             return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
         }
     };
+    // The reply envelope depends on the app's deployment flavor, which
+    // the verified token's actor tells us authoritatively: a Workspace
+    // Add-on requires a `hostAppDataAction` wrapper, a classic Chat app a
+    // bare `{text}` (see `surface_mapper::text_reply_body`).
+    let workspace_addon = claims.is_workspace_addon();
 
     // NFR-P-3 first tier (adapter-wide rate limit). Consumed AFTER
     // the JWT check (so attackers can't waste tokens with bogus
@@ -546,7 +551,7 @@ async fn handle_webhook(
                         "google_chat surface mapper: rendered text exceeded cap; truncated",
                     );
                 }
-                let body = surface_mapper::build_inline_response(&rendered);
+                let body = surface_mapper::build_inline_response(&rendered, workspace_addon);
                 adapter.dispatcher.record_post(
                     &tool_name,
                     PROTOCOL,
@@ -600,7 +605,10 @@ async fn handle_webhook(
             );
             (
                 status,
-                axum::Json(serde_json::json!({ "text": format!("(error: {})", e.class()) })),
+                axum::Json(surface_mapper::text_reply_body(
+                    &format!("(error: {})", e.class()),
+                    workspace_addon,
+                )),
             )
                 .into_response()
         }

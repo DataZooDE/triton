@@ -165,6 +165,22 @@ pub struct GoogleChatClaims {
     pub email: String,
 }
 
+impl GoogleChatClaims {
+    /// Was this token minted for a **Workspace Add-on** deployment (vs a
+    /// classic/dedicated Chat app)? The two flavors require DIFFERENT
+    /// reply envelopes on the synchronous-response path: a classic app
+    /// reads a bare `{ "text": … }` Chat message, while a Workspace
+    /// Add-on requires the message wrapped in a `hostAppDataAction →
+    /// chatDataAction → createMessageAction` envelope — a bare `{text}`
+    /// is rejected by the add-on runtime ("Cannot find field: text in
+    /// google.apps.card.v1.RenderActions/DataActions/Card"). The actor
+    /// `email` is the authoritative discriminator: an add-on always signs
+    /// with the Google-managed Workspace Add-ons service agent.
+    pub fn is_workspace_addon(&self) -> bool {
+        is_workspace_addon_actor(&self.email)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
     #[error("missing kid")]
@@ -444,5 +460,24 @@ mod tests {
             "190449745291@gcp-sa-gsuiteaddons.iam.gserviceaccount.com"
         ));
         assert!(!is_workspace_addon_actor("not-an-email"));
+    }
+
+    #[test]
+    fn claims_is_workspace_addon_reflects_the_actor() {
+        let addon = GoogleChatClaims {
+            iss: "https://accounts.google.com".into(),
+            aud: "https://app.example/google_chat/webhook".into(),
+            sub: "1".into(),
+            email: "service-190449745291@gcp-sa-gsuiteaddons.iam.gserviceaccount.com".into(),
+        };
+        assert!(addon.is_workspace_addon());
+
+        let classic = GoogleChatClaims {
+            iss: "chat@system.gserviceaccount.com".into(),
+            aud: "1234567890".into(),
+            sub: "1".into(),
+            email: String::new(),
+        };
+        assert!(!classic.is_workspace_addon());
     }
 }
