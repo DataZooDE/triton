@@ -423,6 +423,37 @@ impl GoogleChatEvent {
             })
             .collect()
     }
+
+    /// A short human echo of what the user did on a `CARD_CLICKED`, so the
+    /// reply can show which control was used (Google Chat renders no user
+    /// message for a click). For a Selection/Form it's the submitted
+    /// value(s); for a plain button it's the button label (the `lbl`
+    /// parameter). `None` when neither is present.
+    fn action_echo(&self) -> Option<String> {
+        let inputs = self.form_inputs();
+        if !inputs.is_empty() {
+            return Some(
+                inputs
+                    .iter()
+                    .map(|(_, v)| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            );
+        }
+        if let Some(common) = &self.common
+            && let Some(lbl) = common.parameters.get(surface_mapper::BUTTON_LABEL_PARAM)
+        {
+            return Some(lbl.clone());
+        }
+        if let Some(action) = &self.action {
+            for p in &action.parameters {
+                if p.key == surface_mapper::BUTTON_LABEL_PARAM {
+                    return Some(p.value.clone());
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -538,95 +569,99 @@ async fn handle_webhook(
     //     (authenticated) webhook still can't drive an arbitrary tool.
     // Other events (ADDED_TO_SPACE, REMOVED_FROM_SPACE, ...) are acked
     // 200 with an empty body so Google doesn't retry.
-    let (sender_name, tool_name, args): (String, String, Value) = match event.kind.as_str() {
-        "MESSAGE" => {
-            let Some(message) = event.message else {
-                record_rejection(
-                    &adapter,
-                    "-",
-                    "-",
-                    TritonError::Validation("MESSAGE event missing message body".into()),
-                );
-                return (StatusCode::BAD_REQUEST, "missing message").into_response();
-            };
-            let Some(text) = message.text.as_deref().filter(|s| !s.is_empty()) else {
-                // Empty text (Google sends these for image/attachments) —
-                // out of scope; ack and ignore.
+    // `action_echo` is `Some` only on a CARD_CLICKED — the reply prepends
+    // it so chat history shows which control the user used.
+    let (sender_name, tool_name, args, action_echo): (String, String, Value, Option<String>) =
+        match event.kind.as_str() {
+            "MESSAGE" => {
+                let Some(message) = event.message else {
+                    record_rejection(
+                        &adapter,
+                        "-",
+                        "-",
+                        TritonError::Validation("MESSAGE event missing message body".into()),
+                    );
+                    return (StatusCode::BAD_REQUEST, "missing message").into_response();
+                };
+                let Some(text) = message.text.as_deref().filter(|s| !s.is_empty()) else {
+                    // Empty text (Google sends these for image/attachments) —
+                    // out of scope; ack and ignore.
+                    return (
+                        StatusCode::OK,
+                        axum::Json(Value::Object(Default::default())),
+                    )
+                        .into_response();
+                };
+                let sender = message
+                    .sender
+                    .as_ref()
+                    .and_then(|s| s.name.as_deref())
+                    .unwrap_or("")
+                    .to_string();
+                let (tool, args) = route_command(text, &adapter.inbound_tool);
+                (sender, tool, args, None)
+            }
+            "CARD_CLICKED" => {
+                let Some(token) = event.card_token() else {
+                    record_rejection(
+                        &adapter,
+                        "-",
+                        "-",
+                        TritonError::Validation("CARD_CLICKED missing correlation token".into()),
+                    );
+                    return (StatusCode::BAD_REQUEST, "missing action").into_response();
+                };
+                let (tool, mut args) = match triton_correlation::decode_with_cap(
+                    token,
+                    &adapter.correlation_key,
+                    CARD_CORRELATION_CAP,
+                ) {
+                    Ok(p) => p,
+                    Err(_) => {
+                        // Forged/expired/oversized token — never trust the
+                        // click's tool/args. Audited as `error:auth`.
+                        record_rejection(
+                            &adapter,
+                            "-",
+                            "-",
+                            TritonError::Auth("CARD_CLICKED correlation token invalid".into()),
+                        );
+                        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+                    }
+                };
+                // Merge any Selection/Form values the user supplied onto the
+                // token's signed base args (the token fixed the TOOL; the
+                // values are user query params bound by the named-query layer).
+                let inputs = event.form_inputs();
+                if !inputs.is_empty() {
+                    let map = match &mut args {
+                        Value::Object(m) => m,
+                        other => {
+                            *other = Value::Object(Default::default());
+                            other.as_object_mut().unwrap()
+                        }
+                    };
+                    for (k, v) in inputs {
+                        map.insert(k, Value::String(v));
+                    }
+                }
+                let echo = event.action_echo();
+                let sender = event
+                    .user
+                    .as_ref()
+                    .and_then(|u| u.name.as_deref())
+                    .unwrap_or("")
+                    .to_string();
+                (sender, tool, args, echo)
+            }
+            _ => {
                 return (
                     StatusCode::OK,
                     axum::Json(Value::Object(Default::default())),
                 )
                     .into_response();
-            };
-            let sender = message
-                .sender
-                .as_ref()
-                .and_then(|s| s.name.as_deref())
-                .unwrap_or("")
-                .to_string();
-            let (tool, args) = route_command(text, &adapter.inbound_tool);
-            (sender, tool, args)
-        }
-        "CARD_CLICKED" => {
-            let Some(token) = event.card_token() else {
-                record_rejection(
-                    &adapter,
-                    "-",
-                    "-",
-                    TritonError::Validation("CARD_CLICKED missing correlation token".into()),
-                );
-                return (StatusCode::BAD_REQUEST, "missing action").into_response();
-            };
-            let (tool, mut args) = match triton_correlation::decode_with_cap(
-                token,
-                &adapter.correlation_key,
-                CARD_CORRELATION_CAP,
-            ) {
-                Ok(p) => p,
-                Err(_) => {
-                    // Forged/expired/oversized token — never trust the
-                    // click's tool/args. Audited as `error:auth`.
-                    record_rejection(
-                        &adapter,
-                        "-",
-                        "-",
-                        TritonError::Auth("CARD_CLICKED correlation token invalid".into()),
-                    );
-                    return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-                }
-            };
-            // Merge any Selection/Form values the user supplied onto the
-            // token's signed base args (the token fixed the TOOL; the
-            // values are user query params bound by the named-query layer).
-            let inputs = event.form_inputs();
-            if !inputs.is_empty() {
-                let map = match &mut args {
-                    Value::Object(m) => m,
-                    other => {
-                        *other = Value::Object(Default::default());
-                        other.as_object_mut().unwrap()
-                    }
-                };
-                for (k, v) in inputs {
-                    map.insert(k, Value::String(v));
-                }
             }
-            let sender = event
-                .user
-                .as_ref()
-                .and_then(|u| u.name.as_deref())
-                .unwrap_or("")
-                .to_string();
-            (sender, tool, args)
-        }
-        _ => {
-            return (
-                StatusCode::OK,
-                axum::Json(Value::Object(Default::default())),
-            )
-                .into_response();
-        }
-    };
+        };
     let sender_name = sender_name.as_str();
 
     // FR-I-7 sender resolution → (sub, scopes, tenant).
@@ -744,10 +779,20 @@ async fn handle_webhook(
                             }
                         })
                         .collect();
+                // On a CARD_CLICKED, lead the reply with what the user
+                // tapped/submitted (Google renders no user message for a
+                // click), so the chat history stays legible across several
+                // buttons. Italic, on its own line, above the answer.
+                let reply_text = match &action_echo {
+                    Some(echo) if !echo.is_empty() => {
+                        format!("*↳ {}*\n\n{}", echo.replace('*', "\\*"), rendered.text)
+                    }
+                    _ => rendered.text.clone(),
+                };
                 let body = if signed.is_empty() {
-                    surface_mapper::build_inline_response(&rendered, workspace_addon)
+                    surface_mapper::text_reply_body(&reply_text, workspace_addon)
                 } else {
-                    surface_mapper::build_interactive_card(&rendered.text, &signed, workspace_addon)
+                    surface_mapper::build_interactive_card(&reply_text, &signed, workspace_addon)
                 };
                 adapter.dispatcher.record_post(
                     &tool_name,

@@ -94,7 +94,9 @@ fn card_clicked_event(sender_name: &str, token: &str) -> Value {
     json!({
         "type": "CARD_CLICKED",
         "user": { "name": sender_name },
-        "common": { "parameters": { "ct": token } },
+        // `lbl` is the button's display label, echoed back so the reply can
+        // show which button was tapped.
+        "common": { "parameters": { "ct": token, "lbl": "Alpine Scorecard" } },
         "space": { "name": "spaces/AAA", "type": "DM" }
     })
 }
@@ -201,6 +203,15 @@ async fn card_clicked_valid_token_redispatches() {
             .unwrap_or_default()
             .contains("from a click"),
         "expected the re-dispatched echo answer; got: {body}"
+    );
+    // The reply leads with the tapped button's label so chat history shows
+    // which of several buttons was clicked.
+    assert!(
+        body["text"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("*↳ Alpine Scorecard*"),
+        "reply should echo the tapped button label; got: {body}"
     );
 
     let audit = wait_for_audit(&proc, Duration::from_secs(2), |v| {
