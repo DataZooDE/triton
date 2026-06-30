@@ -733,21 +733,9 @@ async fn handle_webhook(
     match result {
         Ok(dispatch) => match render_dispatch_result(&dispatch.result) {
             Ok(rendered) => {
-                // Selection/Form/Dashboard still defer (Cards for those
-                // aren't wired); Buttons now render as Cards v2 actions.
-                if rendered.deferred_selections
-                    + rendered.deferred_forms
-                    + rendered.deferred_dashboards
-                    > 0
-                {
-                    tracing::warn!(
-                        tool = tool_name,
-                        deferred_selections = rendered.deferred_selections,
-                        deferred_forms = rendered.deferred_forms,
-                        deferred_dashboards = rendered.deferred_dashboards,
-                        "google_chat surface mapper: non-button interactive components deferred (Cards not yet wired)",
-                    );
-                }
+                // Text/Narration render inline; Button/Selection/Form render
+                // as Cards v2 actions and Dashboard as a grid — nothing
+                // defers any more.
                 if rendered.truncated {
                     tracing::warn!(
                         tool = tool_name,
@@ -789,10 +777,18 @@ async fn handle_webhook(
                     }
                     _ => rendered.text.clone(),
                 };
-                let body = if signed.is_empty() {
+                // Render the Dashboard (if any) as a Cards v2 grid of metric
+                // tiles — no longer deferred.
+                let dashboard = surface_mapper::dashboard_from_result(&dispatch.result);
+                let body = if signed.is_empty() && dashboard.is_none() {
                     surface_mapper::text_reply_body(&reply_text, workspace_addon)
                 } else {
-                    surface_mapper::build_interactive_card(&reply_text, &signed, workspace_addon)
+                    surface_mapper::build_interactive_card(
+                        &reply_text,
+                        dashboard.as_ref(),
+                        &signed,
+                        workspace_addon,
+                    )
                 };
                 adapter.dispatcher.record_post(
                     &tool_name,
