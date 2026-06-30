@@ -65,6 +65,25 @@ Content-Type: application/json
   `.ts.net`-only default. The list only widens the hostname path; it never
   relaxes the IP-literal rules and triggers no DNS resolution.
 
+### 2a. Optional: argument-schema discovery (`X-Triton-MCP: tools/list`)
+
+Triton can't know your tool's argument schema from the static-upstream map
+alone, so `GET /v1/tools` would otherwise report an empty `input_schema` for
+an upstream agent — and a client (the Explorer) can't build an input form.
+To fix that, answer a **`tools/list` introspection**: Triton POSTs `/` with
+`X-Triton-MCP: tools/list` (an empty `{}` body) and expects:
+
+```json
+{ "tools": [ { "name": "<tool>", "inputSchema": { "type": "object", … } } ] }
+```
+
+Triton folds the returned `inputSchema` into `GET /v1/tools` for the matching
+tool name. It is **best-effort and public**: discovery never fails the
+listing, so you may answer it without verifying the bearer (return only the
+schema, never data), and an agent that doesn't implement it simply keeps the
+empty schema (clients fall back to a free-text composer). Optional but
+recommended — it's a few lines: return your `Tool::input_schema()`.
+
 ## 3. Sender-identity carriage: the bearer, and only the bearer
 
 In signed static-upstream mode (the substrate default — the Consul

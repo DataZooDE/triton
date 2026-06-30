@@ -212,6 +212,33 @@ async fn handler(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> axum::response::Response {
+    let mcp_verb = headers
+        .get("X-Triton-MCP")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    // Schema-discovery probes (`tools/list`) are infrastructure, not tool
+    // calls — answer them WITHOUT recording, so tests asserting the upstream's
+    // request history (hits / tools_seen / bodies_seen) aren't polluted. Only
+    // an MCP-Apps agent advertises a schema; others 404 so the introspection
+    // best-effort path falls back to an empty schema.
+    if mcp_verb.as_deref() == Some("tools/list") {
+        return match *state.mode.lock().unwrap() {
+            AgentMode::McpApps => Json(json!({
+                "tools": [{
+                    "name": "render_report",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": { "report_id": { "type": "string" } },
+                        "required": ["report_id"]
+                    }
+                }]
+            }))
+            .into_response(),
+            _ => StatusCode::NOT_FOUND.into_response(),
+        };
+    }
+
     *state.hits.lock().unwrap() += 1;
     let bearer = headers
         .get(AUTHORIZATION)
@@ -224,10 +251,6 @@ async fn handler(
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     state.tools_seen.lock().unwrap().push(tool);
-    let mcp_verb = headers
-        .get("X-Triton-MCP")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
     state.mcp_verbs_seen.lock().unwrap().push(mcp_verb.clone());
     let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     state.bodies_seen.lock().unwrap().push(value.clone());

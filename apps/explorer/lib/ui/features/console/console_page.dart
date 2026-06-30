@@ -1,44 +1,29 @@
-import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../../../api/a2a_client.dart';
-import '../../../api/mcp_client.dart';
 import '../../../api/models.dart';
-import '../../../api/rest_client.dart';
-import '../../../api/sse.dart';
 import '../../../providers/api_provider.dart';
-import '../../../providers/runtime_provider.dart';
 import '../../../widgets/a2ui/a2ui_renderer.dart';
 import '../../../widgets/a2ui/ui_resource_view.dart';
-import '../../../widgets/chat_channel_previews.dart';
 import '../../../widgets/json_viewer.dart';
-import '../../../widgets/panel_help.dart';
-import '../../../api/friendly_error.dart';
 
-/// The Console — one place to understand the protocols, inject messages,
-/// and make small corrections against a live tool.
+/// The Console — a **chat-first** entry point to the gateway. You talk to an
+/// agent (or run any tool) in a transcript; the message box maps to the tool's
+/// primary text argument and the answer renders as its A2UI surface, with any
+/// `ui://` report embedded inline. The protocol / A2UI version / extra
+/// arguments / raw frame live in a collapsible **Options** panel on the side —
+/// the chat stays simple, the debugging affordances are one click away.
 ///
-/// It merges what used to be the Playground (pick a tool, invoke, render
-/// the A2UI surface, see chat-channel degradation) and the Adapters page
-/// (fire all three protocols, compare parity, MCP handshake, error
-/// taxonomy) into a single editable surface: pick a tool and a protocol,
-/// see the *exact* wire frame Triton expects, edit it, and send precisely
-/// what you typed. The same `{tool, args}` can go to REST, MCP or A2A —
-/// or all three at once — and the response renders both raw and as an
-/// A2UI surface.
-const _consoleWhat =
-    'Pick a tool, choose a protocol (REST / MCP / A2A) and an A2UI '
-    'version, and see the exact request envelope Triton expects. Edit it '
-    'and Send to inject your own message or make a small correction.';
-const _consoleHow =
-    "Select a tool on the left. Edit the JSON envelope, then 'Send' (one "
-    "protocol) or 'Send to all 3' (parity). Click a button/selection in a "
-    'rendered surface to re-invoke the tool. Expand the sections below for '
-    'the MCP handshake and the one-failure-three-idioms error taxonomy.';
+/// Defaults to **MCP** so MCP-Apps results (embedded reports) work out of the
+/// box. Each agent turn links to its audit **Trace**.
+class ConsolePage extends ConsumerStatefulWidget {
+  const ConsolePage({super.key});
+
+  @override
+  ConsumerState<ConsolePage> createState() => _ConsolePageState();
+}
 
 enum _Protocol {
   rest('REST'),
@@ -49,501 +34,173 @@ enum _Protocol {
   final String label;
 }
 
-enum _InputMode {
-  form,
-  json,
-}
+/// One entry in the transcript.
+class _Turn {
+  _Turn.user(this.text)
+      : isUser = true,
+        result = null,
+        version = null;
+  _Turn.agent(this.result, this.version)
+      : isUser = false,
+        text = null;
 
-class ConsolePage extends ConsumerStatefulWidget {
-  const ConsolePage({super.key});
-
-  @override
-  ConsumerState<ConsolePage> createState() => _ConsolePageState();
+  final bool isUser;
+  final String? text;
+  final InvocationResult? result;
+  final String? version;
 }
 
 class _ConsolePageState extends ConsumerState<ConsolePage> {
-  ToolDescriptor? _selected;
-
-  /// Triton's built-in demo/debug tools (`upstream: false` in
-  /// /v1/tools — echo, delay, demo_panel, …) are noise when the
-  /// gateway fronts a real agent: hidden unless this tick is set.
+  ToolDescriptor? _tool;
   bool _showDemoTools = false;
 
-  _Protocol _protocol = _Protocol.rest;
-  String? _a2uiVersion;
-
-  _InputMode _inputMode = kIsWeb ? _InputMode.form : _InputMode.json;
-  final Map<String, TextEditingController> _controllers = {};
-  bool _isOnline = true;
-  Timer? _reloadTimer;
-  bool _autoReRun = true;
-  bool _hasInvokedAtLeastOnce = false;
-
-  /// The canonical args, kept as the source of truth so switching
-  /// protocol re-frames the *same* call rather than resetting it.
-  Map<String, dynamic> _args = const {};
-
-  final _envelopeController = TextEditingController();
-  String? _envelopeError;
-
-  /// Lets you target a tool that isn't in `/v1/tools` — e.g. an upstream
-  /// agent Triton dispatches into by Consul tag (the `hello` adk-rust
-  /// agent), which the in-process registry doesn't list.
-  final _customController = TextEditingController();
-
-  final Map<_Protocol, InvocationResult?> _results = {
-    _Protocol.rest: null,
-    _Protocol.mcp: null,
-    _Protocol.a2a: null,
-  };
-  _Protocol _activeTab = _Protocol.rest;
-  bool _sending = false;
-
-  /// SSE streaming toggle (issue #132). When on (REST only today), Send
-  /// negotiates `Accept: text/event-stream` and renders `tool`/`token`
-  /// frames live before the terminal surface.
+  // Options (the "variations on the side").
+  _Protocol _protocol = _Protocol.mcp;
+  String _a2uiVersion = '0.9';
+  bool _showOptions = false;
   bool _streaming = false;
 
-  /// Live progress lines (`tool` frames) and accumulated `token` deltas
-  /// for the in-flight streamed call.
-  final List<String> _streamProgress = [];
-  final List<String> _streamTokens = [];
+  /// Extra (non-primary) arguments, keyed by schema property name.
+  final Map<String, dynamic> _extraArgs = {};
+  final Map<String, TextEditingController> _extraCtrls = {};
 
-  @override
-  void initState() {
-    super.initState();
-    if (kIsWeb) {
-      _reloadTimer = Timer.periodic(const Duration(seconds: 2), (timer) async {
-        final rest = ref.read(restClientProvider);
-        try {
-          final snap = await rest.healthz();
-          final ok = snap['status'] == 'ok';
-          if (ok) {
-            if (!_isOnline) {
-              if (mounted) {
-                setState(() {
-                  _isOnline = true;
-                });
-                ref.invalidate(toolsProvider);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                    content: Text('⚡ Agent hot-reloaded successfully!'),
-                    duration: Duration(seconds: 2),
-                  ),
-                );
-                if (_autoReRun && _selected != null && _hasInvokedAtLeastOnce) {
-                  _send();
-                }
-              }
-            }
-          } else {
-            if (_isOnline) {
-              setState(() => _isOnline = false);
-            }
-          }
-        } catch (_) {
-          if (_isOnline) {
-            setState(() => _isOnline = false);
-          }
-        }
-      });
-    }
-  }
+  final _composer = TextEditingController();
+  final _scroll = ScrollController();
+  final List<_Turn> _turns = [];
+  bool _sending = false;
 
   @override
   void dispose() {
-    _reloadTimer?.cancel();
-    _envelopeController.dispose();
-    _customController.dispose();
-    for (final ctrl in _controllers.values) {
-      ctrl.dispose();
+    _composer.dispose();
+    _scroll.dispose();
+    for (final c in _extraCtrls.values) {
+      c.dispose();
     }
     super.dispose();
   }
 
-  /// Select an arbitrary tool name (not necessarily in `/v1/tools`). We
-  /// assume it may return an A2UI surface so the version selector shows.
-  void _useCustomTool() {
-    final name = _customController.text.trim();
-    if (name.isEmpty) return;
-    _selectTool(
-      ToolDescriptor(name: name, inputSchema: const {}, returnsA2ui: true),
-    );
-  }
-
-  // ── client + frame helpers ──────────────────────────────────────────
-
-  /// Build a frame for the active call. [tool] overrides the selected tool —
-  /// a rendered surface button may target a *different* tool (e.g. an agent's
-  /// surface offering a `render_report` button that dispatches to the Peacock
-  /// upstream), which the stateless round-trip must honour.
-  WireRequest _buildFor(_Protocol p, Map<String, dynamic> args, {String? tool}) {
-    final name = tool ?? _selected!.name;
-    // Only negotiate A2UI when calling the *selected* tool. A surface button
-    // that targets a different tool (e.g. a `render_report` renderer) must get
-    // the raw result — forcing a surface build on a renderer's output errors,
-    // and its `_meta.ui.resourceUri` is what we embed instead.
-    final sameTool = name == _selected?.name;
-    final a2ui =
-        (sameTool && (_selected?.returnsA2ui ?? false)) ? _a2uiVersion : null;
-    switch (p) {
-      case _Protocol.rest:
-        return ref
-            .read(restClientProvider)
-            .buildRequest(name, args, a2uiVersion: a2ui);
-      case _Protocol.mcp:
-        return ref
-            .read(mcpClientProvider)
-            .buildRequest(name, args, a2uiVersion: a2ui);
-      case _Protocol.a2a:
-        return ref
-            .read(a2aClientProvider)
-            .buildRequest(name, args, a2uiVersion: a2ui);
-    }
-  }
-
-  Future<InvocationResult> _sendFrame(_Protocol p, WireRequest req) {
-    switch (p) {
-      case _Protocol.rest:
-        return ref.read(restClientProvider).sendRaw(req);
-      case _Protocol.mcp:
-        return ref.read(mcpClientProvider).sendRaw(req);
-      case _Protocol.a2a:
-        return ref.read(a2aClientProvider).sendRaw(req);
-    }
-  }
-
-  /// Pull the tool args back out of an (edited) frame so a protocol
-  /// switch carries the user's edits forward.
-  Map<String, dynamic> _argsFromBody(_Protocol p, Map<String, dynamic> body) {
-    try {
-      switch (p) {
-        case _Protocol.rest:
-          return body;
-        case _Protocol.mcp:
-          return ((body['params'] as Map?)?['arguments'] as Map?)
-                  ?.cast<String, dynamic>() ??
-              const {};
-        case _Protocol.a2a:
-          return (((body['parts'] as List?)?.first as Map?)?['data']
-                      as Map?)?['args']
-                  ?.cast<String, dynamic>() ??
-              const {};
-      }
-    } catch (_) {
-      return const {};
-    }
-  }
-
-  String _pretty(Object? json) =>
-      const JsonEncoder.withIndent('  ').convert(json);
-
-  void _reseedEnvelope() {
-    if (_selected == null) return;
-    _envelopeController.text = _pretty(_buildFor(_protocol, _args).body);
-    _envelopeError = null;
-  }
-
-  // ── events ──────────────────────────────────────────────────────────
+  // ── tool + args ─────────────────────────────────────────────────────
 
   void _selectTool(ToolDescriptor t) {
     setState(() {
-      _selected = t;
-      _args = const {};
-      _results.updateAll((_, _) => null);
-      _a2uiVersion = t.returnsA2ui ? _a2uiVersion : null;
-      _hasInvokedAtLeastOnce = false;
-
-      for (final ctrl in _controllers.values) {
-        ctrl.dispose();
+      _tool = t;
+      _turns.clear();
+      _extraArgs.clear();
+      for (final c in _extraCtrls.values) {
+        c.dispose();
       }
-      _controllers.clear();
-
-      final schema = t.inputSchema;
-      final props = schema['properties'] as Map?;
-      if (props != null) {
-        final newArgs = <String, dynamic>{};
-        props.forEach((key, val) {
-          final propVal = val as Map;
-          final type = propVal['type'] as String?;
-          if (type == 'boolean') {
-            newArgs[key] = false;
-          } else {
-            final ctrl = TextEditingController();
-            _controllers[key] = ctrl;
-            newArgs[key] = '';
-          }
-        });
-        _args = newArgs;
+      _extraCtrls.clear();
+      for (final name in _secondaryArgKeys(t)) {
+        _extraCtrls[name] = TextEditingController();
       }
-      _reseedEnvelope();
     });
   }
 
-  void _setInputMode(_InputMode mode) {
-    if (mode == _InputMode.form) {
-      try {
-        final body = (jsonDecode(_envelopeController.text) as Map)
-            .cast<String, dynamic>();
-        final parsedArgs = _argsFromBody(_protocol, body);
-        setState(() {
-          _args = parsedArgs;
-          _envelopeError = null;
-          _args.forEach((key, val) {
-            final ctrl = _controllers[key];
-            if (ctrl != null) {
-              ctrl.text = val?.toString() ?? '';
-            }
-          });
-          _inputMode = mode;
-        });
-      } catch (_) {
-        setState(() => _inputMode = mode);
-      }
-    } else {
-      setState(() => _inputMode = mode);
+  /// The argument the chat box maps to: a string property, preferring the
+  /// common chat keys; falls back to `question` when the schema is unknown
+  /// (upstream agents register without one — see the introspection follow-up).
+  String _primaryArgKey(ToolDescriptor t) {
+    final props =
+        (t.inputSchema['properties'] as Map?)?.cast<String, dynamic>() ?? {};
+    for (final k in ['question', 'message', 'prompt', 'text', 'input', 'query']) {
+      final p = props[k];
+      if (p is Map && (p['type'] == 'string' || p['type'] == null)) return k;
+    }
+    for (final e in props.entries) {
+      if (e.value is Map && (e.value as Map)['type'] == 'string') return e.key;
+    }
+    return 'question';
+  }
+
+  /// Schema properties other than the primary one — rendered as form fields in
+  /// the Options panel.
+  List<String> _secondaryArgKeys(ToolDescriptor t) {
+    final props =
+        (t.inputSchema['properties'] as Map?)?.cast<String, dynamic>() ?? {};
+    final primary = _primaryArgKey(t);
+    return props.keys.where((k) => k != primary).toList(growable: false);
+  }
+
+  Map<String, dynamic> _argsFor(String message) {
+    final t = _tool!;
+    return {
+      _primaryArgKey(t): message,
+      for (final e in _extraArgs.entries)
+        if (e.value != null && '${e.value}'.isNotEmpty) e.key: e.value,
+    };
+  }
+
+  // ── send ────────────────────────────────────────────────────────────
+
+  Future<InvocationResult> _dispatch(
+    String tool,
+    Map<String, dynamic> args,
+    _Protocol p,
+    String? a2ui,
+  ) {
+    switch (p) {
+      case _Protocol.rest:
+        return ref.read(restClientProvider).invoke(tool, args, a2uiVersion: a2ui);
+      case _Protocol.mcp:
+        return ref.read(mcpClientProvider).invoke(tool, args, a2uiVersion: a2ui);
+      case _Protocol.a2a:
+        return ref.read(a2aClientProvider).invoke(tool, args, a2uiVersion: a2ui);
     }
   }
 
-  void _setProtocol(_Protocol p) {
-    setState(() {
-      _protocol = p;
-      _activeTab = p;
-      _reseedEnvelope();
-    });
-  }
-
-  void _setA2ui(String? v) {
-    setState(() {
-      _a2uiVersion = v;
-      _reseedEnvelope();
-    });
-  }
-
-  void _onEnvelopeChanged(String s) {
-    setState(() {
-      try {
-        jsonDecode(s);
-        _envelopeError = null;
-      } catch (_) {
-        _envelopeError = 'Invalid JSON';
-      }
-    });
-  }
-
-  /// Send the current editor contents over the active protocol.
   Future<void> _send() async {
-    if (_selected == null) return;
-    final Map<String, dynamic> body;
-    try {
-      body = (jsonDecode(_envelopeController.text) as Map)
-          .cast<String, dynamic>();
-    } catch (_) {
-      setState(() => _envelopeError = 'Invalid JSON — fix before sending');
-      return;
-    }
-    // SSE path (REST only today): stream tool/token frames live.
-    if (_streaming && _protocol == _Protocol.rest) {
-      await _sendStreaming(body);
-      return;
-    }
-    final p = _protocol;
+    final t = _tool;
+    final text = _composer.text.trim();
+    if (t == null || text.isEmpty || _sending) return;
+    _composer.clear();
     setState(() {
+      _turns.add(_Turn.user(text));
       _sending = true;
-      _activeTab = p;
     });
-    final req = _buildFor(p, const {}).withBody(body);
-    final r = await _sendFrame(p, req);
+    _scrollToEnd();
+    final r = await _dispatch(t.name, _argsFor(text), _protocol, _a2uiVersion);
     if (!mounted) return;
     if (r.traceId != null) {
       ref.read(selectedTraceProvider.notifier).state = r.traceId;
     }
     setState(() {
-      _results[p] = r;
-      _args = _argsFromBody(p, body);
+      _turns.add(_Turn.agent(r, _a2uiVersion));
       _sending = false;
-      _hasInvokedAtLeastOnce = true;
     });
+    _scrollToEnd();
   }
 
-  /// Stream the current REST call (issue #132): consume the SSE frames,
-  /// surfacing `tool` progress and `token` deltas live, then settle the
-  /// response from the terminal `done` (or `error`).
-  Future<void> _sendStreaming(Map<String, dynamic> body) async {
-    const p = _Protocol.rest;
-    setState(() {
-      _sending = true;
-      _activeTab = p;
-      _streamProgress.clear();
-      _streamTokens.clear();
-    });
-    final client = ref.read(restClientProvider);
-    final a2ui = (_selected?.returnsA2ui ?? false) ? _a2uiVersion : null;
-    final sw = Stopwatch()..start();
-    Map<String, dynamic>? doneResult;
-    String? errMsg;
-    try {
-      await for (final f in client.invokeStreaming(
-        _selected!.name,
-        body,
-        a2uiVersion: a2ui,
-      )) {
-        if (!mounted) return;
-        switch (f.type) {
-          case StreamEventType.tool:
-            setState(() => _streamProgress.add(_pretty(f.data)));
-          case StreamEventType.token:
-            setState(() => _streamTokens.add(f.delta ?? ''));
-          case StreamEventType.done:
-            doneResult = (f.data is Map)
-                ? (f.data as Map).cast<String, dynamic>()
-                : null;
-          case StreamEventType.error:
-            errMsg = (f.data is Map && f.data['message'] is String)
-                ? f.data['message'] as String
-                : (f.data?.toString() ?? 'stream error');
-        }
-      }
-    } catch (e) {
-      errMsg = e.toString();
-    }
-    sw.stop();
-    if (!mounted) return;
-    // Match the buffered shape so the response view renders identically:
-    // the buffered REST result is `{ result: <toolresult>, … }`.
-    final result = InvocationResult(
-      raw: doneResult != null
-          ? <String, dynamic>{'result': doneResult}
-          : (errMsg != null ? <String, dynamic>{'error': errMsg} : const {}),
-      statusCode: errMsg == null ? 200 : 502,
-      elapsed: sw.elapsed,
-      error: errMsg,
-    );
-    setState(() {
-      _results[p] = result;
-      _args = _argsFromBody(p, body);
-      _sending = false;
-      _hasInvokedAtLeastOnce = true;
-    });
-  }
-
-  /// Fire the same call (the canonical args) over all three protocols.
-  Future<void> _sendAll() async {
-    if (_selected == null) return;
-    // Adopt any edits in the current editor first.
-    try {
-      final body = (jsonDecode(_envelopeController.text) as Map)
-          .cast<String, dynamic>();
-      _args = _argsFromBody(_protocol, body);
-    } catch (_) {
-      /* keep last good args */
-    }
-    setState(() => _sending = true);
-    final entries = await Future.wait(
-      _Protocol.values.map((p) async {
-        final r = await _sendFrame(p, _buildFor(p, _args));
-        return MapEntry(p, r);
-      }),
-    );
-    if (!mounted) return;
-    setState(() {
-      for (final e in entries) {
-        _results[e.key] = e.value;
-      }
-      _sending = false;
-      _hasInvokedAtLeastOnce = true;
-    });
-  }
-
-  /// A rendered A2UI Button/Selection/Form re-invokes the tool over the
-  /// active protocol (FR-D-3, the stateless round-trip).
+  /// A rendered surface button/selection re-invokes a tool. A cross-tool button
+  /// (e.g. an agent's `render_report`) is an MCP-Apps renderer — always
+  /// dispatch it over MCP so its `ui://` report comes back, regardless of the
+  /// selected protocol.
   Future<void> _onA2uiAction(String tool, Map<String, dynamic> args) async {
-    final p = _activeTab;
+    final crossTool = _tool == null || tool != _tool!.name;
+    final p = crossTool ? _Protocol.mcp : _protocol;
+    final a2ui = crossTool ? null : _a2uiVersion;
     setState(() => _sending = true);
-    final r = await _sendFrame(p, _buildFor(p, args, tool: tool));
+    final r = await _dispatch(tool, args, p, a2ui);
     if (!mounted) return;
+    if (r.traceId != null) {
+      ref.read(selectedTraceProvider.notifier).state = r.traceId;
+    }
     setState(() {
-      _results[p] = r;
+      _turns.add(_Turn.agent(r, a2ui));
       _sending = false;
-      _hasInvokedAtLeastOnce = true;
     });
+    _scrollToEnd();
   }
 
-  Widget _buildFormFields(ToolDescriptor tool) {
-    final schema = tool.inputSchema;
-    final props = schema['properties'] as Map?;
-    if (props == null || props.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 8),
-        child: Card(
-          child: Padding(
-            padding: EdgeInsets.all(16),
-            child: Text(
-              'This tool requires no input arguments.',
-              style: TextStyle(fontStyle: FontStyle.italic),
-            ),
-          ),
-        ),
-      );
-    }
-
-    final children = <Widget>[];
-    props.forEach((key, val) {
-      final propVal = val as Map;
-      final type = propVal['type'] as String?;
-      final desc = propVal['description'] as String?;
-
-      if (type == 'boolean') {
-        final currentVal = _args[key] as bool? ?? false;
-        children.add(
-          SwitchListTile(
-            title: Text(key),
-            subtitle: desc != null ? Text(desc) : null,
-            value: currentVal,
-            onChanged: (v) {
-              setState(() {
-                _args = Map<String, dynamic>.from(_args)..[key] = v;
-                _reseedEnvelope();
-              });
-            },
-          ),
+  void _scrollToEnd() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.animateTo(
+          _scroll.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
         );
-      } else {
-        final ctrl = _controllers[key];
-        if (ctrl != null) {
-          children.add(
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              child: TextField(
-                controller: ctrl,
-                decoration: InputDecoration(
-                  labelText: key,
-                  helperText: desc,
-                  border: const OutlineInputBorder(),
-                ),
-                onChanged: (text) {
-                  dynamic parsedVal = text;
-                  if (type == 'integer') {
-                    parsedVal = int.tryParse(text) ?? text;
-                  } else if (type == 'number') {
-                    parsedVal = double.tryParse(text) ?? text;
-                  }
-                  _args = Map<String, dynamic>.from(_args)..[key] = parsedVal;
-                  final frame = _buildFor(_protocol, _args);
-                  _envelopeController.text = _pretty(frame.body);
-                  _envelopeError = null;
-                },
-              ),
-            ),
-          );
-        }
       }
     });
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: children,
-    );
   }
 
   // ── build ───────────────────────────────────────────────────────────
@@ -553,798 +210,386 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
     final tools = ref.watch(toolsProvider);
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Console'),
+        title: Text(_tool == null ? 'Console' : 'Chat · ${_tool!.name}'),
         actions: [
           IconButton(
             icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh tool list',
+            tooltip: 'Refresh tools',
             onPressed: () => ref.invalidate(toolsProvider),
+          ),
+          IconButton(
+            icon: Icon(_showOptions ? Icons.tune : Icons.tune_outlined),
+            tooltip: 'Options',
+            onPressed: () => setState(() => _showOptions = !_showOptions),
           ),
         ],
       ),
       body: tools.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => Padding(
-          padding: const EdgeInsets.all(24),
-          child: Card(
-            color: Theme.of(context).colorScheme.errorContainer,
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text(friendlyApiError('Could not load /v1/tools', e)),
-            ),
+        error: (e, _) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24),
+            child: Text('Could not load /v1/tools: $e'),
           ),
         ),
-        data: (list) {
-          if (list.isEmpty) {
-            return const Center(
-              child: Padding(
-                padding: EdgeInsets.all(24),
-                child: Text(
-                  'Triton reports no registered tools.\n\n'
-                  'Check the dispatcher registry on the gateway.',
-                  textAlign: TextAlign.center,
-                ),
-              ),
-            );
-          }
-
-          if (_selected == null && kIsWeb) {
-            final initial = list.firstWhere((t) => t.upstream, orElse: () => list.first);
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted && _selected == null) {
-                _selectTool(initial);
-              }
-            });
-          }
-
-          final hasDemoTools = list.any((t) => !t.upstream);
-          final sortedList = List<ToolDescriptor>.from(
-              _showDemoTools ? list : list.where((t) => t.upstream))
-            ..sort((a, b) {
-              if (a.upstream && !b.upstream) return -1;
-              if (!a.upstream && b.upstream) return 1;
-              return a.name.compareTo(b.name);
-            });
-
-          return Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              SizedBox(
-                width: 240,
-                child: Column(
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(8),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          TextField(
-                            key: const Key('custom-tool-field'),
-                            controller: _customController,
-                            decoration: const InputDecoration(
-                              isDense: true,
-                              border: OutlineInputBorder(),
-                              labelText: 'Tool name',
-                              hintText: 'e.g. hello (upstream agent)',
-                              helperText: 'Target a tool not in /v1/tools',
-                            ),
-                            onSubmitted: (_) => _useCustomTool(),
-                          ),
-                          const SizedBox(height: 6),
-                          Align(
-                            alignment: Alignment.centerLeft,
-                            child: TextButton.icon(
-                              icon: const Icon(Icons.add, size: 18),
-                              label: const Text('Use tool'),
-                              onPressed: _useCustomTool,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Divider(height: 1),
-                    if (hasDemoTools)
-                      CheckboxListTile(
-                        key: const Key('show-demo-tools'),
-                        dense: true,
-                        controlAffinity: ListTileControlAffinity.leading,
-                        contentPadding:
-                            const EdgeInsets.symmetric(horizontal: 8),
-                        title: const Text('Show demo tools',
-                            style: TextStyle(fontSize: 12)),
-                        value: _showDemoTools,
-                        onChanged: (v) =>
-                            setState(() => _showDemoTools = v ?? false),
-                      ),
-                    Expanded(
-                      child: ListView.builder(
-                        itemCount: sortedList.length,
-                        itemBuilder: (context, i) {
-                          final t = sortedList[i];
-                          final tag = t.upstream
-                              ? 'upstream agent'
-                              : (t.returnsA2ui ? 'returns A2UI' : null);
-                          return ListTile(
-                            title: Row(
-                              children: [
-                                Expanded(child: Text(t.name)),
-                                if (t.upstream)
-                                  const Icon(Icons.star, color: Colors.amber, size: 16),
-                              ],
-                            ),
-                            subtitle: tag == null
-                                ? null
-                                : Text(
-                                    tag,
-                                    style: const TextStyle(fontSize: 11),
-                                  ),
-                            selected: _selected?.name == t.name,
-                            onTap: () => _selectTool(t),
-                          );
-                        },
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const VerticalDivider(width: 1),
-              Expanded(
-                child: _selected == null
-                    ? const Center(child: Text('Pick a tool'))
-                    : _detail(context),
-              ),
-            ],
-          );
-        },
+        data: (list) => _layout(context, list),
       ),
     );
   }
 
-  Widget _detail(BuildContext context) {
-    final tool = _selected!;
-    final guide = toolGuide(tool);
-    final frame = _buildFor(_protocol, _args);
-    final result = _results[_activeTab];
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (!_isOnline) ...[
-            Card(
-              color: Theme.of(context).colorScheme.errorContainer,
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                child: Row(
-                  children: [
-                    SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(strokeWidth: 2),
+  Widget _layout(BuildContext context, List<ToolDescriptor> list) {
+    if (list.isEmpty) {
+      return const Center(child: Text('Triton reports no registered tools.'));
+    }
+    // Default to the first upstream agent.
+    if (_tool == null) {
+      final initial = list.firstWhere((t) => t.upstream, orElse: () => list.first);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _tool == null) _selectTool(initial);
+      });
+    }
+    final hasDemo = list.any((t) => !t.upstream);
+    final shown = (_showDemoTools ? list : list.where((t) => t.upstream).toList())
+      ..sort((a, b) {
+        if (a.upstream != b.upstream) return a.upstream ? -1 : 1;
+        return a.name.compareTo(b.name);
+      });
+
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _toolRail(shown, hasDemo),
+        const VerticalDivider(width: 1),
+        Expanded(child: _chat(context)),
+        if (_showOptions) ...[
+          const VerticalDivider(width: 1),
+          SizedBox(width: 320, child: _optionsPanel(context)),
+        ],
+      ],
+    );
+  }
+
+  Widget _toolRail(List<ToolDescriptor> shown, bool hasDemo) => SizedBox(
+        width: 210,
+        child: Column(
+          children: [
+            if (hasDemo)
+              CheckboxListTile(
+                dense: true,
+                controlAffinity: ListTileControlAffinity.leading,
+                contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                title: const Text('Show all tools', style: TextStyle(fontSize: 12)),
+                value: _showDemoTools,
+                onChanged: (v) => setState(() => _showDemoTools = v ?? false),
+              ),
+            Expanded(
+              child: ListView.builder(
+                itemCount: shown.length,
+                itemBuilder: (_, i) {
+                  final t = shown[i];
+                  return ListTile(
+                    dense: true,
+                    title: Text(t.name),
+                    subtitle: t.upstream
+                        ? const Text('agent', style: TextStyle(fontSize: 11))
+                        : null,
+                    leading: Icon(
+                      t.upstream ? Icons.smart_toy_outlined : Icons.bolt,
+                      size: 18,
+                      color: t.upstream ? Colors.amber.shade700 : null,
                     ),
-                    SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        '⚡ Reconnecting to Agent... (Rust binary compiling & restarting)',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                    ),
-                  ],
-                ),
+                    selected: _tool?.name == t.name,
+                    onTap: () => _selectTool(t),
+                  );
+                },
               ),
             ),
-            const SizedBox(height: 12),
           ],
-          Text(tool.name, style: Theme.of(context).textTheme.headlineSmall),
-          PanelHelp(
-            what: '$_consoleWhat\n\n${guide.what}',
-            how: '${guide.how}\n\n$_consoleHow',
-            margin: const EdgeInsets.only(top: 12),
-          ),
-          const SizedBox(height: 16),
+        ),
+      );
 
-          // Protocol + A2UI selectors.
-          Wrap(
-            spacing: 24,
-            runSpacing: 12,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Text('Protocol:'),
-                  const SizedBox(width: 12),
-                  SegmentedButton<_Protocol>(
-                    segments: const [
-                      ButtonSegment(value: _Protocol.rest, label: Text('REST')),
-                      ButtonSegment(value: _Protocol.mcp, label: Text('MCP')),
-                      ButtonSegment(value: _Protocol.a2a, label: Text('A2A')),
-                    ],
-                    selected: {_protocol},
-                    onSelectionChanged: (s) => _setProtocol(s.first),
-                  ),
-                ],
-              ),
-              if (tool.returnsA2ui)
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('A2UI:'),
-                    const SizedBox(width: 12),
-                    SegmentedButton<String?>(
-                      segments: const [
-                        ButtonSegment(value: null, label: Text('JSON')),
-                        ButtonSegment(value: '0.8', label: Text('v0.8')),
-                        ButtonSegment(value: '0.9', label: Text('v0.9')),
-                      ],
-                      selected: {_a2uiVersion},
-                      onSelectionChanged: (s) => _setA2ui(s.first),
-                    ),
-                  ],
+  Widget _chat(BuildContext context) {
+    return Column(
+      children: [
+        Expanded(
+          child: _turns.isEmpty
+              ? _emptyState(context)
+              : ListView.builder(
+                  controller: _scroll,
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _turns.length,
+                  itemBuilder: (_, i) => _bubble(context, _turns[i]),
                 ),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Checkbox(
-                    value: _autoReRun,
-                    onChanged: (v) {
-                      setState(() {
-                        _autoReRun = v ?? true;
-                      });
-                    },
-                  ),
-                  const Text('Auto-run last query on reload', style: TextStyle(fontSize: 12)),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
+        ),
+        if (_sending) const LinearProgressIndicator(minHeight: 2),
+        _composerBar(context),
+      ],
+    );
+  }
 
-          // Mode switch selector: Form vs JSON.
-          Row(
+  Widget _emptyState(BuildContext context) => Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
+              Icon(Icons.forum_outlined,
+                  size: 40, color: Theme.of(context).colorScheme.outline),
+              const SizedBox(height: 12),
               Text(
-                'Request envelope',
+                _tool == null
+                    ? 'Pick a tool on the left.'
+                    : 'Say something to ${_tool!.name}.',
                 style: Theme.of(context).textTheme.titleMedium,
               ),
-              const Spacer(),
-              SegmentedButton<_InputMode>(
-                segments: const [
-                  ButtonSegment(
-                    value: _InputMode.form,
-                    icon: Icon(Icons.edit_note),
-                    label: Text('Form builder'),
-                  ),
-                  ButtonSegment(
-                    value: _InputMode.json,
-                    icon: Icon(Icons.code),
-                    label: Text('Raw JSON'),
-                  ),
-                ],
-                selected: {_inputMode},
-                onSelectionChanged: (s) => _setInputMode(s.first),
-              ),
-            ],
-          ),
-          const SizedBox(height: 4),
-          SelectableText(
-            '${frame.method} ${frame.url}\n'
-            '${frame.headers.entries.map((e) => '${e.key}: ${e.value}').join('\n')}',
-            style: const TextStyle(fontFamily: 'monospace', fontSize: 11),
-          ),
-          const SizedBox(height: 8),
-          _inputMode == _InputMode.form
-              ? _buildFormFields(tool)
-              : TextField(
-                  key: const Key('envelope-editor'),
-                  controller: _envelopeController,
-                  minLines: 6,
-                  maxLines: 18,
-                  style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-                  decoration: InputDecoration(
-                    border: const OutlineInputBorder(),
-                    isDense: true,
-                    errorText: _envelopeError,
-                    helperText:
-                        'Edit the JSON body, then Send — this is the exact '
-                        'frame posted to Triton.',
-                  ),
-                  onChanged: _onEnvelopeChanged,
-                ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              FilledButton.icon(
-                icon: _sending
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.send),
-                label: const Text('Send'),
-                onPressed: _sending || _envelopeError != null ? null : _send,
-              ),
-              const SizedBox(width: 12),
-              OutlinedButton.icon(
-                icon: const Icon(Icons.bolt),
-                label: const Text('Send to all 3'),
-                onPressed: _sending ? null : _sendAll,
-              ),
-              if (_protocol == _Protocol.rest) ...[
-                const SizedBox(width: 12),
-                FilterChip(
-                  avatar: const Icon(Icons.stream, size: 16),
-                  label: const Text('Stream'),
-                  selected: _streaming,
-                  onSelected: _sending
-                      ? null
-                      : (v) => setState(() => _streaming = v),
-                ),
-              ],
-            ],
-          ),
-          const SizedBox(height: 24),
-
-          // Per-protocol responses.
-          Text('Response', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          SegmentedButton<_Protocol>(
-            segments: [
-              for (final p in _Protocol.values)
-                ButtonSegment(
-                  value: p,
-                  label: Text(p.label),
-                  icon: _results[p] == null
-                      ? null
-                      : Icon(
-                          _results[p]!.ok ? Icons.check_circle : Icons.error,
-                          size: 16,
-                        ),
-                ),
-            ],
-            selected: {_activeTab},
-            onSelectionChanged: (s) => setState(() => _activeTab = s.first),
-          ),
-          const SizedBox(height: 12),
-          if (_streamProgress.isNotEmpty || _streamTokens.isNotEmpty) ...[
-            _streamLiveView(context),
-            const SizedBox(height: 12),
-          ],
-          _responseView(context, result),
-
-          // Chat-channel degradation for A2UI tools.
-          if (tool.returnsA2ui && result != null && result.ok) ...[
-            const SizedBox(height: 24),
-            const Divider(),
-            const SizedBox(height: 12),
-            ChatChannelPreviews(toolName: tool.name, args: _args),
-          ],
-
-          const SizedBox(height: 24),
-          const Divider(),
-          const _McpDetailSection(),
-          const Divider(height: 1),
-          const _ErrorTaxonomySection(),
-        ],
-      ),
-    );
-  }
-
-  /// Live view of the in-flight SSE stream: `tool` progress lines and the
-  /// accumulated `token` deltas, shown above the settled response.
-  Widget _streamLiveView(BuildContext context) {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                const Icon(Icons.stream, size: 16),
-                const SizedBox(width: 6),
-                Text(
-                  'Live stream',
-                  style: Theme.of(context).textTheme.labelLarge,
-                ),
-              ],
-            ),
-            if (_streamProgress.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              for (final p in _streamProgress)
-                Text('• $p', style: Theme.of(context).textTheme.bodySmall),
-            ],
-            if (_streamTokens.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              SelectableText(_streamTokens.join()),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _responseView(BuildContext context, InvocationResult? r) {
-    if (r == null) {
-      return Text(
-        'Not sent yet — press Send.',
-        style: Theme.of(context).textTheme.bodySmall,
-      );
-    }
-    final showSurface =
-        (_selected?.returnsA2ui ?? false) && _a2uiVersion != null && r.ok;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Wrap(
-          spacing: 8,
-          runSpacing: 4,
-          crossAxisAlignment: WrapCrossAlignment.center,
-          children: [
-            Chip(
-              label: Text('${r.statusCode} • ${r.elapsed.inMilliseconds}ms'),
-              visualDensity: VisualDensity.compact,
-              backgroundColor: r.ok
-                  ? Theme.of(context).colorScheme.secondaryContainer
-                  : Theme.of(context).colorScheme.errorContainer,
-            ),
-            if (r.errorCode != null)
-              Chip(
-                label: Text('rpc ${r.errorCode}'),
-                visualDensity: VisualDensity.compact,
-              ),
-            if (r.taskState != null)
-              Chip(
-                avatar: const Icon(Icons.task_alt, size: 16),
-                label: Text('task: ${r.taskState}'),
-                visualDensity: VisualDensity.compact,
-              ),
-            if (r.traceId != null)
-              SelectableText(
-                'trace ${r.traceId}',
+              const SizedBox(height: 4),
+              Text(
+                'Over ${_protocol.label}, A2UI v$_a2uiVersion. Tune it under Options (top-right).',
                 style: Theme.of(context).textTheme.bodySmall,
               ),
-          ],
+            ],
+          ),
         ),
-        const SizedBox(height: 8),
-        if (r.error != null)
-          Card(
-            color: Theme.of(context).colorScheme.errorContainer,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text(r.error!),
+      );
+
+  Widget _bubble(BuildContext context, _Turn turn) {
+    if (turn.isUser) {
+      return Align(
+        alignment: Alignment.centerRight,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          constraints: const BoxConstraints(maxWidth: 560),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.primaryContainer,
+            borderRadius: BorderRadius.circular(14),
+          ),
+          child: Text(turn.text ?? ''),
+        ),
+      );
+    }
+    final r = turn.result!;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        constraints: const BoxConstraints(maxWidth: 760),
+        child: Card(
+          margin: EdgeInsets.zero,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (r.error != null)
+                  Text(r.error!,
+                      style: TextStyle(
+                          color: Theme.of(context).colorScheme.error))
+                else if (turn.version != null)
+                  A2UIRenderer(
+                    envelope: r.raw,
+                    version: turn.version,
+                    onAction: _onA2uiAction,
+                  )
+                else
+                  JsonViewer(r.raw),
+                if (r.uiResourceUri != null) ...[
+                  const SizedBox(height: 10),
+                  UiResourceView(uri: r.uiResourceUri!),
+                ],
+                const SizedBox(height: 8),
+                _turnFooter(context, r),
+              ],
             ),
           ),
-        if (showSurface) ...[
-          Text(
-            'Rendered surface — MCP App / web client',
-            style: Theme.of(context).textTheme.titleSmall,
+        ),
+      ),
+    );
+  }
+
+  Widget _turnFooter(BuildContext context, InvocationResult r) {
+    final style = Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: Theme.of(context).colorScheme.onSurfaceVariant,
+        );
+    return Wrap(
+      spacing: 10,
+      runSpacing: 4,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        Text('${r.statusCode} · ${r.elapsed.inMilliseconds}ms', style: style),
+        if (r.traceId != null)
+          // Tap selects this trace so the Trace page opens pre-loaded.
+          InkWell(
+            onTap: () => ref.read(selectedTraceProvider.notifier).state = r.traceId,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.timeline, size: 13),
+                const SizedBox(width: 3),
+                Text('trace ${r.traceId!.substring(0, 8)} ·  open in Trace',
+                    style: style?.copyWith(decoration: TextDecoration.underline)),
+              ],
+            ),
           ),
-          const SizedBox(height: 6),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: A2UIRenderer(
-                envelope: r.raw,
-                version: _a2uiVersion,
-                onAction: _onA2uiAction,
+      ],
+    );
+  }
+
+  Widget _composerBar(BuildContext context) {
+    final disabled = _tool == null || _sending;
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(12, 6, 12, 12),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: TextField(
+                key: const Key('chat-composer'),
+                controller: _composer,
+                minLines: 1,
+                maxLines: 5,
+                enabled: _tool != null,
+                textInputAction: TextInputAction.send,
+                onSubmitted: (_) => _send(),
+                decoration: InputDecoration(
+                  hintText: _tool == null
+                      ? 'Pick a tool first'
+                      : 'Message ${_tool!.name}…',
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                ),
               ),
             ),
-          ),
-          const SizedBox(height: 12),
-        ],
-        // MCP-Apps: an interactive upstream (e.g. a Peacock report) returns a
-        // `ui://` resource on `_meta.ui.resourceUri`. Embed it inline — Triton
-        // proxies `resources/read` to the owning upstream (#143).
-        if (r.uiResourceUri != null) ...[
-          Text(
-            'Embedded report — ${r.uiResourceUri}',
-            style: Theme.of(context).textTheme.titleSmall,
-          ),
-          const SizedBox(height: 6),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(8),
-              child: UiResourceView(uri: r.uiResourceUri!),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: disabled ? null : _send,
+              style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14)),
+              child: const Icon(Icons.send, size: 18),
             ),
-          ),
-          const SizedBox(height: 12),
-        ],
-        Text('Raw envelope', style: Theme.of(context).textTheme.titleSmall),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ── options panel (the "variations on the side") ────────────────────
+
+  Widget _optionsPanel(BuildContext context) {
+    final t = _tool;
+    return ListView(
+      padding: const EdgeInsets.all(16),
+      children: [
+        Text('Options', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 12),
+        const Text('Protocol'),
         const SizedBox(height: 6),
-        JsonViewer(r.raw),
-      ],
-    );
-  }
-}
-
-/// MCP-only handshake. `initialize` negotiates a protocol version and
-/// advertises capabilities; `resources/read` fetches the runtime stub
-/// Triton serves at `ui://triton/runtime.html`. Lazy: only fires when
-/// the tile is first expanded.
-class _McpDetailSection extends ConsumerStatefulWidget {
-  const _McpDetailSection();
-
-  @override
-  ConsumerState<_McpDetailSection> createState() => _McpDetailSectionState();
-}
-
-class _McpDetailSectionState extends ConsumerState<_McpDetailSection> {
-  static const _runtimeUri = 'ui://triton/runtime.html';
-
-  bool _loading = false;
-  bool _loaded = false;
-  String? _error;
-  McpServerInfo? _info;
-  McpResource? _resource;
-
-  Future<void> _load() async {
-    if (_loaded || _loading) return;
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    final mcp = ref.read(mcpClientProvider);
-    try {
-      final info = await mcp.initialize();
-      final resource = await mcp.readResource(_runtimeUri);
-      if (!mounted) return;
-      setState(() {
-        _info = info;
-        _resource = resource;
-        _loaded = true;
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _error = e.toString();
-        _loading = false;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ExpansionTile(
-      leading: const Icon(Icons.handshake_outlined),
-      title: const Text('MCP handshake & resources'),
-      subtitle: const Text('initialize + resources/read — MCP only'),
-      onExpansionChanged: (open) {
-        if (open) _load();
-      },
-      childrenPadding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
-      expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        if (_loading)
-          const Padding(
-            padding: EdgeInsets.all(16),
-            child: Center(child: CircularProgressIndicator()),
-          )
-        else if (_error != null)
-          Card(
-            color: Theme.of(context).colorScheme.errorContainer,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Text('initialize/resources failed: $_error'),
-            ),
-          )
-        else if (_info != null) ...[
-          Text('initialize', style: Theme.of(context).textTheme.titleSmall),
-          const SizedBox(height: 8),
-          _kv(context, 'protocolVersion', _info!.protocolVersion),
-          _kv(
-            context,
-            'serverInfo',
-            '${_info!.serverName} ${_info!.serverVersion}',
-          ),
-          _kv(context, 'capabilities', _info!.capabilities.keys.join(', ')),
-          const SizedBox(height: 16),
-          Text(
-            'resources/read  ·  $_runtimeUri',
-            style: Theme.of(context).textTheme.titleSmall,
-          ),
-          const SizedBox(height: 8),
-          _kv(context, 'mimeType', _resource?.mimeType ?? ''),
-          const SizedBox(height: 8),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.surfaceContainerHigh,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: SelectableText(
-              _resource?.text ?? '',
-              style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-            ),
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _kv(BuildContext context, String k, String v) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 2),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SizedBox(
-          width: 140,
-          child: Text(
-            k,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: Theme.of(context).colorScheme.onSurfaceVariant,
-            ),
-          ),
+        SegmentedButton<_Protocol>(
+          segments: const [
+            ButtonSegment(value: _Protocol.mcp, label: Text('MCP')),
+            ButtonSegment(value: _Protocol.rest, label: Text('REST')),
+            ButtonSegment(value: _Protocol.a2a, label: Text('A2A')),
+          ],
+          selected: {_protocol},
+          onSelectionChanged: (s) => setState(() => _protocol = s.first),
         ),
-        Expanded(child: SelectableText(v)),
-      ],
-    ),
-  );
-}
-
-/// Fires deliberately-failing calls across the trio and tabulates how
-/// each protocol reports the same failure. Demonstrates FR-D-4: one
-/// error taxonomy, three idioms (REST/A2A → HTTP status + class,
-/// MCP → JSON-RPC code in an HTTP-200 envelope).
-class _ErrorTaxonomySection extends ConsumerStatefulWidget {
-  const _ErrorTaxonomySection();
-
-  @override
-  ConsumerState<_ErrorTaxonomySection> createState() =>
-      _ErrorTaxonomySectionState();
-}
-
-class _ScenarioRow {
-  _ScenarioRow(this.name, this.detail, this.rest, this.mcp, this.a2a);
-  final String name;
-  final String detail;
-  final InvocationResult rest;
-  final InvocationResult mcp;
-  final InvocationResult a2a;
-}
-
-class _ErrorTaxonomySectionState extends ConsumerState<_ErrorTaxonomySection> {
-  bool _running = false;
-  List<_ScenarioRow> _rows = const [];
-
-  Future<void> _run() async {
-    setState(() => _running = true);
-    final rest = ref.read(restClientProvider);
-    final mcp = ref.read(mcpClientProvider);
-    final a2a = ref.read(a2aClientProvider);
-
-    // Auth scenario needs unauthenticated clients. Reuse the resolved
-    // base URLs from the providers, just drop the token.
-    final dio = ref.read(dioProvider);
-    final restNoAuth = RestClient(dio, baseUrl: rest.baseUrl, token: '');
-    final mcpNoAuth = McpClient(dio, baseUrl: mcp.baseUrl, token: '');
-    final a2aNoAuth = A2aClient(dio, baseUrl: a2a.baseUrl, token: '');
-
-    Future<_ScenarioRow> scenario(
-      String name,
-      String detail, {
-      required Future<InvocationResult> Function(RestClient) onRest,
-      required Future<InvocationResult> Function(McpClient) onMcp,
-      required Future<InvocationResult> Function(A2aClient) onA2a,
-      bool noAuth = false,
-    }) async {
-      final results = await Future.wait([
-        onRest(noAuth ? restNoAuth : rest),
-        onMcp(noAuth ? mcpNoAuth : mcp),
-        onA2a(noAuth ? a2aNoAuth : a2a),
-      ]);
-      return _ScenarioRow(name, detail, results[0], results[1], results[2]);
-    }
-
-    final rows = await Future.wait([
-      // narrate requires `subject`; an empty body fails validation.
-      scenario(
-        'validation',
-        'narrate {} — missing required "subject"',
-        onRest: (c) => c.invoke('narrate', const {}),
-        onMcp: (c) => c.invoke('narrate', const {}),
-        onA2a: (c) => c.invoke('narrate', const {}),
-      ),
-      scenario(
-        'not found',
-        'invoke "__missing__" — unknown tool',
-        onRest: (c) => c.invoke('__missing__', const {}),
-        onMcp: (c) => c.invoke('__missing__', const {}),
-        onA2a: (c) => c.invoke('__missing__', const {}),
-      ),
-      scenario(
-        'auth',
-        'echo with no bearer token',
-        onRest: (c) => c.invoke('echo', const {}),
-        onMcp: (c) => c.invoke('echo', const {}),
-        onA2a: (c) => c.invoke('echo', const {}),
-        noAuth: true,
-      ),
-    ]);
-
-    if (!mounted) return;
-    setState(() {
-      _rows = rows;
-      _running = false;
-    });
-  }
-
-  /// Short per-protocol cell: HTTP status + error class for REST/A2A,
-  /// JSON-RPC code for MCP (whose failures ride an HTTP-200 envelope).
-  String _cell(InvocationResult r, {required bool mcp}) {
-    final cls =
-        (r.raw['error'] as String?) ?? (r.raw['metadata']?['error'] as String?);
-    if (mcp) {
-      if (r.errorCode != null) {
-        return 'rpc ${r.errorCode}${cls != null ? ' · $cls' : ''}';
-      }
-      return r.ok ? '200 ok' : '200 ${r.error ?? '?'}';
-    }
-    return '${r.statusCode}${cls != null ? ' · $cls' : ''}';
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return ExpansionTile(
-      leading: const Icon(Icons.rule),
-      title: const Text('Error taxonomy'),
-      subtitle: const Text('one failure, three idioms — FR-D-4'),
-      childrenPadding: const EdgeInsets.fromLTRB(24, 0, 24, 16),
-      expandedCrossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Align(
-          alignment: Alignment.centerLeft,
-          child: FilledButton.icon(
-            icon: _running
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(Icons.play_arrow),
-            label: const Text('Run error scenarios'),
-            onPressed: _running ? null : _run,
-          ),
-        ),
-        const SizedBox(height: 12),
-        if (_rows.isNotEmpty)
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: DataTable(
-              columns: const [
-                DataColumn(label: Text('scenario')),
-                DataColumn(label: Text('REST')),
-                DataColumn(label: Text('MCP')),
-                DataColumn(label: Text('A2A')),
-              ],
-              rows: [
-                for (final row in _rows)
-                  DataRow(
-                    cells: [
-                      DataCell(
-                        Tooltip(message: row.detail, child: Text(row.name)),
-                      ),
-                      DataCell(Text(_cell(row.rest, mcp: false))),
-                      DataCell(Text(_cell(row.mcp, mcp: true))),
-                      DataCell(Text(_cell(row.a2a, mcp: false))),
-                    ],
-                  ),
-              ],
-            ),
-          ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 6),
         Text(
-          'Not shown live (need server config / upstream behaviour, '
-          'covered by backend integration tests): rate-limit '
-          '429 / rpc -32002, circuit-open 503, upstream timeout 504.',
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-            color: Theme.of(context).colorScheme.onSurfaceVariant,
-          ),
+          'MCP carries embedded ui:// reports; REST/A2A are plain.',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const SizedBox(height: 16),
+        const Text('A2UI render'),
+        const SizedBox(height: 6),
+        SegmentedButton<String>(
+          segments: const [
+            ButtonSegment(value: 'raw', label: Text('JSON')),
+            ButtonSegment(value: '0.8', label: Text('v0.8')),
+            ButtonSegment(value: '0.9', label: Text('v0.9')),
+          ],
+          selected: {_a2uiVersion == '' ? 'raw' : _a2uiVersion},
+          onSelectionChanged: (s) =>
+              setState(() => _a2uiVersion = s.first == 'raw' ? '' : s.first),
+        ),
+        if (t != null && _secondaryArgKeys(t).isNotEmpty) ...[
+          const SizedBox(height: 20),
+          Text('Arguments', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 4),
+          Text('The message box fills "${_primaryArgKey(t)}".',
+              style: Theme.of(context).textTheme.bodySmall),
+          const SizedBox(height: 8),
+          for (final name in _secondaryArgKeys(t)) _argField(t, name),
+        ],
+        const SizedBox(height: 20),
+        ExpansionTile(
+          tilePadding: EdgeInsets.zero,
+          title: const Text('Advanced'),
+          children: [
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              title: const Text('Stream (REST)'),
+              value: _streaming,
+              onChanged: (v) => setState(() => _streaming = v),
+            ),
+            if (_turns.isNotEmpty && _turns.last.result != null) ...[
+              const SizedBox(height: 8),
+              Text('Last raw envelope',
+                  style: Theme.of(context).textTheme.bodySmall),
+              const SizedBox(height: 4),
+              SizedBox(
+                height: 180,
+                child: SingleChildScrollView(
+                  child: SelectableText(
+                    const JsonEncoder.withIndent('  ')
+                        .convert(_turns.last.result!.raw),
+                    style:
+                        const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                  ),
+                ),
+              ),
+            ],
+          ],
         ),
       ],
+    );
+  }
+
+  Widget _argField(ToolDescriptor t, String name) {
+    final prop = ((t.inputSchema['properties'] as Map?)?[name] as Map?)
+            ?.cast<String, dynamic>() ??
+        const {};
+    final type = prop['type'] as String?;
+    if (type == 'boolean') {
+      return SwitchListTile(
+        contentPadding: EdgeInsets.zero,
+        dense: true,
+        title: Text(name),
+        value: _extraArgs[name] as bool? ?? false,
+        onChanged: (v) => setState(() => _extraArgs[name] = v),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: TextField(
+        controller: _extraCtrls[name],
+        decoration: InputDecoration(
+          labelText: name,
+          helperText: prop['description'] as String?,
+          border: const OutlineInputBorder(),
+          isDense: true,
+        ),
+        onChanged: (v) {
+          dynamic val = v;
+          if (type == 'integer') val = int.tryParse(v) ?? v;
+          if (type == 'number') val = double.tryParse(v) ?? v;
+          _extraArgs[name] = val;
+        },
+      ),
     );
   }
 }
