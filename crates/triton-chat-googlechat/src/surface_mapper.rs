@@ -360,13 +360,53 @@ fn action_button(label: &str, token: &str) -> Value {
     })
 }
 
-/// Build a Cards v2 reply carrying `text` plus the interactive widgets.
-/// Each `(spec, token)` renders to a button / dropdown / form whose submit
-/// `onClick.action` carries the signed `token`; Google echoes it (plus any
-/// `formInputs`) on the `CARD_CLICKED` event, where the adapter verifies
-/// and re-dispatches. `workspace_addon` selects the reply envelope.
+/// A `Dashboard` lifted off a surface for Cards v2 rendering: its title
+/// and `(label, value)` metric tiles.
+pub type DashboardData = (String, Vec<(String, String)>);
+
+/// Extract the first `Dashboard` component from a dispatch result's
+/// surface (title + tiles). `None` when there's no surface or no
+/// dashboard.
+pub fn dashboard_from_result(result: &Value) -> Option<DashboardData> {
+    let surface = extract_surface(result).ok()?;
+    surface.components.iter().find_map(|c| match c {
+        Component::Dashboard { title, tiles } => Some((
+            title.clone(),
+            tiles
+                .iter()
+                .map(|t| (t.label.clone(), t.value.clone()))
+                .collect::<Vec<_>>(),
+        )),
+        _ => None,
+    })
+}
+
+/// A Cards v2 section rendering the dashboard's tiles as a 2-column grid
+/// (the metric value as each item's title, the label as its subtitle).
+fn dashboard_section(dashboard: &DashboardData) -> Value {
+    let (title, tiles) = dashboard;
+    let items: Vec<Value> = tiles
+        .iter()
+        .map(|(label, value)| serde_json::json!({ "title": value, "subtitle": label }))
+        .collect();
+    let mut section = serde_json::json!({
+        "widgets": [ { "grid": { "columnCount": 2, "items": items } } ]
+    });
+    if !title.is_empty() {
+        section["header"] = serde_json::json!(title);
+    }
+    section
+}
+
+/// Build a Cards v2 reply carrying `text`, an optional `dashboard` grid,
+/// and the interactive widgets. Each `(spec, token)` renders to a button /
+/// dropdown / form whose submit `onClick.action` carries the signed
+/// `token`; Google echoes it (plus any `formInputs`) on the `CARD_CLICKED`
+/// event, where the adapter verifies and re-dispatches. `workspace_addon`
+/// selects the reply envelope.
 pub fn build_interactive_card(
     text: &str,
+    dashboard: Option<&DashboardData>,
     signed: &[(InteractiveSpec, String)],
     workspace_addon: bool,
 ) -> Value {
@@ -449,11 +489,16 @@ pub fn build_interactive_card(
     if !pending.is_empty() {
         widgets.push(serde_json::json!({ "buttonList": { "buttons": pending } }));
     }
+    // The dashboard grid first (the chart-as-tiles), then the actions.
+    let mut sections: Vec<Value> = Vec::new();
+    if let Some(d) = dashboard {
+        sections.push(dashboard_section(d));
+    }
+    if !widgets.is_empty() {
+        sections.push(serde_json::json!({ "widgets": widgets }));
+    }
     let mut message = serde_json::json!({
-        "cardsV2": [ {
-            "cardId": "agent-actions",
-            "card": { "sections": [ { "widgets": widgets } ] }
-        } ]
+        "cardsV2": [ { "cardId": "agent-actions", "card": { "sections": sections } } ]
     });
     if !text.is_empty() {
         message["text"] = serde_json::json!(text);
@@ -769,7 +814,7 @@ mod tests {
                 "FORM.MAC".to_string(),
             ),
         ];
-        let body = build_interactive_card("the answer", &signed, false);
+        let body = build_interactive_card("the answer", None, &signed, false);
         assert_eq!(body["text"], serde_json::json!("the answer"));
         let widgets = body["cardsV2"][0]["card"]["sections"][0]["widgets"]
             .as_array()
@@ -817,11 +862,47 @@ mod tests {
             },
             "T".to_string(),
         )];
-        let body = build_interactive_card("hi", &signed, true);
+        let body = build_interactive_card("hi", None, &signed, true);
         assert!(body.get("cardsV2").is_none());
         assert!(body.get("text").is_none());
         let msg = &body["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"];
         assert_eq!(msg["text"], serde_json::json!("hi"));
         assert!(msg["cardsV2"].is_array());
+    }
+
+    #[test]
+    fn dashboard_is_lifted_and_rendered_as_a_grid() {
+        let result = serde_json::json!({
+            "surface": { "components": [
+                { "kind": "narration", "text": "top risk" },
+                { "kind": "dashboard", "title": "Stock at risk (€)", "tiles": [
+                    { "label": "Alpine Metals AG", "value": "€2.19M" },
+                    { "label": "Catalonia Carbon", "value": "€1.79M" }
+                ] }
+            ] }
+        });
+        let dash = dashboard_from_result(&result).expect("dashboard lifted");
+        assert_eq!(dash.0, "Stock at risk (€)");
+        assert_eq!(dash.1.len(), 2);
+
+        let body = build_interactive_card("top risk", Some(&dash), &[], false);
+        let sections = body["cardsV2"][0]["card"]["sections"]
+            .as_array()
+            .expect("sections");
+        // The dashboard section is a grid with the section header = title.
+        let grid_section = &sections[0];
+        assert_eq!(
+            grid_section["header"],
+            serde_json::json!("Stock at risk (€)")
+        );
+        let items = grid_section["widgets"][0]["grid"]["items"]
+            .as_array()
+            .expect("grid items");
+        assert_eq!(items.len(), 2);
+        // value = item title, label = subtitle.
+        assert_eq!(items[0]["title"], serde_json::json!("€2.19M"));
+        assert_eq!(items[0]["subtitle"], serde_json::json!("Alpine Metals AG"));
+        // No dashboard in a result with none.
+        assert!(dashboard_from_result(&serde_json::json!({ "echo": "x" })).is_none());
     }
 }
