@@ -217,6 +217,11 @@ pub fn build_inline_response(msg: &RenderedMessage, workspace_addon: bool) -> Va
 pub const BUTTON_ACTION_FUNCTION: &str = "agent_action";
 /// Parameter key carrying the signed correlation token.
 pub const BUTTON_TOKEN_PARAM: &str = "ct";
+/// Parameter key carrying the button's display label, echoed back on the
+/// `CARD_CLICKED` event so the reply can show WHICH button was tapped
+/// (Google Chat doesn't render a click as a user message). Display-only,
+/// so it is not signed — at worst a caller misattributes its own reply.
+pub const BUTTON_LABEL_PARAM: &str = "lbl";
 
 /// A single form field to render as a Cards v2 input.
 #[derive(Debug, Clone, PartialEq)]
@@ -336,14 +341,20 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
         .collect()
 }
 
-/// One Cards v2 action button carrying the signed correlation `token`.
+/// One Cards v2 action button carrying the signed correlation `token` and
+/// its display `label` (echoed back on click so the reply can show which
+/// button was tapped). `FILLED_TONAL` gives the row a clear tappable look.
 fn action_button(label: &str, token: &str) -> Value {
     serde_json::json!({
         "text": label,
+        "type": "FILLED_TONAL",
         "onClick": {
             "action": {
                 "function": BUTTON_ACTION_FUNCTION,
-                "parameters": [ { "key": BUTTON_TOKEN_PARAM, "value": token } ]
+                "parameters": [
+                    { "key": BUTTON_TOKEN_PARAM, "value": token },
+                    { "key": BUTTON_LABEL_PARAM, "value": label }
+                ]
             }
         }
     })
