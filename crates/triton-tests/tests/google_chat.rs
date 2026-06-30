@@ -86,6 +86,27 @@ fn message_event(sender_name: &str, text: &str) -> Value {
     })
 }
 
+/// A `CARD_CLICKED` interaction event carrying the signed correlation
+/// token in `common.parameters.ct` (the shape a clicked Cards v2 button
+/// produces). `user.name` is the clicker — the adapter resolves identity
+/// off it just like `message.sender` on a MESSAGE.
+fn card_clicked_event(sender_name: &str, token: &str) -> Value {
+    json!({
+        "type": "CARD_CLICKED",
+        "user": { "name": sender_name },
+        "common": { "parameters": { "ct": token } },
+        "space": { "name": "spaces/AAA", "type": "DM" }
+    })
+}
+
+/// Sign `(tool, args)` into a button correlation token under the test
+/// manifest's `correlation_key`, exactly as the adapter does when it
+/// renders a button.
+fn sign_button(tool: &str, args: Value) -> String {
+    triton_correlation::encode_with_cap(tool, &args, b"correlation-key-for-test", 1536)
+        .expect("encode correlation token")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn valid_jwt_message_dispatches_inline_response() {
     let jwks = FakeGoogleJwks::start().await;
@@ -127,6 +148,78 @@ async fn valid_jwt_message_dispatches_inline_response() {
     });
     assert_eq!(post["status_label"], "posted");
     assert_eq!(post["result"], "ok");
+}
+
+/// A `CARD_CLICKED` carrying a valid correlation token re-invokes the
+/// signed `(tool, args)` — the interactive button round-trip. The token
+/// is signed under the same `correlation_key` the adapter renders with,
+/// so it verifies; the click re-dispatches `echo` with the button's args
+/// and the answer comes back inline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn card_clicked_valid_token_redispatches() {
+    let jwks = FakeGoogleJwks::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&jwks)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let jwt = jwks.sign_jwt(standard_claims());
+    let token = sign_button("echo", json!({ "message": "from a click" }));
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&card_clicked_event("users/99", &token))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    // Re-dispatched: echo replies with the button's args.
+    let body: Value = resp.json().await.expect("response body");
+    assert!(
+        body["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("from a click"),
+        "expected the re-dispatched echo answer; got: {body}"
+    );
+
+    let audit = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["protocol"] == "messenger:google_chat"
+    });
+    assert_eq!(audit["who"], "alice");
+    assert_eq!(audit["result"], "ok");
+}
+
+/// A `CARD_CLICKED` whose correlation token doesn't verify under the
+/// adapter's `correlation_key` MUST be rejected — otherwise a crafted
+/// click that reaches the (authenticated) webhook could invoke an
+/// arbitrary tool with arbitrary args.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn card_clicked_forged_token_is_rejected() {
+    let jwks = FakeGoogleJwks::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&jwks)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let jwt = jwks.sign_jwt(standard_claims());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        // Well-formed envelope, but the token is not signed by our key.
+        .json(&card_clicked_event("users/99", "Zm9yZ2Vk.Zm9yZ2Vk"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert_eq!(
+        resp.status(),
+        401,
+        "a CARD_CLICKED with an unverifiable correlation token must be rejected"
+    );
+
+    let rejected = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "rejected" && v["protocol"] == "messenger:google_chat"
+    });
+    assert_eq!(rejected["result"], "error:auth");
 }
 
 /// #134: a token from the **current** Google Chat console — a standard

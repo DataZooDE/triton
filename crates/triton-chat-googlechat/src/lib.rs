@@ -107,6 +107,15 @@ const PAIRING_TENANT: &str = "pairing";
 /// audit lines never blur with the real command's.
 const PROTOCOL_RESOLVE: &str = "messenger:google_chat:identity";
 
+/// Byte cap on a button's signed correlation token. Google Chat's
+/// `onClick.action` parameters are far roomier than Telegram's 64-byte
+/// `callback_data` (`triton_correlation`'s default), so we allow a
+/// generous bound while still rejecting an absurd token before HMACing
+/// it (the webhook is an HTTP boundary; an oversized inbound shouldn't
+/// force a large allocate + MAC). 1.5 KiB comfortably fits a tool name +
+/// a modest args object signed and base64'd.
+const CARD_CORRELATION_CAP: usize = 1536;
+
 /// Principal shape the `upstream` resolver tool returns.
 #[derive(Debug, Deserialize)]
 struct ResolvedPrincipal {
@@ -126,6 +135,9 @@ pub struct GoogleChatAdapter {
     dispatcher: Arc<Dispatcher>,
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
+    /// HMAC key signing/verifying button correlation tokens (FR-I,
+    /// the `CARD_CLICKED` round-trip). Resolved from `correlation_key`.
+    correlation_key: Vec<u8>,
 }
 
 impl GoogleChatAdapter {
@@ -250,13 +262,15 @@ impl GoogleChatAdapter {
             }
         };
 
-        // `correlation_key` isn't functionally consumed in PR 33
-        // (no Buttons mean no HMAC correlation tokens) but we still
-        // resolve it so a bad `env://` ref fails closed at boot.
-        resolver
+        // `correlation_key` signs the HMAC tokens on rendered buttons
+        // and verifies them on the `CARD_CLICKED` callback (see the
+        // `surface_mapper::buttons_from_result` + `card_token` paths).
+        // Resolved at boot so a bad `env://` ref also fails closed.
+        let correlation_key = resolver
             .resolve(&adapter.correlation_key)
             .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?;
+            .map_err(|e| BuildError::Resolve("correlation_key", e))?
+            .into_bytes();
 
         // PR 28 headroom rationale: see triton-chat-telegram.
         const ADAPTER_HEADROOM: u32 = 10;
@@ -283,6 +297,7 @@ impl GoogleChatAdapter {
             dispatcher,
             rate_limit,
             per_tenant_limit,
+            correlation_key,
         })
     }
 
@@ -316,6 +331,62 @@ struct GoogleChatEvent {
     kind: String,
     #[serde(default)]
     message: Option<GoogleChatMessage>,
+    /// Present on `CARD_CLICKED`: the user who clicked (top-level on the
+    /// interaction event, unlike `MESSAGE` where the actor is
+    /// `message.sender`).
+    #[serde(default)]
+    user: Option<GoogleChatSender>,
+    /// `CARD_CLICKED` action payload (modern shape): `common.parameters`
+    /// is the flat `{key: value}` map of the clicked button's
+    /// `onClick.action.parameters`.
+    #[serde(default)]
+    common: Option<EventCommon>,
+    /// `CARD_CLICKED` action payload (legacy shape): `action.parameters`
+    /// is a `[{key, value}]` list. We read whichever is present.
+    #[serde(default)]
+    action: Option<EventAction>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EventCommon {
+    #[serde(default)]
+    parameters: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EventAction {
+    #[serde(default)]
+    parameters: Vec<EventActionParam>,
+}
+
+#[derive(Debug, Deserialize)]
+struct EventActionParam {
+    #[serde(default)]
+    key: String,
+    #[serde(default)]
+    value: String,
+}
+
+impl GoogleChatEvent {
+    /// The signed correlation token a `CARD_CLICKED` carries in the
+    /// button's [`surface_mapper::BUTTON_TOKEN_PARAM`] parameter, read
+    /// from whichever action shape Google sent (modern `common.parameters`
+    /// map or legacy `action.parameters` list).
+    fn card_token(&self) -> Option<&str> {
+        if let Some(common) = &self.common
+            && let Some(v) = common.parameters.get(surface_mapper::BUTTON_TOKEN_PARAM)
+        {
+            return Some(v);
+        }
+        if let Some(action) = &self.action {
+            for p in &action.parameters {
+                if p.key == surface_mapper::BUTTON_TOKEN_PARAM {
+                    return Some(&p.value);
+                }
+            }
+        }
+        None
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -422,42 +493,89 @@ async fn handle_webhook(
         }
     };
 
-    // Non-MESSAGE events (ADDED_TO_SPACE, REMOVED_FROM_SPACE,
-    // CARD_CLICKED) are out of scope for PR 33. We ack 200 with an
-    // empty body so Google doesn't retry; no dispatch, no rejection
-    // audit (it's a normal opt-out, not an error).
-    if event.kind != "MESSAGE" {
-        return (
-            StatusCode::OK,
-            axum::Json(Value::Object(Default::default())),
-        )
-            .into_response();
-    }
-
-    let Some(message) = event.message else {
-        // Type=MESSAGE without a message body is malformed; refuse.
-        record_rejection(
-            &adapter,
-            "-",
-            "-",
-            TritonError::Validation("MESSAGE event missing message body".into()),
-        );
-        return (StatusCode::BAD_REQUEST, "missing message").into_response();
+    // Resolve the event into `(sender, tool, args)` for the shared
+    // identity → dispatch → reply tail below. Two interactive kinds:
+    //   * MESSAGE      — a typed message; `route_command` picks the tool.
+    //   * CARD_CLICKED — a button click; the signed correlation token on
+    //     the button carries the `(tool, args)` to re-invoke. We
+    //     HMAC-verify it here, so a forged click that reaches the
+    //     (authenticated) webhook still can't drive an arbitrary tool.
+    // Other events (ADDED_TO_SPACE, REMOVED_FROM_SPACE, ...) are acked
+    // 200 with an empty body so Google doesn't retry.
+    let (sender_name, tool_name, args): (String, String, Value) = match event.kind.as_str() {
+        "MESSAGE" => {
+            let Some(message) = event.message else {
+                record_rejection(
+                    &adapter,
+                    "-",
+                    "-",
+                    TritonError::Validation("MESSAGE event missing message body".into()),
+                );
+                return (StatusCode::BAD_REQUEST, "missing message").into_response();
+            };
+            let Some(text) = message.text.as_deref().filter(|s| !s.is_empty()) else {
+                // Empty text (Google sends these for image/attachments) —
+                // out of scope; ack and ignore.
+                return (
+                    StatusCode::OK,
+                    axum::Json(Value::Object(Default::default())),
+                )
+                    .into_response();
+            };
+            let sender = message
+                .sender
+                .as_ref()
+                .and_then(|s| s.name.as_deref())
+                .unwrap_or("")
+                .to_string();
+            let (tool, args) = route_command(text, &adapter.inbound_tool);
+            (sender, tool, args)
+        }
+        "CARD_CLICKED" => {
+            let Some(token) = event.card_token() else {
+                record_rejection(
+                    &adapter,
+                    "-",
+                    "-",
+                    TritonError::Validation("CARD_CLICKED missing correlation token".into()),
+                );
+                return (StatusCode::BAD_REQUEST, "missing action").into_response();
+            };
+            let (tool, args) = match triton_correlation::decode_with_cap(
+                token,
+                &adapter.correlation_key,
+                CARD_CORRELATION_CAP,
+            ) {
+                Ok(p) => p,
+                Err(_) => {
+                    // Forged/expired/oversized token — never trust the
+                    // click's tool/args. Audited as `error:auth`.
+                    record_rejection(
+                        &adapter,
+                        "-",
+                        "-",
+                        TritonError::Auth("CARD_CLICKED correlation token invalid".into()),
+                    );
+                    return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+                }
+            };
+            let sender = event
+                .user
+                .as_ref()
+                .and_then(|u| u.name.as_deref())
+                .unwrap_or("")
+                .to_string();
+            (sender, tool, args)
+        }
+        _ => {
+            return (
+                StatusCode::OK,
+                axum::Json(Value::Object(Default::default())),
+            )
+                .into_response();
+        }
     };
-    let Some(text) = message.text.as_deref().filter(|s| !s.is_empty()) else {
-        // Empty text — Google sometimes sends these for image/attach
-        // ments. We don't handle those in PR 33; ack and ignore.
-        return (
-            StatusCode::OK,
-            axum::Json(Value::Object(Default::default())),
-        )
-            .into_response();
-    };
-    let sender_name = message
-        .sender
-        .as_ref()
-        .and_then(|s| s.name.as_deref())
-        .unwrap_or("");
+    let sender_name = sender_name.as_str();
 
     // FR-I-7 sender resolution → (sub, scopes, tenant).
     let (sub, scopes, tenant) = match &adapter.identity {
@@ -520,7 +638,6 @@ async fn handle_webhook(
         trace_id: uuid::Uuid::new_v4().to_string(),
     };
     let principal_for_post = principal.clone();
-    let (tool_name, args) = route_command(text, &adapter.inbound_tool);
 
     let result = adapter
         .dispatcher
@@ -529,19 +646,19 @@ async fn handle_webhook(
     match result {
         Ok(dispatch) => match render_dispatch_result(&dispatch.result) {
             Ok(rendered) => {
-                if rendered.deferred_buttons
-                    + rendered.deferred_selections
+                // Selection/Form/Dashboard still defer (Cards for those
+                // aren't wired); Buttons now render as Cards v2 actions.
+                if rendered.deferred_selections
                     + rendered.deferred_forms
                     + rendered.deferred_dashboards
                     > 0
                 {
                     tracing::warn!(
                         tool = tool_name,
-                        deferred_buttons = rendered.deferred_buttons,
                         deferred_selections = rendered.deferred_selections,
                         deferred_forms = rendered.deferred_forms,
                         deferred_dashboards = rendered.deferred_dashboards,
-                        "google_chat surface mapper: interactive components deferred (Cards not yet wired)",
+                        "google_chat surface mapper: non-button interactive components deferred (Cards not yet wired)",
                     );
                 }
                 if rendered.truncated {
@@ -551,7 +668,35 @@ async fn handle_webhook(
                         "google_chat surface mapper: rendered text exceeded cap; truncated",
                     );
                 }
-                let body = surface_mapper::build_inline_response(&rendered, workspace_addon);
+                // Sign each interactive Button's (tool, args) into a
+                // correlation token and render it as a Cards v2 action; on
+                // click Google echoes the token back on CARD_CLICKED, where
+                // we HMAC-verify and re-dispatch. A button whose token
+                // would exceed the cap is dropped (logged), never sent.
+                let signed: Vec<(String, String)> = surface_mapper::buttons_from_result(
+                    &dispatch.result,
+                )
+                .into_iter()
+                .filter_map(|b| {
+                    match triton_correlation::encode_with_cap(
+                        &b.tool,
+                        &b.args,
+                        &adapter.correlation_key,
+                        CARD_CORRELATION_CAP,
+                    ) {
+                        Ok(token) => Some((b.label, token)),
+                        Err(e) => {
+                            tracing::warn!(tool = b.tool, error = %e, "google_chat: dropping button (correlation token too large)");
+                            None
+                        }
+                    }
+                })
+                .collect();
+                let body = if signed.is_empty() {
+                    surface_mapper::build_inline_response(&rendered, workspace_addon)
+                } else {
+                    surface_mapper::build_card_message(&rendered.text, &signed, workspace_addon)
+                };
                 adapter.dispatcher.record_post(
                     &tool_name,
                     PROTOCOL,
