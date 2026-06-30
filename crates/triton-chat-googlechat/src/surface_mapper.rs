@@ -180,16 +180,23 @@ fn truncate_to_char_boundary(s: &str, max: usize) -> &str {
 /// add-on always signs with the Workspace Add-ons service agent, so the
 /// token is the authoritative signal and no operator config is needed.
 pub fn text_reply_body(text: &str, workspace_addon: bool) -> Value {
+    wrap_message(serde_json::json!({ "text": text }), workspace_addon)
+}
+
+/// Wrap a Chat `Message` object in the reply envelope for the app's
+/// flavor: bare for a classic/dedicated app, nested in
+/// `hostAppDataAction → chatDataAction → createMessageAction` for a
+/// Workspace Add-on (see [`text_reply_body`]). Used for both the
+/// plain-text and the card (`cardsV2`) replies.
+fn wrap_message(message: Value, workspace_addon: bool) -> Value {
     if workspace_addon {
         serde_json::json!({
             "hostAppDataAction": {
-                "chatDataAction": {
-                    "createMessageAction": { "message": { "text": text } }
-                }
+                "chatDataAction": { "createMessageAction": { "message": message } }
             }
         })
     } else {
-        serde_json::json!({ "text": text })
+        message
     }
 }
 
@@ -199,6 +206,84 @@ pub fn text_reply_body(text: &str, workspace_addon: bool) -> Value {
 /// [`text_reply_body`]).
 pub fn build_inline_response(msg: &RenderedMessage, workspace_addon: bool) -> Value {
     text_reply_body(&msg.text, workspace_addon)
+}
+
+/// The `function` name stamped on a rendered button's `onClick.action`
+/// and echoed back on the `CARD_CLICKED` event. The per-button
+/// `(tool, args)` rides a single signed correlation token in the
+/// `ct` parameter, so this name is constant.
+pub const BUTTON_ACTION_FUNCTION: &str = "agent_button";
+/// Parameter key carrying the signed correlation token on a button.
+pub const BUTTON_TOKEN_PARAM: &str = "ct";
+
+/// An interactive `Button` lifted off a Surface, with the `(tool, args)`
+/// the click must re-invoke. The adapter signs `(tool, args)` into a
+/// correlation token (it holds the key; this stays key-free) and renders
+/// it via [`build_card_message`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ButtonSpec {
+    pub label: String,
+    pub tool: String,
+    pub args: Value,
+}
+
+/// Extract the interactive `Button` components from a dispatch result's
+/// A2UI surface, in order. Empty when the result isn't a surface or has
+/// no buttons (caller then sends a plain text reply).
+pub fn buttons_from_result(result: &Value) -> Vec<ButtonSpec> {
+    let Ok(surface) = extract_surface(result) else {
+        return Vec::new();
+    };
+    surface
+        .components
+        .iter()
+        .filter_map(|c| match c {
+            Component::Button { label, tool, args } => Some(ButtonSpec {
+                label: label.clone(),
+                tool: tool.clone(),
+                args: args.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Build a Cards v2 reply that carries the rendered `text` plus a button
+/// row. Each `(label, token)` becomes a Cards v2 button whose
+/// `onClick.action` re-invokes the app with the signed correlation
+/// `token` in the [`BUTTON_TOKEN_PARAM`] parameter — Google echoes that
+/// parameter back on the `CARD_CLICKED` event, where the adapter
+/// HMAC-verifies it and re-dispatches. `workspace_addon` selects the
+/// reply envelope, exactly like [`text_reply_body`].
+pub fn build_card_message(
+    text: &str,
+    signed_buttons: &[(String, String)],
+    workspace_addon: bool,
+) -> Value {
+    let buttons: Vec<Value> = signed_buttons
+        .iter()
+        .map(|(label, token)| {
+            serde_json::json!({
+                "text": label,
+                "onClick": {
+                    "action": {
+                        "function": BUTTON_ACTION_FUNCTION,
+                        "parameters": [ { "key": BUTTON_TOKEN_PARAM, "value": token } ]
+                    }
+                }
+            })
+        })
+        .collect();
+    let mut message = serde_json::json!({
+        "cardsV2": [ {
+            "cardId": "agent-actions",
+            "card": { "sections": [ { "widgets": [ { "buttonList": { "buttons": buttons } } ] } ] }
+        } ]
+    });
+    if !text.is_empty() {
+        message["text"] = serde_json::json!(text);
+    }
+    wrap_message(message, workspace_addon)
 }
 
 #[cfg(test)]
@@ -433,5 +518,52 @@ mod tests {
                 ["message"]["text"],
             serde_json::json!("answer")
         );
+    }
+
+    #[test]
+    fn buttons_are_lifted_off_the_surface() {
+        let result = serde_json::json!({
+            "surface": { "components": [
+                { "kind": "text", "value": "hi" },
+                { "kind": "button", "label": "Ask again",
+                  "tool": "assistant", "args": { "question": "redo?" } }
+            ] }
+        });
+        let buttons = buttons_from_result(&result);
+        assert_eq!(buttons.len(), 1);
+        assert_eq!(buttons[0].label, "Ask again");
+        assert_eq!(buttons[0].tool, "assistant");
+        assert_eq!(buttons[0].args, serde_json::json!({ "question": "redo?" }));
+        // A non-surface result yields no buttons.
+        assert!(buttons_from_result(&serde_json::json!({ "echo": "x" })).is_empty());
+    }
+
+    #[test]
+    fn card_message_carries_text_and_a_signed_button() {
+        let signed = vec![("Ask again".to_string(), "BODY.MAC".to_string())];
+        let body = build_card_message("the answer", &signed, false);
+        assert_eq!(body["text"], serde_json::json!("the answer"));
+        let btn =
+            &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
+        assert_eq!(btn["text"], serde_json::json!("Ask again"));
+        assert_eq!(
+            btn["onClick"]["action"]["function"],
+            serde_json::json!(BUTTON_ACTION_FUNCTION)
+        );
+        let param = &btn["onClick"]["action"]["parameters"][0];
+        assert_eq!(param["key"], serde_json::json!(BUTTON_TOKEN_PARAM));
+        assert_eq!(param["value"], serde_json::json!("BODY.MAC"));
+    }
+
+    #[test]
+    fn card_message_addon_envelope_nests_cardsv2() {
+        let signed = vec![("Go".to_string(), "T".to_string())];
+        let body = build_card_message("hi", &signed, true);
+        // No top-level cardsV2/text on the add-on flavor — it's nested.
+        assert!(body.get("cardsV2").is_none());
+        assert!(body.get("text").is_none());
+        let msg = &body["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"];
+        assert_eq!(msg["text"], serde_json::json!("hi"));
+        assert!(msg["cardsV2"].is_array());
     }
 }
