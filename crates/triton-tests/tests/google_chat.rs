@@ -192,6 +192,66 @@ async fn oidc_issuer_jwt_message_dispatches_inline_response() {
     assert_eq!(audit["result"], "ok");
 }
 
+/// A Chat app deployed as a **Google Workspace Add-on** signs its
+/// webhook with the Google-managed Workspace Add-ons service agent
+/// (`service-<project>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com`)
+/// rather than the legacy `chat@system` SA. That namespace is
+/// google.com-owned — only Google can sign as it — so it is just as
+/// unforgeable an actor proof. #141 only knew `chat@system` and rejected
+/// this token; it MUST now be accepted (real captured flavor).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn oidc_token_from_workspace_addon_actor_is_accepted() {
+    const OIDC_AUDIENCE: &str = "https://triton.example.com/google_chat/webhook";
+    let oidc_manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-google-chat-oidc-test.yaml")
+        .display()
+        .to_string();
+
+    let jwks = FakeGoogleJwks::start().await;
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), oidc_manifest),
+        (
+            "TRITON_GOOGLE_CHAT_JWKS_URI".to_string(),
+            jwks.oidc_jwks_uri(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let now = unix_now();
+    let token = jwks.sign_jwt(json!({
+        "iss": GOOGLE_OIDC_ISS,
+        "aud": OIDC_AUDIENCE,
+        "iat": now,
+        "exp": now + 600,
+        "sub": "1029384756",
+        // Workspace Add-ons service agent — the actor Google stamps for a
+        // Chat app deployed as a Workspace Add-on.
+        "email": "service-190449745291@gcp-sa-gsuiteaddons.iam.gserviceaccount.com",
+        "email_verified": true,
+    }));
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&message_event("users/99", "hello from a workspace add-on"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(
+        resp.status().is_success(),
+        "Workspace Add-on actor token must be accepted, got {}",
+        resp.status()
+    );
+
+    let audit = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["protocol"] == "messenger:google_chat"
+    });
+    assert_eq!(audit["who"], "alice");
+    assert_eq!(audit["result"], "ok");
+}
+
 /// Codex security review (#141 follow-up): the OIDC issuer
 /// `accounts.google.com` is shared by EVERY Google-minted ID token —
 /// anyone with a Google service account can mint one via IAM

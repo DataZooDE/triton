@@ -78,10 +78,56 @@ const ACCEPTED_ISSUERS: &[&str] = &[
 /// token — the discriminator that proves an `accounts.google.com` token
 /// was minted for Chat rather than by any other Google caller.
 const CHAT_PLATFORM_SA: &str = "chat@system.gserviceaccount.com";
+/// Google-managed domain of the **Workspace Add-ons service agent**. A
+/// Chat app deployed as a Google Workspace Add-on (rather than a plain
+/// Chat API app) signs its webhook with the per-project service agent
+/// `service-<PROJECT_NUMBER>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com`
+/// instead of `chat@system`. This is a `google.com`-owned
+/// `gserviceaccount.com` namespace that customers cannot create service
+/// accounts in, so — exactly like `chat@system` — ONLY Google can sign
+/// as an identity in it; it is just as unforgeable a Chat-actor proof.
+/// #141 only knew the legacy + `chat@system` flavors and rejected this
+/// one (`NotChatPlatform`), which blocked Workspace Add-on deployments.
+const WORKSPACE_ADDONS_SA_DOMAIN: &str = "gcp-sa-gsuiteaddons.iam.gserviceaccount.com";
 /// Clock skew Google's docs implicitly allow on inbound JWTs (the
 /// platform stamps `iat`/`exp` against its own clock, which can
 /// drift up to a few minutes). We allow 5 minutes each direction.
 const CLOCK_SKEW_SECS: u64 = 300;
+
+/// Is `email` the Google-managed Workspace Add-ons service agent
+/// (`service-<digits>@gcp-sa-gsuiteaddons.iam.gserviceaccount.com`)? The
+/// domain must match EXACTLY (not a suffix) so a lookalike like
+/// `…gserviceaccount.com.evil.example` — or an attacker's own
+/// `service-1@their-project.iam.gserviceaccount.com` — does not pass;
+/// only Google can mint a token whose `email` sits in the add-ons
+/// namespace.
+fn is_workspace_addon_actor(email: &str) -> bool {
+    email
+        .strip_prefix("service-")
+        .and_then(|rest| rest.split_once('@'))
+        .is_some_and(|(project, domain)| {
+            !project.is_empty()
+                && project.bytes().all(|b| b.is_ascii_digit())
+                && domain == WORKSPACE_ADDONS_SA_DOMAIN
+        })
+}
+
+/// Does this token's `(iss, email)` prove it was minted for Google Chat?
+/// Three accepted shapes (see [`ACCEPTED_ISSUERS`] for why each is
+/// self-proving):
+///   * **legacy** — `iss == chat@system.gserviceaccount.com` (the issuer
+///     IS the Chat platform identity; no further actor check needed);
+///   * **modern Chat app** — OIDC issuer + `email == chat@system…`;
+///   * **Workspace Add-on** — OIDC issuer + `email` is the Google-managed
+///     Workspace Add-ons service agent ([`is_workspace_addon_actor`]).
+///
+/// On the OIDC flavors the issuer (`accounts.google.com`) and `aud` (our
+/// public App URL) are not Chat-specific, so the `email` actor is the
+/// proof; the signature (verified against Google's keyset) is what makes
+/// that `email` claim trustworthy.
+fn is_chat_actor(iss: &str, email: &str) -> bool {
+    iss == CHAT_PLATFORM_SA || email == CHAT_PLATFORM_SA || is_workspace_addon_actor(email)
+}
 
 #[derive(Debug, Clone)]
 pub struct VerifierConfig {
@@ -205,10 +251,12 @@ impl GoogleJwtVerifier {
         // #141 follow-up (Codex security review): on the OIDC flavor the
         // issuer `accounts.google.com` is shared by every Google ID token
         // and `aud` is our public App URL, so neither proves the token
-        // came from Chat. Require the Chat-specific `email` claim. The
-        // legacy issuer IS `chat@system.gserviceaccount.com`, so a token
-        // whose issuer already equals it needs no further actor check.
-        if claims.iss != CHAT_PLATFORM_SA && claims.email != CHAT_PLATFORM_SA {
+        // came from Chat. Require a Chat-specific actor in the `email`
+        // claim — either the legacy `chat@system` SA or, for a Workspace
+        // Add-on deployment, the Google-managed Workspace Add-ons service
+        // agent (see `is_chat_actor`). The legacy issuer IS `chat@system`,
+        // so a token whose issuer already equals it needs no actor check.
+        if !is_chat_actor(&claims.iss, &claims.email) {
             return Err(VerifyError::NotChatPlatform(claims.email));
         }
         Ok(claims)
@@ -350,5 +398,51 @@ mod tests {
         assert!(ACCEPTED_ISSUERS.contains(&"chat@system.gserviceaccount.com"));
         // A non-Google issuer must NOT be in the set.
         assert!(!ACCEPTED_ISSUERS.contains(&"https://evil.example.com"));
+    }
+
+    #[test]
+    fn legacy_and_modern_chat_actors_are_accepted() {
+        // Legacy: the issuer itself is the Chat platform SA.
+        assert!(is_chat_actor("chat@system.gserviceaccount.com", ""));
+        // Modern Chat app: OIDC issuer + chat@system email.
+        assert!(is_chat_actor(
+            "https://accounts.google.com",
+            "chat@system.gserviceaccount.com"
+        ));
+    }
+
+    #[test]
+    fn workspace_addon_service_agent_is_a_chat_actor() {
+        // A Chat app deployed as a Google Workspace Add-on signs with the
+        // per-project Workspace Add-ons service agent (real captured shape).
+        let email = "service-190449745291@gcp-sa-gsuiteaddons.iam.gserviceaccount.com";
+        assert!(is_workspace_addon_actor(email));
+        assert!(is_chat_actor("https://accounts.google.com", email));
+    }
+
+    #[test]
+    fn non_chat_actors_are_rejected() {
+        // An attacker's own Google-signed SA is not a Chat actor.
+        assert!(!is_chat_actor(
+            "https://accounts.google.com",
+            "attacker@evil-project.iam.gserviceaccount.com"
+        ));
+        // Right local-part shape, WRONG (attacker-creatable) domain.
+        assert!(!is_workspace_addon_actor(
+            "service-123@evil-project.iam.gserviceaccount.com"
+        ));
+        // Domain must match exactly — a suffix lookalike must not pass.
+        assert!(!is_workspace_addon_actor(
+            "service-1@gcp-sa-gsuiteaddons.iam.gserviceaccount.com.evil.example"
+        ));
+        // Non-numeric project segment.
+        assert!(!is_workspace_addon_actor(
+            "service-abc@gcp-sa-gsuiteaddons.iam.gserviceaccount.com"
+        ));
+        // Missing the `service-` prefix / not an email at all.
+        assert!(!is_workspace_addon_actor(
+            "190449745291@gcp-sa-gsuiteaddons.iam.gserviceaccount.com"
+        ));
+        assert!(!is_workspace_addon_actor("not-an-email"));
     }
 }
