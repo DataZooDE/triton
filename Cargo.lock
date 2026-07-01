@@ -2502,10 +2502,12 @@ name = "triton-chat-googlechat"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "base64",
  "jsonwebtoken",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
