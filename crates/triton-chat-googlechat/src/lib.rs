@@ -740,11 +740,19 @@ async fn handle_webhook(
                         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
                     }
                 };
-                // Merge any Selection/Form values the user supplied onto the
+                // Merge the user-supplied Selection/Form values onto the
                 // token's signed base args (the token fixed the TOOL; the
-                // values are user query params bound by the named-query layer).
+                // values are user query params bound by the named-query
+                // layer). Skip EMPTY values: Google Chat submits *every*
+                // input on the card with *any* action, so tapping a
+                // preset button also sends the (blank) follow-up form and
+                // dropdown — an empty merge would clobber the button's own
+                // preset args (e.g. blank out its `question`). Only a value
+                // the user actually entered/selected overrides the preset.
                 let inputs = event.form_inputs();
-                if !inputs.is_empty() {
+                let non_empty: Vec<(String, String)> =
+                    inputs.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+                if !non_empty.is_empty() {
                     let map = match &mut args {
                         Value::Object(m) => m,
                         other => {
@@ -752,7 +760,7 @@ async fn handle_webhook(
                             other.as_object_mut().unwrap()
                         }
                     };
-                    for (k, v) in inputs {
+                    for (k, v) in non_empty {
                         map.insert(k, Value::String(v));
                     }
                 }
