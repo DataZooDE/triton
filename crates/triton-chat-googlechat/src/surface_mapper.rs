@@ -5,15 +5,11 @@
 //! Cards are a follow-up PR).
 //!
 //! Output discipline:
-//!   * Text → plain text, no escaping (Google Chat's default
-//!     `text` field is plain — Markdown-style escaping would
-//!     just show backslashes to the user).
-//!   * Narration → wrapped in single-asterisk italic per Google
-//!     Chat's text formatting rules (`*italic*`), the closest
-//!     analogue to Telegram's `<i>` and Discord's `*`. We escape
-//!     any bare `*` in the user text so the italic markers stay
-//!     balanced.
-//!   * Button / Selection / Form / Dashboard → deferred, counted.
+//! - Text (the answer) → its portable markdown is normalised into Google
+//!   Chat's text syntax (bold, bullets, links, headers) via [`to_google_chat`].
+//! - Narration (a short aside) → Google Chat italic (`_…_`); NB Google Chat's
+//!   `*` is *bold*, not italic.
+//! - Button / Selection / Form / Dashboard → deferred, counted.
 //!
 //! Truncation strategy mirrors Telegram's PR 20: chunks are
 //! pre-rendered, joined with `\n\n`, and if the total exceeds
@@ -21,6 +17,7 @@
 //! and append a sentinel. Cuts always land between chunks, never
 //! mid-component, so italic markers stay balanced.
 
+use regex::Regex;
 use serde_json::Value;
 use triton_core::a2ui::{Component, FormFieldKind, Surface, extract_surface};
 use triton_manifest::{LogoStyle, Theme};
@@ -68,10 +65,15 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     for c in &surface.components {
         match c {
             Component::Text { value } => {
-                chunks.push(value.clone());
+                // The answer: normalise the model's portable markdown (bold,
+                // bullets, links, headers) into Google Chat's text syntax.
+                chunks.push(to_google_chat(value));
             }
             Component::Narration { text } => {
-                chunks.push(format!("*{}*", escape_italic(text)));
+                // A short aside → Google Chat italic (`_…_`). NOT `*…*`, which
+                // Google Chat renders as *bold* — the whole answer used to come
+                // through here, so every reply was one bold blob.
+                chunks.push(format!("_{}_", escape_underscore(text)));
             }
             Component::Button { .. } => {
                 deferred_buttons += 1;
@@ -141,13 +143,52 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     })
 }
 
-/// Escape `*` in narration text so the wrapping `*...*` italic
-/// markers don't unbalance. Google Chat's text formatting treats
-/// `*` as the italic delimiter; the rest of the syntax
-/// (`_underline_`, `~strikethrough~`, ``` `code` ```) we leave
-/// alone because the mapper only emits italics.
-fn escape_italic(s: &str) -> String {
-    s.replace('*', "\\*")
+/// Escape `_` in narration text so the wrapping `_…_` italic markers stay
+/// balanced (Google Chat's italic delimiter).
+fn escape_underscore(s: &str) -> String {
+    s.replace('_', "\\_")
+}
+
+/// Normalise the model's portable markdown into Google Chat's text syntax so
+/// the answer renders formatted (bold figures, bulleted lists, links, headers)
+/// instead of showing raw `**` / `[]()`. Google Chat's rules differ from
+/// CommonMark: `*x*` = **bold**, `_x_` = _italic_, bullets are `- ` lines,
+/// links are `<url|text>`. We map the common CommonMark the model emits:
+///
+/// - `**x**` / `__x__` → `*x*` (bold)
+/// - `#`/`##`/`###` heading → `*…*` (Google Chat has no headings)
+/// - `- x` / `* x` list marker → `- x` (bulleted list line)
+/// - `[text](url)` → `<url|text>`
+///
+/// Single `*`/`_` (italic) and `` `code` `` are left as-is (already valid).
+fn to_google_chat(md: &str) -> String {
+    use std::sync::LazyLock;
+    static HEADER: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\s{0,3}#{1,6}\s+(.*?)\s*$").unwrap());
+    static BULLET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\s*)[-*]\s+(.*)$").unwrap());
+    static LINK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(([^)\s]+)\)").unwrap());
+    static BOLD_STAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*([^*\n]+)\*\*").unwrap());
+    static BOLD_UNDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"__([^_\n]+)__").unwrap());
+
+    let mut out: Vec<String> = Vec::new();
+    for raw in md.lines() {
+        // Block level: a header becomes a bold line; a list marker normalises
+        // to `- ` (so a `* ` bullet isn't mistaken for bold).
+        let line = if let Some(c) = HEADER.captures(raw) {
+            format!("*{}*", &c[1])
+        } else if let Some(c) = BULLET.captures(raw) {
+            format!("{}- {}", &c[1], &c[2])
+        } else {
+            raw.to_string()
+        };
+        // Inline: links first (so a `[` inside doesn't trip bold), then bold.
+        let line = LINK.replace_all(&line, "<$2|$1>");
+        let line = BOLD_STAR.replace_all(&line, "*$1*");
+        let line = BOLD_UNDER.replace_all(&line, "*$1*");
+        out.push(line.into_owned());
+    }
+    out.join("\n")
 }
 
 /// UTF-8-safe truncation at the largest char boundary `<= max`.
@@ -629,7 +670,7 @@ mod tests {
             ],
         };
         let r = render(&s).expect("renders");
-        assert_eq!(r.text, "hello\n\n*a footnote*");
+        assert_eq!(r.text, "hello\n\n_a footnote_");
         assert_eq!(r.deferred_buttons, 0);
         assert!(!r.truncated);
     }
@@ -718,18 +759,16 @@ mod tests {
     }
 
     #[test]
-    fn narration_asterisks_are_escaped() {
-        // Bare `*` in narration text would unbalance the italic
-        // wrapping. Escape so the user-visible string is what the
-        // tool actually emitted (with literal asterisks rendered
-        // as backslash-asterisk per Google Chat's escape syntax).
+    fn narration_is_italic_and_underscores_escaped() {
+        // Narration → Google Chat italic (`_…_`). A bare `_` would unbalance
+        // the wrapping, so it's escaped; `*` is left untouched.
         let s = Surface {
             components: vec![Component::Narration {
-                text: "danger * zone".into(),
+                text: "danger _zone_ *ok*".into(),
             }],
         };
         let r = render(&s).expect("renders");
-        assert_eq!(r.text, "*danger \\* zone*");
+        assert_eq!(r.text, "_danger \\_zone\\_ *ok*_");
     }
 
     #[test]
@@ -795,7 +834,33 @@ mod tests {
             ],
         };
         let r = render(&s).expect("renders");
-        assert_eq!(r.text, "1\n\n*2*\n\n3\n\n*4*");
+        assert_eq!(r.text, "1\n\n_2_\n\n3\n\n_4_");
+    }
+
+    #[test]
+    fn text_markdown_is_normalised_to_google_chat() {
+        // Bold: **/__ → single-star bold.
+        assert_eq!(
+            to_google_chat("stock **€2.19M** at __risk__"),
+            "stock *€2.19M* at *risk*"
+        );
+        // Header → bold line (Google Chat has no headers).
+        assert_eq!(to_google_chat("## Top suppliers"), "*Top suppliers*");
+        // Bullets: `-` and `*` markers both normalise to `- ` (never bold).
+        assert_eq!(
+            to_google_chat("- Alpine\n* Catalonia"),
+            "- Alpine\n- Catalonia"
+        );
+        // Links → `<url|text>`.
+        assert_eq!(
+            to_google_chat("see [the report](https://x.example/r)"),
+            "see <https://x.example/r|the report>"
+        );
+        // Plain text + inline code are untouched.
+        assert_eq!(to_google_chat("id `SUP-001` ok"), "id `SUP-001` ok");
+        // A full answer keeps its structure.
+        let out = to_google_chat("**Alpine Metals** leads.\n- share: 17.6%\n- rating: CCC");
+        assert_eq!(out, "*Alpine Metals* leads.\n- share: 17.6%\n- rating: CCC");
     }
 
     #[test]
