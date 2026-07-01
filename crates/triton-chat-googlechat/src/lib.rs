@@ -116,6 +116,67 @@ const PROTOCOL_RESOLVE: &str = "messenger:google_chat:identity";
 /// a modest args object signed and base64'd.
 const CARD_CORRELATION_CAP: usize = 1536;
 
+/// Correlation-token cap for a dashboard image URL. A dashboard spec
+/// (title + up to a few dozen tiles) signed + base64'd is larger than a
+/// button's, but still bounded well under a URL-length limit.
+const DASHBOARD_TOKEN_CAP: usize = 8192;
+/// Correlation-token "tool" marker for a dashboard image token — lets the
+/// image route reject a button/form token replayed at `…/img/`.
+const DASHBOARD_MARKER: &str = "__dashboard_png";
+/// PNG canvas width (matches the standalone `triton-rasterizer` bin).
+const DASHBOARD_PNG_WIDTH: u32 = 1200;
+
+/// Public base URL for the chart-image route Google fetches. Prefer an
+/// explicit `TRITON_GOOGLE_CHAT_PUBLIC_BASE`; else derive it from the
+/// inbound request's forwarded host (a tunnel/proxy sets it to the public
+/// hostname). `None` → no reachable base, so the dashboard falls back to
+/// the self-contained tile grid instead of an image. Always `https`
+/// (Google Chat requires HTTPS image URLs).
+fn public_base(headers: &HeaderMap) -> Option<String> {
+    if let Ok(base) = std::env::var("TRITON_GOOGLE_CHAT_PUBLIC_BASE") {
+        let base = base.trim().trim_end_matches('/');
+        if !base.is_empty() {
+            return Some(base.to_string());
+        }
+    }
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(axum::http::header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|h| !h.is_empty())?;
+    // A loopback host (no proxy header) isn't reachable by Google.
+    if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
+        return None;
+    }
+    Some(format!("https://{host}"))
+}
+
+/// Sign a dashboard spec into a chart-image URL under `…/img/{token}`, or
+/// `None` when there's no reachable public base or the spec won't fit the
+/// token cap (caller then renders the tile-grid fallback).
+fn dashboard_image_url(
+    adapter: &GoogleChatAdapter,
+    headers: &HeaderMap,
+    dashboard: &surface_mapper::DashboardData,
+) -> Option<String> {
+    let base = public_base(headers)?;
+    let (title, tiles) = dashboard;
+    let spec = serde_json::json!({
+        "title": title,
+        "tiles": tiles.iter().map(|(l, v)| serde_json::json!({ "label": l, "value": v }))
+            .collect::<Vec<_>>(),
+    });
+    let token = triton_correlation::encode_with_cap(
+        DASHBOARD_MARKER,
+        &spec,
+        &adapter.correlation_key,
+        DASHBOARD_TOKEN_CAP,
+    )
+    .ok()?;
+    Some(format!("{base}/{}/img/{token}", adapter.name))
+}
+
 /// Principal shape the `upstream` resolver tool returns.
 #[derive(Debug, Deserialize)]
 struct ResolvedPrincipal {
@@ -304,10 +365,60 @@ impl GoogleChatAdapter {
     /// Mount the inbound webhook at `/<adapter-name>/webhook`.
     pub fn router(self: Arc<Self>) -> Router {
         let name = self.name.clone();
-        let path = format!("/{name}/webhook");
+        let webhook = format!("/{name}/webhook");
+        // On-demand chart images: Google fetches `…/img/{token}` (anonymous,
+        // no Chat JWT), where `token` is the signed dashboard spec. The
+        // signature is the only gate; the handler decodes, rasterises, and
+        // returns a PNG.
+        let img = format!("/{name}/img/{{token}}");
         Router::new()
-            .route(&path, post(handle_webhook))
+            .route(&webhook, post(handle_webhook))
+            .route(&img, axum::routing::get(serve_dashboard_png))
             .with_state(self)
+    }
+}
+
+/// GET `…/img/{token}` — decode the signed dashboard spec, rasterise it to
+/// a PNG in-process, and return it. Unauthenticated by design (Google
+/// fetches card images anonymously); the HMAC-signed token is the
+/// capability, so only URLs this adapter minted resolve.
+async fn serve_dashboard_png(
+    State(adapter): State<Arc<GoogleChatAdapter>>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> Response {
+    let (marker, spec) = match triton_correlation::decode_with_cap(
+        &token,
+        &adapter.correlation_key,
+        DASHBOARD_TOKEN_CAP,
+    ) {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+    if marker != DASHBOARD_MARKER {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let req: triton_rasterizer::DashboardRequest = match serde_json::from_value(spec) {
+        Ok(r) => r,
+        Err(_) => return (StatusCode::BAD_REQUEST, "bad spec").into_response(),
+    };
+    if req.validate().is_err() {
+        return (StatusCode::BAD_REQUEST, "spec too large").into_response();
+    }
+    let (svg, height) = triton_rasterizer::svg::build(&req);
+    match triton_rasterizer::render::render_png(&svg, DASHBOARD_PNG_WIDTH, height) {
+        Ok(png) => (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "image/png"),
+                (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
+            ],
+            png,
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::warn!(error = %e, "google_chat: dashboard rasterise failed");
+            (StatusCode::INTERNAL_SERVER_ERROR, "render failed").into_response()
+        }
     }
 }
 
@@ -777,15 +888,21 @@ async fn handle_webhook(
                     }
                     _ => rendered.text.clone(),
                 };
-                // Render the Dashboard (if any) as a Cards v2 grid of metric
-                // tiles — no longer deferred.
+                // Render the Dashboard (if any): a rasterised chart PNG when
+                // we can mint a reachable image URL (Triton serves it on
+                // demand at `…/img/{token}`), else a self-contained Cards v2
+                // tile grid.
                 let dashboard = surface_mapper::dashboard_from_result(&dispatch.result);
+                let dash_img = dashboard
+                    .as_ref()
+                    .and_then(|d| dashboard_image_url(&adapter, &headers, d));
                 let body = if signed.is_empty() && dashboard.is_none() {
                     surface_mapper::text_reply_body(&reply_text, workspace_addon)
                 } else {
                     surface_mapper::build_interactive_card(
                         &reply_text,
                         dashboard.as_ref(),
+                        dash_img.as_deref(),
                         &signed,
                         workspace_addon,
                     )

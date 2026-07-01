@@ -298,6 +298,63 @@ async fn card_clicked_form_submit_merges_inputs() {
     assert_eq!(audit["result"], "ok");
 }
 
+/// The chart-image route: `GET …/img/{token}` decodes the signed dashboard
+/// spec and returns a rasterised PNG. Google fetches this URL anonymously
+/// (no Chat JWT), so the signed token is the only gate — a token signed
+/// with our key resolves; the response is `image/png`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dashboard_image_route_returns_a_png() {
+    let jwks = FakeGoogleJwks::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&jwks)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let spec = json!({
+        "title": "Stock at risk (€)",
+        "tiles": [
+            { "label": "Alpine Metals AG", "value": "€2.19M" },
+            { "label": "Catalonia Carbon", "value": "€1.79M" }
+        ]
+    });
+    let token = triton_correlation::encode_with_cap(
+        "__dashboard_png",
+        &spec,
+        b"correlation-key-for-test",
+        8192,
+    )
+    .expect("encode dashboard token");
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{webhook}/google_chat/img/{token}"))
+        .send()
+        .await
+        .expect("GET img");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("image/png")
+    );
+    let bytes = resp.bytes().await.expect("png bytes");
+    // PNG magic number.
+    assert_eq!(
+        &bytes[..4],
+        b"\x89PNG",
+        "expected a PNG; got {} bytes",
+        bytes.len()
+    );
+
+    // A token signed with a DIFFERENT key must not resolve (404).
+    let forged = triton_correlation::encode_with_cap("__dashboard_png", &spec, b"wrong-key", 8192)
+        .expect("encode");
+    let resp2 = reqwest::Client::new()
+        .get(format!("http://{webhook}/google_chat/img/{forged}"))
+        .send()
+        .await
+        .expect("GET img forged");
+    assert_eq!(resp2.status(), 404);
+}
+
 /// #134: a token from the **current** Google Chat console — a standard
 /// Google OIDC ID token (`iss = https://accounts.google.com`, `aud =`
 /// the App URL, keys from Google's OIDC JWKS) — MUST be accepted,

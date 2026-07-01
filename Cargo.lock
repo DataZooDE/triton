@@ -2512,6 +2512,7 @@ dependencies = [
  "triton-core",
  "triton-correlation",
  "triton-manifest",
+ "triton-rasterizer",
  "triton-secrets",
  "uuid",
 ]

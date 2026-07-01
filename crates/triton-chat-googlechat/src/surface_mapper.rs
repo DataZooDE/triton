@@ -381,17 +381,24 @@ pub fn dashboard_from_result(result: &Value) -> Option<DashboardData> {
     })
 }
 
-/// A Cards v2 section rendering the dashboard's tiles as a 2-column grid
-/// (the metric value as each item's title, the label as its subtitle).
-fn dashboard_section(dashboard: &DashboardData) -> Value {
-    let (title, tiles) = dashboard;
-    let items: Vec<Value> = tiles
-        .iter()
-        .map(|(label, value)| serde_json::json!({ "title": value, "subtitle": label }))
-        .collect();
-    let mut section = serde_json::json!({
-        "widgets": [ { "grid": { "columnCount": 2, "items": items } } ]
-    });
+/// A Cards v2 section for the dashboard. With an `image_url` (a chart PNG
+/// the adapter serves on demand) it renders an `image` widget — the actual
+/// bar chart; otherwise a 2-column `grid` of metric tiles (value as each
+/// item's title, label as its subtitle) as the hosting-free fallback.
+fn dashboard_section(dashboard: &DashboardData, image_url: Option<&str>) -> Value {
+    let (title, _tiles) = dashboard;
+    let widget = match image_url {
+        Some(url) => serde_json::json!({ "image": { "imageUrl": url, "altText": title } }),
+        None => {
+            let items: Vec<Value> = dashboard
+                .1
+                .iter()
+                .map(|(label, value)| serde_json::json!({ "title": value, "subtitle": label }))
+                .collect();
+            serde_json::json!({ "grid": { "columnCount": 2, "items": items } })
+        }
+    };
+    let mut section = serde_json::json!({ "widgets": [ widget ] });
     if !title.is_empty() {
         section["header"] = serde_json::json!(title);
     }
@@ -407,6 +414,7 @@ fn dashboard_section(dashboard: &DashboardData) -> Value {
 pub fn build_interactive_card(
     text: &str,
     dashboard: Option<&DashboardData>,
+    dashboard_image_url: Option<&str>,
     signed: &[(InteractiveSpec, String)],
     workspace_addon: bool,
 ) -> Value {
@@ -492,7 +500,7 @@ pub fn build_interactive_card(
     // The dashboard grid first (the chart-as-tiles), then the actions.
     let mut sections: Vec<Value> = Vec::new();
     if let Some(d) = dashboard {
-        sections.push(dashboard_section(d));
+        sections.push(dashboard_section(d, dashboard_image_url));
     }
     if !widgets.is_empty() {
         sections.push(serde_json::json!({ "widgets": widgets }));
@@ -814,7 +822,7 @@ mod tests {
                 "FORM.MAC".to_string(),
             ),
         ];
-        let body = build_interactive_card("the answer", None, &signed, false);
+        let body = build_interactive_card("the answer", None, None, &signed, false);
         assert_eq!(body["text"], serde_json::json!("the answer"));
         let widgets = body["cardsV2"][0]["card"]["sections"][0]["widgets"]
             .as_array()
@@ -862,7 +870,7 @@ mod tests {
             },
             "T".to_string(),
         )];
-        let body = build_interactive_card("hi", None, &signed, true);
+        let body = build_interactive_card("hi", None, None, &signed, true);
         assert!(body.get("cardsV2").is_none());
         assert!(body.get("text").is_none());
         let msg = &body["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"];
@@ -885,7 +893,7 @@ mod tests {
         assert_eq!(dash.0, "Stock at risk (€)");
         assert_eq!(dash.1.len(), 2);
 
-        let body = build_interactive_card("top risk", Some(&dash), &[], false);
+        let body = build_interactive_card("top risk", Some(&dash), None, &[], false);
         let sections = body["cardsV2"][0]["card"]["sections"]
             .as_array()
             .expect("sections");
@@ -904,5 +912,22 @@ mod tests {
         assert_eq!(items[0]["subtitle"], serde_json::json!("Alpine Metals AG"));
         // No dashboard in a result with none.
         assert!(dashboard_from_result(&serde_json::json!({ "echo": "x" })).is_none());
+    }
+
+    #[test]
+    fn dashboard_with_image_url_renders_an_image_widget() {
+        let dash: DashboardData = (
+            "Stock at risk (€)".into(),
+            vec![("Alpine".into(), "€2.19M".into())],
+        );
+        let url = "https://x.example/google_chat/img/TOKEN";
+        let body = build_interactive_card("top risk", Some(&dash), Some(url), &[], false);
+        let section = &body["cardsV2"][0]["card"]["sections"][0];
+        assert_eq!(section["header"], serde_json::json!("Stock at risk (€)"));
+        let img = &section["widgets"][0]["image"];
+        assert_eq!(img["imageUrl"], serde_json::json!(url));
+        assert_eq!(img["altText"], serde_json::json!("Stock at risk (€)"));
+        // No grid when we have the chart image.
+        assert!(section["widgets"][0].get("grid").is_none());
     }
 }
