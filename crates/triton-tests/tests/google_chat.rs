@@ -489,6 +489,68 @@ async fn card_clicked_render_report_png_renders_as_image() {
     );
 }
 
+/// A manifest `theme` block brands the rendered card end-to-end: the reply
+/// carries a card header (logo + title) and the action button is FILLED in the
+/// brand colour. Proves per-deployment styling reaches the surface via config
+/// alone (no agent change).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_theme_brands_the_reply_card() {
+    let jwks = FakeGoogleJwks::start().await;
+    // The upstream returns a surface with a narration + a button, so the reply
+    // is a Cards v2 card (where branding applies).
+    let upstream = FakeAgent::start_returning(json!({
+        "surface": { "components": [
+            { "kind": "narration", "text": "top risks" },
+            { "kind": "button", "label": "Details", "tool": "assistant", "args": {} }
+        ] }
+    }))
+    .await;
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-google-chat-theme-test.yaml")
+        .display()
+        .to_string();
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), manifest),
+        ("TRITON_GOOGLE_CHAT_JWKS_URI".to_string(), jwks.jwks_uri()),
+        (
+            "TRITON_STATIC_UPSTREAMS".to_string(),
+            format!("assistant={}", upstream.host_port()),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let jwt = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&message_event("users/99", "which suppliers are risky?"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let body: Value = resp.json().await.expect("json reply");
+
+    let card = &body["cardsV2"][0]["card"];
+    assert_eq!(
+        card["header"]["title"],
+        json!("DataZoo Supplier Risk"),
+        "themed card header title; got: {body}"
+    );
+    assert_eq!(
+        card["header"]["imageUrl"],
+        json!("https://brand.example/logo.png")
+    );
+    let btn = &card["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
+    assert_eq!(btn["type"], json!("FILLED"), "brand button is FILLED");
+    // #1A73E8 → blue = 232/255 ≈ 0.91.
+    assert!(
+        btn["color"]["blue"].as_f64().unwrap() > 0.9,
+        "button carries the brand colour; got: {btn}"
+    );
+}
+
 /// #134: a token from the **current** Google Chat console — a standard
 /// Google OIDC ID token (`iss = https://accounts.google.com`, `aud =`
 /// the App URL, keys from Google's OIDC JWKS) — MUST be accepted,
