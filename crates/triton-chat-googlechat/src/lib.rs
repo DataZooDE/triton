@@ -1016,6 +1016,43 @@ async fn handle_webhook(
                 let dash_img = dashboard
                     .as_ref()
                     .and_then(|d| dashboard_image_url(&adapter, &headers, d));
+                // Inline Report: the agent asked to embed a rendered report in
+                // its answer (no button click). Dispatch `render_report` to the
+                // report upstream and show the chart PNG in THIS reply, as the
+                // card's image. Only when there's no native Dashboard (that path
+                // already owns the image slot).
+                let (dashboard, dash_img) = match (
+                    &dashboard,
+                    surface_mapper::report_from_result(&dispatch.result),
+                ) {
+                    (None, Some((report_id, args))) => {
+                        let mut rargs = if args.is_object() {
+                            args
+                        } else {
+                            serde_json::json!({})
+                        };
+                        rargs["report_id"] = serde_json::json!(report_id);
+                        match adapter
+                            .dispatcher
+                            .invoke("render_report", rargs, principal_for_post.clone(), PROTOCOL)
+                            .await
+                        {
+                            Ok(rep) => match upstream_png_bytes(&rep.result)
+                                .and_then(|png| upstream_image_url(&adapter, &headers, png))
+                            {
+                                // Synthetic title-less Dashboard so the shared
+                                // card builder renders the image as its section.
+                                Some(url) => (Some((String::new(), Vec::new())), Some(url)),
+                                None => (dashboard, dash_img),
+                            },
+                            Err(e) => {
+                                tracing::warn!(report = %report_id, error = %e, "google_chat: inline render_report failed; sending answer without the chart");
+                                (dashboard, dash_img)
+                            }
+                        }
+                    }
+                    _ => (dashboard, dash_img),
+                };
                 // An upstream that renders its OWN chart PNG (peacock
                 // `render_report`) carries it as base64 in the result — it uses
                 // components (kpi/vega/table) this adapter can't map to Cards

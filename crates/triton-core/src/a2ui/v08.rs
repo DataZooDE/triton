@@ -82,6 +82,9 @@ fn component_to_json(c: &Component) -> Value {
                 }).collect::<Vec<_>>(),
             }
         }),
+        Component::Report { report_id, args } => json!({
+            "Report": { "report_id": report_id, "args": args }
+        }),
     };
     json!({ "Component": inner })
 }

@@ -69,6 +69,9 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     for c in &surface.components {
         match c {
             Component::Text { value } => chunks.push(value.clone()),
+            // `Report` is an optional inline chart rendered out-of-band by
+            // adapters that support it (Google Chat); ignored by the text mapper.
+            Component::Report { .. } => {}
             Component::Narration { text } => chunks.push(format!("_{}_", text)),
             Component::Button { .. } => deferred_buttons += 1,
             Component::Selection { .. } => deferred_selections += 1,

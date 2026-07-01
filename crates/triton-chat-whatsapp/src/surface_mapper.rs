@@ -143,6 +143,9 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
                     raw: value.clone(),
                 }));
             }
+            // `Report` is an optional inline chart rendered out-of-band by
+            // adapters that support it (Google Chat); ignored by the text mapper.
+            Component::Report { .. } => {}
             Component::Narration { text } => {
                 chunks.push(format!("_{text}_"));
                 raw_sources.push(Some(RawChunk {

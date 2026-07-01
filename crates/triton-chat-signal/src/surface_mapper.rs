@@ -77,6 +77,9 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             Component::Text { value } => {
                 chunks.push(value.clone());
             }
+            // `Report` is an optional inline chart rendered out-of-band by
+            // adapters that support it (Google Chat); ignored by the text mapper.
+            Component::Report { .. } => {}
             Component::Narration { text } => {
                 // Single underscore wraps so Signal's markdown
                 // rendering treats it as italic; the underscores
