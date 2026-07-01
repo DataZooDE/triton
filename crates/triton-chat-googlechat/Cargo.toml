@@ -10,6 +10,7 @@ publish = false
 triton-core = { path = "../triton-core" }
 triton-correlation = { path = "../triton-correlation" }
 triton-manifest = { path = "../triton-manifest" }
+triton-rasterizer = { path = "../triton-rasterizer" }
 triton-secrets = { path = "../triton-secrets" }
 axum = { workspace = true }
 jsonwebtoken = "9"
