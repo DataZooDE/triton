@@ -1,0 +1,39 @@
+# Themed Google Chat adapter: a `theme` block brands the rendered card
+# (header logo/title + brand button colour). Routes plain messages to the
+# `assistant` upstream so the reply is a card (not bare text). Dev-mode
+# literal credentials.
+version: "0.2"
+
+adapters:
+  google_chat:
+    kind: google_chat
+    tool: assistant
+    inbound:
+      kind: webhook
+      signature: google_oidc_jwt
+      audience: "1234567890"
+    outbound:
+      kind: rest_api
+      token: unused-sync-reply
+    identity:
+      kind: sender_table
+      table: '{"users/99":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: card_v2
+      selections: card_v2
+      forms: card_v2
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+    theme:
+      title: "DataZoo Supplier Risk"
+      logo_url: "https://brand.example/logo.png"
+      brand_color: "#1A73E8"
+
+tools:
+  assistant:
+    surface_components: []

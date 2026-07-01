@@ -23,6 +23,7 @@
 
 use serde_json::Value;
 use triton_core::a2ui::{Component, FormFieldKind, Surface, extract_surface};
+use triton_manifest::Theme;
 
 /// Google Chat caps message text at ~32,000 chars; we use byte
 /// count as a conservative proxy.
@@ -341,13 +342,46 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
         .collect()
 }
 
-/// One Cards v2 action button carrying the signed correlation `token` and
-/// its display `label` (echoed back on click so the reply can show which
-/// button was tapped). `FILLED_TONAL` gives the row a clear tappable look.
-fn action_button(label: &str, token: &str) -> Value {
-    serde_json::json!({
+/// Parse `#RRGGBB` into a Cards v2 `color` object (RGBA floats in 0..=1).
+/// `None` for anything that isn't 6 hex digits.
+fn hex_to_color(hex: &str) -> Option<Value> {
+    let h = hex.trim().trim_start_matches('#');
+    if h.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some(serde_json::json!({
+        "red": r as f64 / 255.0,
+        "green": g as f64 / 255.0,
+        "blue": b as f64 / 255.0,
+        "alpha": 1.0,
+    }))
+}
+
+/// A Cards v2 card `header` (logo + title) from the deployment theme, or `None`
+/// when the theme sets neither — the swap point for per-customer branding.
+fn card_header(theme: &Theme) -> Option<Value> {
+    let mut header = serde_json::Map::new();
+    if let Some(title) = theme.title.as_deref().filter(|s| !s.is_empty()) {
+        header.insert("title".into(), serde_json::json!(title));
+    }
+    if let Some(logo) = theme.logo_url.as_deref().filter(|s| !s.is_empty()) {
+        header.insert("imageUrl".into(), serde_json::json!(logo));
+        header.insert("imageType".into(), serde_json::json!("CIRCLE"));
+    }
+    (!header.is_empty()).then_some(Value::Object(header))
+}
+
+/// One Cards v2 action button carrying the signed correlation `token` and its
+/// display `label` (echoed back on click). A `brand_color` in the theme makes
+/// it a `FILLED` button in that colour; otherwise the neutral `FILLED_TONAL`.
+fn action_button(label: &str, token: &str, theme: &Theme) -> Value {
+    let color = theme.brand_color.as_deref().and_then(hex_to_color);
+    let mut btn = serde_json::json!({
         "text": label,
-        "type": "FILLED_TONAL",
+        "type": if color.is_some() { "FILLED" } else { "FILLED_TONAL" },
         "onClick": {
             "action": {
                 "function": BUTTON_ACTION_FUNCTION,
@@ -357,7 +391,11 @@ fn action_button(label: &str, token: &str) -> Value {
                 ]
             }
         }
-    })
+    });
+    if let Some(c) = color {
+        btn["color"] = c;
+    }
+    btn
 }
 
 /// A `Dashboard` lifted off a surface for Cards v2 rendering: its title
@@ -417,6 +455,7 @@ pub fn build_interactive_card(
     dashboard_image_url: Option<&str>,
     signed: &[(InteractiveSpec, String)],
     workspace_addon: bool,
+    theme: &Theme,
 ) -> Value {
     let mut widgets: Vec<Value> = Vec::new();
     // Consecutive plain buttons group into one buttonList row.
@@ -424,7 +463,7 @@ pub fn build_interactive_card(
     for (spec, token) in signed {
         match spec {
             InteractiveSpec::Button { label, .. } => {
-                pending.push(action_button(label, token));
+                pending.push(action_button(label, token, theme));
             }
             InteractiveSpec::Selection {
                 prompt,
@@ -449,7 +488,7 @@ pub fn build_interactive_card(
                     }
                 }));
                 widgets.push(serde_json::json!({
-                    "buttonList": { "buttons": [ action_button("Submit", token) ] }
+                    "buttonList": { "buttons": [ action_button("Submit", token, theme) ] }
                 }));
             }
             InteractiveSpec::Form {
@@ -489,7 +528,7 @@ pub fn build_interactive_card(
                     submit_label
                 };
                 widgets.push(serde_json::json!({
-                    "buttonList": { "buttons": [ action_button(submit, token) ] }
+                    "buttonList": { "buttons": [ action_button(submit, token, theme) ] }
                 }));
             }
         }
@@ -505,8 +544,12 @@ pub fn build_interactive_card(
     if !widgets.is_empty() {
         sections.push(serde_json::json!({ "widgets": widgets }));
     }
+    let mut card = serde_json::json!({ "sections": sections });
+    if let Some(header) = card_header(theme) {
+        card["header"] = header;
+    }
     let mut message = serde_json::json!({
-        "cardsV2": [ { "cardId": "agent-actions", "card": { "sections": sections } } ]
+        "cardsV2": [ { "cardId": "agent-actions", "card": card } ]
     });
     if !text.is_empty() {
         message["text"] = serde_json::json!(text);
@@ -519,12 +562,21 @@ pub fn build_interactive_card(
 /// `render_report` result whose own components (kpi/vega/table) this adapter
 /// can't map — the PNG is the renderable artifact. `workspace_addon` selects
 /// the reply envelope.
-pub fn image_reply_card(text: &str, image_url: &str, workspace_addon: bool) -> Value {
+pub fn image_reply_card(
+    text: &str,
+    image_url: &str,
+    workspace_addon: bool,
+    theme: &Theme,
+) -> Value {
     let section = serde_json::json!({
         "widgets": [ { "image": { "imageUrl": image_url, "altText": "chart" } } ]
     });
+    let mut card = serde_json::json!({ "sections": [ section ] });
+    if let Some(header) = card_header(theme) {
+        card["header"] = header;
+    }
     let mut message = serde_json::json!({
-        "cardsV2": [ { "cardId": "agent-report", "card": { "sections": [ section ] } } ]
+        "cardsV2": [ { "cardId": "agent-report", "card": card } ]
     });
     if !text.is_empty() {
         message["text"] = serde_json::json!(text);
@@ -840,7 +892,8 @@ mod tests {
                 "FORM.MAC".to_string(),
             ),
         ];
-        let body = build_interactive_card("the answer", None, None, &signed, false);
+        let body =
+            build_interactive_card("the answer", None, None, &signed, false, &Theme::default());
         assert_eq!(body["text"], serde_json::json!("the answer"));
         let widgets = body["cardsV2"][0]["card"]["sections"][0]["widgets"]
             .as_array()
@@ -888,7 +941,7 @@ mod tests {
             },
             "T".to_string(),
         )];
-        let body = build_interactive_card("hi", None, None, &signed, true);
+        let body = build_interactive_card("hi", None, None, &signed, true, &Theme::default());
         assert!(body.get("cardsV2").is_none());
         assert!(body.get("text").is_none());
         let msg = &body["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"];
@@ -911,7 +964,8 @@ mod tests {
         assert_eq!(dash.0, "Stock at risk (€)");
         assert_eq!(dash.1.len(), 2);
 
-        let body = build_interactive_card("top risk", Some(&dash), None, &[], false);
+        let body =
+            build_interactive_card("top risk", Some(&dash), None, &[], false, &Theme::default());
         let sections = body["cardsV2"][0]["card"]["sections"]
             .as_array()
             .expect("sections");
@@ -939,7 +993,14 @@ mod tests {
             vec![("Alpine".into(), "€2.19M".into())],
         );
         let url = "https://x.example/google_chat/img/TOKEN";
-        let body = build_interactive_card("top risk", Some(&dash), Some(url), &[], false);
+        let body = build_interactive_card(
+            "top risk",
+            Some(&dash),
+            Some(url),
+            &[],
+            false,
+            &Theme::default(),
+        );
         let section = &body["cardsV2"][0]["card"]["sections"][0];
         assert_eq!(section["header"], serde_json::json!("Stock at risk (€)"));
         let img = &section["widgets"][0]["image"];
@@ -947,5 +1008,55 @@ mod tests {
         assert_eq!(img["altText"], serde_json::json!("Stock at risk (€)"));
         // No grid when we have the chart image.
         assert!(section["widgets"][0].get("grid").is_none());
+    }
+
+    #[test]
+    fn theme_brands_the_card_header_and_buttons() {
+        let theme = Theme {
+            title: Some("DataZoo Supplier Risk".into()),
+            logo_url: Some("https://brand.example/logo.png".into()),
+            brand_color: Some("#1A73E8".into()),
+        };
+        let signed = vec![(
+            InteractiveSpec::Button {
+                label: "Details".into(),
+                tool: "assistant".into(),
+                args: serde_json::json!({}),
+            },
+            "T".to_string(),
+        )];
+        let body = build_interactive_card("hi", None, None, &signed, false, &theme);
+        // Card header = logo + title.
+        let header = &body["cardsV2"][0]["card"]["header"];
+        assert_eq!(header["title"], serde_json::json!("DataZoo Supplier Risk"));
+        assert_eq!(
+            header["imageUrl"],
+            serde_json::json!("https://brand.example/logo.png")
+        );
+        // Button is FILLED in the brand colour (#1A73E8 → 26/115/232).
+        let btn =
+            &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
+        assert_eq!(btn["type"], serde_json::json!("FILLED"));
+        assert!((btn["color"]["red"].as_f64().unwrap() - 26.0 / 255.0).abs() < 1e-6);
+        assert!((btn["color"]["green"].as_f64().unwrap() - 115.0 / 255.0).abs() < 1e-6);
+        assert!((btn["color"]["blue"].as_f64().unwrap() - 232.0 / 255.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn empty_theme_is_unbranded_tonal_with_no_header() {
+        let signed = vec![(
+            InteractiveSpec::Button {
+                label: "Details".into(),
+                tool: "assistant".into(),
+                args: serde_json::json!({}),
+            },
+            "T".to_string(),
+        )];
+        let body = build_interactive_card("hi", None, None, &signed, false, &Theme::default());
+        assert!(body["cardsV2"][0]["card"].get("header").is_none());
+        let btn =
+            &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
+        assert_eq!(btn["type"], serde_json::json!("FILLED_TONAL"));
+        assert!(btn.get("color").is_none());
     }
 }
