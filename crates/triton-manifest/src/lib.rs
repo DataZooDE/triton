@@ -87,6 +87,23 @@ pub struct Theme {
     /// this colour; unset ⇒ the neutral FILLED_TONAL default.
     #[serde(default)]
     pub brand_color: Option<String>,
+    /// How `logo_url` is placed. `avatar` (default) is the small round header
+    /// image — good for a square icon. `banner` is a full-width image at the
+    /// top of the card — good for a wide wordmark that a circular avatar would
+    /// crop.
+    #[serde(default)]
+    pub logo_style: LogoStyle,
+}
+
+/// Placement of a theme's `logo_url` on the rendered card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogoStyle {
+    /// Small round image in the card header (square icon logos).
+    #[default]
+    Avatar,
+    /// Full-width image at the top of the card (wide wordmark logos).
+    Banner,
 }
 
 /// WhatsApp Cloud API template category (Meta's closed set). The agent

@@ -32,6 +32,7 @@ adapters:
     theme:
       title: "DataZoo Supplier Risk"
       logo_url: "https://brand.example/logo.png"
+      logo_style: banner
       brand_color: "#1A73E8"
 
 tools:
