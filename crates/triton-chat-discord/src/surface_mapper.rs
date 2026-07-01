@@ -139,6 +139,9 @@ pub fn render(
             Component::Text { value } => {
                 chunks.push(md_escape(value));
             }
+            // `Report` is an optional inline chart rendered out-of-band by
+            // adapters that support it (Google Chat); ignored by the text mapper.
+            Component::Report { .. } => {}
             Component::Narration { text } => {
                 chunks.push(format!("*{}*", md_escape(text)));
             }

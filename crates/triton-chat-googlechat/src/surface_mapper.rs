@@ -69,6 +69,9 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
                 // bullets, links, headers) into Google Chat's text syntax.
                 chunks.push(to_google_chat(value));
             }
+            // `Report` is an optional inline chart rendered out-of-band by
+            // adapters that support it (Google Chat); ignored by the text mapper.
+            Component::Report { .. } => {}
             Component::Narration { text } => {
                 // A short aside → Google Chat italic (`_…_`). NOT `*…*`, which
                 // Google Chat renders as *bold* — the whole answer used to come
@@ -474,6 +477,18 @@ pub fn dashboard_from_result(result: &Value) -> Option<DashboardData> {
                 .map(|t| (t.label.clone(), t.value.clone()))
                 .collect::<Vec<_>>(),
         )),
+        _ => None,
+    })
+}
+
+/// Extract an inline `Report` request `(report_id, args)` from a result
+/// surface, if present. The handler dispatches `render_report` with these and
+/// embeds the returned chart image in the same reply — so an agent can surface
+/// a rich chart without the user clicking a button.
+pub fn report_from_result(result: &Value) -> Option<(String, Value)> {
+    let surface = extract_surface(result).ok()?;
+    surface.components.iter().find_map(|c| match c {
+        Component::Report { report_id, args } => Some((report_id.clone(), args.clone())),
         _ => None,
     })
 }
@@ -1039,6 +1054,25 @@ mod tests {
         let msg = &body["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"];
         assert_eq!(msg["text"], serde_json::json!("hi"));
         assert!(msg["cardsV2"].is_array());
+    }
+
+    #[test]
+    fn report_component_is_extracted_for_inline_render() {
+        let result = serde_json::json!({
+            "surface": { "components": [
+                { "kind": "text", "value": "over-dependent on Alpine" },
+                { "kind": "report", "report_id": "supplier-concentration",
+                  "args": { "top_n": 10 } }
+            ] }
+        });
+        let (id, args) = report_from_result(&result).expect("report lifted");
+        assert_eq!(id, "supplier-concentration");
+        assert_eq!(args["top_n"], serde_json::json!(10));
+        // No report component → None.
+        let plain = serde_json::json!({
+            "surface": { "components": [ { "kind": "text", "value": "hi" } ] }
+        });
+        assert!(report_from_result(&plain).is_none());
     }
 
     #[test]

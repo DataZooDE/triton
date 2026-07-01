@@ -71,6 +71,16 @@ pub enum Component {
         title: String,
         tiles: Vec<DashboardTile>,
     },
+    /// A rendered report to embed inline: the adapter dispatches
+    /// `render_report(report_id, args)` to the report upstream and
+    /// shows the returned chart image in the same reply — so an agent
+    /// can surface a rich chart without the user clicking a button.
+    /// Surfaces that can't render images degrade to a caption/link.
+    Report {
+        report_id: String,
+        #[serde(default)]
+        args: Value,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
