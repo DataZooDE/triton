@@ -298,6 +298,44 @@ async fn card_clicked_form_submit_merges_inputs() {
     assert_eq!(audit["result"], "ok");
 }
 
+/// A preset button tapped on a card that ALSO has a (blank) form field:
+/// Google submits every input, so the click carries an EMPTY formInput.
+/// That empty value must NOT clobber the button's own signed `message`
+/// arg — the button still drives its preset, not a blanked-out one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn card_clicked_empty_form_input_does_not_clobber_button_args() {
+    let jwks = FakeGoogleJwks::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&jwks)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let jwt = jwks.sign_jwt(standard_claims());
+    // A button signs its full preset args; the co-located form field is
+    // empty and shares the `message` key.
+    let token = sign_button("echo", json!({ "message": "the button preset" }));
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&card_clicked_form_event(
+            "users/99",
+            &token,
+            &[("message", "")],
+        ))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let body: Value = resp.json().await.expect("response body");
+    assert!(
+        body["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("the button preset"),
+        "empty form input must not clobber the button's preset arg; got: {body}"
+    );
+}
+
 /// The chart-image route: `GET …/img/{token}` decodes the signed dashboard
 /// spec and returns a rasterised PNG. Google fetches this URL anonymously
 /// (no Chat JWT), so the signed token is the only gate — a token signed
