@@ -533,16 +533,31 @@ async fn manifest_theme_brands_the_reply_card() {
     let body: Value = resp.json().await.expect("json reply");
 
     let card = &body["cardsV2"][0]["card"];
+    // Header carries the title; the logo is a full-width BANNER (logo_style:
+    // banner), not the header avatar — so no header imageUrl.
     assert_eq!(
         card["header"]["title"],
         json!("DataZoo Supplier Risk"),
         "themed card header title; got: {body}"
     );
-    assert_eq!(
-        card["header"]["imageUrl"],
-        json!("https://brand.example/logo.png")
+    assert!(
+        card["header"].get("imageUrl").is_none(),
+        "banner mode ⇒ no avatar image in the header; got: {card}"
     );
-    let btn = &card["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
+    // First section is the full-width brand logo.
+    assert_eq!(
+        card["sections"][0]["widgets"][0]["image"]["imageUrl"],
+        json!("https://brand.example/logo.png"),
+        "full-width banner logo; got: {body}"
+    );
+    // The brand button (FILLED teal) is in the actions section that follows.
+    let sections = card["sections"].as_array().expect("sections");
+    let btn = sections
+        .iter()
+        .filter_map(|s| s["widgets"].as_array())
+        .flatten()
+        .find_map(|w| w["buttonList"]["buttons"].get(0))
+        .expect("an action button");
     assert_eq!(btn["type"], json!("FILLED"), "brand button is FILLED");
     // #1A73E8 → blue = 232/255 ≈ 0.91.
     assert!(

@@ -23,7 +23,7 @@
 
 use serde_json::Value;
 use triton_core::a2ui::{Component, FormFieldKind, Surface, extract_surface};
-use triton_manifest::Theme;
+use triton_manifest::{LogoStyle, Theme};
 
 /// Google Chat caps message text at ~32,000 chars; we use byte
 /// count as a conservative proxy.
@@ -360,18 +360,36 @@ fn hex_to_color(hex: &str) -> Option<Value> {
     }))
 }
 
-/// A Cards v2 card `header` (logo + title) from the deployment theme, or `None`
-/// when the theme sets neither — the swap point for per-customer branding.
+/// A Cards v2 card `header` (title + optional avatar logo) from the theme, or
+/// `None` when it sets neither. The logo appears here only in `avatar` mode;
+/// `banner` mode renders it as a full-width widget instead (see
+/// [`logo_banner_section`]) so a wide wordmark isn't cropped by the round slot.
 fn card_header(theme: &Theme) -> Option<Value> {
     let mut header = serde_json::Map::new();
     if let Some(title) = theme.title.as_deref().filter(|s| !s.is_empty()) {
         header.insert("title".into(), serde_json::json!(title));
     }
-    if let Some(logo) = theme.logo_url.as_deref().filter(|s| !s.is_empty()) {
+    if theme.logo_style == LogoStyle::Avatar
+        && let Some(logo) = theme.logo_url.as_deref().filter(|s| !s.is_empty())
+    {
         header.insert("imageUrl".into(), serde_json::json!(logo));
         header.insert("imageType".into(), serde_json::json!("CIRCLE"));
     }
     (!header.is_empty()).then_some(Value::Object(header))
+}
+
+/// A full-width logo image section for `banner` mode (a wide wordmark that the
+/// header's round avatar slot would crop), or `None` in `avatar` mode / when no
+/// logo is set. Prepended above the card's content.
+fn logo_banner_section(theme: &Theme) -> Option<Value> {
+    if theme.logo_style != LogoStyle::Banner {
+        return None;
+    }
+    let logo = theme.logo_url.as_deref().filter(|s| !s.is_empty())?;
+    let alt = theme.title.as_deref().unwrap_or("logo");
+    Some(serde_json::json!({
+        "widgets": [ { "image": { "imageUrl": logo, "altText": alt } } ]
+    }))
 }
 
 /// One Cards v2 action button carrying the signed correlation `token` and its
@@ -536,8 +554,12 @@ pub fn build_interactive_card(
     if !pending.is_empty() {
         widgets.push(serde_json::json!({ "buttonList": { "buttons": pending } }));
     }
-    // The dashboard grid first (the chart-as-tiles), then the actions.
+    // A full-width brand logo (banner mode) first, then the dashboard grid
+    // (chart-as-tiles), then the actions.
     let mut sections: Vec<Value> = Vec::new();
+    if let Some(banner) = logo_banner_section(theme) {
+        sections.push(banner);
+    }
     if let Some(d) = dashboard {
         sections.push(dashboard_section(d, dashboard_image_url));
     }
@@ -568,10 +590,15 @@ pub fn image_reply_card(
     workspace_addon: bool,
     theme: &Theme,
 ) -> Value {
-    let section = serde_json::json!({
+    let chart = serde_json::json!({
         "widgets": [ { "image": { "imageUrl": image_url, "altText": "chart" } } ]
     });
-    let mut card = serde_json::json!({ "sections": [ section ] });
+    let mut sections: Vec<Value> = Vec::new();
+    if let Some(banner) = logo_banner_section(theme) {
+        sections.push(banner);
+    }
+    sections.push(chart);
+    let mut card = serde_json::json!({ "sections": sections });
     if let Some(header) = card_header(theme) {
         card["header"] = header;
     }
@@ -1016,6 +1043,7 @@ mod tests {
             title: Some("DataZoo Supplier Risk".into()),
             logo_url: Some("https://brand.example/logo.png".into()),
             brand_color: Some("#1A73E8".into()),
+            logo_style: LogoStyle::Avatar,
         };
         let signed = vec![(
             InteractiveSpec::Button {
@@ -1058,5 +1086,35 @@ mod tests {
             &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
         assert_eq!(btn["type"], serde_json::json!("FILLED_TONAL"));
         assert!(btn.get("color").is_none());
+    }
+
+    #[test]
+    fn banner_logo_renders_full_width_not_in_the_header() {
+        // A wide wordmark: `banner` puts it as a full-width image at the TOP of
+        // the card; the header keeps the title but no avatar image.
+        let theme = Theme {
+            title: Some("DataZoo".into()),
+            logo_url: Some("https://brand.example/wordmark.png".into()),
+            brand_color: None,
+            logo_style: LogoStyle::Banner,
+        };
+        let signed = vec![(
+            InteractiveSpec::Button {
+                label: "Details".into(),
+                tool: "assistant".into(),
+                args: serde_json::json!({}),
+            },
+            "T".to_string(),
+        )];
+        let body = build_interactive_card("hi", None, None, &signed, false, &theme);
+        let card = &body["cardsV2"][0]["card"];
+        // First section is the full-width logo image.
+        assert_eq!(
+            card["sections"][0]["widgets"][0]["image"]["imageUrl"],
+            serde_json::json!("https://brand.example/wordmark.png")
+        );
+        // Header carries the title but NOT an avatar image.
+        assert_eq!(card["header"]["title"], serde_json::json!("DataZoo"));
+        assert!(card["header"].get("imageUrl").is_none());
     }
 }
