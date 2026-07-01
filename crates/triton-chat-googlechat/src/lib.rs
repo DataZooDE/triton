@@ -36,8 +36,11 @@ pub mod jwt_verifier;
 pub mod surface_mapper;
 pub use surface_mapper::RenderedMessage;
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
+
+use base64::Engine as _;
+use sha2::{Digest, Sha256};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -123,8 +126,47 @@ const DASHBOARD_TOKEN_CAP: usize = 8192;
 /// Correlation-token "tool" marker for a dashboard image token — lets the
 /// image route reject a button/form token replayed at `…/img/`.
 const DASHBOARD_MARKER: &str = "__dashboard_png";
+/// Correlation-token "tool" marker for an upstream-rendered chart-image token
+/// (e.g. peacock `render_report`, which returns its own PNG). Distinguishes it
+/// from a dashboard token on the shared `…/img/` route.
+const RENDER_REPORT_IMG_MARKER: &str = "__render_report_png";
 /// PNG canvas width (matches the standalone `triton-rasterizer` bin).
 const DASHBOARD_PNG_WIDTH: u32 = 1200;
+
+/// A tiny FIFO-bounded byte cache for upstream-rendered chart images.
+///
+/// An upstream (peacock `render_report`) hands us a fully-rendered PNG inline
+/// in its result. Google Chat can only show an image by URL, so we stash the
+/// bytes here — already authorised at dispatch time — and serve them at a
+/// signed `…/img/{token}` URL. Ephemeral by design: bounded, in-memory, lost
+/// on restart (cards are short-lived, and a stale image just 404s).
+#[derive(Default)]
+struct ImageCache {
+    map: HashMap<String, Vec<u8>>,
+    order: VecDeque<String>,
+}
+
+impl ImageCache {
+    /// Keep at most this many images (a handful of concurrent chats' worth).
+    const CAP: usize = 64;
+
+    fn insert(&mut self, id: String, bytes: Vec<u8>) {
+        if self.map.contains_key(&id) {
+            return;
+        }
+        self.map.insert(id.clone(), bytes);
+        self.order.push_back(id);
+        while self.order.len() > Self::CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+    }
+
+    fn get(&self, id: &str) -> Option<Vec<u8>> {
+        self.map.get(id).cloned()
+    }
+}
 
 /// Public base URL for the chart-image route Google fetches. Prefer an
 /// explicit `TRITON_GOOGLE_CHAT_PUBLIC_BASE`; else derive it from the
@@ -177,6 +219,49 @@ fn dashboard_image_url(
     Some(format!("{base}/{}/img/{token}", adapter.name))
 }
 
+/// Extract a fully-rendered chart PNG an upstream returned inline. Peacock's
+/// `render_report` carries it at `structuredContent.result._meta.png_base64`;
+/// we search for the first `png_base64` string anywhere in the result so we're
+/// robust to the exact nesting, then base64-decode it.
+fn upstream_png_bytes(result: &Value) -> Option<Vec<u8>> {
+    fn find(v: &Value) -> Option<&str> {
+        match v {
+            Value::Object(m) => m
+                .get("png_base64")
+                .and_then(Value::as_str)
+                .or_else(|| m.values().find_map(find)),
+            Value::Array(a) => a.iter().find_map(find),
+            _ => None,
+        }
+    }
+    let b64 = find(result)?;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .ok()
+}
+
+/// Cache an upstream-rendered chart PNG and sign a `…/img/{token}` URL Google
+/// can fetch it from. The token carries the content-hash id into the ephemeral
+/// [`ImageCache`]. `None` when there's no reachable public base (Google can't
+/// fetch a loopback URL, so the caller falls back to text).
+fn upstream_image_url(
+    adapter: &GoogleChatAdapter,
+    headers: &HeaderMap,
+    png: Vec<u8>,
+) -> Option<String> {
+    let base = public_base(headers)?;
+    let id = format!("{:x}", Sha256::digest(&png));
+    let token = triton_correlation::encode_with_cap(
+        RENDER_REPORT_IMG_MARKER,
+        &serde_json::json!({ "id": id }),
+        &adapter.correlation_key,
+        DASHBOARD_TOKEN_CAP,
+    )
+    .ok()?;
+    adapter.image_cache.lock().unwrap().insert(id, png);
+    Some(format!("{base}/{}/img/{token}", adapter.name))
+}
+
 /// Principal shape the `upstream` resolver tool returns.
 #[derive(Debug, Deserialize)]
 struct ResolvedPrincipal {
@@ -199,6 +284,9 @@ pub struct GoogleChatAdapter {
     /// HMAC key signing/verifying button correlation tokens (FR-I,
     /// the `CARD_CLICKED` round-trip). Resolved from `correlation_key`.
     correlation_key: Vec<u8>,
+    /// Ephemeral cache of upstream-rendered chart PNGs, served on demand at
+    /// the signed `…/img/{token}` route (peacock `render_report`).
+    image_cache: Arc<Mutex<ImageCache>>,
 }
 
 impl GoogleChatAdapter {
@@ -359,6 +447,7 @@ impl GoogleChatAdapter {
             rate_limit,
             per_tenant_limit,
             correlation_key,
+            image_cache: Arc::new(Mutex::new(ImageCache::default())),
         })
     }
 
@@ -378,10 +467,12 @@ impl GoogleChatAdapter {
     }
 }
 
-/// GET `…/img/{token}` — decode the signed dashboard spec, rasterise it to
-/// a PNG in-process, and return it. Unauthenticated by design (Google
-/// fetches card images anonymously); the HMAC-signed token is the
-/// capability, so only URLs this adapter minted resolve.
+/// GET `…/img/{token}` — decode the signed token and return a PNG. Two kinds:
+/// a **dashboard** token (the spec, rasterised in-process) or an
+/// **upstream-image** token (an id into the ephemeral cache of a
+/// pre-rendered chart, e.g. peacock `render_report`). Unauthenticated by
+/// design (Google fetches card images anonymously); the HMAC-signed token is
+/// the capability, so only URLs this adapter minted resolve.
 async fn serve_dashboard_png(
     State(adapter): State<Arc<GoogleChatAdapter>>,
     axum::extract::Path(token): axum::extract::Path<String>,
@@ -394,6 +485,23 @@ async fn serve_dashboard_png(
         Ok(p) => p,
         Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
+    // Upstream-rendered chart PNG (peacock render_report): the token carries an
+    // id into the ephemeral image cache. Serve the bytes verbatim.
+    if marker == RENDER_REPORT_IMG_MARKER {
+        let id = spec.get("id").and_then(Value::as_str).unwrap_or_default();
+        return match adapter.image_cache.lock().unwrap().get(id) {
+            Some(png) => (
+                StatusCode::OK,
+                [
+                    (axum::http::header::CONTENT_TYPE, "image/png"),
+                    (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
+                ],
+                png,
+            )
+                .into_response(),
+            None => (StatusCode::NOT_FOUND, "not found").into_response(),
+        };
+    }
     if marker != DASHBOARD_MARKER {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
@@ -904,7 +1012,31 @@ async fn handle_webhook(
                 let dash_img = dashboard
                     .as_ref()
                     .and_then(|d| dashboard_image_url(&adapter, &headers, d));
-                let body = if signed.is_empty() && dashboard.is_none() {
+                // An upstream that renders its OWN chart PNG (peacock
+                // `render_report`) carries it as base64 in the result — it uses
+                // components (kpi/vega/table) this adapter can't map to Cards
+                // v2, so without this it would render an empty card. Serve the
+                // PNG as an image widget instead. Only when there's no native
+                // Dashboard (that path already owns the image slot).
+                let upstream_img = if dashboard.is_none() {
+                    upstream_png_bytes(&dispatch.result)
+                        .and_then(|png| upstream_image_url(&adapter, &headers, png))
+                } else {
+                    None
+                };
+                let body = if let Some(url) = &upstream_img {
+                    // The chart image IS the payload; a render_report result's
+                    // rendered text can be large (structured rows / the inline
+                    // PNG base64), which blows past Google Chat's message-size
+                    // limit. Caption with just what was tapped, not the text.
+                    let caption = match &action_echo {
+                        Some(echo) if !echo.is_empty() => {
+                            format!("*↳ {}*", echo.replace('*', "\\*"))
+                        }
+                        _ => String::new(),
+                    };
+                    surface_mapper::image_reply_card(&caption, url, workspace_addon)
+                } else if signed.is_empty() && dashboard.is_none() {
                     surface_mapper::text_reply_body(&reply_text, workspace_addon)
                 } else {
                     surface_mapper::build_interactive_card(
