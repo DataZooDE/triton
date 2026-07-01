@@ -393,6 +393,102 @@ async fn dashboard_image_route_returns_a_png() {
     assert_eq!(resp2.status(), 404);
 }
 
+/// The tiniest valid PNG (1×1), base64 — as an upstream returns it inline.
+const TINY_PNG_B64: &str =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMEAP8/xJ8oAAAAAElFTkSuQmCC";
+
+/// A `render_report`-style upstream (peacock) returns its chart as an inline
+/// base64 PNG at `structuredContent.result._meta.png_base64`, plus components
+/// (kpi/vega/table) this adapter can't map to Cards v2. On a `CARD_CLICKED`
+/// the adapter must (a) serve that PNG as a Cards v2 **image** widget via the
+/// signed `…/img/` route, and (b) caption it with just the tapped label — NOT
+/// dump the whole (huge) result JSON as text, which Google rejects as
+/// "message too long". Regression test for both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn card_clicked_render_report_png_renders_as_image() {
+    let jwks = FakeGoogleJwks::start().await;
+    // The upstream `render_report` returns a peacock-shaped artifact: a
+    // multi-key object (so the adapter's text fallback would serialise the
+    // whole thing) carrying the PNG in `_meta`.
+    let upstream = FakeAgent::start_returning(json!({
+        "isError": false,
+        "content": [{ "type": "text", "text": "Supplier concentration" }],
+        "structuredContent": { "result": { "_meta": { "png_base64": TINY_PNG_B64 } } }
+    }))
+    .await;
+    let mut env = env_with(&jwks);
+    env.insert(
+        "TRITON_STATIC_UPSTREAMS".to_string(),
+        format!("render_report={}", upstream.host_port()),
+    );
+    // A reachable public base so the adapter mints an image URL (else it would
+    // fall back to text).
+    env.insert(
+        "TRITON_GOOGLE_CHAT_PUBLIC_BASE".to_string(),
+        "https://chat.example".to_string(),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    // Click the "concentration chart" button: a token routing to render_report.
+    let token = sign_button(
+        "render_report",
+        json!({ "report_id": "supplier-concentration" }),
+    );
+    let jwt = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&card_clicked_event("users/99", &token))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let body: Value = resp.json().await.expect("json reply");
+
+    // The reply is a Cards v2 image card pointing at the /img route.
+    let img_url = body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["image"]["imageUrl"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an image widget, got: {body}"));
+    assert!(
+        img_url.contains("/google_chat/img/"),
+        "image points at the signed /img route: {img_url}"
+    );
+    // The caption is short — the huge result JSON must NOT be dumped as text.
+    let text = body["text"].as_str().unwrap_or_default();
+    assert!(
+        text.len() < 200,
+        "caption must be short, got {} bytes",
+        text.len()
+    );
+    assert!(
+        !text.contains("png_base64"),
+        "must not dump the base64 PNG into the message text"
+    );
+
+    // The /img route serves the actual PNG bytes.
+    let img_token = img_url.rsplit('/').next().expect("token in url");
+    let img = reqwest::Client::new()
+        .get(format!("http://{webhook}/google_chat/img/{img_token}"))
+        .send()
+        .await
+        .expect("GET img");
+    assert!(img.status().is_success(), "img route: {}", img.status());
+    assert_eq!(
+        img.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok()),
+        Some("image/png"),
+    );
+    let bytes = img.bytes().await.expect("png bytes");
+    assert_eq!(
+        &bytes[..4],
+        b"\x89PNG",
+        "expected PNG magic, got {} bytes",
+        bytes.len()
+    );
+}
+
 /// #134: a token from the **current** Google Chat console — a standard
 /// Google OIDC ID token (`iss = https://accounts.google.com`, `aud =`
 /// the App URL, keys from Google's OIDC JWKS) — MUST be accepted,

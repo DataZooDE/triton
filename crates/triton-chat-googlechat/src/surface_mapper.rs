@@ -514,6 +514,24 @@ pub fn build_interactive_card(
     wrap_message(message, workspace_addon)
 }
 
+/// A Cards v2 reply carrying a single upstream-rendered chart image (served at
+/// a signed `…/img/{token}` URL) plus optional lead text. Used for a
+/// `render_report` result whose own components (kpi/vega/table) this adapter
+/// can't map — the PNG is the renderable artifact. `workspace_addon` selects
+/// the reply envelope.
+pub fn image_reply_card(text: &str, image_url: &str, workspace_addon: bool) -> Value {
+    let section = serde_json::json!({
+        "widgets": [ { "image": { "imageUrl": image_url, "altText": "chart" } } ]
+    });
+    let mut message = serde_json::json!({
+        "cardsV2": [ { "cardId": "agent-report", "card": { "sections": [ section ] } } ]
+    });
+    if !text.is_empty() {
+        message["text"] = serde_json::json!(text);
+    }
+    wrap_message(message, workspace_addon)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
