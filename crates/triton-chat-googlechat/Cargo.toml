@@ -25,3 +25,5 @@ uuid = { version = "1", features = ["v4"] }
 # and content-hash it into the ephemeral image-cache key.
 base64 = "0.22"
 sha2 = "0.10"
+# Normalise the agent's portable markdown into Google Chat's text syntax.
+regex = "1"
