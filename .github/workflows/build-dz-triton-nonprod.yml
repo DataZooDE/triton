@@ -1,0 +1,77 @@
+name: build-dz-triton-nonprod
+
+# Nonprod/demo variant of the dz-triton image → ghcr.io/datazoode/dz-triton
+# tagged `:main-devtoken` (+ `:<sha>-devtoken`). IDENTICAL to build-dz-triton.yml
+# except it passes `--build-arg DEV_TOKEN=dev-token`, so the `dev-token` Cargo
+# feature is compiled IN (deploy/triton/Dockerfile already supports this ARG).
+#
+# Why: production `:main` is built `--no-default-features` (dev-token compiled
+# out, ADR-10 / FR-I-5). But the nonprod substrate's dz-triton runs in dev-token
+# mode — no OIDC issuer, no forwarded-auth — and its browser SPAs
+# (dz-triton-explorer, herkules-web) authenticate with `Bearer dev-token`. Those
+# SPAs 401 against a production `:main`. This image keeps the dev-token
+# affordance for nonprod ONLY, on a DISTINCT tag so production `:main` stays
+# hardened. The accepted token defaults to the literal `dev-token`
+# (DEFAULT_DEV_TOKEN); a deploy MAY override via TRITON_DEV_TOKEN (empty = kill
+# switch). NEVER point a production/public deploy at a `-devtoken` tag.
+#
+# workflow_dispatch only (re-run after a triton update to refresh the nonprod
+# image with the latest fixes); the production build-dz-triton.yml is unchanged.
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: build-dz-triton-nonprod-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  packages: write # push the image to ghcr.io (GAR retired, Phase 5)
+  contents: read
+
+jobs:
+  build:
+    name: build + push dz-triton (nonprod, dev-token)
+    runs-on: ubuntu-latest
+    # cargo build --release -p triton-bin from scratch; 60m gives margin.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          set -euo pipefail
+          GHCR="ghcr.io/datazoode/dz-triton"
+          SHORT="${GITHUB_SHA::12}"
+          # Distinct `-devtoken` tags so the nonprod affordance can NEVER be
+          # pulled by a deploy that meant to use the hardened production image.
+          TAGS="${GHCR}:${SHORT}-devtoken"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},${GHCR}:main-devtoken"
+          fi
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "Pushing: ${TAGS}"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/triton/Dockerfile
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          # Opt the dev-token affordance back in for nonprod (see the Dockerfile
+          # ARG DEV_TOKEN). Production build-dz-triton.yml omits this → hardened.
+          build-args: |
+            DEV_TOKEN=dev-token
+          provenance: false
