@@ -39,6 +39,11 @@ pub enum Component {
         label: String,
         tool: String,
         args: Value,
+        /// Optional MCP-App the button references (`ui://<authority>/…`,
+        /// params in the query) — the report-as-surface pattern. Hosts
+        /// that can embed resources may auto-open it; others ignore it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resource: Option<String>,
     },
     Narration {
         text: String,
@@ -148,5 +153,46 @@ impl From<crate::A2uiVersion> for BuilderVersion {
             crate::A2uiVersion::V08 => BuilderVersion::V08,
             crate::A2uiVersion::V09 => BuilderVersion::V09,
         }
+    }
+}
+
+#[cfg(test)]
+mod resource_roundtrip_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// A surface BUTTON may reference an MCP-App (`resource: ui://…`) — the
+    /// agent's report-as-surface pattern. The negotiated A2UI path must
+    /// PRESERVE it through extract → build (it was silently dropped before),
+    /// or hosts can never auto-open the referenced report.
+    #[test]
+    fn button_resource_survives_the_negotiated_round_trip() {
+        let raw = json!({
+            "surface": { "components": [{
+                "kind": "button",
+                "label": "Open report: nba-report",
+                "tool": "render_report",
+                "args": { "report_id": "nba-report", "params": { "account": "beverages-gmbh" } },
+                "resource": "ui://peacock/nba-report?account=beverages-gmbh",
+            }]}
+        });
+        let surface = extract_surface(&raw).expect("valid surface");
+        for version in [BuilderVersion::V08, BuilderVersion::V09] {
+            let envelope = build_envelope(&surface, version);
+            let s = envelope.to_string();
+            assert!(
+                s.contains("ui://peacock/nba-report?account=beverages-gmbh"),
+                "{version:?} must keep the button's resource: {s}"
+            );
+        }
+        // A button WITHOUT a resource stays byte-shaped as before (no null key).
+        let plain = extract_surface(&json!({
+            "surface": { "components": [{
+                "kind": "button", "label": "Ask again", "tool": "assistant", "args": {}
+            }]}
+        }))
+        .expect("valid surface");
+        let envelope = build_envelope(&plain, BuilderVersion::V09);
+        assert!(!envelope.to_string().contains("resource"));
     }
 }

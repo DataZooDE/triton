@@ -252,7 +252,9 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
             Component::Narration { text } => {
                 chunks.push(PreRender::narration(text));
             }
-            Component::Button { label, tool, args } => {
+            Component::Button {
+                label, tool, args, ..
+            } => {
                 match triton_correlation::encode(tool, args, correlation_key) {
                     Ok(token) => {
                         keyboard_rows.push(vec![json!({
@@ -838,6 +840,7 @@ mod tests {
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: json!({}),
+                    resource: None,
                 },
             ],
         };
@@ -872,6 +875,7 @@ mod tests {
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: big_args,
+                    resource: None,
                 },
             ],
         };
@@ -921,6 +925,7 @@ mod tests {
                 label: "Click".into(),
                 tool: "narrate".into(),
                 args: json!({}),
+                resource: None,
             }],
         };
         let r = render(&s, TEST_KEY).expect("renders");

@@ -148,6 +148,7 @@ impl Tool for Narrate {
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: serde_json::json!({ "subject": parsed.subject }),
+                    resource: None,
                 },
             ],
         };
@@ -266,6 +267,7 @@ impl Tool for DemoPanel {
                     label: "Refresh".into(),
                     tool: "demo_panel".into(),
                     args: serde_json::json!({}),
+                    resource: None,
                 },
             ],
         };

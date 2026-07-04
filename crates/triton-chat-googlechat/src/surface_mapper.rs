@@ -344,7 +344,9 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
         .components
         .iter()
         .filter_map(|c| match c {
-            Component::Button { label, tool, args } => Some(InteractiveSpec::Button {
+            Component::Button {
+                label, tool, args, ..
+            } => Some(InteractiveSpec::Button {
                 label: label.clone(),
                 tool: tool.clone(),
                 args: args.clone(),
@@ -711,6 +713,7 @@ mod tests {
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: serde_json::json!({}),
+                    resource: None,
                 },
                 Component::Selection {
                     prompt: "pick".into(),
@@ -768,6 +771,7 @@ mod tests {
                 label: "Click".into(),
                 tool: "narrate".into(),
                 args: serde_json::json!({}),
+                resource: None,
             }],
         };
         assert!(matches!(render(&s), Err(RenderError::EmptyAfterRender)));

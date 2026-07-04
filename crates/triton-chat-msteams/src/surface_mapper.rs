@@ -231,6 +231,7 @@ mod tests {
                     label: "Click".into(),
                     tool: "narrate".into(),
                     args: json!({}),
+                    resource: None,
                 },
             ],
         };

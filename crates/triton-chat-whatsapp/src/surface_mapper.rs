@@ -153,7 +153,9 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
                     raw: text.clone(),
                 }));
             }
-            Component::Button { label, tool, args } => {
+            Component::Button {
+                label, tool, args, ..
+            } => {
                 // #94: render as a Cloud API reply button. The id is a
                 // signed correlation token (NOT the tool/args), so the
                 // user can't re-execute by typing. Defer on encode
@@ -582,6 +584,7 @@ mod tests {
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: json!({}),
+                    resource: None,
                 },
                 Component::Selection {
                     prompt: "pick".into(),
@@ -695,6 +698,7 @@ mod tests {
                 label: "Click".into(),
                 tool: "narrate".into(),
                 args: json!({}),
+                resource: None,
             }],
         };
         let r = render(&s, &KEY).expect("renders");
@@ -713,6 +717,7 @@ mod tests {
             label: label.into(),
             tool: "narrate".into(),
             args: json!({ "subject": label }),
+            resource: None,
         };
         let s = Surface {
             components: vec![
