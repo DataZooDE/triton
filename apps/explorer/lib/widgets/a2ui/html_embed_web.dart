@@ -81,6 +81,30 @@ String? _readMcpPrompt(Object raw) {
 /// fulfil it (dispatching the tool through Triton) and post the result back as
 /// `{type:'mcp:callServerTool:result', reqId, result}`. `mcp:updateModelContext`
 /// is accepted and ignored (a host could relay it to its model).
+/// The page-level `mcp:prompt` handler + its ONE window listener. A prompt
+/// is a page-level intent ("send this text as a user turn"), and several
+/// embeds may be live at once (auto-opened report + clicked sources) — a
+/// per-iframe listener would turn one click into N turns, and filtering by
+/// `event.source == el.contentWindow` cannot work in dart:html (cross-frame
+/// `WindowBase` wrappers are re-created per access, so `==` is never true).
+/// So: exactly one listener, exactly one handler slot (the most recently
+/// mounted embed's — they all funnel to the same chat send anyway).
+void Function(String text)? _activePromptHandler;
+bool _promptListenerInstalled = false;
+
+void _installPromptListener() {
+  if (_promptListenerInstalled) return;
+  _promptListenerInstalled = true;
+  html.window.onMessage.listen((event) {
+    final raw = event.data;
+    if (raw == null) return;
+    final prompt = _readMcpPrompt(raw);
+    if (prompt == null) return;
+    final handler = _activePromptHandler;
+    if (handler != null && prompt.trim().isNotEmpty) handler(prompt.trim());
+  });
+}
+
 Widget embedHtml(
   String htmlStr, {
   required String viewId,
@@ -88,6 +112,10 @@ Widget embedHtml(
   Future<Object?> Function(String name, Object? args)? onCallServerTool,
   void Function(String text)? onPrompt,
 }) {
+  if (onPrompt != null) {
+    _activePromptHandler = onPrompt;
+    _installPromptListener();
+  }
   if (!_registered.contains(viewId)) {
     ui_web.platformViewRegistry.registerViewFactory(viewId, (int _) {
       final el = html.IFrameElement()
@@ -96,21 +124,10 @@ Widget embedHtml(
         ..style.width = '100%'
         ..style.height = '100%'
         ..setAttribute('sandbox', 'allow-scripts');
-      if (onCallServerTool != null || onPrompt != null) {
+      if (onCallServerTool != null) {
         html.window.onMessage.listen((event) async {
           final raw = event.data;
           if (raw == null) return;
-          // `mcp:prompt` → a new user turn. Several embeds may be live at
-          // once (auto-opened report + clicked sources); only THIS iframe's
-          // messages may fire, or one click sends N prompts.
-          if (onPrompt != null && event.source == el.contentWindow) {
-            final prompt = _readMcpPrompt(raw);
-            if (prompt != null) {
-              if (prompt.trim().isNotEmpty) onPrompt(prompt.trim());
-              return;
-            }
-          }
-          if (onCallServerTool == null) return;
           final reading = _readMcpRequest(raw);
           if (reading == null) return; // not a callServerTool message
           Object? result;
