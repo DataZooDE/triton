@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import 'markdown_lite.dart';
 import 'sources_row.dart';
 
 /// A2UI v0.9 renderer. **No shared base** with v0.8 per ADR-4. The
@@ -27,23 +28,30 @@ class A2UIv09Renderer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final stream = (envelope['stream'] as List?) ?? const [];
+    // A sibling button carrying a ui:// resource is the open affordance
+    // (hosts auto-open it) — inline `report` nodes are suppressed next to
+    // it to avoid a duplicate control.
+    final hasResourceButton = stream.any((c) =>
+        c is Map && (c['resource'] as String?)?.startsWith('ui://') == true);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final raw in stream) _node(context, raw),
+        for (final raw in stream) _node(context, raw, hasResourceButton),
       ],
     );
   }
 
-  Widget _node(BuildContext context, dynamic raw) {
+  Widget _node(BuildContext context, dynamic raw, bool hasResourceButton) {
     if (raw is! Map) return _unknown('not an object');
     final map = raw.cast<String, dynamic>();
     final type = map['type'] as String?;
     switch (type) {
       case 'text':
+        // Chat text may carry light portable markdown (the same subset the
+        // Google Chat adapter normalises) — render it, don't show raw `**`.
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Text((map['text'] as String?) ?? ''),
+          child: MarkdownLite((map['text'] as String?) ?? ''),
         );
       case 'narration':
         return Padding(
@@ -142,6 +150,31 @@ class A2UIv09Renderer extends StatelessWidget {
         return _Vega(
           title: map['title'] as String?,
           pngBase64: map['png_base64'] as String?,
+        );
+      case 'report':
+        // An inline report reference: image-hosting chat adapters expand it
+        // server-side; here the resource button (if any) already auto-opens
+        // the richer ui:// app, so only render an open control when the
+        // reply carries no other affordance. Peacock renders — this chip
+        // only dispatches.
+        if (hasResourceButton) return const SizedBox.shrink();
+        final reportId = (map['report_id'] as String?) ?? '';
+        final rawArgs =
+            (map['args'] as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: FilledButton.tonal(
+              onPressed: onAction == null || reportId.isEmpty
+                  ? null
+                  : () => onAction!(
+                        'render_report',
+                        {...rawArgs, 'report_id': reportId},
+                      ),
+              child: Text('Open report: $reportId'),
+            ),
+          ),
         );
       case 'sources':
         final items = ((map['items'] as List?) ?? const [])

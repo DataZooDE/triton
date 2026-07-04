@@ -257,6 +257,12 @@ pub enum ComponentKind {
     Selections,
     Forms,
     Dashboard,
+    /// Click-to-open references to the documents a turn wrote (chat
+    /// adapters degrade them to a plain label list).
+    Sources,
+    /// An inline report reference: image-hosting adapters (Google Chat)
+    /// expand it to the upstream-rendered chart; others drop it.
+    Report,
 }
 
 impl std::fmt::Display for ComponentKind {
@@ -269,6 +275,8 @@ impl std::fmt::Display for ComponentKind {
             ComponentKind::Selections => "selections",
             ComponentKind::Forms => "forms",
             ComponentKind::Dashboard => "dashboard",
+            ComponentKind::Sources => "sources",
+            ComponentKind::Report => "report",
         };
         f.write_str(s)
     }
@@ -375,6 +383,25 @@ impl<'de> Deserialize<'de> for SecretField {
         } else {
             Ok(SecretField::Literal(s))
         }
+    }
+}
+
+#[cfg(test)]
+mod component_kind_tests {
+    use super::ComponentKind;
+
+    /// The kinds an agent's `surface_components` may declare include the
+    /// newer `sources` (click-to-open document references) and `report`
+    /// (inline chart) — a fragment listing them must parse, and their wire
+    /// names round-trip through Display.
+    #[test]
+    fn sources_and_report_parse_and_display() {
+        let kinds: Vec<ComponentKind> =
+            serde_yaml_ng::from_str("[text, dashboard, buttons, sources, report]")
+                .expect("the template fragment's component list parses");
+        assert_eq!(kinds.len(), 5);
+        assert_eq!(kinds[3].to_string(), "sources");
+        assert_eq!(kinds[4].to_string(), "report");
     }
 }
 
