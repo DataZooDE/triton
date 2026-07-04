@@ -241,6 +241,7 @@ mod tests {
                 label: "Refresh".into(),
                 tool: "narrate".into(),
                 args: json!({}),
+                resource: None,
             }],
         };
         assert!(matches!(render(&s), Err(RenderError::EmptyAfterRender)));
@@ -257,6 +258,7 @@ mod tests {
                     label: "Go".into(),
                     tool: "narrate".into(),
                     args: json!({}),
+                    resource: None,
                 },
             ],
         };

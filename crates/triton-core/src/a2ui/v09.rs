@@ -28,11 +28,22 @@ fn component_to_json(c: &Component) -> Value {
     match c {
         Component::Text { value } => json!({ "type": "text", "text": value }),
         Component::Narration { text } => json!({ "type": "narration", "text": text }),
-        Component::Button { label, tool, args } => json!({
-            "type": "button",
-            "label": label,
-            "action": { "tool": tool, "args": args }
-        }),
+        Component::Button {
+            label,
+            tool,
+            args,
+            resource,
+        } => {
+            let mut b = json!({
+                "type": "button",
+                "label": label,
+                "action": { "tool": tool, "args": args }
+            });
+            if let Some(r) = resource {
+                b["resource"] = json!(r);
+            }
+            b
+        }
         Component::Selection {
             prompt,
             options,

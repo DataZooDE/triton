@@ -145,7 +145,9 @@ pub fn render(
             Component::Narration { text } => {
                 chunks.push(format!("*{}*", md_escape(text)));
             }
-            Component::Button { label, tool, args } => {
+            Component::Button {
+                label, tool, args, ..
+            } => {
                 if buttons.len() >= DISCORD_MAX_BUTTONS {
                     // Beyond Discord's 5x5 grid — `SurfaceLimits`
                     // says reject at the mapper edge before the
@@ -652,6 +654,7 @@ mod tests {
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: json!({}),
+                    resource: None,
                 },
             ],
         };
@@ -678,6 +681,7 @@ mod tests {
                 label: "Refresh".into(),
                 tool: "narrate".into(),
                 args: json!({}),
+                resource: None,
             }],
         };
         let r = render(&s, TEST_KEY).expect("renders");
@@ -702,6 +706,7 @@ mod tests {
                 label: format!("b{i}"),
                 tool: "narrate".into(),
                 args: json!({ "s": format!("p{i}") }),
+                resource: None,
             })
             .collect();
         let s = Surface { components };
@@ -727,6 +732,7 @@ mod tests {
                 label: format!("b{i}"),
                 tool: "narrate".into(),
                 args: json!({ "s": format!("p{i}") }),
+                resource: None,
             })
             .collect();
         let s = Surface { components };
