@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'markdown_lite.dart';
 import 'sources_row.dart';
 
 /// A2UI v0.8 renderer. **No shared base** with v0.9, per ADR-4 — this
@@ -30,15 +31,22 @@ class A2UIv08Renderer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final stream = (envelope['stream'] as List?) ?? const [];
+    // v0.8 wraps components; the resource rides the inner Button object.
+    final hasResourceButton = stream.any((c) {
+      final comp = (c is Map) ? c['Component'] : null;
+      final inner = (comp is Map) ? comp['Button'] : null;
+      return inner is Map &&
+          (inner['resource'] as String?)?.startsWith('ui://') == true;
+    });
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        for (final raw in stream) _node(context, raw),
+        for (final raw in stream) _node(context, raw, hasResourceButton),
       ],
     );
   }
 
-  Widget _node(BuildContext context, dynamic raw) {
+  Widget _node(BuildContext context, dynamic raw, bool hasResourceButton) {
     if (raw is! Map) return _unknown('not an object');
     final component = (raw['Component'] as Map?)?.cast<String, dynamic>();
     if (component == null) return _unknown('missing Component wrapper');
@@ -50,9 +58,10 @@ class A2UIv08Renderer extends StatelessWidget {
     final body = (entry.value as Map?)?.cast<String, dynamic>() ?? const {};
     switch (kind) {
       case 'Text':
+        // Chat text may carry light portable markdown — render it.
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Text((body['text'] as String?) ?? ''),
+          child: MarkdownLite((body['text'] as String?) ?? ''),
         );
       case 'Narration':
         return Padding(
@@ -136,6 +145,28 @@ class A2UIv08Renderer extends StatelessWidget {
                 ))
             .toList(growable: false);
         return _Dashboard(title: title, tiles: tiles);
+      case 'Report':
+        // See the v0.9 renderer: suppressed next to a resource button;
+        // otherwise an open control that dispatches (peacock renders).
+        if (hasResourceButton) return const SizedBox.shrink();
+        final reportId = (body['report_id'] as String?) ?? '';
+        final rawArgs =
+            (body['args'] as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: FilledButton.tonal(
+              onPressed: onAction == null || reportId.isEmpty
+                  ? null
+                  : () => onAction!(
+                        'render_report',
+                        {...rawArgs, 'report_id': reportId},
+                      ),
+              child: Text('Open report: $reportId'),
+            ),
+          ),
+        );
       case 'Sources':
         final items = ((body['items'] as List?) ?? const [])
             .whereType<Map>()
