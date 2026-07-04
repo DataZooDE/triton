@@ -26,6 +26,9 @@ tools:
     # for each of these (FR-L-5, M-COVERAGE-1) — over-declaring forces
     # the operator to add rules you don't need; under-declaring makes
     # a real surface get rejected at render time.
+    # Full vocabulary: text, narration, buttons, selections, forms,
+    # dashboard, sources (click-to-open document references), report
+    # (inline chart) — see references/02.
     surface_components: [text, narration, buttons]
 
   # A raw-JSON tool with no UI declares an empty surface.

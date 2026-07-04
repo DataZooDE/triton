@@ -4,6 +4,27 @@ The skill version tracks the consumer-facing contract, not the Triton
 binary version. The Triton repo's checked-out git ref is the true
 version pin (see `SKILL.md` → "How this skill is installed").
 
+## 0.5.0 — the current surface: markdown text, resource buttons, report, sources; theming moved to peacock
+
+- `02`: the component vocabulary catches up — `text` carries light
+  portable markdown (Google Chat normalises, the Explorer renders);
+  `button.resource` documents the auto-open contract (first
+  resource-bearing button; params ride the URI query); new `report`
+  (inline chart — expanded by image-hosting chat adapters, suppressed
+  by the Explorer next to a resource button) and `sources`
+  (click-to-open document references; items' resources one level down
+  so hosts never auto-open them); the unique-input-names rule for
+  selection+form cards.
+- `05`: Google Chat is a full Cards v2 surface now (#152–#169) —
+  buttons/selection/form with signed callbacks + click echo, chart
+  images, inline report. Degrade keys gain sources/report/card_v2.
+  NEW theming section: **peacock owns ALL theming** — the manifest
+  `theme:` block is gone (#176); brands live in one peacock CSS file
+  (`PEACOCK_BRAND_CSS`) and card chrome is fetched per reply via the
+  report upstream's `get_theme` tool.
+- `01`: the MCP-Apps host verbs gain `mcp:prompt` (an embedded app
+  hands the host text to send as a new user turn).
+
 ## 0.4.0 — MCP-Apps proxying + PNG-rasterisation delegation (#143)
 
 Adds the consumer contract for an interactive **upstream renderer**
