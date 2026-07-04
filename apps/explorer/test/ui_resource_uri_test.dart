@@ -76,6 +76,30 @@ void main() {
         }),
         'ui://peacock/nba-report?account=beverages-gmbh',
       );
+      // The NEGOTIATED v0.9 envelope re-shapes the surface: components ride
+      // a `stream` array with `type`/`action` keys — the lift must find the
+      // resource there too (Triton keeps it since #172).
+      expect(
+        InvocationResult.uiFrom(const {
+          'content': [],
+          'structuredContent': {
+            'latency_ms': 5,
+            'result': {
+              'version': '0.9',
+              'stream': [
+                {'type': 'narration', 'text': 'Recorded.'},
+                {
+                  'type': 'button',
+                  'label': 'Open report: nba-report',
+                  'action': {'tool': 'render_report', 'args': {}},
+                  'resource': 'ui://peacock/nba-report?account=beverages-gmbh',
+                },
+              ],
+            },
+          },
+        }),
+        'ui://peacock/nba-report?account=beverages-gmbh',
+      );
       // _meta.ui still wins when both are present.
       expect(
         InvocationResult.uiFrom(const {
