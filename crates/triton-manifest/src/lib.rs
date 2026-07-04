@@ -63,47 +63,6 @@ pub struct Adapter {
     /// adapters that don't model templates.
     #[serde(default)]
     pub templates: BTreeMap<TemplateCategory, TemplateDecl>,
-    /// Per-deployment branding for chat surfaces that support it (Google
-    /// Chat Cards v2 today): a header logo/title and a brand button colour.
-    /// Non-secret config — swap it per customer deployment without touching
-    /// agent code. Empty ⇒ the platform defaults (fully backward-compatible).
-    #[serde(default)]
-    pub theme: Theme,
-}
-
-/// Per-deployment branding for a chat adapter's rendered surface. All fields
-/// optional; an empty `Theme` renders exactly as before. This is the swap
-/// point for white-labelling a deployment: the agent stays brand-agnostic and
-/// each customer's `adapter.yaml` carries its own theme.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct Theme {
-    /// Card header title (e.g. the product/app name).
-    #[serde(default)]
-    pub title: Option<String>,
-    /// Card header logo — a public HTTPS image URL.
-    #[serde(default)]
-    pub logo_url: Option<String>,
-    /// Primary button colour as `#RRGGBB`. Rendered as a FILLED button in
-    /// this colour; unset ⇒ the neutral FILLED_TONAL default.
-    #[serde(default)]
-    pub brand_color: Option<String>,
-    /// How `logo_url` is placed. `avatar` (default) is the small round header
-    /// image — good for a square icon. `banner` is a full-width image at the
-    /// top of the card — good for a wide wordmark that a circular avatar would
-    /// crop.
-    #[serde(default)]
-    pub logo_style: LogoStyle,
-}
-
-/// Placement of a theme's `logo_url` on the rendered card.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LogoStyle {
-    /// Small round image in the card header (square icon logos).
-    #[default]
-    Avatar,
-    /// Full-width image at the top of the card (wide wordmark logos).
-    Banner,
 }
 
 /// WhatsApp Cloud API template category (Meta's closed set). The agent

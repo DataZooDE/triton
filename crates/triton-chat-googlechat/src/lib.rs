@@ -51,7 +51,7 @@ use axum::routing::post;
 use serde::Deserialize;
 use serde_json::Value;
 use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
-use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme, Theme};
+use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
 use triton_secrets::{ResolveError, SecretResolver};
 
 use crate::jwt_verifier::{GoogleJwtVerifier, VerifierConfig};
@@ -287,9 +287,6 @@ pub struct GoogleChatAdapter {
     /// Ephemeral cache of upstream-rendered chart PNGs, served on demand at
     /// the signed `…/img/{token}` route (peacock `render_report`).
     image_cache: Arc<Mutex<ImageCache>>,
-    /// Per-deployment branding (card header logo/title, brand button colour)
-    /// resolved from the manifest `theme` block. Empty ⇒ platform defaults.
-    theme: Theme,
 }
 
 impl GoogleChatAdapter {
@@ -451,7 +448,6 @@ impl GoogleChatAdapter {
             per_tenant_limit,
             correlation_key,
             image_cache: Arc::new(Mutex::new(ImageCache::default())),
-            theme: adapter.theme.clone(),
         })
     }
 
@@ -1065,6 +1061,26 @@ async fn handle_webhook(
                 } else {
                     None
                 };
+                // The card chrome (header/logo/brand colour) comes from the
+                // report upstream's `get_theme` — peacock owns ALL theming;
+                // this adapter only consumes the resolved values. No
+                // `get_theme` upstream registered ⇒ unbranded (debug-logged).
+                let chrome = match adapter
+                    .dispatcher
+                    .invoke(
+                        "get_theme",
+                        serde_json::json!({}),
+                        principal_for_post.clone(),
+                        PROTOCOL,
+                    )
+                    .await
+                {
+                    Ok(t) => surface_mapper::CardChrome::from_get_theme(&t.result),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "google_chat: no get_theme upstream; unbranded card");
+                        surface_mapper::CardChrome::default()
+                    }
+                };
                 let body = if let Some(url) = &upstream_img {
                     // The chart image IS the payload; a render_report result's
                     // rendered text can be large (structured rows / the inline
@@ -1076,7 +1092,7 @@ async fn handle_webhook(
                         }
                         _ => String::new(),
                     };
-                    surface_mapper::image_reply_card(&caption, url, workspace_addon, &adapter.theme)
+                    surface_mapper::image_reply_card(&caption, url, workspace_addon, &chrome)
                 } else if signed.is_empty() && dashboard.is_none() {
                     surface_mapper::text_reply_body(&reply_text, workspace_addon)
                 } else {
@@ -1086,7 +1102,7 @@ async fn handle_webhook(
                         dash_img.as_deref(),
                         &signed,
                         workspace_addon,
-                        &adapter.theme,
+                        &chrome,
                     )
                 };
                 adapter.dispatcher.record_post(

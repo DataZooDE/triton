@@ -1,6 +1,7 @@
-# Themed Google Chat adapter: a `theme` block brands the rendered card
-# (header logo/title + brand button colour). Routes plain messages to the
-# `assistant` upstream so the reply is a card (not bare text). Dev-mode
+# Card-producing Google Chat adapter (buttons signed via correlation_key,
+# plain messages routed to the `assistant` upstream so the reply is a card,
+# not bare text). Branding comes from the report upstream's `get_theme` —
+# peacock owns ALL theming; no theme config exists in triton. Dev-mode
 # literal credentials.
 version: "0.2"
 
@@ -29,11 +30,6 @@ adapters:
       messages_per_sec: 25
       burst: 50
     correlation_key: correlation-key-for-test
-    theme:
-      title: "DataZoo Supplier Risk"
-      logo_url: "https://brand.example/logo.png"
-      logo_style: banner
-      brand_color: "#1A73E8"
 
 tools:
   assistant:
