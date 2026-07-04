@@ -17,21 +17,28 @@ The same surface lands differently depending on the channel
 |---|---|---|
 | Signal | text + media | buttons/selections/forms → **numbered prompts** |
 | WhatsApp Web | text + media + quote + reactions | numbered prompts; text chunked at 4000 chars |
-| Google Chat | text + media + threads | numbered prompts (Card v2 deferred) |
+| **Google Chat** | **full Cards v2**: markdown text, buttons/selection/form (signed `CARD_CLICKED` callbacks + click echo), dashboard/report as inline chart **images**, card chrome branded via the report upstream's `get_theme` | `card_v2` for controls, `rasterised_png` for dashboards; inline `report` expands natively (#152–#169, #176) |
 | Telegram | text + media + inline keyboards | native inline keyboard; ≤ 8 buttons/row |
 | Discord | text + media + components v2 | native components; ≤ 25-item select |
 | MS Teams | text + Adaptive Cards | near-lossless Adaptive Card projection |
+
+`sources` degrades to one "Sources: …" label line on every chat channel;
+`report` is dropped where no image can be hosted (the sibling button
+remains the affordance).
 
 ## `degrade` rule keys (per component type)
 
 The manifest's `adapter.<name>.degrade` maps each component type to a
 rule. Observed values (`crates/triton-tests/fixtures/manifest-valid.yaml`):
 
-- `text`, `narration`: `passthrough`
+- `text`, `narration`, `sources`, `report`: `passthrough`
 - `buttons`, `selections`: `inline_keyboard` (Telegram),
-  `components_v2` (Discord), `numbered_prompts` (text-first)
-- `forms`: `numbered_prompts` or `components_v2`
-- `dashboard`: `rasterised_png`
+  `components_v2` (Discord), `card_v2` (Google Chat),
+  `numbered_prompts` (text-first)
+- `forms`: `numbered_prompts`, `components_v2` or `card_v2`
+- `dashboard`: `rasterised_png` (delegated to the report upstream via
+  `TRITON_RASTERIZE_UPSTREAM=render_a2ui_to_png` — peacock renders,
+  Triton transports)
 
 Every component type your tool declares in `surface_components` must
 have a rule in **every** chat adapter, or boot fails (FR-L-5; →
@@ -92,3 +99,14 @@ a fresh `trace_id`. You don't implement this — but know that:
 - Platform callback-data caps are tight (Telegram 64 bytes). Keep
   `tool` names and `args` for interactive components small, or the
   token won't fit and the mapper degrades/rejects.
+
+## Theming — peacock owns ALL of it
+
+There is **no theme config in Triton** (the manifest `theme:` block was
+removed in #176; stale blocks parse-and-ignore). The deployment's brand
+is ONE CSS file of `--pk-*` tokens registered with the report upstream
+(peacock `PEACOCK_BRAND_CSS`); it themes every chart PNG, every `ui://`
+iframe, AND the chat-card chrome — adapters that render cards fetch the
+resolved brand per reply via the upstream's `get_theme` tool. Operator
+wiring: add `get_theme=<peacock>` to `TRITON_STATIC_UPSTREAMS`. No
+`get_theme` upstream registered ⇒ unbranded cards (the pre-theme look).

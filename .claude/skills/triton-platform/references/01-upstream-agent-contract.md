@@ -169,6 +169,11 @@ one audit line to each, exactly like `tools/call`.
 4. **Model-context push.** `updateModelContext` arrives as `POST /` with
    `X-Triton-MCP: updateModelContext` and the iframe's compact
    `{report_id, params, salient_summary}` record as the body, **verbatim**
+5. **Prompt hand-off.** An embedded app may post
+   `{type:"mcp:prompt", text}` to its HOST (not to Triton): the host
+   sends `text` as a NEW USER TURN through the normal chat path — the
+   pattern behind document action buttons. Your `ui://` runtime emits
+   it; Triton itself never sees the verb.
    (Triton never inspects or expands it).
 
 **Registration gotcha:** the `ui://<authority>/…` authority is resolved

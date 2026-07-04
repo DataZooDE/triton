@@ -20,12 +20,14 @@ Each component is tagged by `kind` (snake_case). The full vocabulary
 
 | `kind` | Fields | Use for |
 |---|---|---|
-| `text` | `value` | Plain text. |
-| `narration` | `text` | LLM-generated prose, semantically distinct from `text`. |
-| `button` | `label`, `tool`, `args` | A tap that re-invokes `tool` with `args`. |
+| `text` | `value` | The answer. May carry **light portable markdown** (`**bold**`, `- ` bullets, `[text](url)`, headings) — Google Chat normalises it to its syntax, the Explorer renders it; other chat channels show the markers literally (harmless). |
+| `narration` | `text` | An italic ASIDE, semantically distinct from the answer. |
+| `button` | `label`, `tool`, `args`, `resource?` | A tap that re-invokes `tool` with `args`. An optional `resource: ui://<authority>/…` names an MCP-App — capable hosts (the Explorer) **auto-open the FIRST resource-bearing button's app inline**; put the render params in the URI query so the first render is self-sufficient. |
 | `selection` | `prompt`, `options[]`, `tool`, `args_key` | Pick one option; re-invokes `tool` with the chosen value bound to `args_key`. |
-| `form` | `title`, `fields[]`, `submit_label`, `tool` | Multi-field input submitted as one tool call. |
-| `dashboard` | `title`, `tiles[]` | Read-only grid of summary tiles. Rasterised to PNG on text-first chat channels (→ `references/05`). |
+| `form` | `title`, `fields[]`, `submit_label`, `tool` | Multi-field input submitted as one tool call. NB: when a surface carries BOTH a selection and a form, their input names MUST differ (Cards v2 rejects the whole card on collision). |
+| `dashboard` | `title`, `tiles[]` | Read-only grid of summary tiles. Rasterised to PNG on chat channels (→ `references/05`). |
+| `report` | `report_id`, `args` | An INLINE report reference: image-hosting chat adapters (Google Chat) dispatch `render_report` (args + injected report_id) and embed the returned chart, zero clicks; the Explorer suppresses it next to a resource-bearing button (no duplicate affordance) or renders an "Open report" chip; text-only channels drop it. Emit it ALONGSIDE the resource button. |
+| `sources` | `items[]` of `{label, resource}` | Click-to-open references to the documents a turn wrote. The items' `ui://` resources ride ONE LEVEL DOWN by design — hosts never auto-open sources; chat channels degrade to a plain "Sources: …" label line. |
 
 `options` items are `{label, value}`. `form` fields are `{name,
 label, kind, required}` where `kind ∈ {string, integer, boolean}`.
