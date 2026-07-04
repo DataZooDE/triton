@@ -93,10 +93,11 @@ Future<String> loadInitialBaseUrl(String fallback,
 final dioProvider = Provider<Dio>((ref) {
   final dio = Dio(BaseOptions(
     connectTimeout: const Duration(seconds: 5),
-    // A live upstream agent doing LLM tool-calling can take well over 10s for
-    // one turn; keep the read window generous so a slow synthesis doesn't
-    // abort as a client timeout.
-    receiveTimeout: const Duration(seconds: 90),
+    // A live upstream agent doing LLM tool-calling can take well over a
+    // minute for one multi-tool turn (Triton's own upstream budget is often
+    // 180s); the CLIENT must never be the tightest timeout in the chain, so
+    // give the read window comfortable headroom over the gateway's.
+    receiveTimeout: const Duration(seconds: 300),
   ));
   if (kIsWeb) {
     // The deployed shape (apps/explorer/deploy/explorer.nomad.hcl) puts

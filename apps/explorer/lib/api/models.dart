@@ -116,11 +116,15 @@ class InvocationResult {
   static String? _buttonResource(Object? node, int depth) {
     if (depth > 8) return null;
     if (node is Map) {
-      final comps = node['components'];
-      if (comps is List) {
-        for (final c in comps) {
-          final r = (c is Map) ? c['resource'] : null;
-          if (r is String && r.startsWith('ui://')) return r;
+      // Raw surfaces carry `components`; the negotiated A2UI envelope
+      // re-shapes them onto `stream` — the resource field rides both.
+      for (final key in const ['components', 'stream']) {
+        final comps = node[key];
+        if (comps is List) {
+          for (final c in comps) {
+            final r = (c is Map) ? c['resource'] : null;
+            if (r is String && r.startsWith('ui://')) return r;
+          }
         }
       }
       for (final v in node.values) {
