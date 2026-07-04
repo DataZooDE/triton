@@ -94,13 +94,46 @@ class InvocationResult {
 
   /// Lift `_meta.ui.resourceUri` out of a (possibly wrapped) tool result.
   /// Accepts either the inner tool result or a REST envelope that nests it
-  /// under `result`.
+  /// under `result`. Falls back to a surface BUTTON that references a
+  /// `ui://` resource (the agent's report-as-surface pattern) so the
+  /// referenced report renders inline WITHOUT a click — the resource URI
+  /// carries the render params since peacock #16, making it
+  /// self-sufficient.
   static String? uiFrom(Map<String, dynamic>? result) {
     if (result == null) return null;
     final inner = (result['result'] as Map?)?.cast<String, dynamic>() ?? result;
-    final ui = (inner['_meta'] as Map?)?['ui'];
-    final uri = (ui as Map?)?['resourceUri'];
-    return (uri is String && uri.isNotEmpty) ? uri : null;
+    for (final level in [inner, result]) {
+      final ui = (level['_meta'] as Map?)?['ui'];
+      final uri = (ui as Map?)?['resourceUri'];
+      if (uri is String && uri.isNotEmpty) return uri;
+    }
+    return _buttonResource(result, 0);
+  }
+
+  /// Bounded scan for the first surface component carrying a `ui://`
+  /// `resource` — protocol-agnostic (REST nests the surface under
+  /// `result`, Triton's MCP envelope under `structuredContent.result`).
+  static String? _buttonResource(Object? node, int depth) {
+    if (depth > 8) return null;
+    if (node is Map) {
+      final comps = node['components'];
+      if (comps is List) {
+        for (final c in comps) {
+          final r = (c is Map) ? c['resource'] : null;
+          if (r is String && r.startsWith('ui://')) return r;
+        }
+      }
+      for (final v in node.values) {
+        final r = _buttonResource(v, depth + 1);
+        if (r != null) return r;
+      }
+    } else if (node is List) {
+      for (final v in node) {
+        final r = _buttonResource(v, depth + 1);
+        if (r != null) return r;
+      }
+    }
+    return null;
   }
 
   /// MCP JSON-RPC error code (e.g. -32602 validation, -32001 auth).

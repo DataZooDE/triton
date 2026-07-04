@@ -33,6 +33,61 @@ void main() {
       );
     });
 
+    test('auto-opens a surface BUTTON that references a ui:// resource', () {
+      // The agent's report-as-surface pattern: the reply carries a button
+      // whose `resource` names the report's MCP-App. The Explorer lifts it
+      // so the report renders inline WITHOUT a click — through the REST
+      // envelope, the agent's own body, and Triton's MCP double-wrap alike.
+      const button = {
+        'kind': 'button',
+        'label': 'Open report: nba-report',
+        'tool': 'render_report',
+        'args': {
+          'report_id': 'nba-report',
+          'params': {'account': 'beverages-gmbh'},
+        },
+        'resource': 'ui://peacock/nba-report?account=beverages-gmbh',
+      };
+      const surface = {
+        'surface': {
+          'components': [
+            {'kind': 'narration', 'text': 'Recorded.'},
+            button,
+          ],
+        },
+      };
+      // REST: {latency_ms, result: {surface}, trace_id}
+      expect(
+        InvocationResult.uiFrom(const {
+          'latency_ms': 5,
+          'result': surface,
+          'trace_id': 't',
+        }),
+        'ui://peacock/nba-report?account=beverages-gmbh',
+      );
+      // Triton MCP: the upstream body under structuredContent.
+      expect(
+        InvocationResult.uiFrom(const {
+          'content': [],
+          'structuredContent': {
+            'latency_ms': 5,
+            'result': surface,
+          },
+        }),
+        'ui://peacock/nba-report?account=beverages-gmbh',
+      );
+      // _meta.ui still wins when both are present.
+      expect(
+        InvocationResult.uiFrom(const {
+          '_meta': {
+            'ui': {'resourceUri': 'ui://peacock/direct'},
+          },
+          'result': surface,
+        }),
+        'ui://peacock/direct',
+      );
+    });
+
     test('null when absent or empty', () {
       expect(InvocationResult.uiFrom(const {'result': {}}), isNull);
       expect(InvocationResult.uiFrom(null), isNull);
