@@ -92,6 +92,13 @@ fn component_to_json(c: &Component) -> Value {
             "report_id": report_id,
             "args": args,
         }),
+        Component::Sources { items } => json!({
+            "type": "sources",
+            "items": items.iter().map(|i| json!({
+                "label": i.label,
+                "resource": i.resource,
+            })).collect::<Vec<_>>(),
+        }),
     }
 }
 

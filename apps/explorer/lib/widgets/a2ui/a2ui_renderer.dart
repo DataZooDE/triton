@@ -22,6 +22,7 @@ class A2UIRenderer extends StatelessWidget {
     required this.envelope,
     this.version,
     this.onAction,
+    this.onOpenResource,
   });
 
   final Map<String, dynamic> envelope;
@@ -32,6 +33,10 @@ class A2UIRenderer extends StatelessWidget {
 
   final void Function(String tool, Map<String, dynamic> args)? onAction;
 
+  /// A `sources` item was clicked: open its `ui://` resource inline.
+  /// Sources never auto-open — this fires only on an explicit tap.
+  final void Function(String uri)? onOpenResource;
+
   @override
   Widget build(BuildContext context) {
     final inner = (envelope['result'] is Map)
@@ -41,9 +46,11 @@ class A2UIRenderer extends StatelessWidget {
         version ?? (inner['version'] as String?) ?? _sniff(inner);
     switch (resolved) {
       case '0.8':
-        return A2UIv08Renderer(envelope: inner, onAction: onAction);
+        return A2UIv08Renderer(
+            envelope: inner, onAction: onAction, onOpenResource: onOpenResource);
       case '0.9':
-        return A2UIv09Renderer(envelope: inner, onAction: onAction);
+        return A2UIv09Renderer(
+            envelope: inner, onAction: onAction, onOpenResource: onOpenResource);
       default:
         return Card(
           color: Colors.amber.shade100,

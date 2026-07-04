@@ -86,6 +86,24 @@ pub enum Component {
         #[serde(default)]
         args: Value,
     },
+    /// Click-to-open references — "Sources" — to the documents a reply
+    /// touched (created/updated records). Each item names an MCP-App
+    /// resource; hosts render a chip row and open an item's resource
+    /// ONLY on click. The items' resources deliberately sit one level
+    /// down so an auto-open lift (first resource-bearing component)
+    /// never fires on sources. Text-only surfaces degrade to a list of
+    /// labels.
+    Sources {
+        items: Vec<SourceItem>,
+    },
+}
+
+/// One clickable reference in a [`Component::Sources`] row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceItem {
+    pub label: String,
+    /// The MCP-App resource the click opens (`ui://<authority>/…`).
+    pub resource: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,5 +212,49 @@ mod resource_roundtrip_tests {
         .expect("valid surface");
         let envelope = build_envelope(&plain, BuilderVersion::V09);
         assert!(!envelope.to_string().contains("resource"));
+    }
+
+    /// The SOURCES component: click-to-open references to the documents the
+    /// agent touched this turn. Items carry their `resource` one level down
+    /// (`items[].resource`) — NEVER as a top-level component key — so a
+    /// host's "auto-open the first resource-bearing component" lift skips
+    /// sources by construction and only an explicit click opens one.
+    #[test]
+    fn sources_round_trips_and_never_leaks_a_top_level_resource() {
+        let raw = json!({
+            "surface": { "components": [{
+                "kind": "sources",
+                "items": [
+                    { "label": "account · initech-corp",
+                      "resource": "ui://peacock/document?skill=account&id=initech-corp" },
+                    { "label": "email · email-demo-1",
+                      "resource": "ui://peacock/document?skill=email&id=email-demo-1" },
+                ],
+            }]}
+        });
+        let surface = extract_surface(&raw).expect("valid surface");
+        for version in [BuilderVersion::V08, BuilderVersion::V09] {
+            let envelope = build_envelope(&surface, version);
+            let stream = envelope["stream"].as_array().expect("stream");
+            assert_eq!(stream.len(), 1, "{version:?}: {envelope}");
+            let node = &stream[0];
+            // The wire node itself must NOT carry a `resource` key…
+            let obj = match version {
+                BuilderVersion::V09 => node.clone(),
+                BuilderVersion::V08 => node["Component"]["Sources"].clone(),
+            };
+            assert!(
+                obj.get("resource").is_none(),
+                "{version:?} leaks a top-level resource: {node}"
+            );
+            // …while both items ride under `items` with label + resource.
+            let items = obj["items"].as_array().expect("items");
+            assert_eq!(items.len(), 2);
+            assert_eq!(items[0]["label"], "account · initech-corp");
+            assert_eq!(
+                items[1]["resource"],
+                "ui://peacock/document?skill=email&id=email-demo-1"
+            );
+        }
     }
 }

@@ -239,3 +239,69 @@ fn nonlocal_env_refuses_a_userinfo_smuggled_endpoint() {
         String::from_utf8_lossy(&out.stderr),
     );
 }
+
+/// A SOURCES-emitting upstream surface survives the NEGOTIATED envelope
+/// through the real binary: the wrap re-shapes components onto `stream`,
+/// the sources node keeps its items (label + `ui://` resource one level
+/// down) and never grows a top-level `resource` key — the no-auto-open
+/// contract on the wire.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sources_component_survives_the_negotiated_envelope() {
+    let agent = FakeAgent::start_returning(json!({
+        "surface": { "components": [
+            { "kind": "narration", "text": "Flagged initech-corp." },
+            { "kind": "sources", "items": [
+                { "label": "account · initech-corp",
+                  "resource": "ui://peacock/document?skill=account&id=initech-corp" },
+            ]},
+        ]}
+    }))
+    .await;
+
+    let env = HashMap::from([
+        ("TRITON_ENV".into(), "nonprod".into()),
+        (
+            "TRITON_STATIC_UPSTREAMS".into(),
+            format!("assistant={}", agent.host_port()),
+        ),
+    ]);
+    let triton = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    for accept in [
+        "application/json+a2ui",
+        "application/json+a2ui; version=0.9",
+    ] {
+        let resp: Value = reqwest::Client::new()
+            .post(triton.rest_url("/v1/tools/assistant"))
+            .bearer_auth("dev-token")
+            .header("Accept", accept)
+            .json(&json!({ "question": "flag initech-corp" }))
+            .send()
+            .await
+            .expect("dispatch")
+            .json()
+            .await
+            .expect("json");
+        let stream = resp["result"]["stream"]
+            .as_array()
+            .unwrap_or_else(|| panic!("negotiated stream ({accept}): {resp}"));
+        let node = stream
+            .iter()
+            .find_map(|n| {
+                if n["type"] == "sources" {
+                    Some(n.clone()) // v0.9 flat
+                } else {
+                    n.get("Component").and_then(|c| c.get("Sources")).cloned() // v0.8
+                }
+            })
+            .unwrap_or_else(|| panic!("a sources node ({accept}): {resp}"));
+        assert!(
+            node.get("resource").is_none(),
+            "no top-level resource ({accept}): {node}"
+        );
+        assert_eq!(
+            node["items"][0]["resource"], "ui://peacock/document?skill=account&id=initech-corp",
+            "({accept})"
+        );
+    }
+}

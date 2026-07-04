@@ -146,6 +146,14 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
             // `Report` is an optional inline chart rendered out-of-band by
             // adapters that support it (Google Chat); ignored by the text mapper.
             Component::Report { .. } => {}
+            // Click-to-open document references degrade to a plain label
+            // list on a surface with no embeddable resource host.
+            Component::Sources { items } => {
+                if !items.is_empty() {
+                    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+                    chunks.push(format!("Sources: {}", labels.join(" \u{b7} ")));
+                }
+            }
             Component::Narration { text } => {
                 chunks.push(format!("_{text}_"));
                 raw_sources.push(Some(RawChunk {

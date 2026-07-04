@@ -13,11 +13,20 @@ import 'html_embed_stub.dart' if (dart.library.html) 'html_embed_web.dart';
 /// rendered inline, with no knowledge of the upstream's component vocabulary.
 /// On non-web targets it degrades to the HTML source (no DOM to host).
 class UiResourceView extends ConsumerStatefulWidget {
-  const UiResourceView({super.key, required this.uri, this.height = 600});
+  const UiResourceView({
+    super.key,
+    required this.uri,
+    this.height = 600,
+    this.onPrompt,
+  });
 
   /// The `ui://<authority>/…` resource to read and embed.
   final String uri;
   final double height;
+
+  /// The embedded runtime posted `{type:'mcp:prompt', text}` — a document
+  /// action asking the host to send `text` as a NEW USER TURN in the chat.
+  final void Function(String text)? onPrompt;
 
   @override
   ConsumerState<UiResourceView> createState() => _UiResourceViewState();
@@ -96,6 +105,7 @@ class _UiResourceViewState extends ConsumerState<UiResourceView> {
       viewId: _viewId,
       height: widget.height,
       onCallServerTool: _callServerTool,
+      onPrompt: widget.onPrompt,
     );
   }
 
