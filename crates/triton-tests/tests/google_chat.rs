@@ -489,12 +489,13 @@ async fn card_clicked_render_report_png_renders_as_image() {
     );
 }
 
-/// A manifest `theme` block brands the rendered card end-to-end: the reply
-/// carries a card header (logo + title) and the action button is FILLED in the
-/// brand colour. Proves per-deployment styling reaches the surface via config
-/// alone (no agent change).
+/// The rendered card is branded end-to-end from the REPORT UPSTREAM's
+/// `get_theme` (peacock owns ALL theming — one CSS of `--pk-*` tokens themes
+/// charts, iframes and this chrome; the adapter only consumes the resolved
+/// values): the reply carries a card header (logo + title) and the action
+/// button is FILLED in the brand colour. No theme config exists in triton.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn manifest_theme_brands_the_reply_card() {
+async fn get_theme_brands_the_reply_card() {
     let jwks = FakeGoogleJwks::start().await;
     // The upstream returns a surface with a narration + a button, so the reply
     // is a Cards v2 card (where branding applies).
@@ -505,8 +506,20 @@ async fn manifest_theme_brands_the_reply_card() {
         ] }
     }))
     .await;
+    // The theme source: what peacock's `get_theme` returns for the
+    // deployment tenant ⊕ host (see peacock#18).
+    let theme_upstream = FakeAgent::start_returning(json!({
+        "brand": "acme", "host": "chat.example",
+        "title": "DataZoo Supplier Risk",
+        "logo_url": "https://brand.example/logo.png",
+        "logo_style": "banner",
+        "brand_color": "#1A73E8",
+        "accent": "#22d3c5",
+        "css": ":root { --pk-brand: #1A73E8; }",
+    }))
+    .await;
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("fixtures/manifest-google-chat-theme-test.yaml")
+        .join("fixtures/manifest-google-chat-card-test.yaml")
         .display()
         .to_string();
     let env = HashMap::from([
@@ -515,7 +528,11 @@ async fn manifest_theme_brands_the_reply_card() {
         ("TRITON_GOOGLE_CHAT_JWKS_URI".to_string(), jwks.jwks_uri()),
         (
             "TRITON_STATIC_UPSTREAMS".to_string(),
-            format!("assistant={}", upstream.host_port()),
+            format!(
+                "assistant={},get_theme={}",
+                upstream.host_port(),
+                theme_upstream.host_port()
+            ),
         ),
     ]);
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;

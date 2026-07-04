@@ -20,7 +20,58 @@
 use regex::Regex;
 use serde_json::Value;
 use triton_core::a2ui::{Component, FormFieldKind, Surface, extract_surface};
-use triton_manifest::{LogoStyle, Theme};
+
+/// The chat-card chrome (header title/logo, brand button colour) — fetched
+/// per reply from the report upstream's `get_theme` tool. Peacock owns ALL
+/// theming (one CSS of `--pk-*` tokens themes charts, iframes AND this
+/// chrome); this adapter only consumes the resolved values. Default =
+/// unbranded (the pre-theme rendering).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CardChrome {
+    /// Card header title (`--pk-name`).
+    pub title: Option<String>,
+    /// Card header logo — a public HTTPS image URL (`--pk-logo`).
+    pub logo_url: Option<String>,
+    /// Primary button colour as `#RRGGBB` (`--pk-brand`). Rendered as a
+    /// FILLED button in this colour; unset ⇒ the neutral FILLED_TONAL.
+    pub brand_color: Option<String>,
+    /// How `logo_url` is placed (`--pk-logo-style`).
+    pub logo_style: LogoStyle,
+}
+
+/// Placement of the chrome's `logo_url` on the rendered card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogoStyle {
+    /// Small round image in the card header (square icon logos).
+    #[default]
+    Avatar,
+    /// Full-width image at the top of the card (wide wordmark logos).
+    Banner,
+}
+
+impl CardChrome {
+    /// Parse a `get_theme` tool result (`{title, logo_url, logo_style,
+    /// brand_color, …}`). Absent/null fields stay unbranded; an unknown
+    /// logo_style is the default — theming never fails a reply.
+    pub fn from_get_theme(result: &Value) -> Self {
+        let get = |k: &str| {
+            result
+                .get(k)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        CardChrome {
+            title: get("title"),
+            logo_url: get("logo_url"),
+            brand_color: get("brand_color"),
+            logo_style: match result.get("logo_style").and_then(Value::as_str) {
+                Some("banner") => LogoStyle::Banner,
+                _ => LogoStyle::Avatar,
+            },
+        }
+    }
+}
 
 /// Google Chat caps message text at ~32,000 chars; we use byte
 /// count as a conservative proxy.
@@ -418,7 +469,7 @@ fn hex_to_color(hex: &str) -> Option<Value> {
 /// `None` when it sets neither. The logo appears here only in `avatar` mode;
 /// `banner` mode renders it as a full-width widget instead (see
 /// [`logo_banner_section`]) so a wide wordmark isn't cropped by the round slot.
-fn card_header(theme: &Theme) -> Option<Value> {
+fn card_header(theme: &CardChrome) -> Option<Value> {
     let mut header = serde_json::Map::new();
     if let Some(title) = theme.title.as_deref().filter(|s| !s.is_empty()) {
         header.insert("title".into(), serde_json::json!(title));
@@ -435,7 +486,7 @@ fn card_header(theme: &Theme) -> Option<Value> {
 /// A full-width logo image section for `banner` mode (a wide wordmark that the
 /// header's round avatar slot would crop), or `None` in `avatar` mode / when no
 /// logo is set. Prepended above the card's content.
-fn logo_banner_section(theme: &Theme) -> Option<Value> {
+fn logo_banner_section(theme: &CardChrome) -> Option<Value> {
     if theme.logo_style != LogoStyle::Banner {
         return None;
     }
@@ -449,7 +500,7 @@ fn logo_banner_section(theme: &Theme) -> Option<Value> {
 /// One Cards v2 action button carrying the signed correlation `token` and its
 /// display `label` (echoed back on click). A `brand_color` in the theme makes
 /// it a `FILLED` button in that colour; otherwise the neutral `FILLED_TONAL`.
-fn action_button(label: &str, token: &str, theme: &Theme) -> Value {
+fn action_button(label: &str, token: &str, theme: &CardChrome) -> Value {
     let color = theme.brand_color.as_deref().and_then(hex_to_color);
     let mut btn = serde_json::json!({
         "text": label,
@@ -539,7 +590,7 @@ pub fn build_interactive_card(
     dashboard_image_url: Option<&str>,
     signed: &[(InteractiveSpec, String)],
     workspace_addon: bool,
-    theme: &Theme,
+    theme: &CardChrome,
 ) -> Value {
     let mut widgets: Vec<Value> = Vec::new();
     // Consecutive plain buttons group into one buttonList row.
@@ -654,7 +705,7 @@ pub fn image_reply_card(
     text: &str,
     image_url: &str,
     workspace_addon: bool,
-    theme: &Theme,
+    theme: &CardChrome,
 ) -> Value {
     let chart = serde_json::json!({
         "widgets": [ { "image": { "imageUrl": image_url, "altText": "chart" } } ]
@@ -1011,8 +1062,14 @@ mod tests {
                 "FORM.MAC".to_string(),
             ),
         ];
-        let body =
-            build_interactive_card("the answer", None, None, &signed, false, &Theme::default());
+        let body = build_interactive_card(
+            "the answer",
+            None,
+            None,
+            &signed,
+            false,
+            &CardChrome::default(),
+        );
         assert_eq!(body["text"], serde_json::json!("the answer"));
         let widgets = body["cardsV2"][0]["card"]["sections"][0]["widgets"]
             .as_array()
@@ -1060,7 +1117,7 @@ mod tests {
             },
             "T".to_string(),
         )];
-        let body = build_interactive_card("hi", None, None, &signed, true, &Theme::default());
+        let body = build_interactive_card("hi", None, None, &signed, true, &CardChrome::default());
         assert!(body.get("cardsV2").is_none());
         assert!(body.get("text").is_none());
         let msg = &body["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"];
@@ -1102,8 +1159,14 @@ mod tests {
         assert_eq!(dash.0, "Stock at risk (€)");
         assert_eq!(dash.1.len(), 2);
 
-        let body =
-            build_interactive_card("top risk", Some(&dash), None, &[], false, &Theme::default());
+        let body = build_interactive_card(
+            "top risk",
+            Some(&dash),
+            None,
+            &[],
+            false,
+            &CardChrome::default(),
+        );
         let sections = body["cardsV2"][0]["card"]["sections"]
             .as_array()
             .expect("sections");
@@ -1137,7 +1200,7 @@ mod tests {
             Some(url),
             &[],
             false,
-            &Theme::default(),
+            &CardChrome::default(),
         );
         let section = &body["cardsV2"][0]["card"]["sections"][0];
         assert_eq!(section["header"], serde_json::json!("Stock at risk (€)"));
@@ -1150,7 +1213,7 @@ mod tests {
 
     #[test]
     fn theme_brands_the_card_header_and_buttons() {
-        let theme = Theme {
+        let theme = CardChrome {
             title: Some("DataZoo Supplier Risk".into()),
             logo_url: Some("https://brand.example/logo.png".into()),
             brand_color: Some("#1A73E8".into()),
@@ -1191,7 +1254,7 @@ mod tests {
             },
             "T".to_string(),
         )];
-        let body = build_interactive_card("hi", None, None, &signed, false, &Theme::default());
+        let body = build_interactive_card("hi", None, None, &signed, false, &CardChrome::default());
         assert!(body["cardsV2"][0]["card"].get("header").is_none());
         let btn =
             &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
@@ -1203,7 +1266,7 @@ mod tests {
     fn banner_logo_renders_full_width_not_in_the_header() {
         // A wide wordmark: `banner` puts it as a full-width image at the TOP of
         // the card; the header keeps the title but no avatar image.
-        let theme = Theme {
+        let theme = CardChrome {
             title: Some("DataZoo".into()),
             logo_url: Some("https://brand.example/wordmark.png".into()),
             brand_color: None,
