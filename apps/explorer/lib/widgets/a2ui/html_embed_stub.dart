@@ -9,6 +9,7 @@ Widget embedHtml(
   required String viewId,
   double height = 600,
   Future<Object?> Function(String name, Object? args)? onCallServerTool,
+  void Function(String text)? onPrompt,
 }) {
   return SizedBox(
     height: height,

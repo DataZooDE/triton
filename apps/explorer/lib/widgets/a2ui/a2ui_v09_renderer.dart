@@ -3,6 +3,8 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import 'sources_row.dart';
+
 /// A2UI v0.9 renderer. **No shared base** with v0.8 per ADR-4. The
 /// envelope uses lowercase `type`, no `Component` wrapper, action
 /// data inlined. Components: text / narration / button / selection /
@@ -13,10 +15,14 @@ class A2UIv09Renderer extends StatelessWidget {
     super.key,
     required this.envelope,
     this.onAction,
+    this.onOpenResource,
   });
 
   final Map<String, dynamic> envelope;
   final void Function(String tool, Map<String, dynamic> args)? onAction;
+
+  /// A `sources` chip was tapped: open its `ui://` resource inline.
+  final void Function(String uri)? onOpenResource;
 
   @override
   Widget build(BuildContext context) {
@@ -137,6 +143,15 @@ class A2UIv09Renderer extends StatelessWidget {
           title: map['title'] as String?,
           pngBase64: map['png_base64'] as String?,
         );
+      case 'sources':
+        final items = ((map['items'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((i) => SourceChip(
+                  label: (i['label'] as String?) ?? '',
+                  resource: (i['resource'] as String?) ?? '',
+                ))
+            .toList(growable: false);
+        return SourcesRow(items: items, onOpen: onOpenResource);
       default:
         return _unknown('unknown v0.9 type: $type');
     }

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'sources_row.dart';
+
 /// A2UI v0.8 renderer. **No shared base** with v0.9, per ADR-4 — this
 /// file owns the full v0.8 envelope shape so the schema can evolve
 /// without rippling. The envelope wraps each stream entry in a
@@ -16,10 +18,14 @@ class A2UIv08Renderer extends StatelessWidget {
     super.key,
     required this.envelope,
     this.onAction,
+    this.onOpenResource,
   });
 
   final Map<String, dynamic> envelope;
   final void Function(String tool, Map<String, dynamic> args)? onAction;
+
+  /// A `Sources` chip was tapped: open its `ui://` resource inline.
+  final void Function(String uri)? onOpenResource;
 
   @override
   Widget build(BuildContext context) {
@@ -130,6 +136,15 @@ class A2UIv08Renderer extends StatelessWidget {
                 ))
             .toList(growable: false);
         return _Dashboard(title: title, tiles: tiles);
+      case 'Sources':
+        final items = ((body['items'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((i) => SourceChip(
+                  label: (i['label'] as String?) ?? '',
+                  resource: (i['resource'] as String?) ?? '',
+                ))
+            .toList(growable: false);
+        return SourcesRow(items: items, onOpen: onOpenResource);
       default:
         return _unknown('unknown v0.8 component kind: $kind');
     }

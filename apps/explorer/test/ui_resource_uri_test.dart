@@ -112,6 +112,81 @@ void main() {
       );
     });
 
+    test('SOURCES never auto-open: their items are invisible to the lift', () {
+      // A `sources` component carries its `ui://` resources one level down
+      // (`items[].resource`) — the click-to-open contract. The lift must
+      // return null when sources are the ONLY resource-bearing component…
+      const sources = {
+        'kind': 'sources',
+        'items': [
+          {
+            'label': 'account · initech-corp',
+            'resource': 'ui://peacock/document?skill=account&id=initech-corp',
+          },
+        ],
+      };
+      expect(
+        InvocationResult.uiFrom(const {
+          'latency_ms': 5,
+          'result': {
+            'surface': {
+              'components': [
+                {'kind': 'narration', 'text': 'Flagged.'},
+                sources,
+              ],
+            },
+          },
+        }),
+        isNull,
+      );
+      // …including on the NEGOTIATED envelope's `stream` shape…
+      expect(
+        InvocationResult.uiFrom(const {
+          'content': [],
+          'structuredContent': {
+            'result': {
+              'version': '0.9',
+              'stream': [
+                {'type': 'narration', 'text': 'Flagged.'},
+                {
+                  'type': 'sources',
+                  'items': [
+                    {
+                      'label': 'account · initech-corp',
+                      'resource':
+                          'ui://peacock/document?skill=account&id=initech-corp',
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        }),
+        isNull,
+      );
+      // …while a SIBLING report button still auto-opens as before.
+      expect(
+        InvocationResult.uiFrom(const {
+          'latency_ms': 5,
+          'result': {
+            'surface': {
+              'components': [
+                sources,
+                {
+                  'kind': 'button',
+                  'label': 'Open report: nba-report',
+                  'tool': 'render_report',
+                  'args': {},
+                  'resource': 'ui://peacock/nba-report?account=initech-corp',
+                },
+              ],
+            },
+          },
+        }),
+        'ui://peacock/nba-report?account=initech-corp',
+      );
+    });
+
     test('null when absent or empty', () {
       expect(InvocationResult.uiFrom(const {'result': {}}), isNull);
       expect(InvocationResult.uiFrom(null), isNull);

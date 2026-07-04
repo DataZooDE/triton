@@ -48,6 +48,11 @@ class _Turn {
   final String? text;
   final InvocationResult? result;
   final String? version;
+
+  /// The `ui://` resource a Sources chip on this turn opened (click-to-open;
+  /// nothing is set until the user taps a chip). Rendered below the surface,
+  /// alongside — not replacing — the turn's auto-opened report.
+  String? openedResource;
 }
 
 class _ConsolePageState extends ConsumerState<ConsolePage> {
@@ -149,10 +154,18 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   }
 
   Future<void> _send() async {
-    final t = _tool;
     final text = _composer.text.trim();
-    if (t == null || text.isEmpty || _sending) return;
+    if (text.isEmpty) return;
     _composer.clear();
+    await _sendText(text);
+  }
+
+  /// Send `text` as a user turn — from the composer, or handed up by an
+  /// embedded document's `prompt` action (`mcp:prompt`). Either way it is a
+  /// real turn: user bubble, dispatch on the selected protocol, agent bubble.
+  Future<void> _sendText(String text) async {
+    final t = _tool;
+    if (t == null || text.isEmpty || _sending) return;
     setState(() {
       _turns.add(_Turn.user(text));
       _sending = true;
@@ -168,6 +181,12 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
       _sending = false;
     });
     _scrollToEnd();
+  }
+
+  /// An embedded runtime (auto-opened report or a clicked source document)
+  /// posted a prepared prompt — send it as a new user turn.
+  void _promptFromEmbed(String text) {
+    _sendText(text);
   }
 
   /// A rendered surface button/selection re-invokes a tool. A cross-tool button
@@ -390,12 +409,23 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                     envelope: r.raw,
                     version: turn.version,
                     onAction: _onA2uiAction,
+                    onOpenResource: (uri) =>
+                        setState(() => turn.openedResource = uri),
                   )
                 else
                   JsonViewer(r.raw),
                 if (r.uiResourceUri != null) ...[
                   const SizedBox(height: 10),
-                  UiResourceView(uri: r.uiResourceUri!),
+                  UiResourceView(uri: r.uiResourceUri!, onPrompt: _promptFromEmbed),
+                ],
+                // A Sources chip opened a document — embedded below the
+                // surface (and below the auto-opened report, when both).
+                if (turn.openedResource != null) ...[
+                  const SizedBox(height: 10),
+                  UiResourceView(
+                    uri: turn.openedResource!,
+                    onPrompt: _promptFromEmbed,
+                  ),
                 ],
                 const SizedBox(height: 8),
                 _turnFooter(context, r),

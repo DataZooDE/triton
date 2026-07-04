@@ -48,6 +48,25 @@ _McpRequest? _readMcpRequest(Object raw) {
   }
 }
 
+/// Parse an `mcp:prompt` message (`{type:'mcp:prompt', text}`): the embedded
+/// runtime hands the host a prepared prompt to send as a NEW USER TURN in the
+/// chat (a document's skill-page `prompt` action). Same Map-or-JSObject
+/// duality as [_readMcpRequest]. Returns the text, or null for anything else.
+String? _readMcpPrompt(Object raw) {
+  if (raw is Map) {
+    if (raw['type'] != 'mcp:prompt') return null;
+    return raw['text']?.toString();
+  }
+  try {
+    final obj = raw as JSObject;
+    final type = (obj.getProperty('type'.toJS) as JSString?)?.toDart;
+    if (type != 'mcp:prompt') return null;
+    return (obj.getProperty('text'.toJS) as JSString?)?.toDart;
+  } catch (_) {
+    return null;
+  }
+}
+
 /// Embed self-contained HTML in a **sandboxed** `<iframe>` on Flutter web.
 /// The iframe is fed via `srcdoc`, so it loads no external URL; the `sandbox`
 /// attribute isolates the embedded upstream report from the Explorer, while
@@ -67,6 +86,7 @@ Widget embedHtml(
   required String viewId,
   double height = 600,
   Future<Object?> Function(String name, Object? args)? onCallServerTool,
+  void Function(String text)? onPrompt,
 }) {
   if (!_registered.contains(viewId)) {
     ui_web.platformViewRegistry.registerViewFactory(viewId, (int _) {
@@ -76,10 +96,21 @@ Widget embedHtml(
         ..style.width = '100%'
         ..style.height = '100%'
         ..setAttribute('sandbox', 'allow-scripts');
-      if (onCallServerTool != null) {
+      if (onCallServerTool != null || onPrompt != null) {
         html.window.onMessage.listen((event) async {
           final raw = event.data;
           if (raw == null) return;
+          // `mcp:prompt` → a new user turn. Several embeds may be live at
+          // once (auto-opened report + clicked sources); only THIS iframe's
+          // messages may fire, or one click sends N prompts.
+          if (onPrompt != null && event.source == el.contentWindow) {
+            final prompt = _readMcpPrompt(raw);
+            if (prompt != null) {
+              if (prompt.trim().isNotEmpty) onPrompt(prompt.trim());
+              return;
+            }
+          }
+          if (onCallServerTool == null) return;
           final reading = _readMcpRequest(raw);
           if (reading == null) return; // not a callServerTool message
           Object? result;

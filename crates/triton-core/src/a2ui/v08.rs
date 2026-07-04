@@ -94,6 +94,14 @@ fn component_to_json(c: &Component) -> Value {
         Component::Report { report_id, args } => json!({
             "Report": { "report_id": report_id, "args": args }
         }),
+        Component::Sources { items } => json!({
+            "Sources": {
+                "items": items.iter().map(|i| json!({
+                    "label": i.label,
+                    "resource": i.resource,
+                })).collect::<Vec<_>>(),
+            }
+        }),
     };
     json!({ "Component": inner })
 }
