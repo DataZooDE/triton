@@ -17,10 +17,11 @@ adapters:
       audience: "1234567890"
     outbound:
       kind: rest_api
-      # #164 T1a: the async courier authorises its create-message POST
-      # with this resolved token as a static bearer. Tests assert this
-      # exact value arrives at the fake Chat API. T1b replaces the
-      # static bearer with the SA JWT-bearer OAuth minter.
+      # #164 T1a: a NON-service-account-shaped token rides verbatim as
+      # a static bearer (the operator escape hatch). Tests assert this
+      # exact value arrives at the fake Chat API. An SA key JSON here
+      # would select the T1b minter instead — see
+      # manifest-google-chat-sa-test.yaml.
       token: google-chat-courier-static-token
     identity:
       kind: sender_table

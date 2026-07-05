@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::{
-    FakeGoogleChatApi, FakeGoogleJwks, GoogleChatSentMessage, attacker_signing_key,
+    FakeGoogleChatApi, FakeGoogleJwks, FakeGoogleOAuth, GoogleChatSentMessage,
+    attacker_signing_key, service_account_decoding_key, service_account_key_json,
 };
 use triton_tests::upstream_fixture::FakeAgent;
 
@@ -1272,9 +1273,9 @@ fn async_manifest_path() -> String {
         .to_string()
 }
 
-/// The static bearer the google-chat manifests carry as
-/// `outbound.token` (T1a; T1b replaces it with an SA-minted OAuth
-/// token).
+/// The static bearer the T1a manifests carry as `outbound.token` —
+/// not service-account-shaped, so it rides verbatim (the deliberate
+/// escape hatch next to the T1b minter path below).
 const COURIER_STATIC_TOKEN: &str = "google-chat-courier-static-token";
 
 /// Env for the async-courier tests: the `answer` inbound tool routes
@@ -1498,6 +1499,311 @@ async fn async_courier_api_500_audits_retry_and_stays_up() {
         .await
         .expect("second POST webhook");
     assert!(resp2.status().is_success(), "{}", resp2.status());
+}
+
+// ---------- #164 T1b: SA JWT-bearer OAuth minter ----------
+
+fn sa_manifest_path() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-google-chat-sa-test.yaml")
+        .display()
+        .to_string()
+}
+
+/// `client_email` of the test service-account key — the assertion
+/// JWT's `iss` must carry exactly this.
+const SA_CLIENT_EMAIL: &str = "courier-bot@triton-test.iam.gserviceaccount.com";
+/// Env var the SA manifest's `outbound.token: env://…` resolves from.
+const SA_KEY_ENV: &str = "GOOGLE_CHAT_SA_KEY";
+/// The OAuth scope Google Chat's create-message REST call requires;
+/// the assertion JWT must ask for exactly this.
+const CHAT_BOT_SCOPE: &str = "https://www.googleapis.com/auth/chat.bot";
+
+/// Env for the T1b minter tests: async courier ON, `outbound.token`
+/// resolved from [`SA_KEY_ENV`] as an SA key JSON whose `token_uri`
+/// points at the fake OAuth endpoint.
+fn sa_courier_env(
+    jwks: &FakeGoogleJwks,
+    chat_api: &FakeGoogleChatApi,
+    oauth: &FakeGoogleOAuth,
+    upstream: &FakeAgent,
+) -> HashMap<String, String> {
+    HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), sa_manifest_path()),
+        ("TRITON_GOOGLE_CHAT_JWKS_URI".to_string(), jwks.jwks_uri()),
+        (
+            "TRITON_STATIC_UPSTREAMS".to_string(),
+            format!("answer={}", upstream.host_port()),
+        ),
+        (
+            "TRITON_GOOGLE_CHAT_API_BASE".to_string(),
+            chat_api.base_url(),
+        ),
+        ("TRITON_GOOGLE_CHAT_ASYNC".to_string(), "1".to_string()),
+        (
+            SA_KEY_ENV.to_string(),
+            service_account_key_json(SA_CLIENT_EMAIL, &oauth.token_url()),
+        ),
+    ])
+}
+
+/// Poll the fake Chat API until at least `n` Messages land.
+fn wait_for_chat_posts(
+    chat_api: &FakeGoogleChatApi,
+    n: usize,
+    deadline: Duration,
+) -> Vec<GoogleChatSentMessage> {
+    let start = Instant::now();
+    loop {
+        let captured = chat_api.captured();
+        if captured.len() >= n {
+            return captured;
+        }
+        if start.elapsed() > deadline {
+            panic!(
+                "only {} of {n} Messages reached the fake Chat API within {deadline:?}",
+                captured.len()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// #164 T1b happy path. An `outbound.token` that is a service-account
+/// key JSON (`"type": "service_account"`) must NOT ride as a bearer
+/// verbatim: the courier mints an OAuth access token via the JWT-bearer
+/// grant at the key's `token_uri` and posts the reply with the MINTED
+/// token. The captured assertion must verify against the SA public key
+/// and carry iss = client_email, scope = chat.bot, aud = the token URL.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sa_key_outbound_token_mints_oauth_bearer_for_courier_post() {
+    let jwks = FakeGoogleJwks::start().await;
+    let chat_api = FakeGoogleChatApi::start().await;
+    let oauth = FakeGoogleOAuth::start("minted-access-token-1").await;
+    let upstream = FakeAgent::start_returning(json!({ "answer": "minted-path answer" })).await;
+    let env = sa_courier_env(&jwks, &chat_api, &oauth, &upstream);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let jwt = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&message_event("users/99", "mint me a bearer"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    // The reply lands with the fake-issued access token, never the raw key.
+    let captured = wait_for_chat_posts(&chat_api, 1, Duration::from_secs(5));
+    assert_eq!(captured.len(), 1, "exactly one Message POST");
+    assert_eq!(
+        captured[0].bearer, "Bearer minted-access-token-1",
+        "courier must present the MINTED OAuth token, not the SA key"
+    );
+    assert!(
+        !captured[0].bearer.contains("service_account"),
+        "the raw SA key JSON must never ride as a bearer"
+    );
+    assert!(
+        captured[0].body["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("minted-path answer"),
+        "posted Message must carry the agent's answer; got: {}",
+        captured[0].body
+    );
+
+    // The grant is the JWT-bearer shape, and the assertion verifies
+    // against the SA public key with the documented claims.
+    let grants = oauth.captured();
+    assert_eq!(grants.len(), 1, "exactly one token-endpoint grant");
+    assert_eq!(
+        grants[0].grant_type,
+        "urn:ietf:params:oauth:grant-type:jwt-bearer"
+    );
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+    validation.set_audience(&[oauth.token_url()]);
+    let decoded = jsonwebtoken::decode::<Value>(
+        &grants[0].assertion,
+        &service_account_decoding_key(),
+        &validation,
+    )
+    .expect("assertion must verify (RS256) against the SA key, aud = token URL, unexpired");
+    assert_eq!(decoded.claims["iss"], SA_CLIENT_EMAIL, "iss = client_email");
+    assert_eq!(decoded.claims["scope"], CHAT_BOT_SCOPE, "chat.bot scope");
+    assert_eq!(
+        decoded.claims["aud"],
+        oauth.token_url(),
+        "aud = the token URL"
+    );
+}
+
+/// Cache semantics: two webhook turns → exactly ONE token-endpoint
+/// grant. The second courier POST still bears the minted token, served
+/// from the in-process cache instead of a second mint.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sa_minter_caches_token_across_turns() {
+    let jwks = FakeGoogleJwks::start().await;
+    let chat_api = FakeGoogleChatApi::start().await;
+    let oauth = FakeGoogleOAuth::start("minted-access-token-cached").await;
+    let upstream = FakeAgent::start_returning(json!({ "answer": "cached answer" })).await;
+    let env = sa_courier_env(&jwks, &chat_api, &oauth, &upstream);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+    let client = reqwest::Client::new();
+    let jwt = jwks.sign_jwt(standard_claims());
+
+    for text in ["first turn", "second turn"] {
+        let resp = client
+            .post(format!("http://{webhook}/google_chat/webhook"))
+            .header("authorization", format!("Bearer {jwt}"))
+            .json(&message_event("users/99", text))
+            .send()
+            .await
+            .expect("POST webhook");
+        assert!(resp.status().is_success(), "{}", resp.status());
+    }
+
+    let captured = wait_for_chat_posts(&chat_api, 2, Duration::from_secs(5));
+    assert_eq!(captured.len(), 2, "one Message POST per turn");
+    for msg in &captured {
+        assert_eq!(
+            msg.bearer, "Bearer minted-access-token-cached",
+            "every courier POST bears the minted token"
+        );
+    }
+    assert_eq!(
+        oauth.captured().len(),
+        1,
+        "second turn must reuse the cached token — exactly one token-endpoint hit"
+    );
+}
+
+/// Failed refresh: the token endpoint answers 500. The courier must
+/// audit the turn as a retryable delivery failure (`phase: post` /
+/// `retry`, `error:provider`, status 0 — the mint failed before any
+/// Chat API roundtrip), the raw key must never be sent as a fallback
+/// bearer, and the adapter stays up for the next webhook.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sa_minter_oauth_500_audits_retry_and_stays_up() {
+    let jwks = FakeGoogleJwks::start().await;
+    let chat_api = FakeGoogleChatApi::start().await;
+    let oauth = FakeGoogleOAuth::start_with_status(500).await;
+    let upstream = FakeAgent::start_returning(json!({ "answer": "doomed reply" })).await;
+    let env = sa_courier_env(&jwks, &chat_api, &oauth, &upstream);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+    let client = reqwest::Client::new();
+
+    let jwt = jwks.sign_jwt(standard_claims());
+    let resp = client
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&message_event("users/99", "mint will 500"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(
+        resp.status().is_success(),
+        "ack still 200: {}",
+        resp.status()
+    );
+
+    let post = wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit" && v["phase"] == "post" && v["protocol"] == "messenger:google_chat"
+    });
+    assert_eq!(
+        post["status_label"], "retry",
+        "a failed mint is retryable — next use re-attempts"
+    );
+    assert_eq!(post["result"], "error:provider");
+    assert_eq!(
+        post["status"], 0,
+        "the mint failed before any Chat API roundtrip"
+    );
+    assert!(
+        chat_api.captured().is_empty(),
+        "no bearer minted ⇒ nothing may reach the Chat API (never fall back to the raw key)"
+    );
+
+    // Nothing panicked: the webhook still serves the next turn.
+    let resp2 = client
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&message_event("users/99", "still alive?"))
+        .send()
+        .await
+        .expect("second POST webhook");
+    assert!(resp2.status().is_success(), "{}", resp2.status());
+}
+
+/// Boot behaviour: async courier enabled + an SA-key-shaped
+/// `outbound.token` (`"type": "service_account"`) whose `private_key`
+/// is not a parseable RSA PEM → the binary refuses to boot (exit 2)
+/// with a clear message, same fail-closed spirit as T1a's
+/// missing-token check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sa_key_with_broken_private_key_refuses_boot() {
+    let bin = locate_triton_binary();
+    let broken_key = json!({
+        "type": "service_account",
+        "project_id": "triton-test",
+        "client_email": "broken@triton-test.iam.gserviceaccount.com",
+        "private_key": "-----BEGIN PRIVATE KEY-----\nnot a real key\n-----END PRIVATE KEY-----\n",
+        "token_uri": "http://127.0.0.1:9/token",
+    })
+    .to_string();
+    let mut child = std::process::Command::new(&bin)
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_ENV", "local")
+        .env("TRITON_MANIFEST_PATH", sa_manifest_path())
+        .env("TRITON_GOOGLE_CHAT_JWKS_URI", "https://www.googleapis.com")
+        .env("TRITON_GOOGLE_CHAT_ASYNC", "1")
+        .env("TRITON_STATIC_UPSTREAMS", "answer=127.0.0.1:9")
+        .env(SA_KEY_ENV, broken_key)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn triton");
+    // Poll with a deadline instead of a bare `.output()` so a
+    // regression (binary boots and serves) fails the test instead of
+    // hanging it forever.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(status) => break status,
+            None if Instant::now() > deadline => {
+                let _ = child.kill();
+                panic!("broken SA private_key MUST refuse boot, but the binary kept running");
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    let out = child.wait_with_output().expect("collect output");
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "SA-shaped outbound.token with a broken private_key MUST fail boot closed; output:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("service"),
+        "boot refusal must name the service-account key problem; output:\n{combined}"
+    );
 }
 
 fn locate_triton_binary() -> PathBuf {

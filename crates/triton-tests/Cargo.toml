@@ -32,8 +32,10 @@ tiny-skia = { workspace = true }
 
 # Real OIDC fixture: Ed25519 keypair + JWT sign + tiny axum issuer
 # serving discovery + JWKS. No mocks per CLAUDE.md §1.
-# Multipart enabled for PR 36's FakeTelegramApi `sendPhoto` route.
-axum = { workspace = true, features = ["multipart", "ws"] }
+# Multipart enabled for PR 36's FakeTelegramApi `sendPhoto` route;
+# `form` parses the OAuth2 JWT-bearer grants FakeGoogleOAuth captures
+# (#164 T1b).
+axum = { workspace = true, features = ["multipart", "ws", "form"] }
 base64 = "0.22"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 # Derive the RSA public modulus/exponent so FakeGoogleJwks can also serve

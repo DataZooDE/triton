@@ -34,6 +34,7 @@
 
 pub mod jwt_verifier;
 pub mod surface_mapper;
+pub mod token_minter;
 pub use surface_mapper::RenderedMessage;
 
 use std::collections::{HashMap, VecDeque};
@@ -55,6 +56,7 @@ use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
 use triton_secrets::{ResolveError, SecretResolver};
 
 use crate::jwt_verifier::{GoogleJwtVerifier, VerifierConfig};
+use crate::token_minter::TokenMinter;
 
 pub const PROTOCOL: &str = "messenger:google_chat";
 
@@ -299,6 +301,23 @@ impl Default for CourierConfig {
     }
 }
 
+/// How the #164 courier authorises its create-message POST, decided
+/// once at boot from the resolved `outbound.token` (see the mode
+/// detection in [`GoogleChatAdapter::from_manifest`]).
+enum OutboundAuth {
+    /// No `outbound.token` in the manifest. The courier refuses to
+    /// enable at boot; the inline sync path never POSTs.
+    None,
+    /// T1a: the resolved value rides verbatim as a static bearer —
+    /// the deliberate operator escape hatch (and every pre-T1b
+    /// manifest's behaviour, unchanged).
+    Static(String),
+    /// T1b: the resolved value is a Google service-account key file;
+    /// a cached, auto-refreshing minter exchanges SA-signed assertion
+    /// JWTs for `chat.bot`-scoped access tokens per RFC 7523.
+    ServiceAccount(TokenMinter),
+}
+
 pub struct GoogleChatAdapter {
     name: String,
     verifier: Arc<GoogleJwtVerifier>,
@@ -317,12 +336,13 @@ pub struct GoogleChatAdapter {
     image_cache: Arc<Mutex<ImageCache>>,
     /// #164 T1a: async reply courier switch + Chat REST API base.
     courier: CourierConfig,
-    /// Resolved `outbound.token`. T1a uses this value directly as a
-    /// static bearer on the courier's create-message POST; T1b
-    /// replaces it with the SA JWT-bearer OAuth minter (see the
-    /// msteams `TokenClient` precedent). `None` when the manifest
-    /// carries no token (courier then refuses to enable at boot).
-    outbound_token: Option<String>,
+    /// Courier bearer source, decided at boot from the resolved
+    /// `outbound.token` (#164): a service-account key file (`"type":
+    /// "service_account"` JSON — client_email, private_key PEM,
+    /// token_uri; the Vault-managed shape in prod) selects the T1b
+    /// OAuth minter; any other non-empty value rides verbatim as a
+    /// T1a static bearer (the operator escape hatch).
+    outbound: OutboundAuth,
     /// Outbound HTTP client for the courier POST (built once at boot
     /// with the configured courier timeout).
     http: reqwest::Client,
@@ -373,10 +393,8 @@ impl GoogleChatAdapter {
 
         // FR-L-6 / NFR-S-5: every credential field MUST resolve at
         // boot so a misconfigured `env://` ref fails closed. The
-        // resolved value authorises the #164 T1a async courier's
-        // create-message POST: used directly as a static bearer today;
-        // T1b replaces this with the SA JWT-bearer OAuth minter (see
-        // the msteams TokenClient precedent).
+        // resolved value authorises the #164 async courier's
+        // create-message POST.
         let outbound_token = match adapter.outbound.credentials.get("token") {
             Some(field) => Some(
                 resolver
@@ -395,6 +413,23 @@ impl GoogleChatAdapter {
             // that can never deliver — refuse at boot, not per turn.
             return Err(BuildError::MissingCredential("outbound.token"));
         }
+        // #164 T1b mode detection: a value shaped like a Google
+        // service-account key file (JSON object with `"type":
+        // "service_account"`) selects the SA JWT-bearer OAuth minter;
+        // anything else keeps the T1a static-bearer path unchanged.
+        // An SA-shaped value that then fails to parse (broken PEM,
+        // missing client_email) fails boot closed — same spirit as
+        // the missing-token check above, and regardless of the
+        // courier flag so a bad prod secret surfaces immediately.
+        let outbound = match outbound_token {
+            None => OutboundAuth::None,
+            Some(raw) if token_minter::looks_like_service_account_key(&raw) => {
+                let minter =
+                    TokenMinter::from_key_json(&raw).map_err(BuildError::ServiceAccountKey)?;
+                OutboundAuth::ServiceAccount(minter)
+            }
+            Some(raw) => OutboundAuth::Static(raw),
+        };
 
         let identity = match adapter.identity.kind {
             IdentityKind::SenderTable => {
@@ -507,7 +542,7 @@ impl GoogleChatAdapter {
             correlation_key,
             image_cache: Arc::new(Mutex::new(ImageCache::default())),
             courier,
-            outbound_token,
+            outbound,
             http,
         })
     }
@@ -603,6 +638,12 @@ pub enum BuildError {
     Resolve(&'static str, #[source] ResolveError),
     #[error("identity.table failed to parse as sender JSON: {0}")]
     TableParse(String),
+    /// #164 T1b: `outbound.token` is shaped like a Google
+    /// service-account key (`"type": "service_account"`) but is not a
+    /// usable one — boot fails closed rather than couriering with a
+    /// credential that can never mint.
+    #[error("outbound.token is a service-account key that cannot mint: {0}")]
+    ServiceAccountKey(#[source] token_minter::MinterError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -1411,15 +1452,20 @@ async fn send_chat_message(
     space: &str,
     text: &str,
 ) -> Result<u16, String> {
-    // T1a (#164): the resolved `outbound.token` value is used directly
-    // as a static bearer today; T1b replaces this with the SA
-    // JWT-bearer OAuth minter — see the msteams TokenClient precedent.
-    // Boot fails closed when the courier is enabled without a token,
-    // so this guard is defensive only.
-    let token = adapter
-        .outbound_token
-        .as_deref()
-        .ok_or_else(|| "no outbound token resolved".to_string())?;
+    // #164 bearer acquisition: static token verbatim (T1a escape
+    // hatch), or a cached/auto-refreshed SA-minted OAuth token (T1b).
+    // A failed mint returns Err so the caller audits the turn as a
+    // retryable transport failure — the raw SA key NEVER rides as a
+    // fallback bearer. Boot fails closed when the courier is enabled
+    // without a token, so the `None` guard is defensive only.
+    let token = match &adapter.outbound {
+        OutboundAuth::Static(t) => t.clone(),
+        OutboundAuth::ServiceAccount(minter) => minter
+            .access_token()
+            .await
+            .map_err(|e| format!("service-account token mint: {e}"))?,
+        OutboundAuth::None => return Err("no outbound token resolved".to_string()),
+    };
     let url = format!(
         "{}/v1/{}/messages",
         adapter.courier.api_base.trim_end_matches('/'),

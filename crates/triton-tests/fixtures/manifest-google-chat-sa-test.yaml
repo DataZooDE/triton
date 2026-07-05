@@ -1,0 +1,40 @@
+# #164 T1b integration manifest — SA JWT-bearer OAuth minter. Same
+# shape as manifest-google-chat-async-test.yaml, except `outbound.token`
+# resolves (via env://) to a Google service-account key JSON. The
+# adapter detects the `"type": "service_account"` shape and mints its
+# courier bearer via the JWT-bearer grant at the key's `token_uri`
+# (the test's FakeGoogleOAuth) instead of using the value verbatim.
+version: "0.2"
+
+adapters:
+  google_chat:
+    kind: google_chat
+    # Route plain inbound text to the static-upstream `answer` agent.
+    tool: answer
+    inbound:
+      kind: webhook
+      signature: google_oidc_jwt
+      audience: "1234567890"
+    outbound:
+      kind: rest_api
+      # #164 T1b: the test injects a service-account key JSON here
+      # (client_email + private_key PEM + token_uri → FakeGoogleOAuth).
+      token: env://GOOGLE_CHAT_SA_KEY
+    identity:
+      kind: sender_table
+      table: '{"users/99":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: card_v2
+      selections: card_v2
+      forms: card_v2
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []
