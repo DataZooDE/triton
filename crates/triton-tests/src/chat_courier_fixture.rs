@@ -657,6 +657,101 @@ async fn handle_activity_post(
     Json(json!({ "id": "stub-activity-id" }))
 }
 
+// ---------- Google Chat REST API fake (#164 T1a) ----------
+
+/// One captured create-message POST against the fake Google Chat
+/// REST API (#164 T1a async reply courier). `space` is the parent
+/// resource reconstructed from the URL path (`spaces/<id>`);
+/// `bearer` is the verbatim `Authorization` header value so tests
+/// can pin the courier's credential; `body` is the posted Message
+/// JSON (`{"text": …}` for T1a).
+#[derive(Debug, Clone)]
+pub struct GoogleChatSentMessage {
+    pub space: String,
+    pub bearer: String,
+    pub body: Value,
+}
+
+struct GoogleChatApiState {
+    captured: Mutex<Vec<GoogleChatSentMessage>>,
+    /// HTTP status every POST answers with — 200 for the happy path,
+    /// 500 to exercise the courier's Retry audit branch.
+    status: u16,
+}
+
+/// Fake `chat.googleapis.com` for the #164 T1a async reply courier.
+/// Speaks the `POST /v1/spaces/{space}/messages` wire shape with a
+/// stub `{name: "spaces/<id>/messages/stub"}` response.
+///
+/// No mocks per CLAUDE.md §1: a real axum HTTP server on a real TCP
+/// port; the spawned courier task inside the binary POSTs to it over
+/// real HTTP.
+pub struct FakeGoogleChatApi {
+    addr: SocketAddr,
+    state: Arc<GoogleChatApiState>,
+}
+
+impl FakeGoogleChatApi {
+    pub async fn start() -> Self {
+        Self::start_with_status(200).await
+    }
+
+    /// Same as [`start`](Self::start) but every POST answers `status`
+    /// (still capturing the request), so tests can exercise the
+    /// courier's non-2xx `record_post` branches.
+    pub async fn start_with_status(status: u16) -> Self {
+        let state = Arc::new(GoogleChatApiState {
+            captured: Mutex::new(Vec::new()),
+            status,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/v1/spaces/{space}/messages",
+            post(handle_chat_message_post).with_state(state.clone()),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        Self { addr, state }
+    }
+
+    pub fn base_url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// Snapshot of every Message POST the fixture captured.
+    pub fn captured(&self) -> Vec<GoogleChatSentMessage> {
+        self.state.captured.lock().unwrap().clone()
+    }
+}
+
+async fn handle_chat_message_post(
+    State(state): State<Arc<GoogleChatApiState>>,
+    Path(space): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    state.captured.lock().unwrap().push(GoogleChatSentMessage {
+        space: format!("spaces/{space}"),
+        bearer,
+        body,
+    });
+    let status =
+        axum::http::StatusCode::from_u16(state.status).unwrap_or(axum::http::StatusCode::OK);
+    (
+        status,
+        Json(json!({ "name": format!("spaces/{space}/messages/stub") })),
+    )
+        .into_response()
+}
+
 // ---------- WhatsApp Cloud API fake (PR 31) ----------
 
 /// One captured `messages` POST against the fake WhatsApp Cloud

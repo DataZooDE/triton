@@ -916,12 +916,37 @@ async fn main() -> std::io::Result<()> {
                         );
                         std::process::exit(2);
                     }
+                    // #164 T1a: the async courier's egress target gets
+                    // the same NFR-S-4 treatment — outside `local` env
+                    // the Chat REST base MUST be the canonical
+                    // `chat.googleapis.com` host (parsed-host check,
+                    // not `starts_with`, per the PR 37 lesson above).
+                    if settings.env != "local"
+                        && !is_canonical_url(
+                            &settings.google_chat_api_base,
+                            "https",
+                            "chat.googleapis.com",
+                        )
+                    {
+                        tracing::error!(
+                            env = %settings.env,
+                            api_base = %settings.google_chat_api_base,
+                            "non-`local` env MUST use TRITON_GOOGLE_CHAT_API_BASE with host chat.googleapis.com (NFR-S-4 egress allowlist)",
+                        );
+                        std::process::exit(2);
+                    }
+                    let courier_config = triton_chat_googlechat::CourierConfig {
+                        enabled: settings.google_chat_async,
+                        api_base: settings.google_chat_api_base.clone(),
+                        timeout: settings.courier_timeout,
+                    };
                     match triton_chat_googlechat::GoogleChatAdapter::from_manifest(
                         name,
                         adapter,
                         resolver.as_ref(),
                         dispatcher.clone(),
                         settings.google_chat_jwks_uri.clone(),
+                        courier_config,
                     )
                     .await
                     {

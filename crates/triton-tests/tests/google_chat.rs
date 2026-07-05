@@ -21,7 +21,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
-use triton_tests::chat_courier_fixture::{FakeGoogleJwks, attacker_signing_key};
+use triton_tests::chat_courier_fixture::{
+    FakeGoogleChatApi, FakeGoogleJwks, GoogleChatSentMessage, attacker_signing_key,
+};
 use triton_tests::upstream_fixture::FakeAgent;
 
 const AUDIENCE: &str = "1234567890";
@@ -1259,6 +1261,243 @@ async fn upstream_resolver_colliding_with_inprocess_tool_refuses_to_boot() {
         "resolver_tool colliding with an in-process tool MUST refuse to boot; stderr:\n{}",
         String::from_utf8_lossy(&out.stderr),
     );
+}
+
+// ---------- #164 T1a: async reply courier ----------
+
+fn async_manifest_path() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-google-chat-async-test.yaml")
+        .display()
+        .to_string()
+}
+
+/// The static bearer the google-chat manifests carry as
+/// `outbound.token` (T1a; T1b replaces it with an SA-minted OAuth
+/// token).
+const COURIER_STATIC_TOKEN: &str = "google-chat-courier-static-token";
+
+/// Env for the async-courier tests: the `answer` inbound tool routes
+/// to `upstream` via the static-upstream map, and the courier POSTs
+/// replies at the fake Chat REST API. `async_on` toggles
+/// `TRITON_GOOGLE_CHAT_ASYNC` so the same setup pins both the new
+/// path and the unchanged sync default.
+fn courier_env(
+    jwks: &FakeGoogleJwks,
+    chat_api: &FakeGoogleChatApi,
+    upstream: &FakeAgent,
+    async_on: bool,
+) -> HashMap<String, String> {
+    let mut env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), async_manifest_path()),
+        ("TRITON_GOOGLE_CHAT_JWKS_URI".to_string(), jwks.jwks_uri()),
+        (
+            "TRITON_STATIC_UPSTREAMS".to_string(),
+            format!("answer={}", upstream.host_port()),
+        ),
+        (
+            "TRITON_GOOGLE_CHAT_API_BASE".to_string(),
+            chat_api.base_url(),
+        ),
+    ]);
+    if async_on {
+        env.insert("TRITON_GOOGLE_CHAT_ASYNC".to_string(), "1".to_string());
+    }
+    env
+}
+
+/// Poll the fake Chat API until at least one Message lands (the
+/// courier task POSTs out-of-band, after the webhook already acked).
+fn wait_for_chat_post(
+    chat_api: &FakeGoogleChatApi,
+    deadline: Duration,
+) -> Vec<GoogleChatSentMessage> {
+    let start = Instant::now();
+    loop {
+        let captured = chat_api.captured();
+        if !captured.is_empty() {
+            return captured;
+        }
+        if start.elapsed() > deadline {
+            panic!("no Message reached the fake Chat API within {deadline:?}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// #164 T1a happy path. Google Chat's webhook is synchronous with a
+/// ~30s deadline while live-LLM dispatches run 17–60s; with
+/// `TRITON_GOOGLE_CHAT_ASYNC=1` the webhook MUST ack 200 (empty body)
+/// immediately after JWT verify + identity resolution, and the reply
+/// MUST arrive out-of-band as a create-message POST at the Chat REST
+/// API — correct space, the manifest's static bearer (T1a), the
+/// agent's answer — audited as `phase: post` / `posted` with a real
+/// latency.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn async_courier_acks_immediately_and_posts_reply() {
+    let jwks = FakeGoogleJwks::start().await;
+    let chat_api = FakeGoogleChatApi::start().await;
+    // The agent takes ~2s to answer — far above the ack budget below,
+    // so a passing ack PROVES the handler didn't wait on dispatch.
+    let upstream = FakeAgent::start_returning_after(
+        Duration::from_secs(2),
+        json!({ "answer": "42, after a long think" }),
+    )
+    .await;
+    let env = courier_env(&jwks, &chat_api, &upstream, true);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+    let client = reqwest::Client::new();
+
+    // Warm the verifier's JWKS fetch with a non-MESSAGE event so the
+    // timed request below measures only the ack path.
+    let jwt = jwks.sign_jwt(standard_claims());
+    let warm = client
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&json!({ "type": "ADDED_TO_SPACE", "space": { "name": "spaces/AAA" } }))
+        .send()
+        .await
+        .expect("warm-up POST");
+    assert!(warm.status().is_success());
+
+    let started = Instant::now();
+    let resp = client
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&message_event("users/99", "what is the answer?"))
+        .send()
+        .await
+        .expect("POST webhook");
+    let ack_latency = started.elapsed();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert!(
+        ack_latency < Duration::from_millis(100),
+        "async ack must not wait for the (2s) dispatch; took {ack_latency:?}"
+    );
+    // The ack is a no-op body — the reply comes out-of-band, so the
+    // webhook body must not render anything.
+    let body: Value = resp.json().await.expect("ack body");
+    assert_eq!(body, json!({}), "async ack must be an empty no-op body");
+
+    // The spawned courier delivers the reply to the Chat REST API.
+    let captured = wait_for_chat_post(&chat_api, Duration::from_secs(5));
+    assert_eq!(captured.len(), 1, "exactly one Message POST");
+    let msg = &captured[0];
+    assert_eq!(
+        msg.space, "spaces/AAA",
+        "reply must target the inbound event's space"
+    );
+    assert_eq!(
+        msg.bearer,
+        format!("Bearer {COURIER_STATIC_TOKEN}"),
+        "T1a: the resolved outbound.token rides as a static bearer"
+    );
+    let text = msg.body["text"].as_str().unwrap_or_default();
+    assert!(
+        text.contains("42, after a long think"),
+        "posted Message must carry the agent's answer; got: {}",
+        msg.body
+    );
+
+    // Delivery audited as `phase: post` with a REAL HTTP roundtrip
+    // (status 200 from the fake API), unlike the inline path's 0/200.
+    let post = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "post" && v["protocol"] == "messenger:google_chat"
+    });
+    assert_eq!(post["status_label"], "posted");
+    assert_eq!(post["result"], "ok");
+    assert_eq!(post["status"], 200);
+}
+
+/// Backward compatibility: without `TRITON_GOOGLE_CHAT_ASYNC` the same
+/// setup answers inline in the webhook's 200 body (today's behaviour,
+/// byte-for-byte) and NOTHING reaches the Chat REST API.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_flag_unset_keeps_inline_sync_reply() {
+    let jwks = FakeGoogleJwks::start().await;
+    let chat_api = FakeGoogleChatApi::start().await;
+    let upstream = FakeAgent::start_returning(json!({ "answer": "sync inline answer" })).await;
+    let env = courier_env(&jwks, &chat_api, &upstream, false);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let jwt = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&message_event("users/99", "hello sync"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let body: Value = resp.json().await.expect("inline body");
+    assert!(
+        body["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("sync inline answer"),
+        "flag off ⇒ the reply is inline in the 200 body; got: {body}"
+    );
+
+    // Give a hypothetical stray courier task a beat, then assert the
+    // Chat REST API was never touched.
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        chat_api.captured().is_empty(),
+        "flag off ⇒ no outbound Message POST"
+    );
+}
+
+/// Courier failure path: the Chat API answers 500. The turn must be
+/// audited as `phase: post` / `retry` (a 5xx is retryable) with
+/// `error:provider`, and the binary keeps serving — no panic, next
+/// webhook still works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn async_courier_api_500_audits_retry_and_stays_up() {
+    let jwks = FakeGoogleJwks::start().await;
+    let chat_api = FakeGoogleChatApi::start_with_status(500).await;
+    let upstream = FakeAgent::start_returning(json!({ "answer": "doomed reply" })).await;
+    let env = courier_env(&jwks, &chat_api, &upstream, true);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+    let client = reqwest::Client::new();
+
+    let jwt = jwks.sign_jwt(standard_claims());
+    let resp = client
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&message_event("users/99", "post will 500"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(
+        resp.status().is_success(),
+        "ack still 200: {}",
+        resp.status()
+    );
+
+    // The courier tried (the fake captured the POST) and audited the
+    // 500 as a retryable delivery failure.
+    let captured = wait_for_chat_post(&chat_api, Duration::from_secs(5));
+    assert_eq!(captured.len(), 1);
+    let post = wait_for_audit(&proc, Duration::from_secs(2), |v| {
+        v["kind"] == "audit" && v["phase"] == "post" && v["protocol"] == "messenger:google_chat"
+    });
+    assert_eq!(post["status_label"], "retry", "5xx is a retryable outcome");
+    assert_eq!(post["result"], "error:provider");
+    assert_eq!(post["status"], 500);
+
+    // Nothing panicked: the webhook still serves the next turn.
+    let resp2 = client
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&message_event("users/99", "still alive?"))
+        .send()
+        .await
+        .expect("second POST webhook");
+    assert!(resp2.status().is_success(), "{}", resp2.status());
 }
 
 fn locate_triton_binary() -> PathBuf {

@@ -15,12 +15,12 @@ adapters:
       audience: "1234567890"
     outbound:
       kind: rest_api
-      # PR 33 uses the synchronous-response pattern (no outbound
-      # HTTP call); the manifest still carries a token field per the
-      # rest_api scheme's required-credentials rule, but the
-      # adapter never sends it anywhere. A literal placeholder is
-      # safe under dev mode.
-      token: unused-in-pr-33
+      # Resolved at boot and held for the #164 T1a async courier
+      # (static bearer on the create-message POST; T1b swaps in the
+      # SA JWT-bearer OAuth minter). These tests run the default
+      # synchronous inline-reply path, so it is never sent anywhere
+      # here. A literal value is safe under dev mode.
+      token: google-chat-courier-static-token
     identity:
       kind: sender_table
       # JSON: maps Google Chat sender's full `users/<id>` string
