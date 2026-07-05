@@ -1177,3 +1177,16 @@ a trap the next developer should not have to step in.
   thumb: when an inbound credential's issuer/audience aren't both unique to
   *this* caller, you need a per-actor claim too — signature + audience
   alone is not authentication.
+
+- **A test-local `locate_triton_binary` skips the harness's freshness
+  guard.** `TritonProcess::spawn` locates the binary via
+  `triton_binary_path()` which runs `ensure_fresh_binary` (rebuilds
+  `triton-bin` when any production source is newer). Tests that spawn the
+  binary *directly* for boot-refusal assertions (google_chat's
+  `locate_triton_binary`) get no such guard: under
+  `cargo test -p triton-tests …` the T1b broken-SA-key boot test ran a
+  pre-change `target/debug/triton` that happily booted — the test read as
+  "fail-closed not implemented" when the implementation was fine. Also:
+  never assert boot-refusal with a bare `.output()` (a regression that
+  boots = a test that hangs forever); poll `try_wait` with a deadline and
+  kill + panic on timeout.

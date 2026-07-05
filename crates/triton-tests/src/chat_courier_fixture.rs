@@ -752,6 +752,132 @@ async fn handle_chat_message_post(
         .into_response()
 }
 
+// ---------- Google OAuth2 token endpoint fake (#164 T1b) ----------
+
+/// A Google service-account key JSON (the standard downloaded key-file
+/// shape) built around the fixture's embedded RSA-2048 keypair, so a
+/// test can hand the binary an SA key whose assertions it can also
+/// verify (via [`service_account_decoding_key`]). `token_uri` points
+/// the minter's JWT-bearer grant at the test's [`FakeGoogleOAuth`].
+pub fn service_account_key_json(client_email: &str, token_uri: &str) -> String {
+    serde_json::json!({
+        "type": "service_account",
+        "project_id": "triton-test",
+        "private_key_id": "triton-test-sa-key",
+        "private_key": FAKE_GOOGLE_TEST_PRIVATE_KEY_PEM,
+        "client_email": client_email,
+        "client_id": "1234567890",
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": token_uri,
+    })
+    .to_string()
+}
+
+/// The public side of the fixture keypair as a `DecodingKey`, so tests
+/// can cryptographically verify the assertion JWT the minter signed
+/// with [`service_account_key_json`]'s private key.
+pub fn service_account_decoding_key() -> jsonwebtoken::DecodingKey {
+    jsonwebtoken::DecodingKey::from_rsa_components(FAKE_RSA_N_B64URL, FAKE_RSA_E_B64URL)
+        .expect("fixture rsa components parse")
+}
+
+/// One captured grant on the fake token endpoint: the raw
+/// `grant_type` and `assertion` form fields, so tests can pin the
+/// JWT-bearer grant shape and decode/verify the assertion.
+#[derive(Debug, Clone)]
+pub struct CapturedTokenGrant {
+    pub grant_type: String,
+    pub assertion: String,
+}
+
+struct GoogleOAuthState {
+    captured: Mutex<Vec<CapturedTokenGrant>>,
+    /// HTTP status every grant answers with — 200 happy path, 500 to
+    /// exercise the minter's failed-refresh branch.
+    status: u16,
+    access_token: String,
+}
+
+/// Fake `oauth2.googleapis.com` for the #164 T1b service-account
+/// minter. Speaks the OAuth2 JWT-bearer wire shape: POST `/token`
+/// with `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&
+/// assertion=<jwt>` answers `{access_token, expires_in, token_type}`.
+///
+/// No mocks per CLAUDE.md §1: a real axum HTTP server on a real TCP
+/// port; the minter inside the binary POSTs to it over real HTTP.
+pub struct FakeGoogleOAuth {
+    addr: SocketAddr,
+    state: Arc<GoogleOAuthState>,
+}
+
+impl FakeGoogleOAuth {
+    /// Happy-path fake issuing `access_token` with `expires_in: 3600`.
+    pub async fn start(access_token: &str) -> Self {
+        Self::build(200, access_token).await
+    }
+
+    /// Every grant answers `status` (still capturing the request), so
+    /// tests can exercise the minter's failed-refresh audit branch.
+    pub async fn start_with_status(status: u16) -> Self {
+        Self::build(status, "never-issued").await
+    }
+
+    async fn build(status: u16, access_token: &str) -> Self {
+        let state = Arc::new(GoogleOAuthState {
+            captured: Mutex::new(Vec::new()),
+            status,
+            access_token: access_token.to_string(),
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/token",
+            post(handle_google_token_grant).with_state(state.clone()),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        Self { addr, state }
+    }
+
+    /// The endpoint a test wires into the SA key's `token_uri`.
+    pub fn token_url(&self) -> String {
+        format!("http://{}/token", self.addr)
+    }
+
+    /// Snapshot of every grant the fixture captured. Its `len()` is
+    /// the token-endpoint hit count — the caching test pins it to 1
+    /// across two webhook turns.
+    pub fn captured(&self) -> Vec<CapturedTokenGrant> {
+        self.state.captured.lock().unwrap().clone()
+    }
+}
+
+async fn handle_google_token_grant(
+    State(state): State<Arc<GoogleOAuthState>>,
+    axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    state.captured.lock().unwrap().push(CapturedTokenGrant {
+        grant_type: form.get("grant_type").cloned().unwrap_or_default(),
+        assertion: form.get("assertion").cloned().unwrap_or_default(),
+    });
+    let status =
+        axum::http::StatusCode::from_u16(state.status).unwrap_or(axum::http::StatusCode::OK);
+    if !status.is_success() {
+        return (status, Json(json!({ "error": "internal_failure" }))).into_response();
+    }
+    (
+        status,
+        Json(json!({
+            "access_token": state.access_token.clone(),
+            "expires_in": 3600,
+            "token_type": "Bearer",
+        })),
+    )
+        .into_response()
+}
+
 // ---------- WhatsApp Cloud API fake (PR 31) ----------
 
 /// One captured `messages` POST against the fake WhatsApp Cloud

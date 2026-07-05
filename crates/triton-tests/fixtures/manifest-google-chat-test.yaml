@@ -15,11 +15,12 @@ adapters:
       audience: "1234567890"
     outbound:
       kind: rest_api
-      # Resolved at boot and held for the #164 T1a async courier
-      # (static bearer on the create-message POST; T1b swaps in the
-      # SA JWT-bearer OAuth minter). These tests run the default
-      # synchronous inline-reply path, so it is never sent anywhere
-      # here. A literal value is safe under dev mode.
+      # Resolved at boot and held for the #164 async courier: a
+      # non-SA-shaped value like this rides as a static bearer (T1a);
+      # a service-account key JSON would select the T1b OAuth minter.
+      # These tests run the default synchronous inline-reply path, so
+      # it is never sent anywhere here. A literal value is safe under
+      # dev mode.
       token: google-chat-courier-static-token
     identity:
       kind: sender_table
