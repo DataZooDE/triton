@@ -75,6 +75,19 @@ pub struct Settings {
     /// this adapter. Integration tests override this with an in-repo
     /// `FakeGoogleJwks` fixture.
     pub google_chat_jwks_uri: String,
+    /// #164 T1a: async reply courier for Google Chat. When `true` the
+    /// webhook acks 200 (empty body) immediately after JWT verify +
+    /// identity resolution and a spawned task delivers the reply via
+    /// the Chat REST API. Default `false` keeps the synchronous
+    /// inline-reply behaviour byte-for-byte unchanged.
+    pub google_chat_async: bool,
+    /// #164 T1a: base URL of the Google Chat REST API the async
+    /// courier POSTs replies to (`{base}/v1/{space}/messages`).
+    /// Production stays at the canonical `https://chat.googleapis.com`
+    /// (the only Chat REST host on the NFR-S-4 egress allowlist);
+    /// integration tests override it with an in-repo
+    /// `FakeGoogleChatApi` fixture.
+    pub google_chat_api_base: String,
     /// signald daemon address override for the Signal adapter
     /// (PR 34). Empty string ⇒ use the address declared in
     /// `adapter.yaml`. Outside `local` env this MUST be set
@@ -427,6 +440,25 @@ struct Cli {
     )]
     google_chat_jwks_uri: String,
 
+    /// #164 T1a: enable the Google Chat async reply courier — ack the
+    /// webhook 200 (empty body) right after JWT verify + identity
+    /// resolution and deliver the reply out-of-band via the Chat REST
+    /// API. Accepts `true`/`1` (case-insensitive) as on; anything else
+    /// is off. Default off — the synchronous inline reply is unchanged.
+    #[arg(long, env = "TRITON_GOOGLE_CHAT_ASYNC", default_value = "false")]
+    google_chat_async: String,
+
+    /// #164 T1a: Google Chat REST API base the async courier POSTs
+    /// replies to. Default is the canonical host; outside `local` env
+    /// the binary refuses any other host (NFR-S-4 egress allowlist).
+    /// Integration tests point this at an in-repo `FakeGoogleChatApi`.
+    #[arg(
+        long,
+        env = "TRITON_GOOGLE_CHAT_API_BASE",
+        default_value = "https://chat.googleapis.com"
+    )]
+    google_chat_api_base: String,
+
     /// signald daemon address for the Signal adapter (PR 34).
     /// Format: `tcp://<host>:<port>` or `unix:///path/to/sock`.
     /// Empty default — `adapter.yaml` carries the manifest value.
@@ -644,6 +676,11 @@ impl From<Cli> for Settings {
             discord_api_base: c.discord_api_base,
             whatsapp_bridge_addr: c.whatsapp_bridge_addr,
             google_chat_jwks_uri: c.google_chat_jwks_uri,
+            google_chat_async: matches!(
+                c.google_chat_async.trim().to_ascii_lowercase().as_str(),
+                "true" | "1"
+            ),
+            google_chat_api_base: c.google_chat_api_base,
             signal_signald_addr: c.signal_signald_addr,
             msteams_openid_url: c.msteams_openid_url,
             msteams_token_url: c.msteams_token_url,

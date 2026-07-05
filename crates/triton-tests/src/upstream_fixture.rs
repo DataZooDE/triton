@@ -49,6 +49,10 @@ struct FakeAgentState {
     failures_remaining: Mutex<u32>,
     /// Fixed response body for `AgentMode::Returning`.
     fixed_response: Option<Value>,
+    /// Sleep this long before answering — a slow "thinking" agent
+    /// (#164: live-LLM turns outlast Google Chat's ~30s webhook
+    /// deadline; tests use ~2s to prove the ack doesn't wait).
+    delay: Option<Duration>,
 }
 
 #[derive(Clone, Copy)]
@@ -111,6 +115,13 @@ impl FakeAgent {
         Self::start(AgentMode::Returning, 0, Some(body)).await
     }
 
+    /// Like [`start_returning`](Self::start_returning), but the response
+    /// only arrives after `delay` — a slow agent whose dispatch outlasts
+    /// a chat platform's synchronous webhook deadline (#164 T1a).
+    pub async fn start_returning_after(delay: Duration, body: Value) -> Self {
+        Self::start_with_delay(AgentMode::Returning, 0, Some(body), Some(delay)).await
+    }
+
     /// Emit an incremental SSE stream (`tool`/`token`/`done`). See
     /// [`AgentMode::Streaming`].
     pub async fn start_streaming() -> Self {
@@ -148,6 +159,15 @@ impl FakeAgent {
     }
 
     async fn start(mode: AgentMode, fail_first: u32, fixed_response: Option<Value>) -> Self {
+        Self::start_with_delay(mode, fail_first, fixed_response, None).await
+    }
+
+    async fn start_with_delay(
+        mode: AgentMode,
+        fail_first: u32,
+        fixed_response: Option<Value>,
+        delay: Option<Duration>,
+    ) -> Self {
         let state = Arc::new(FakeAgentState {
             mode: Mutex::new(mode),
             bearers_seen: Mutex::new(Vec::new()),
@@ -157,6 +177,7 @@ impl FakeAgent {
             hits: Mutex::new(0),
             failures_remaining: Mutex::new(fail_first),
             fixed_response,
+            delay,
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
         let addr = listener.local_addr().unwrap();
@@ -254,6 +275,12 @@ async fn handler(
     state.mcp_verbs_seen.lock().unwrap().push(mcp_verb.clone());
     let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     state.bodies_seen.lock().unwrap().push(value.clone());
+
+    // A slow "thinking" agent (#164): hold the response so callers that
+    // must not block on dispatch can prove they didn't wait.
+    if let Some(delay) = state.delay {
+        tokio::time::sleep(delay).await;
+    }
 
     let mode = *state.mode.lock().unwrap();
     let should_fail = match mode {

@@ -271,6 +271,34 @@ struct ResolvedPrincipal {
     tenant: String,
 }
 
+/// Configuration for the #164 T1a async reply courier. Google Chat's
+/// webhook is synchronous with a ~30s deadline while live-LLM
+/// dispatches run 17–60s; with `enabled` the webhook acks 200 (empty
+/// body) right after JWT verify + identity resolution and a spawned
+/// task delivers the reply as a create-message POST at
+/// `{api_base}/v1/{space}/messages`. Default base is the canonical
+/// `https://chat.googleapis.com`; tests override it via
+/// `TRITON_GOOGLE_CHAT_API_BASE` to point at a local fake (mirrors
+/// telegram's `CourierConfig`).
+#[derive(Debug, Clone)]
+pub struct CourierConfig {
+    /// `TRITON_GOOGLE_CHAT_ASYNC` — unset/false keeps today's
+    /// synchronous inline-reply behaviour byte-for-byte.
+    pub enabled: bool,
+    pub api_base: String,
+    pub timeout: std::time::Duration,
+}
+
+impl Default for CourierConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_base: "https://chat.googleapis.com".to_string(),
+            timeout: std::time::Duration::from_secs(10),
+        }
+    }
+}
+
 pub struct GoogleChatAdapter {
     name: String,
     verifier: Arc<GoogleJwtVerifier>,
@@ -287,6 +315,17 @@ pub struct GoogleChatAdapter {
     /// Ephemeral cache of upstream-rendered chart PNGs, served on demand at
     /// the signed `…/img/{token}` route (peacock `render_report`).
     image_cache: Arc<Mutex<ImageCache>>,
+    /// #164 T1a: async reply courier switch + Chat REST API base.
+    courier: CourierConfig,
+    /// Resolved `outbound.token`. T1a uses this value directly as a
+    /// static bearer on the courier's create-message POST; T1b
+    /// replaces it with the SA JWT-bearer OAuth minter (see the
+    /// msteams `TokenClient` precedent). `None` when the manifest
+    /// carries no token (courier then refuses to enable at boot).
+    outbound_token: Option<String>,
+    /// Outbound HTTP client for the courier POST (built once at boot
+    /// with the configured courier timeout).
+    http: reqwest::Client,
 }
 
 impl GoogleChatAdapter {
@@ -296,6 +335,7 @@ impl GoogleChatAdapter {
         resolver: &dyn SecretResolver,
         dispatcher: Arc<Dispatcher>,
         jwks_uri: String,
+        courier: CourierConfig,
     ) -> Result<Self, BuildError> {
         if adapter.kind != AdapterKind::GoogleChat {
             return Err(BuildError::WrongKind);
@@ -332,14 +372,28 @@ impl GoogleChatAdapter {
         }
 
         // FR-L-6 / NFR-S-5: every credential field MUST resolve at
-        // boot. `outbound.token` is reserved for the future async
-        // courier path (`https://chat.googleapis.com/...`); we still
-        // resolve it now so a misconfigured `env://` ref fails closed.
-        if let Some(field) = adapter.outbound.credentials.get("token") {
-            resolver
-                .resolve(field)
-                .await
-                .map_err(|e| BuildError::Resolve("outbound.token", e))?;
+        // boot so a misconfigured `env://` ref fails closed. The
+        // resolved value authorises the #164 T1a async courier's
+        // create-message POST: used directly as a static bearer today;
+        // T1b replaces this with the SA JWT-bearer OAuth minter (see
+        // the msteams TokenClient precedent).
+        let outbound_token = match adapter.outbound.credentials.get("token") {
+            Some(field) => Some(
+                resolver
+                    .resolve(field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("outbound.token", e))?,
+            ),
+            None => None,
+        };
+        if courier.enabled
+            && outbound_token
+                .as_deref()
+                .is_none_or(|t| t.trim().is_empty())
+        {
+            // Enabling the courier without a bearer would spawn tasks
+            // that can never deliver — refuse at boot, not per turn.
+            return Err(BuildError::MissingCredential("outbound.token"));
         }
 
         let identity = match adapter.identity.kind {
@@ -438,6 +492,10 @@ impl GoogleChatAdapter {
             jwks_uri,
             audience.clone(),
         )));
+        let http = reqwest::Client::builder()
+            .timeout(courier.timeout)
+            .build()
+            .map_err(|e| BuildError::Unsupported(format!("courier http client: {e}")))?;
         Ok(Self {
             name: name.to_string(),
             verifier,
@@ -448,6 +506,9 @@ impl GoogleChatAdapter {
             per_tenant_limit,
             correlation_key,
             image_cache: Arc::new(Mutex::new(ImageCache::default())),
+            courier,
+            outbound_token,
+            http,
         })
     }
 
@@ -564,6 +625,17 @@ struct GoogleChatEvent {
     /// is a `[{key, value}]` list. We read whichever is present.
     #[serde(default)]
     action: Option<EventAction>,
+    /// The space the event happened in (`spaces/<id>`), top-level on
+    /// both MESSAGE and CARD_CLICKED. The #164 async courier POSTs its
+    /// reply at `{api_base}/v1/{space.name}/messages`.
+    #[serde(default)]
+    space: Option<GoogleChatSpace>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct GoogleChatSpace {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -790,6 +862,9 @@ async fn handle_webhook(
     // 200 with an empty body so Google doesn't retry.
     // `action_echo` is `Some` only on a CARD_CLICKED — the reply prepends
     // it so chat history shows which control the user used.
+    // Captured before the match below partially consumes `event`: the
+    // #164 async courier needs the space to address its reply POST.
+    let space_name: Option<String> = event.space.as_ref().and_then(|s| s.name.clone());
     let (sender_name, tool_name, args, action_echo): (String, String, Value, Option<String>) =
         match event.kind.as_str() {
             "MESSAGE" => {
@@ -952,6 +1027,40 @@ async fn handle_webhook(
         trace_id: uuid::Uuid::new_v4().to_string(),
     };
     let principal_for_post = principal.clone();
+
+    // #164 T1a: async reply courier. Google Chat's webhook is
+    // synchronous with a ~30s deadline while live-LLM dispatches run
+    // 17–60s (→ platform timeouts + retries). When enabled we ack 200
+    // with an empty body NOW — everything security-relevant (JWT
+    // verify, rate limits, identity resolution, correlation-token
+    // check) already happened above — and the spawned task runs the
+    // dispatch → render → create-message POST → `record_post` chain
+    // out-of-band. Unset ⇒ the synchronous inline reply below,
+    // unchanged.
+    if adapter.courier.enabled {
+        match space_name {
+            Some(space) if !space.is_empty() => {
+                let adapter = adapter.clone();
+                tokio::spawn(async move {
+                    courier_reply(adapter, space, tool_name, args, principal, action_echo).await;
+                });
+                return (
+                    StatusCode::OK,
+                    axum::Json(Value::Object(Default::default())),
+                )
+                    .into_response();
+            }
+            _ => {
+                // No space to address the reply to — deliver inline
+                // instead of silently dropping the turn.
+                tracing::warn!(
+                    tool = tool_name,
+                    "google_chat: async courier enabled but event carries no space.name; \
+                     falling back to the synchronous inline reply",
+                );
+            }
+        }
+    }
 
     let result = adapter
         .dispatcher
@@ -1166,6 +1275,166 @@ async fn handle_webhook(
                 .into_response()
         }
     }
+}
+
+/// #164 T1a: one async courier turn — dispatch the tool, render the
+/// reply, POST it as a plain Chat Message to
+/// `{api_base}/v1/{space}/messages`, and audit the delivery as
+/// `phase: post` carrying the REAL HTTP status + latency (unlike the
+/// inline path's fixed 0/200).
+///
+/// The courier reply is a *create-message* REST call, not a webhook
+/// response body, so it never wears the Workspace Add-on
+/// `hostAppDataAction` envelope — T1a sends a plain `{text}` Message
+/// (interactive Cards over the courier are follow-up scope).
+async fn courier_reply(
+    adapter: Arc<GoogleChatAdapter>,
+    space: String,
+    tool_name: String,
+    args: Value,
+    principal: Principal,
+    action_echo: Option<String>,
+) {
+    let principal_for_post = principal.clone();
+    let result = adapter
+        .dispatcher
+        .invoke(&tool_name, args, principal, PROTOCOL)
+        .await;
+    let text = match result {
+        Ok(dispatch) => match render_dispatch_result(&dispatch.result) {
+            Ok(rendered) => {
+                if rendered.truncated {
+                    tracing::warn!(
+                        tool = tool_name,
+                        cap_bytes = surface_mapper::GOOGLE_CHAT_TEXT_MAX_BYTES,
+                        "google_chat surface mapper: rendered text exceeded cap; truncated",
+                    );
+                }
+                // Same CARD_CLICKED echo discipline as the inline path.
+                match &action_echo {
+                    Some(echo) if !echo.is_empty() => {
+                        format!("*↳ {}*\n\n{}", echo.replace('*', "\\*"), rendered.text)
+                    }
+                    _ => rendered.text,
+                }
+            }
+            Err(surface_mapper::RenderError::EmptyAfterRender) => {
+                // Mirror the inline path: nothing to send, audit the drop.
+                tracing::warn!(
+                    tool = tool_name,
+                    "google_chat surface mapper: empty surface; skipping courier post",
+                );
+                let provider =
+                    TritonError::Provider("google_chat surface mapper: empty surface".into());
+                adapter.dispatcher.record_post(
+                    &tool_name,
+                    PROTOCOL,
+                    &principal_for_post,
+                    0,
+                    Err((&provider, 0, PostOutcome::Dropped, None)),
+                );
+                return;
+            }
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, class = %e.class(), "google_chat courier dispatch failed");
+            // Mirror the inline error path's audit shape (one `phase:
+            // post` line, Dropped + `error_response`), then still
+            // deliver the short error notice best-effort so the user
+            // isn't left staring at silence — the delivery itself is
+            // deliberately un-audited to keep one post line per turn.
+            adapter.dispatcher.record_post(
+                &tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                0,
+                Err((&e, 0, PostOutcome::Dropped, Some("error_response"))),
+            );
+            let notice = format!("(error: {})", e.class());
+            if let Err(err) = send_chat_message(&adapter, &space, &notice).await {
+                tracing::warn!(error = %err, "google_chat courier: error notice not delivered");
+            }
+            return;
+        }
+    };
+
+    let started = std::time::Instant::now();
+    let outcome = send_chat_message(&adapter, &space, &text).await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+    match outcome {
+        Ok(status) if (200..300).contains(&status) => {
+            adapter.dispatcher.record_post(
+                &tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                latency_ms,
+                Ok((status, PostOutcome::Posted, None)),
+            );
+        }
+        Ok(status) => {
+            // Same retry/drop split as the msteams courier: 5xx and
+            // 429 are worth retrying, other 4xx are permanent.
+            let label = if status >= 500 || status == 429 {
+                PostOutcome::Retry
+            } else {
+                PostOutcome::Dropped
+            };
+            let provider =
+                TritonError::Provider(format!("google chat messages POST status {status}"));
+            adapter.dispatcher.record_post(
+                &tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                latency_ms,
+                Err((&provider, status, label, None)),
+            );
+        }
+        Err(e) => {
+            tracing::warn!("google_chat messages POST failed: {e}");
+            let provider = TritonError::Provider(format!("google chat transport: {e}"));
+            adapter.dispatcher.record_post(
+                &tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                latency_ms,
+                Err((&provider, 0, PostOutcome::Retry, None)),
+            );
+        }
+    }
+}
+
+/// Raw create-message POST: `POST {api_base}/v1/{space}/messages` with
+/// the reply as a plain `{text}` Message. Returns the HTTP status, or
+/// the transport error as a string.
+async fn send_chat_message(
+    adapter: &GoogleChatAdapter,
+    space: &str,
+    text: &str,
+) -> Result<u16, String> {
+    // T1a (#164): the resolved `outbound.token` value is used directly
+    // as a static bearer today; T1b replaces this with the SA
+    // JWT-bearer OAuth minter — see the msteams TokenClient precedent.
+    // Boot fails closed when the courier is enabled without a token,
+    // so this guard is defensive only.
+    let token = adapter
+        .outbound_token
+        .as_deref()
+        .ok_or_else(|| "no outbound token resolved".to_string())?;
+    let url = format!(
+        "{}/v1/{}/messages",
+        adapter.courier.api_base.trim_end_matches('/'),
+        space
+    );
+    let body = surface_mapper::text_reply_body(text, false);
+    let resp = adapter
+        .http
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(resp.status().as_u16())
 }
 
 /// Resolve a platform sender to `(sub, scopes, tenant)`. `None` means

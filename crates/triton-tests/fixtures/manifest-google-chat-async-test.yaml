@@ -1,0 +1,42 @@
+# #164 T1a integration manifest — async reply courier. Same shape as
+# manifest-google-chat-test.yaml, except plain inbound text routes to
+# the `answer` tool: an upstream agent (via `TRITON_STATIC_UPSTREAMS`)
+# the test makes deliberately SLOW, so the webhook ack measurably
+# cannot have waited for the dispatch.
+version: "0.2"
+
+adapters:
+  google_chat:
+    kind: google_chat
+    # Route plain inbound text to the static-upstream `answer` agent
+    # (the delayed FakeAgent) instead of the instant in-process echo.
+    tool: answer
+    inbound:
+      kind: webhook
+      signature: google_oidc_jwt
+      audience: "1234567890"
+    outbound:
+      kind: rest_api
+      # #164 T1a: the async courier authorises its create-message POST
+      # with this resolved token as a static bearer. Tests assert this
+      # exact value arrives at the fake Chat API. T1b replaces the
+      # static bearer with the SA JWT-bearer OAuth minter.
+      token: google-chat-courier-static-token
+    identity:
+      kind: sender_table
+      table: '{"users/99":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: card_v2
+      selections: card_v2
+      forms: card_v2
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []
