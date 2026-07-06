@@ -7,6 +7,7 @@ import '../../../api/models.dart';
 import '../../../providers/api_provider.dart';
 import '../../../widgets/a2ui/a2ui_renderer.dart';
 import '../../../widgets/a2ui/ui_resource_view.dart';
+import '../../../widgets/channel/channel_view.dart';
 import '../../../widgets/json_viewer.dart';
 
 /// The Console — a **chat-first** entry point to the gateway. You talk to an
@@ -36,13 +37,8 @@ enum _Protocol {
 
 /// One entry in the transcript.
 class _Turn {
-  _Turn.user(this.text)
-      : isUser = true,
-        result = null,
-        version = null;
-  _Turn.agent(this.result, this.version)
-      : isUser = false,
-        text = null;
+  _Turn.user(this.text) : isUser = true, result = null, version = null;
+  _Turn.agent(this.result, this.version) : isUser = false, text = null;
 
   final bool isUser;
   final String? text;
@@ -53,6 +49,18 @@ class _Turn {
   /// nothing is set until the user taps a chip). Rendered below the surface,
   /// alongside — not replacing — the turn's auto-opened report.
   String? openedResource;
+
+  /// Which surface this answer is being viewed as (see [kChatChannels]):
+  /// `web` is the canonical A2UI render; a chat channel previews the same
+  /// answer through that platform's mapper.
+  String channel = kWebChannel;
+
+  /// Cached `/v1/surface/render` payloads per channel, so re-selecting a
+  /// channel is instant and never re-hits the endpoint.
+  final Map<String, Map<String, dynamic>> renders = {};
+
+  /// The channel whose render is currently in flight (spinner), if any.
+  String? loadingChannel;
 }
 
 class _ConsolePageState extends ConsumerState<ConsolePage> {
@@ -107,7 +115,14 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   String _primaryArgKey(ToolDescriptor t) {
     final props =
         (t.inputSchema['properties'] as Map?)?.cast<String, dynamic>() ?? {};
-    for (final k in ['question', 'message', 'prompt', 'text', 'input', 'query']) {
+    for (final k in [
+      'question',
+      'message',
+      'prompt',
+      'text',
+      'input',
+      'query',
+    ]) {
       final p = props[k];
       if (p is Map && (p['type'] == 'string' || p['type'] == null)) return k;
     }
@@ -145,11 +160,17 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   ) {
     switch (p) {
       case _Protocol.rest:
-        return ref.read(restClientProvider).invoke(tool, args, a2uiVersion: a2ui);
+        return ref
+            .read(restClientProvider)
+            .invoke(tool, args, a2uiVersion: a2ui);
       case _Protocol.mcp:
-        return ref.read(mcpClientProvider).invoke(tool, args, a2uiVersion: a2ui);
+        return ref
+            .read(mcpClientProvider)
+            .invoke(tool, args, a2uiVersion: a2ui);
       case _Protocol.a2a:
-        return ref.read(a2aClientProvider).invoke(tool, args, a2uiVersion: a2ui);
+        return ref
+            .read(a2aClientProvider)
+            .invoke(tool, args, a2uiVersion: a2ui);
     }
   }
 
@@ -187,6 +208,34 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   /// posted a prepared prompt — send it as a new user turn.
   void _promptFromEmbed(String text) {
     _sendText(text);
+  }
+
+  /// View an agent turn as a different surface. `web` is the canonical
+  /// render (already in hand). Any chat channel is fetched ONCE from
+  /// `POST /v1/surface/render`, which maps the SAME surface this bubble is
+  /// already showing — so there's no tool re-invocation (and no second,
+  /// possibly-different agent turn). The result is cached on the turn.
+  Future<void> _selectChannel(_Turn turn, String channel) async {
+    if (turn.channel == channel) return;
+    setState(() => turn.channel = channel);
+    if (channel == kWebChannel || turn.renders.containsKey(channel)) return;
+    setState(() => turn.loadingChannel = channel);
+    try {
+      final res = await ref
+          .read(restClientProvider)
+          .renderSurface(adapter: channel, result: turn.result!.raw);
+      if (!mounted) return;
+      setState(() {
+        turn.renders[channel] = res;
+        turn.loadingChannel = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        turn.renders[channel] = {'rendered': false, 'reason': e.toString()};
+        turn.loadingChannel = null;
+      });
+    }
   }
 
   /// A rendered surface button/selection re-invokes a tool. A cross-tool button
@@ -262,17 +311,21 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
     }
     // Default to the first upstream agent.
     if (_tool == null) {
-      final initial = list.firstWhere((t) => t.upstream, orElse: () => list.first);
+      final initial = list.firstWhere(
+        (t) => t.upstream,
+        orElse: () => list.first,
+      );
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted && _tool == null) _selectTool(initial);
       });
     }
     final hasDemo = list.any((t) => !t.upstream);
-    final shown = (_showDemoTools ? list : list.where((t) => t.upstream).toList())
-      ..sort((a, b) {
-        if (a.upstream != b.upstream) return a.upstream ? -1 : 1;
-        return a.name.compareTo(b.name);
-      });
+    final shown =
+        (_showDemoTools ? list : list.where((t) => t.upstream).toList())
+          ..sort((a, b) {
+            if (a.upstream != b.upstream) return a.upstream ? -1 : 1;
+            return a.name.compareTo(b.name);
+          });
 
     return Row(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -289,43 +342,43 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   }
 
   Widget _toolRail(List<ToolDescriptor> shown, bool hasDemo) => SizedBox(
-        width: 210,
-        child: Column(
-          children: [
-            if (hasDemo)
-              CheckboxListTile(
+    width: 210,
+    child: Column(
+      children: [
+        if (hasDemo)
+          CheckboxListTile(
+            dense: true,
+            controlAffinity: ListTileControlAffinity.leading,
+            contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+            title: const Text('Show all tools', style: TextStyle(fontSize: 12)),
+            value: _showDemoTools,
+            onChanged: (v) => setState(() => _showDemoTools = v ?? false),
+          ),
+        Expanded(
+          child: ListView.builder(
+            itemCount: shown.length,
+            itemBuilder: (_, i) {
+              final t = shown[i];
+              return ListTile(
                 dense: true,
-                controlAffinity: ListTileControlAffinity.leading,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 8),
-                title: const Text('Show all tools', style: TextStyle(fontSize: 12)),
-                value: _showDemoTools,
-                onChanged: (v) => setState(() => _showDemoTools = v ?? false),
-              ),
-            Expanded(
-              child: ListView.builder(
-                itemCount: shown.length,
-                itemBuilder: (_, i) {
-                  final t = shown[i];
-                  return ListTile(
-                    dense: true,
-                    title: Text(t.name),
-                    subtitle: t.upstream
-                        ? const Text('agent', style: TextStyle(fontSize: 11))
-                        : null,
-                    leading: Icon(
-                      t.upstream ? Icons.smart_toy_outlined : Icons.bolt,
-                      size: 18,
-                      color: t.upstream ? Colors.amber.shade700 : null,
-                    ),
-                    selected: _tool?.name == t.name,
-                    onTap: () => _selectTool(t),
-                  );
-                },
-              ),
-            ),
-          ],
+                title: Text(t.name),
+                subtitle: t.upstream
+                    ? const Text('agent', style: TextStyle(fontSize: 11))
+                    : null,
+                leading: Icon(
+                  t.upstream ? Icons.smart_toy_outlined : Icons.bolt,
+                  size: 18,
+                  color: t.upstream ? Colors.amber.shade700 : null,
+                ),
+                selected: _tool?.name == t.name,
+                onTap: () => _selectTool(t),
+              );
+            },
+          ),
         ),
-      );
+      ],
+    ),
+  );
 
   Widget _chat(BuildContext context) {
     return Column(
@@ -347,29 +400,32 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   }
 
   Widget _emptyState(BuildContext context) => Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(Icons.forum_outlined,
-                  size: 40, color: Theme.of(context).colorScheme.outline),
-              const SizedBox(height: 12),
-              Text(
-                _tool == null
-                    ? 'Pick a tool on the left.'
-                    : 'Say something to ${_tool!.name}.',
-                style: Theme.of(context).textTheme.titleMedium,
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'Over ${_protocol.label}, A2UI v$_a2uiVersion. Tune it under Options (top-right).',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
-            ],
+    child: Padding(
+      padding: const EdgeInsets.all(24),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.forum_outlined,
+            size: 40,
+            color: Theme.of(context).colorScheme.outline,
           ),
-        ),
-      );
+          const SizedBox(height: 12),
+          Text(
+            _tool == null
+                ? 'Pick a tool on the left.'
+                : 'Say something to ${_tool!.name}.',
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Over ${_protocol.label}, A2UI v$_a2uiVersion. Tune it under Options (top-right).',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
+        ],
+      ),
+    ),
+  );
 
   Widget _bubble(BuildContext context, _Turn turn) {
     if (turn.isUser) {
@@ -401,9 +457,18 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (r.error != null)
-                  Text(r.error!,
-                      style: TextStyle(
-                          color: Theme.of(context).colorScheme.error))
+                  Text(
+                    r.error!,
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  )
+                else if (turn.channel != kWebChannel)
+                  ChannelBubble(
+                    adapter: turn.channel,
+                    payload: turn.renders[turn.channel],
+                    loading: turn.loadingChannel == turn.channel,
+                  )
                 else if (turn.version != null)
                   A2UIRenderer(
                     envelope: r.raw,
@@ -414,13 +479,29 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                   )
                 else
                   JsonViewer(r.raw),
-                if (r.uiResourceUri != null) ...[
+                // The channel selector — only when there's a canonical
+                // surface to map (a2ui turn, no error). `web` shows the
+                // native render; a chat channel previews the same answer.
+                if (r.error == null && turn.version != null) ...[
+                  const SizedBox(height: 8),
+                  ChannelChips(
+                    selected: turn.channel,
+                    onSelected: (ch) => _selectChannel(turn, ch),
+                  ),
+                ],
+                // The report/document embeds are web-surface affordances —
+                // a channel preview shows only what that channel would post.
+                if (turn.channel == kWebChannel && r.uiResourceUri != null) ...[
                   const SizedBox(height: 10),
-                  UiResourceView(uri: r.uiResourceUri!, onPrompt: _promptFromEmbed),
+                  UiResourceView(
+                    uri: r.uiResourceUri!,
+                    onPrompt: _promptFromEmbed,
+                  ),
                 ],
                 // A Sources chip opened a document — embedded below the
                 // surface (and below the auto-opened report, when both).
-                if (turn.openedResource != null) ...[
+                if (turn.channel == kWebChannel &&
+                    turn.openedResource != null) ...[
                   const SizedBox(height: 10),
                   UiResourceView(
                     uri: turn.openedResource!,
@@ -439,8 +520,8 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
 
   Widget _turnFooter(BuildContext context, InvocationResult r) {
     final style = Theme.of(context).textTheme.bodySmall?.copyWith(
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-        );
+      color: Theme.of(context).colorScheme.onSurfaceVariant,
+    );
     return Wrap(
       spacing: 10,
       runSpacing: 4,
@@ -450,14 +531,17 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
         if (r.traceId != null)
           // Tap selects this trace so the Trace page opens pre-loaded.
           InkWell(
-            onTap: () => ref.read(selectedTraceProvider.notifier).state = r.traceId,
+            onTap: () =>
+                ref.read(selectedTraceProvider.notifier).state = r.traceId,
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
                 const Icon(Icons.timeline, size: 13),
                 const SizedBox(width: 3),
-                Text('trace ${r.traceId!.substring(0, 8)} ·  open in Trace',
-                    style: style?.copyWith(decoration: TextDecoration.underline)),
+                Text(
+                  'trace ${r.traceId!.substring(0, 8)} ·  open in Trace',
+                  style: style?.copyWith(decoration: TextDecoration.underline),
+                ),
               ],
             ),
           ),
@@ -489,8 +573,10 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                       : 'Message ${_tool!.name}…',
                   border: const OutlineInputBorder(),
                   isDense: true,
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 12,
+                  ),
                 ),
               ),
             ),
@@ -498,7 +584,11 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
             FilledButton(
               onPressed: disabled ? null : _send,
               style: FilledButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14)),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 18,
+                  vertical: 14,
+                ),
+              ),
               child: const Icon(Icons.send, size: 18),
             ),
           ],
@@ -549,8 +639,10 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
           const SizedBox(height: 20),
           Text('Arguments', style: Theme.of(context).textTheme.titleSmall),
           const SizedBox(height: 4),
-          Text('The message box fills "${_primaryArgKey(t)}".',
-              style: Theme.of(context).textTheme.bodySmall),
+          Text(
+            'The message box fills "${_primaryArgKey(t)}".',
+            style: Theme.of(context).textTheme.bodySmall,
+          ),
           const SizedBox(height: 8),
           for (final name in _secondaryArgKeys(t)) _argField(t, name),
         ],
@@ -568,17 +660,22 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
             ),
             if (_turns.isNotEmpty && _turns.last.result != null) ...[
               const SizedBox(height: 8),
-              Text('Last raw envelope',
-                  style: Theme.of(context).textTheme.bodySmall),
+              Text(
+                'Last raw envelope',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
               const SizedBox(height: 4),
               SizedBox(
                 height: 180,
                 child: SingleChildScrollView(
                   child: SelectableText(
-                    const JsonEncoder.withIndent('  ')
-                        .convert(_turns.last.result!.raw),
-                    style:
-                        const TextStyle(fontFamily: 'monospace', fontSize: 11),
+                    const JsonEncoder.withIndent(
+                      '  ',
+                    ).convert(_turns.last.result!.raw),
+                    style: const TextStyle(
+                      fontFamily: 'monospace',
+                      fontSize: 11,
+                    ),
                   ),
                 ),
               ),
@@ -590,7 +687,8 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   }
 
   Widget _argField(ToolDescriptor t, String name) {
-    final prop = ((t.inputSchema['properties'] as Map?)?[name] as Map?)
+    final prop =
+        ((t.inputSchema['properties'] as Map?)?[name] as Map?)
             ?.cast<String, dynamic>() ??
         const {};
     final type = prop['type'] as String?;

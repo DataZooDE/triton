@@ -1190,3 +1190,16 @@ a trap the next developer should not have to step in.
   never assert boot-refusal with a bare `.output()` (a regression that
   boots = a test that hangs forever); poll `try_wait` with a deadline and
   kill + panic on timeout.
+
+- **A negotiated A2UI envelope has no `surface` field, so the channel
+  preview can't just re-post the bubble.** `POST /v1/surface/render` runs
+  the chat mappers, which call `extract_surface` (needs
+  `{ "surface": … }`). But a turn the Explorer is *showing* holds the
+  negotiated `{version, stream}` — `v09::build` reshapes onto `stream` and
+  drops `surface`. Re-invoking the tool to recover it would run a whole new
+  LLM turn (and could yield a *different* surface — wrong for a "preview
+  THIS answer" affordance). Fix: `envelope_to_surface` (the v0.9 inverse of
+  `build`) in `triton-core::a2ui`, and `surface_render` normalises its
+  input — accept `{surface}` directly OR reverse a negotiated envelope. A
+  round-trip unit test (`build` then reverse == identity, every variant)
+  pins it against drift when a new `Component` variant lands.

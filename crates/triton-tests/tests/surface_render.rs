@@ -232,6 +232,89 @@ async fn discord_render_exposes_components_for_buttons() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accepts_an_already_negotiated_v09_envelope() {
+    // The Explorer's per-turn channel preview POSTs the bubble's *raw*
+    // envelope — an already-negotiated v0.9 `{version, stream}` — rather
+    // than re-invoking the tool (which for an LLM agent would run a whole
+    // new turn). The endpoint reverses it back to a Surface, so the same
+    // text comes out as the canonical `{surface}` path would.
+    let proc = TritonProcess::spawn_with(Duration::from_secs(5)).await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(proc.rest_url("/v1/surface/render"))
+        .bearer_auth("dev-token")
+        .json(&serde_json::json!({
+            "adapter": "telegram",
+            "result": {
+                "version": "0.9",
+                "stream": [
+                    { "type": "text", "text": "Hello" },
+                    { "type": "narration", "text": "a footnote" },
+                ]
+            }
+        }))
+        .send()
+        .await
+        .expect("POST /v1/surface/render")
+        .json()
+        .await
+        .expect("decode JSON");
+    assert_eq!(
+        body["rendered"], true,
+        "negotiated envelope should render: {body}"
+    );
+    let text = body["text"].as_str().expect("text str");
+    assert!(
+        text.contains("Hello"),
+        "text component lost in reverse: {body}"
+    );
+    assert!(
+        text.contains("<i>a footnote</i>"),
+        "narration lost in reverse: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn negotiated_v09_button_preserves_interaction() {
+    // The reverse must unwrap the v0.9 `action: {tool, args}` back to a
+    // flat button so the mapper still emits an interactive control — proof
+    // the action round-trips, not just the text.
+    let proc = TritonProcess::spawn_with(Duration::from_secs(5)).await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(proc.rest_url("/v1/surface/render"))
+        .bearer_auth("dev-token")
+        .json(&serde_json::json!({
+            "adapter": "telegram",
+            "result": {
+                "version": "0.9",
+                "stream": [
+                    { "type": "text", "text": "label" },
+                    {
+                        "type": "button",
+                        "label": "Refresh",
+                        "action": { "tool": "narrate", "args": {} }
+                    }
+                ]
+            }
+        }))
+        .send()
+        .await
+        .expect("POST /v1/surface/render")
+        .json()
+        .await
+        .expect("decode JSON");
+    assert_eq!(
+        body["rendered"], true,
+        "button envelope should render: {body}"
+    );
+    assert_eq!(
+        body["deferred_buttons"], 0,
+        "button should be interactive: {body}"
+    );
+    let text = body["text"].as_str().expect("text str");
+    assert!(text.contains("label"), "text lost: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_adapter_rejected() {
     let proc = TritonProcess::spawn_with(Duration::from_secs(5)).await;
     let resp = reqwest::Client::new()
