@@ -23,7 +23,7 @@ use axum::{Json, Router};
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use triton_core::a2ui::{build_envelope, extract_surface};
+use triton_core::a2ui::{build_envelope, envelope_to_surface, extract_surface};
 use triton_core::audit::AuditBuffer;
 use triton_core::{A2uiVersion, Dispatcher, RuntimeInfo, StreamEvent, TritonError, envelope};
 
@@ -224,6 +224,20 @@ async fn surface_render(
             .into_response()
     };
 
+    // The mappers each call `extract_surface`, which wants the canonical
+    // `{ "surface": … }` shape. Accept that directly — but also accept an
+    // already-negotiated v0.9 envelope (what the Explorer holds for a turn
+    // it is *already showing*) by reversing it back to a surface, so a
+    // channel preview never has to re-invoke the tool. Anything else passes
+    // through untouched and trips `not_a2ui` below.
+    let surface_input = if req.result.get("surface").is_some() {
+        req.result.clone()
+    } else if let Some(surface) = envelope_to_surface(&req.result) {
+        json!({ "surface": surface })
+    } else {
+        req.result.clone()
+    };
+
     // One arm per adapter. Each crate's `RenderedMessage` /
     // `RenderedInteraction` is a distinct type, so we map each into
     // the common JSON envelope explicitly. The shared keys (`text`,
@@ -234,7 +248,7 @@ async fn surface_render(
     match req.adapter.as_str() {
         "telegram" => {
             match triton_chat_telegram::surface_mapper::try_render_surface(
-                &req.result,
+                &surface_input,
                 &PREVIEW_KEY,
             ) {
                 None => not_a2ui(),
@@ -255,8 +269,10 @@ async fn surface_render(
             }
         }
         "discord" => {
-            match triton_chat_discord::surface_mapper::try_render_surface(&req.result, &PREVIEW_KEY)
-            {
+            match triton_chat_discord::surface_mapper::try_render_surface(
+                &surface_input,
+                &PREVIEW_KEY,
+            ) {
                 None => not_a2ui(),
                 Some(Err(_)) => empty("discord"),
                 Some(Ok(m)) => Json(json!({
@@ -275,7 +291,7 @@ async fn surface_render(
             }
         }
         "googlechat" => {
-            match triton_chat_googlechat::surface_mapper::try_render_surface(&req.result) {
+            match triton_chat_googlechat::surface_mapper::try_render_surface(&surface_input) {
                 None => not_a2ui(),
                 Some(Err(_)) => empty("googlechat"),
                 Some(Ok(m)) => Json(json!({
@@ -291,22 +307,24 @@ async fn surface_render(
                 .into_response(),
             }
         }
-        "msteams" => match triton_chat_msteams::surface_mapper::try_render_surface(&req.result) {
-            None => not_a2ui(),
-            Some(Err(_)) => empty("msteams"),
-            Some(Ok(m)) => Json(json!({
-                "adapter": "msteams",
-                "rendered": true,
-                "text": m.text,
-                "deferred_buttons": m.deferred_buttons,
-                "deferred_selections": m.deferred_selections,
-                "deferred_forms": m.deferred_forms,
-                "deferred_dashboards": m.deferred_dashboards,
-                "truncated": m.truncated,
-            }))
-            .into_response(),
-        },
-        "signal" => match triton_chat_signal::surface_mapper::try_render_surface(&req.result) {
+        "msteams" => {
+            match triton_chat_msteams::surface_mapper::try_render_surface(&surface_input) {
+                None => not_a2ui(),
+                Some(Err(_)) => empty("msteams"),
+                Some(Ok(m)) => Json(json!({
+                    "adapter": "msteams",
+                    "rendered": true,
+                    "text": m.text,
+                    "deferred_buttons": m.deferred_buttons,
+                    "deferred_selections": m.deferred_selections,
+                    "deferred_forms": m.deferred_forms,
+                    "deferred_dashboards": m.deferred_dashboards,
+                    "truncated": m.truncated,
+                }))
+                .into_response(),
+            }
+        }
+        "signal" => match triton_chat_signal::surface_mapper::try_render_surface(&surface_input) {
             None => not_a2ui(),
             Some(Err(_)) => empty("signal"),
             Some(Ok(m)) => Json(json!({
@@ -322,7 +340,7 @@ async fn surface_render(
             .into_response(),
         },
         "whatsapp" => match triton_chat_whatsapp::surface_mapper::try_render_surface(
-            &req.result,
+            &surface_input,
             &PREVIEW_KEY,
         ) {
             None => not_a2ui(),

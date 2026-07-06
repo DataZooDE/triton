@@ -174,6 +174,197 @@ impl From<crate::A2uiVersion> for BuilderVersion {
     }
 }
 
+/// Reverse of the v0.9 [`build_envelope`]: recover the canonical
+/// [`Surface`] from an already-negotiated envelope. The chat-channel
+/// preview endpoint (`POST /v1/surface/render`) uses this so it can map a
+/// turn the caller is *already showing* — the Explorer POSTs the bubble's
+/// raw envelope — without re-invoking the tool (which, for an LLM agent,
+/// would run a whole new turn and could yield a different surface).
+///
+/// It searches (bounded) for the `stream` array, tolerating the
+/// per-protocol wrapping (`{result: …}` for REST/A2A, `{structuredContent:
+/// …}` for MCP). Returns `None` when there is no v0.9 stream — a raw
+/// `{surface}` (handled directly by [`extract_surface`]) or a v0.8 envelope
+/// both yield `None`, and the caller falls back accordingly.
+pub fn envelope_to_surface(value: &Value) -> Option<Surface> {
+    let stream = find_stream(value, 0)?;
+    let components = stream
+        .iter()
+        .map(v09_node_to_component)
+        .collect::<Option<Vec<_>>>()?;
+    Some(Surface { components })
+}
+
+/// Bounded search for a v0.9 `stream` array, descending through whatever
+/// per-protocol envelope wraps it.
+fn find_stream(value: &Value, depth: usize) -> Option<&Vec<Value>> {
+    if depth > 6 {
+        return None;
+    }
+    if let Some(stream) = value.get("stream").and_then(Value::as_array) {
+        return Some(stream);
+    }
+    if let Value::Object(map) = value {
+        for v in map.values() {
+            if let Some(stream) = find_stream(v, depth + 1) {
+                return Some(stream);
+            }
+        }
+    }
+    None
+}
+
+/// Turn one v0.9 stream node back into its canonical [`Component`] JSON
+/// (internally `kind`-tagged) and deserialise it. This is the exact
+/// inverse of `v09::component_to_json`: `type` → `kind`, Text's `text` →
+/// `value`, and the button `action` object is unwrapped back to flat
+/// `tool` / `args`. Every other field name already matches the struct, so
+/// it rides through unchanged.
+fn v09_node_to_component(node: &Value) -> Option<Component> {
+    let ty = node.get("type")?.as_str()?;
+    let mut obj = serde_json::Map::new();
+    obj.insert("kind".to_string(), Value::String(ty.to_string()));
+    let empty = || Value::Object(serde_json::Map::new());
+    match ty {
+        "text" => {
+            obj.insert("value".into(), node.get("text")?.clone());
+        }
+        "narration" => {
+            obj.insert("text".into(), node.get("text")?.clone());
+        }
+        "button" => {
+            obj.insert("label".into(), node.get("label")?.clone());
+            let action = node.get("action")?;
+            obj.insert("tool".into(), action.get("tool")?.clone());
+            obj.insert(
+                "args".into(),
+                action.get("args").cloned().unwrap_or_else(empty),
+            );
+            if let Some(r) = node.get("resource") {
+                obj.insert("resource".into(), r.clone());
+            }
+        }
+        "selection" => {
+            for k in ["prompt", "options", "tool", "args_key"] {
+                obj.insert(k.to_string(), node.get(k)?.clone());
+            }
+        }
+        "form" => {
+            for k in ["title", "fields", "submit_label", "tool"] {
+                obj.insert(k.to_string(), node.get(k)?.clone());
+            }
+        }
+        "dashboard" => {
+            for k in ["title", "tiles"] {
+                obj.insert(k.to_string(), node.get(k)?.clone());
+            }
+        }
+        "report" => {
+            obj.insert("report_id".into(), node.get("report_id")?.clone());
+            obj.insert(
+                "args".into(),
+                node.get("args").cloned().unwrap_or_else(empty),
+            );
+        }
+        "sources" => {
+            obj.insert("items".into(), node.get("items")?.clone());
+        }
+        _ => return None,
+    }
+    serde_json::from_value(Value::Object(obj)).ok()
+}
+
+#[cfg(test)]
+mod reverse_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample_surface() -> Surface {
+        Surface {
+            components: vec![
+                Component::Text { value: "hi".into() },
+                Component::Narration {
+                    text: "note".into(),
+                },
+                Component::Button {
+                    label: "Open".into(),
+                    tool: "render_report".into(),
+                    args: json!({ "id": "x" }),
+                    resource: Some("ui://peacock/x".into()),
+                },
+                Component::Selection {
+                    prompt: "pick".into(),
+                    options: vec![SelectionOption {
+                        label: "A".into(),
+                        value: "a".into(),
+                    }],
+                    tool: "t".into(),
+                    args_key: "k".into(),
+                },
+                Component::Form {
+                    title: "F".into(),
+                    fields: vec![FormField {
+                        name: "n".into(),
+                        label: "L".into(),
+                        kind: FormFieldKind::Integer,
+                        required: true,
+                    }],
+                    submit_label: "Go".into(),
+                    tool: "t".into(),
+                },
+                Component::Dashboard {
+                    title: "D".into(),
+                    tiles: vec![DashboardTile {
+                        label: "x".into(),
+                        value: "1".into(),
+                        trend: Some("up".into()),
+                    }],
+                },
+                Component::Report {
+                    report_id: "r".into(),
+                    args: json!({ "a": 1 }),
+                },
+                Component::Sources {
+                    items: vec![SourceItem {
+                        label: "s".into(),
+                        resource: "ui://peacock/d".into(),
+                    }],
+                },
+            ],
+        }
+    }
+
+    /// The whole point: `build` then reverse is the identity, across every
+    /// component variant — so the preview endpoint can trust a round-tripped
+    /// surface to render byte-for-byte what the live courier would.
+    #[test]
+    fn v09_envelope_round_trips_to_surface() {
+        let s = sample_surface();
+        let env = v09::build(&s);
+        let back = envelope_to_surface(&env).expect("v0.9 envelope is reversible");
+        assert_eq!(
+            serde_json::to_value(&back).unwrap(),
+            serde_json::to_value(&s).unwrap(),
+        );
+    }
+
+    /// REST/A2A nest the envelope under `result`; the finder descends into it.
+    #[test]
+    fn tolerates_a_result_wrapper() {
+        let s = sample_surface();
+        let wrapped = json!({ "result": v09::build(&s) });
+        assert!(envelope_to_surface(&wrapped).is_some());
+    }
+
+    /// A raw `{surface}` has no stream → `None`, so the endpoint falls back to
+    /// `extract_surface` instead of double-handling it.
+    #[test]
+    fn raw_surface_is_not_a_v09_envelope() {
+        let raw = json!({ "surface": { "components": [] } });
+        assert!(envelope_to_surface(&raw).is_none());
+    }
+}
+
 #[cfg(test)]
 mod resource_roundtrip_tests {
     use super::*;

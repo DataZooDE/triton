@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../features/a2ui_diff/a2ui_diff_page.dart';
 import '../features/audit/audit_page.dart';
 import '../features/console/console_page.dart';
 import '../features/dashboard/dashboard_page.dart';
@@ -22,16 +21,7 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-enum _Pane {
-  console,
-  dashboard,
-  trace,
-  a2uiDiff,
-  manifest,
-  audit,
-  metrics,
-  settings,
-}
+enum _Pane { console, dashboard, trace, manifest, audit, metrics, settings }
 
 class _AppShellState extends State<AppShell> {
   // Chat is the central entry point.
@@ -41,12 +31,6 @@ class _AppShellState extends State<AppShell> {
     _NavItem(_Pane.console, Icons.forum_outlined, Icons.forum, 'Chat'),
     _NavItem(_Pane.dashboard, Icons.home_outlined, Icons.home, 'Dashboard'),
     _NavItem(_Pane.trace, Icons.timeline_outlined, Icons.timeline, 'Trace'),
-    _NavItem(
-      _Pane.a2uiDiff,
-      Icons.compare_outlined,
-      Icons.compare,
-      'A2UI diff',
-    ),
     _NavItem(
       _Pane.manifest,
       Icons.description_outlined,
@@ -77,7 +61,6 @@ class _AppShellState extends State<AppShell> {
         ConsolePage(),
         DashboardPage(),
         TracePage(),
-        A2uiDiffPage(),
         ManifestPage(),
         AuditPage(),
         MetricsPage(),

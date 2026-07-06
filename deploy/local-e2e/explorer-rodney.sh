@@ -199,7 +199,6 @@ shot "01-dashboard"
 echo "==> walking pages"
 declare -a PAGES=(
   "Console|Pick a tool|02-console"
-  "A2UI diff|Invoke|03-a2ui-diff"
   "Manifest|Manifest|04-manifest"
   "Audit|Audit|05-audit"
   "Trace|Available traces|05b-trace"
