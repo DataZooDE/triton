@@ -27,6 +27,7 @@ triton-chat-googlechat = { path = "../triton-chat-googlechat" }
 triton-chat-msteams = { path = "../triton-chat-msteams" }
 triton-chat-signal = { path = "../triton-chat-signal" }
 triton-chat-whatsapp = { path = "../triton-chat-whatsapp" }
+triton-chat-gemini = { path = "../triton-chat-gemini" }
 axum = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

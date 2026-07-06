@@ -12,6 +12,7 @@ members = [
     "crates/triton-chat-googlechat",
     "crates/triton-chat-msteams",
     "crates/triton-chat-signal",
+    "crates/triton-chat-gemini",
     "crates/triton-upstream",
     "crates/triton-adapters-http",
     "crates/triton-bin",

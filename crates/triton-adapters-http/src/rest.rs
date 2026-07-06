@@ -157,8 +157,9 @@ async fn metrics_view(State(state): State<RestState>, parts: Parts) -> Response 
 
 #[derive(Debug, Deserialize)]
 struct SurfaceRenderRequest {
-    /// Which chat-channel adapter to ask. One of `telegram`,
-    /// `discord`, `googlechat`, `msteams`, `signal`, `whatsapp`.
+    /// Which preview adapter to ask — one of [`PREVIEW_ADAPTERS`]
+    /// (`telegram`, `discord`, `googlechat`, `msteams`, `signal`,
+    /// `whatsapp`, plus the product-named `copilot` / `gemini`).
     adapter: String,
     /// Raw A2UI `result` envelope `{ "surface": {...} }` as a tool
     /// would return — the same shape `extract_surface` parses.
@@ -175,6 +176,11 @@ const PREVIEW_ADAPTERS: &[&str] = &[
     "msteams",
     "signal",
     "whatsapp",
+    // Product-named preview surfaces: `copilot` reuses the msteams Adaptive
+    // Cards mapper (Copilot's card host); `gemini` is the markdown-forward
+    // Gemini Enterprise answer surface.
+    "copilot",
+    "gemini",
 ];
 
 /// `POST /v1/surface/render` — runs the supplied A2UI Surface
@@ -355,6 +361,44 @@ async fn surface_render(
                 "deferred_dashboards": m.deferred_dashboards,
                 "truncated": m.truncated,
                 "has_dashboard_raster": m.dashboard.is_some(),
+            }))
+            .into_response(),
+        },
+        // Microsoft Copilot renders M365 Adaptive Cards — the same primitive
+        // the msteams mapper produces — so `copilot` is that mapper under the
+        // product name (echoing `copilot` back so the UI labels it right).
+        "copilot" => {
+            match triton_chat_msteams::surface_mapper::try_render_surface(&surface_input) {
+                None => not_a2ui(),
+                Some(Err(_)) => empty("copilot"),
+                Some(Ok(m)) => Json(json!({
+                    "adapter": "copilot",
+                    "rendered": true,
+                    "text": m.text,
+                    "deferred_buttons": m.deferred_buttons,
+                    "deferred_selections": m.deferred_selections,
+                    "deferred_forms": m.deferred_forms,
+                    "deferred_dashboards": m.deferred_dashboards,
+                    "truncated": m.truncated,
+                }))
+                .into_response(),
+            }
+        }
+        // Gemini Enterprise — a markdown-forward answer surface that renders
+        // Dashboards as tables and Sources as citations (no raster, no cards).
+        "gemini" => match triton_chat_gemini::surface_mapper::try_render_surface(&surface_input) {
+            None => not_a2ui(),
+            Some(Err(_)) => empty("gemini"),
+            Some(Ok(m)) => Json(json!({
+                "adapter": "gemini",
+                "rendered": true,
+                "text": m.text,
+                "deferred_buttons": m.deferred_buttons,
+                "deferred_selections": m.deferred_selections,
+                "deferred_forms": m.deferred_forms,
+                "deferred_dashboards": m.deferred_dashboards,
+                "truncated": m.truncated,
+                "has_dashboard_raster": false,
             }))
             .into_response(),
         },

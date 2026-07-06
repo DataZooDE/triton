@@ -315,6 +315,129 @@ async fn negotiated_v09_button_preserves_interaction() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn copilot_aliases_the_adaptive_cards_mapper() {
+    // Microsoft Copilot renders M365 Adaptive Cards — the same primitive the
+    // msteams mapper produces. `copilot` is that mapper under the product
+    // name, so a button-bearing surface renders (adapter echo `copilot`).
+    let proc = TritonProcess::spawn_with(Duration::from_secs(5)).await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(proc.rest_url("/v1/surface/render"))
+        .bearer_auth("dev-token")
+        .json(&serde_json::json!({
+            "adapter": "copilot",
+            "result": {
+                "surface": {
+                    "components": [
+                        { "kind": "text", "value": "pick:" },
+                        { "kind": "button", "label": "Go", "tool": "narrate", "args": {} }
+                    ]
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("POST render copilot")
+        .json()
+        .await
+        .expect("decode copilot");
+    assert_eq!(body["adapter"], "copilot", "adapter echo: {body}");
+    assert_eq!(body["rendered"], true, "copilot should render: {body}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_renders_a_dashboard_as_a_markdown_table() {
+    // Gemini Enterprise is a markdown-forward answer surface: unlike the
+    // text-first channels (which defer or rasterise a Dashboard), it renders
+    // the tiles inline as a markdown table. This is the differentiator that
+    // makes the `gemini` preview a distinct experience.
+    let proc = TritonProcess::spawn_with(Duration::from_secs(5)).await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(proc.rest_url("/v1/surface/render"))
+        .bearer_auth("dev-token")
+        .json(&serde_json::json!({
+            "adapter": "gemini",
+            "result": {
+                "surface": {
+                    "components": [
+                        { "kind": "text", "value": "Here is the quarter." },
+                        {
+                            "kind": "dashboard",
+                            "title": "Q3",
+                            "tiles": [
+                                { "label": "Revenue", "value": "€48,250", "trend": "up" },
+                                { "label": "Open orders", "value": "3" }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("POST render gemini")
+        .json()
+        .await
+        .expect("decode gemini");
+    assert_eq!(body["adapter"], "gemini", "adapter echo: {body}");
+    assert_eq!(body["rendered"], true, "gemini should render: {body}");
+    let text = body["text"].as_str().expect("text str");
+    assert!(
+        text.contains('|'),
+        "dashboard should render as a table: {body}"
+    );
+    assert!(text.contains("Revenue"), "tile label missing: {body}");
+    assert!(text.contains("€48,250"), "tile value missing: {body}");
+    // Rendered inline → not deferred, not rasterised (unlike the text-first
+    // channels).
+    assert_eq!(
+        body["deferred_dashboards"], 0,
+        "gemini renders tables: {body}"
+    );
+    assert_eq!(
+        body["has_dashboard_raster"], false,
+        "gemini is not a rasteriser: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn gemini_renders_sources_as_citations() {
+    // The citation-forward half of the Gemini profile: a Sources component
+    // becomes a numbered reference list with markdown links.
+    let proc = TritonProcess::spawn_with(Duration::from_secs(5)).await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(proc.rest_url("/v1/surface/render"))
+        .bearer_auth("dev-token")
+        .json(&serde_json::json!({
+            "adapter": "gemini",
+            "result": {
+                "surface": {
+                    "components": [
+                        { "kind": "text", "value": "Filed the note." },
+                        {
+                            "kind": "sources",
+                            "items": [
+                                { "label": "account · initech-corp", "resource": "ui://peacock/document?id=initech-corp" }
+                            ]
+                        }
+                    ]
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("POST render gemini sources")
+        .json()
+        .await
+        .expect("decode gemini sources");
+    assert_eq!(body["rendered"], true, "gemini should render: {body}");
+    let text = body["text"].as_str().expect("text str");
+    assert!(
+        text.contains("account · initech-corp") && text.contains("ui://peacock/document"),
+        "sources should render as citations with links: {body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unknown_adapter_rejected() {
     let proc = TritonProcess::spawn_with(Duration::from_secs(5)).await;
     let resp = reqwest::Client::new()
