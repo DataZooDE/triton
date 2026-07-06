@@ -9,8 +9,10 @@ import '../json_viewer.dart';
 const kWebChannel = 'web';
 const kChatChannels = <(String, String, IconData)>[
   (kWebChannel, 'Web', Icons.language),
-  ('telegram', 'Telegram', Icons.send),
+  ('gemini', 'Gemini', Icons.auto_awesome),
+  ('copilot', 'Copilot', Icons.assistant),
   ('whatsapp', 'WhatsApp', Icons.chat),
+  ('telegram', 'Telegram', Icons.send),
   ('discord', 'Discord', Icons.forum),
   ('googlechat', 'Google Chat', Icons.chat_bubble_outline),
   ('msteams', 'MS Teams', Icons.groups),
