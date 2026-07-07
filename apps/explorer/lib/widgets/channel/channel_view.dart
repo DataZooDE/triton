@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../json_viewer.dart';
+import 'channel_chrome.dart';
 
 /// The channels a chat answer can be previewed as: `web` is the canonical
 /// A2UI render (the default), the rest are the chat-channel surface mappers
@@ -86,7 +87,6 @@ class ChannelBubble extends StatelessWidget {
       );
     }
     final r = payload!;
-    final cs = Theme.of(context).colorScheme;
     if (r['rendered'] == false) {
       return Text(
         'No usable message — $adapter would skip this post.'
@@ -94,33 +94,31 @@ class ChannelBubble extends StatelessWidget {
         style: Theme.of(context).textTheme.bodySmall,
       );
     }
+    final meta = kChatChannels.firstWhere(
+      (c) => c.$1 == adapter,
+      orElse: () => (adapter, adapter, Icons.chat),
+    );
+    final text = (r['text'] as String?)?.trim().isNotEmpty == true
+        ? r['text'] as String
+        : '(no text part)';
     final chips = _chips(r);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (chips.isNotEmpty) ...[
-          Wrap(spacing: 6, runSpacing: 4, children: chips),
-          const SizedBox(height: 8),
-        ],
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.all(10),
-          decoration: BoxDecoration(
-            color: cs.surfaceContainer,
-            borderRadius: const BorderRadius.only(
-              topRight: Radius.circular(12),
-              bottomLeft: Radius.circular(12),
-              bottomRight: Radius.circular(12),
-            ),
-          ),
-          child: SelectableText(
-            (r['text'] as String?)?.trim().isNotEmpty == true
-                ? r['text'] as String
-                : '(no text part)',
-            style: const TextStyle(fontSize: 13, height: 1.4),
-          ),
+        // The message painted as the target product.
+        ChannelChrome(
+          adapter: adapter,
+          label: meta.$2,
+          icon: meta.$3,
+          text: text,
         ),
-        const SizedBox(height: 4),
+        // Degrade decisions + raw payload stay as compact "how it mapped"
+        // footnotes below the chrome.
+        if (chips.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Wrap(spacing: 6, runSpacing: 4, children: chips),
+        ],
+        const SizedBox(height: 2),
         Theme(
           data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
           child: ExpansionTile(
