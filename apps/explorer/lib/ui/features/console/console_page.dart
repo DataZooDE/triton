@@ -452,10 +452,13 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           constraints: const BoxConstraints(maxWidth: 560),
           decoration: BoxDecoration(
-            color: Theme.of(context).colorScheme.primaryContainer,
+            color: Theme.of(context).colorScheme.primary,
             borderRadius: BorderRadius.circular(14),
           ),
-          child: Text(turn.text ?? ''),
+          child: Text(
+            turn.text ?? '',
+            style: TextStyle(color: Theme.of(context).colorScheme.onPrimary),
+          ),
         ),
       );
     }
