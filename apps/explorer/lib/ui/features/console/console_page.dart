@@ -483,6 +483,7 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                   ChannelBubble(
                     adapter: turn.channel,
                     payload: turn.renders[turn.channel],
+                    result: r,
                     loading: turn.loadingChannel == turn.channel,
                   )
                 else if (turn.version != null)
