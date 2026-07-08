@@ -181,6 +181,9 @@ const PREVIEW_ADAPTERS: &[&str] = &[
     // Gemini Enterprise answer surface.
     "copilot",
     "gemini",
+    // The richest surface: HTML email renders the message complete — buttons
+    // as links, dashboard as a table, plus a subject line no other mapper has.
+    "email",
 ];
 
 /// `POST /v1/surface/render` — runs the supplied A2UI Surface
@@ -399,6 +402,28 @@ async fn surface_render(
                 "deferred_dashboards": m.deferred_dashboards,
                 "truncated": m.truncated,
                 "has_dashboard_raster": false,
+            }))
+            .into_response(),
+        },
+        "email" => match triton_chat_email::surface_mapper::try_render_surface(&surface_input) {
+            None => not_a2ui(),
+            Some(Err(_)) => empty("email"),
+            // Email carries two extras no other mapper does: a `subject`
+            // (derived from the lead text) and a full `html` body. `text` is
+            // the plaintext alternative, so the common envelope keys still
+            // line up. Buttons/dashboards render inline, so their `deferred_*`
+            // counters are 0 — only a form's submit defers.
+            Some(Ok(m)) => Json(json!({
+                "adapter": "email",
+                "rendered": true,
+                "subject": m.subject,
+                "html": m.html,
+                "text": m.text,
+                "deferred_buttons": m.deferred_buttons,
+                "deferred_selections": m.deferred_selections,
+                "deferred_forms": m.deferred_forms,
+                "deferred_dashboards": m.deferred_dashboards,
+                "truncated": m.truncated,
             }))
             .into_response(),
         },

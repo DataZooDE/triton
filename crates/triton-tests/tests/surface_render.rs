@@ -161,6 +161,7 @@ async fn every_adapter_renders_the_text_surface() {
         "msteams",
         "signal",
         "whatsapp",
+        "email",
     ] {
         let body: serde_json::Value = client
             .post(proc.rest_url("/v1/surface/render"))
@@ -191,6 +192,65 @@ async fn every_adapter_renders_the_text_surface() {
             "{adapter} missing truncated: {body}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn email_render_returns_subject_html_and_link_buttons() {
+    // Email is the richest surface: it renders the message COMPLETE. A
+    // button-bearing surface comes back with a `subject` (no other mapper
+    // has one), an `html` body carrying the button as an `<a>` link, and
+    // `deferred_buttons: 0` — email defers nothing but a form submit.
+    let proc = TritonProcess::spawn_with(Duration::from_secs(5)).await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .post(proc.rest_url("/v1/surface/render"))
+        .bearer_auth("dev-token")
+        .json(&serde_json::json!({
+            "adapter": "email",
+            "result": {
+                "surface": {
+                    "components": [
+                        { "kind": "text", "value": "**Initech** leads revenue." },
+                        {
+                            "kind": "button",
+                            "label": "What does Initech buy?",
+                            "tool": "assistant",
+                            "args": { "question": "what does initech buy?" }
+                        },
+                        { "kind": "dashboard", "title": "Revenue", "tiles": [
+                            { "label": "Initech", "value": "$2,500" }
+                        ] }
+                    ]
+                }
+            }
+        }))
+        .send()
+        .await
+        .expect("POST /v1/surface/render")
+        .json()
+        .await
+        .expect("decode JSON");
+    assert_eq!(body["adapter"], "email");
+    assert_eq!(body["rendered"], true);
+    // The subject is derived from the lead text (markdown stripped).
+    assert_eq!(body["subject"], "Initech leads revenue.");
+    let html = body["html"].as_str().expect("html str");
+    assert!(html.starts_with("<!doctype html>"), "full document: {html}");
+    assert!(
+        html.contains("<strong>Initech</strong>"),
+        "bold rendered: {html}"
+    );
+    assert!(
+        html.contains(">What does Initech buy?</a>"),
+        "button renders as a link, not deferred: {html}"
+    );
+    assert!(
+        html.contains("<table"),
+        "dashboard renders as a table: {html}"
+    );
+    // Nothing defers on email (no form here).
+    assert_eq!(body["deferred_buttons"], 0);
+    assert_eq!(body["deferred_dashboards"], 0);
+    assert_eq!(body["truncated"], false);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
