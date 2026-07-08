@@ -40,6 +40,8 @@ mod discord_dashboard;
 mod discord_gateway;
 #[path = "../echo.rs"]
 mod echo;
+#[path = "../email_outbound.rs"]
+mod email_outbound;
 #[path = "../explorer_contract.rs"]
 mod explorer_contract;
 #[path = "../forward_principal.rs"]

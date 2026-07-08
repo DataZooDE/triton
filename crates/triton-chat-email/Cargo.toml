@@ -8,7 +8,12 @@ publish = false
 
 [dependencies]
 triton-core = { path = "../triton-core" }
+triton-manifest = { path = "../triton-manifest" }
+triton-secrets = { path = "../triton-secrets" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+async-trait = "0.1"
+reqwest = { workspace = true }
+thiserror = { workspace = true }
 # Normalise the agent's portable markdown into the HTML email body.
 regex = "1"

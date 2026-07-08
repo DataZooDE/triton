@@ -1,0 +1,33 @@
+# Email outbound channel adapter (literal credentials — dev/test only).
+# Outbound-only: no inbound webhook route is wired; `inbound.kind: webhook`
+# + `signature: trusted_socket` is the carrier declaration that routes the
+# adapter through Triton's courier-building path. The transactional-email
+# endpoint comes from `TRITON_EMAIL_API_BASE` (pointed at the fake sink in
+# tests); `outbound.token` is the API key, `outbound.from` the sender.
+version: "0.2"
+
+adapters:
+  email:
+    kind: email
+    tool: echo
+    inbound:
+      kind: webhook
+      signature: trusted_socket
+    outbound:
+      kind: rest_api
+      token: email-api-key-for-test
+      from: assistant@datazoo.example
+    identity:
+      kind: sender_table
+      table: '{"maria@company.example":{"sub":"maria","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: email-correlation-key-unused
+
+tools:
+  echo:
+    surface_components: []

@@ -1034,3 +1034,82 @@ async fn handle_whatsapp_media(
         });
     Json(json!({ "id": "media_id_stub" }))
 }
+
+// ---------- transactional-email API fake (email channel courier) ----------
+
+/// One captured email send: the bearer (the resolved API key) and the JSON
+/// body `{from, to, subject, html, text}` the [`EmailAdapter`] POSTed.
+#[derive(Debug, Clone)]
+pub struct EmailSent {
+    pub bearer: String,
+    pub body: Value,
+}
+
+struct FakeEmailState {
+    captured: Mutex<Vec<EmailSent>>,
+    status: u16,
+}
+
+/// A fake transactional-email HTTP API for the email outbound courier.
+/// Speaks the courier's `POST /send` wire shape (JSON `{from, to, subject,
+/// html, text}` + `Authorization: Bearer <api-key>`), capturing every send.
+///
+/// No mocks per CLAUDE.md §1: a real axum HTTP server on a real TCP port;
+/// the binary's email courier POSTs to it over real HTTP.
+pub struct FakeEmailApi {
+    addr: SocketAddr,
+    state: Arc<FakeEmailState>,
+}
+
+impl FakeEmailApi {
+    pub async fn start() -> Self {
+        Self::start_with_status(200).await
+    }
+
+    /// Same as [`start`](Self::start) but every POST answers `status` (still
+    /// capturing), so tests can exercise the courier's non-2xx branches.
+    pub async fn start_with_status(status: u16) -> Self {
+        let state = Arc::new(FakeEmailState {
+            captured: Mutex::new(Vec::new()),
+            status,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
+        let addr = listener.local_addr().unwrap();
+        let router =
+            Router::new().route("/send", post(handle_email_send).with_state(state.clone()));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        Self { addr, state }
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    /// Snapshot of every email the fixture captured.
+    pub fn captured(&self) -> Vec<EmailSent> {
+        self.state.captured.lock().unwrap().clone()
+    }
+}
+
+async fn handle_email_send(
+    State(state): State<Arc<FakeEmailState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    state
+        .captured
+        .lock()
+        .unwrap()
+        .push(EmailSent { bearer, body });
+    let status =
+        axum::http::StatusCode::from_u16(state.status).unwrap_or(axum::http::StatusCode::OK);
+    (status, Json(json!({ "id": "email_stub" }))).into_response()
+}

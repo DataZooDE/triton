@@ -16,4 +16,7 @@
 //! SAME [`surface_mapper::try_render_surface`], so the preview can't drift
 //! from what a recipient receives.
 
+pub mod courier;
 pub mod surface_mapper;
+
+pub use courier::{BuildError, CourierConfig, EmailAdapter, PROTOCOL};
