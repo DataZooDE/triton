@@ -20,6 +20,7 @@ const kChatChannels = <(String, String, IconData)>[
   ('googlechat', 'Google Chat', Icons.chat_bubble_outline),
   ('msteams', 'MS Teams', Icons.groups),
   ('signal', 'Signal', Icons.lock_outline),
+  ('email', 'Email', Icons.email_outlined),
 ];
 
 /// A compact chip row under an agent bubble: pick which surface to view the
@@ -171,6 +172,9 @@ class ChannelBubble extends StatelessWidget {
           label: meta.$2,
           icon: meta.$3,
           text: text,
+          // Only the email mapper returns a subject; the email skin renders
+          // it in its header, every other skin ignores it.
+          subject: r['subject'] as String?,
         ),
         // The answer's action buttons, styled to sit under the card/answer
         // chrome (the platforms that render rich-card actions).

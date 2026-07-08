@@ -231,6 +231,53 @@ void main() {
     expect(find.textContaining('REPORT-CHART'), findsOneWidget);
   });
 
+  testWidgets('email renders an email shell with subject header + link buttons', (
+    tester,
+  ) async {
+    // The email mapper's preview payload carries a `subject` + `html` no other
+    // channel does; the email skin renders a From/To/Subject header, the
+    // surface buttons render inline, and the deferred chip is dropped.
+    final payload = {
+      'rendered': true,
+      'subject': 'Initech renewal at risk',
+      'html': '<p>body</p>',
+      'text': 'Recorded.',
+      'deferred_buttons': 0,
+      'deferred_forms': 0,
+      'truncated': false,
+    };
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChannelBubble(
+            adapter: 'email',
+            payload: payload,
+            result: resultWithButtons(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // The email shell is on screen.
+    expect(find.byKey(const ValueKey('channel-chrome-email')), findsOneWidget);
+    // The subject line and the envelope labels render.
+    expect(find.text('Subject'), findsOneWidget);
+    expect(find.text('Initech renewal at risk'), findsOneWidget);
+    expect(find.text('From'), findsOneWidget);
+    // Email renders the surface buttons (it's button-capable), keyed per adapter.
+    expect(find.byKey(const ValueKey('channel-buttons-email')), findsOneWidget);
+    expect(find.text('Open report'), findsOneWidget);
+    expect(find.text('Mark reviewed'), findsOneWidget);
+  });
+
+  testWidgets('email with no subject shows a placeholder', (tester) async {
+    await tester.pumpWidget(_host('email', _msg('Body only.')));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('channel-chrome-email')), findsOneWidget);
+    expect(find.text('(no subject)'), findsOneWidget);
+  });
+
   test('buttonsFrom lifts both surface shapes and skips empty labels', () {
     // Raw agent surface: `components` + `kind:button`, tool on the node.
     final raw = ChannelBubble.buttonsFrom({

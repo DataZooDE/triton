@@ -12,6 +12,9 @@ import '../a2ui/markdown_lite.dart';
 ///     Adaptive-Card-style card with a brand accent bar and markdown body.
 ///   * `answer` — Gemini Enterprise: a clean answer card with a sparkle accent
 ///     that renders markdown **including tables** (its distinctive output).
+///   * `email` — an email-client shell: a From/To/**Subject** header over the
+///     rendered body. The richest surface — it renders the message complete
+///     (buttons as links, chart inline), and it's the only one with a subject.
 class ChannelChrome extends StatelessWidget {
   const ChannelChrome({
     super.key,
@@ -19,12 +22,17 @@ class ChannelChrome extends StatelessWidget {
     required this.label,
     required this.icon,
     required this.text,
+    this.subject,
   });
 
   final String adapter;
   final String label;
   final IconData icon;
   final String text;
+
+  /// The email subject line — only the `email` skin renders it (the one
+  /// channel whose mapper produces a subject). Null on every other channel.
+  final String? subject;
 
   @override
   Widget build(BuildContext context) {
@@ -33,6 +41,7 @@ class ChannelChrome extends StatelessWidget {
       _Kind.bubble => _bubble(context, skin),
       _Kind.card => _card(context, skin),
       _Kind.answer => _answer(context, skin),
+      _Kind.email => _email(context, skin),
     };
     // Stable per-adapter key so the console (and tests) can tell which shell
     // is on screen.
@@ -172,6 +181,92 @@ class ChannelChrome extends StatelessWidget {
     );
   }
 
+  // ── email (an email-client shell) ─────────────────────────────────────
+  Widget _email(BuildContext context, _Skin skin) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 600),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: cs.outlineVariant),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.06),
+            blurRadius: 3,
+            offset: const Offset(0, 1),
+          ),
+        ],
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // The header band: the channel label, then the envelope meta rows.
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
+            color: skin.accent.withValues(alpha: 0.08),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _header(skin, cs),
+                const SizedBox(height: 8),
+                _emailMeta(cs, 'From', 'assistant@datazoo.example'),
+                _emailMeta(cs, 'To', 'you@company.example'),
+                _emailMeta(
+                  cs,
+                  'Subject',
+                  subject?.trim().isNotEmpty == true
+                      ? subject!.trim()
+                      : '(no subject)',
+                  bold: true,
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: _body(context, cs.onSurface, 13),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _emailMeta(ColorScheme cs, String label, String value, {bool bold = false}) =>
+      Padding(
+        padding: const EdgeInsets.only(top: 2),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 56,
+              child: Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: cs.onSurfaceVariant,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                value,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  color: cs.onSurface,
+                  fontWeight: bold ? FontWeight.w700 : FontWeight.normal,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+
   Widget _header(_Skin skin, ColorScheme cs) => Row(
     mainAxisSize: MainAxisSize.min,
     children: [
@@ -215,7 +310,9 @@ class ChannelButton {
 bool channelShowsButtons(String adapter) {
   final skin = _skins[adapter];
   return skin != null &&
-      (skin.kind == _Kind.card || skin.kind == _Kind.answer);
+      (skin.kind == _Kind.card ||
+          skin.kind == _Kind.answer ||
+          skin.kind == _Kind.email);
 }
 
 /// A row of the answer's action buttons, styled with the channel's brand
@@ -265,7 +362,7 @@ class ChannelButtons extends StatelessWidget {
   }
 }
 
-enum _Kind { bubble, card, answer }
+enum _Kind { bubble, card, answer, email }
 
 class _Skin {
   const _Skin(
@@ -312,6 +409,7 @@ const _skins = <String, _Skin>{
   'msteams': _Skin(_Kind.card, Color(0xFF6264A7)),
   'copilot': _Skin(_Kind.card, Color(0xFF8B5CF6)),
   'gemini': _Skin(_Kind.answer, Color(0xFF4285F4)),
+  'email': _Skin(_Kind.email, Color(0xFFD93025)),
 };
 
 /// Markdown body that also renders pipe tables (`| a | b |`) as a real
