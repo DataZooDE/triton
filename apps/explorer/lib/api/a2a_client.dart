@@ -75,6 +75,9 @@ class A2aClient {
         // the failed state stays internal to the store — so this is
         // null on the error path below.
         taskState: (data['metadata']?['task_state'] as String?),
+        toolTrace: InvocationResult.toolTraceFrom(
+          (data['metadata'] as Map?)?.cast<String, dynamic>(),
+        ),
       );
     } on DioException catch (e) {
       sw.stop();

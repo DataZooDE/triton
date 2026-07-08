@@ -4,7 +4,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../api/a2a_client.dart';
 import '../api/mcp_client.dart';
 import '../api/rest_client.dart';
-import '../api/trace_summary.dart';
 import '../auth/auth_manager.dart';
 import 'runtime_provider.dart';
 
@@ -121,10 +120,6 @@ final a2aClientProvider = Provider<A2aClient>((ref) {
   );
 });
 
-/// The `trace_id` the user last invoked (set by the Console) — pre-fills
-/// the Trace page so "see the timeline of that call" is one click.
-final selectedTraceProvider = StateProvider<String?>((ref) => null);
-
 /// Auto-refreshed list of tools from `/v1/tools`. The Playground page
 /// binds to this; refreshing pulls the latest registry without a
 /// manual UI step.
@@ -158,18 +153,6 @@ final auditTailProvider =
       final client = ref.watch(restClientProvider);
       return client.auditTail(limit: q.limit, traceId: q.traceId);
     });
-
-/// The distinct trace_ids currently in the audit ring buffer, newest-first.
-/// Derived client-side from `/v1/audit` (the buffer carries no dedicated
-/// "list trace_ids" endpoint), so it sees the newest entries the server
-/// returns — `limit` is pulled to the server cap (500) for the widest view.
-/// The Trace page binds to this so an operator can browse and click a trace
-/// instead of having to already know its id.
-final availableTracesProvider = FutureProvider<List<TraceSummary>>((ref) async {
-  final client = ref.watch(restClientProvider);
-  final entries = await client.auditTail(limit: 500);
-  return distinctTraces(entries);
-});
 
 class AuditQuery {
   const AuditQuery({required this.limit, this.traceId});

@@ -138,6 +138,11 @@ struct OutboundPart {
 struct OutboundMetadata {
     trace_id: String,
     task_state: TaskState,
+    /// The upstream's per-turn tool trace (`_meta.tool_trace`), mirrored onto
+    /// A2A's `metadata` like `trace_id`. Absent when the upstream sent none, so
+    /// existing consumers see a byte-identical message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_trace: Option<Value>,
 }
 
 async fn message_send(State(state): State<A2aState>, parts: Parts, body: Bytes) -> Response {
@@ -253,23 +258,35 @@ async fn message_send(State(state): State<A2aState>, parts: Parts, body: Bytes) 
         .invoke(&tool_name, args, principal, "a2a")
         .await
     {
-        Ok(mut d) => match wrap_a2ui_if_requested(&mut d, requested) {
-            Ok(()) => {
-                state.tasks.record(&trace_id, TaskState::Completed);
-                let msg = OutboundMessage {
-                    parts: vec![OutboundPart { data: envelope(&d) }],
-                    metadata: OutboundMetadata {
-                        trace_id: d.trace_id.clone(),
-                        task_state: TaskState::Completed,
-                    },
-                };
-                (StatusCode::OK, Json(msg)).into_response()
+        Ok(mut d) => {
+            // Capture the upstream's tool trace before the A2UI wrap rewrites
+            // `d.result` and drops `_meta` (mirrors the MCP/REST paths). Only a
+            // structured array is reflected.
+            let tool_trace = d
+                .result
+                .get("_meta")
+                .and_then(|m| m.get("tool_trace"))
+                .filter(|t| t.is_array())
+                .cloned();
+            match wrap_a2ui_if_requested(&mut d, requested) {
+                Ok(()) => {
+                    state.tasks.record(&trace_id, TaskState::Completed);
+                    let msg = OutboundMessage {
+                        parts: vec![OutboundPart { data: envelope(&d) }],
+                        metadata: OutboundMetadata {
+                            trace_id: d.trace_id.clone(),
+                            task_state: TaskState::Completed,
+                            tool_trace,
+                        },
+                    };
+                    (StatusCode::OK, Json(msg)).into_response()
+                }
+                Err(e) => {
+                    state.tasks.record(&trace_id, TaskState::Failed);
+                    a2a_error_with_trace(&e, &trace_id)
+                }
             }
-            Err(e) => {
-                state.tasks.record(&trace_id, TaskState::Failed);
-                a2a_error_with_trace(&e, &trace_id)
-            }
-        },
+        }
         Err(e) => {
             state.tasks.record(&trace_id, TaskState::Failed);
             a2a_error_with_trace(&e, &trace_id)

@@ -77,6 +77,7 @@ class InvocationResult {
     this.errorCode,
     this.taskState,
     this.uiResourceUri,
+    this.toolTrace,
   });
 
   final Map<String, dynamic> raw;
@@ -84,6 +85,32 @@ class InvocationResult {
   final Duration elapsed;
   final String? traceId;
   final String? error;
+
+  /// The per-turn tool trace the upstream agent attached under
+  /// `_meta.tool_trace` — which tools ran and which Escurel data each touched
+  /// (`{tool, target, verb, ms}`), in call order. Triton reflects it onto the
+  /// response (MCP `_meta`, REST envelope sibling, A2A `metadata`); the Console
+  /// shows it in the per-message trace sidebar. Null/empty for a plain reply.
+  final List<Map<String, dynamic>>? toolTrace;
+
+  /// Lift the tool trace out of a reflected response node: MCP puts it under
+  /// the tools/call result's `_meta.tool_trace`, REST/A2A as a top-level
+  /// (`tool_trace`) sibling. Pass whichever root the client holds.
+  static List<Map<String, dynamic>>? toolTraceFrom(Map<String, dynamic>? root) {
+    if (root == null) return null;
+    final direct = root['tool_trace'];
+    final meta = (root['_meta'] as Map?)?['tool_trace'];
+    final list = (direct is List)
+        ? direct
+        : (meta is List)
+        ? meta
+        : null;
+    if (list == null || list.isEmpty) return null;
+    return list
+        .whereType<Map>()
+        .map((e) => e.cast<String, dynamic>())
+        .toList(growable: false);
+  }
 
   /// An MCP-Apps UI resource the result points at, lifted from the tool
   /// result's `_meta.ui.resourceUri` (e.g. `ui://peacock/<report>`). Set

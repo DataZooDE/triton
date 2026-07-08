@@ -201,7 +201,6 @@ declare -a PAGES=(
   "Console|Pick a tool|02-console"
   "Manifest|Manifest|04-manifest"
   "Audit|Audit|05-audit"
-  "Trace|Available traces|05b-trace"
   "Metrics|Metrics|06-metrics"
   "Settings|Settings|07-settings"
 )

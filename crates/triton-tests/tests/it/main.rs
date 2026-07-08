@@ -112,6 +112,8 @@ mod telegram_longpoll_dashboard;
 mod telegram_surface;
 #[path = "../telegram_upstream_identity.rs"]
 mod telegram_upstream_identity;
+#[path = "../tool_trace.rs"]
+mod tool_trace;
 #[path = "../upstream_listing.rs"]
 mod upstream_listing;
 #[path = "../version.rs"]

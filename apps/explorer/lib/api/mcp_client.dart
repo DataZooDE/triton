@@ -148,6 +148,7 @@ class McpClient {
         error: err?['message'] as String?,
         errorCode: err?['code'] as int?,
         uiResourceUri: InvocationResult.uiFrom(result),
+        toolTrace: InvocationResult.toolTraceFrom(result),
       );
     } on DioException catch (e) {
       sw.stop();

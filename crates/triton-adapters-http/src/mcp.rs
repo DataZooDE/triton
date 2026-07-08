@@ -345,6 +345,18 @@ async fn tools_call(
                 .and_then(|m| m.get("ui"))
                 .filter(|ui| ui.is_object())
                 .cloned();
+            // An upstream agent may attach a per-turn tool trace under
+            // `_meta.tool_trace` (which tools ran + the data they touched) —
+            // a host-render debug sidecar, mirrored to the response `_meta`
+            // exactly like `ui` (and captured before the A2UI wrap rewrites
+            // `d.result`). Only a structured array is reflected; a scalar/
+            // object blob is ignored, so an upstream can't bloat the response.
+            let tool_trace = d
+                .result
+                .get("_meta")
+                .and_then(|m| m.get("tool_trace"))
+                .filter(|t| t.is_array())
+                .cloned();
             if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
                 return rpc_error(id, code_for(&e), &e.to_string());
             }
@@ -357,6 +369,9 @@ async fn tools_call(
             let mut meta = json!({ "trace_id": trace_id });
             if let Some(ui) = ui_meta {
                 meta["ui"] = ui;
+            }
+            if let Some(trace) = tool_trace {
+                meta["tool_trace"] = trace;
             }
             rpc_ok(
                 id,

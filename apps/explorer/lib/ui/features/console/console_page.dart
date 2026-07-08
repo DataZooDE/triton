@@ -9,6 +9,7 @@ import '../../../widgets/a2ui/a2ui_renderer.dart';
 import '../../../widgets/a2ui/ui_resource_view.dart';
 import '../../../widgets/channel/channel_view.dart';
 import '../../../widgets/json_viewer.dart';
+import '../../../widgets/trace/trace_view.dart';
 
 /// The Console — a **chat-first** entry point to the gateway. You talk to an
 /// agent (or run any tool) in a transcript; the message box maps to the tool's
@@ -18,7 +19,9 @@ import '../../../widgets/json_viewer.dart';
 /// the chat stays simple, the debugging affordances are one click away.
 ///
 /// Defaults to **MCP** so MCP-Apps results (embedded reports) work out of the
-/// box. Each agent turn links to its audit **Trace**.
+/// box. Each agent turn has an **inspect** button that opens a per-message
+/// trace sidebar — the tools it called and the Escurel data each touched,
+/// plus the gateway timeline for its `trace_id`.
 class ConsolePage extends ConsumerStatefulWidget {
   const ConsolePage({super.key});
 
@@ -81,6 +84,10 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
   final _scroll = ScrollController();
   final List<_Turn> _turns = [];
   bool _sending = false;
+
+  /// The agent turn whose trace sidebar is open (tap a bubble's inspect
+  /// button); `null` when the sidebar is closed.
+  _Turn? _inspect;
 
   @override
   void dispose() {
@@ -194,9 +201,6 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
     _scrollToEnd();
     final r = await _dispatch(t.name, _argsFor(text), _protocol, _a2uiVersion);
     if (!mounted) return;
-    if (r.traceId != null) {
-      ref.read(selectedTraceProvider.notifier).state = r.traceId;
-    }
     setState(() {
       _turns.add(_Turn.agent(r, _a2uiVersion));
       _sending = false;
@@ -249,9 +253,6 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
     setState(() => _sending = true);
     final r = await _dispatch(tool, args, p, a2ui);
     if (!mounted) return;
-    if (r.traceId != null) {
-      ref.read(selectedTraceProvider.notifier).state = r.traceId;
-    }
     setState(() {
       _turns.add(_Turn.agent(r, a2ui));
       _sending = false;
@@ -333,6 +334,21 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
         _toolRail(shown, hasDemo),
         const VerticalDivider(width: 1),
         Expanded(child: _chat(context)),
+        if (_inspect != null) ...[
+          const VerticalDivider(width: 1),
+          SizedBox(
+            width: 360,
+            child: MessageTraceSidebar(
+              // Keyed on the trace_id so switching between two bubbles' sidebars
+              // re-fetches the right gateway timeline instead of reusing the
+              // first FutureBuilder.
+              key: ValueKey('trace-sidebar-${_inspect!.result!.traceId}'),
+              traceId: _inspect!.result!.traceId,
+              toolTrace: _inspect!.result!.toolTrace,
+              onClose: () => setState(() => _inspect = null),
+            ),
+          ),
+        ],
         if (_showOptions) ...[
           const VerticalDivider(width: 1),
           SizedBox(width: 320, child: _optionsPanel(context)),
@@ -509,7 +525,7 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
                   ),
                 ],
                 const SizedBox(height: 8),
-                _turnFooter(context, r),
+                _turnFooter(context, turn),
               ],
             ),
           ),
@@ -518,28 +534,36 @@ class _ConsolePageState extends ConsumerState<ConsolePage> {
     );
   }
 
-  Widget _turnFooter(BuildContext context, InvocationResult r) {
+  Widget _turnFooter(BuildContext context, _Turn turn) {
+    final r = turn.result!;
     final style = Theme.of(context).textTheme.bodySmall?.copyWith(
       color: Theme.of(context).colorScheme.onSurfaceVariant,
     );
+    // A reply is inspectable when it carries a trace_id (gateway timeline) or
+    // a tool trace (which tools/data it touched) — usually both.
+    final inspectable =
+        r.traceId != null || (r.toolTrace?.isNotEmpty ?? false);
     return Wrap(
       spacing: 10,
       runSpacing: 4,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
         Text('${r.statusCode} · ${r.elapsed.inMilliseconds}ms', style: style),
-        if (r.traceId != null)
-          // Tap selects this trace so the Trace page opens pre-loaded.
+        if (inspectable)
+          // Open THIS message's trace in the sidebar (tools + data touched +
+          // the gateway timeline) — no separate Trace tab to navigate to.
           InkWell(
-            onTap: () =>
-                ref.read(selectedTraceProvider.notifier).state = r.traceId,
+            key: const Key('inspect-trace'),
+            onTap: () => setState(() => _inspect = turn),
             child: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.timeline, size: 13),
+                const Icon(Icons.travel_explore, size: 13),
                 const SizedBox(width: 3),
                 Text(
-                  'trace ${r.traceId!.substring(0, 8)} ·  open in Trace',
+                  r.traceId != null
+                      ? 'inspect · trace ${r.traceId!.substring(0, 8)}'
+                      : 'inspect',
                   style: style?.copyWith(decoration: TextDecoration.underline),
                 ),
               ],
