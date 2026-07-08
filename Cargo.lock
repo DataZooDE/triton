@@ -2443,6 +2443,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "triton-chat-discord",
+ "triton-chat-email",
  "triton-chat-gemini",
  "triton-chat-googlechat",
  "triton-chat-msteams",
@@ -2508,6 +2509,16 @@ dependencies = [
  "triton-rasterizer",
  "triton-secrets",
  "uuid",
+]
+
+[[package]]
+name = "triton-chat-email"
+version = "0.0.1"
+dependencies = [
+ "regex",
+ "serde",
+ "serde_json",
+ "triton-core",
 ]
 
 [[package]]
