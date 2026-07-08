@@ -623,10 +623,29 @@ async fn invoke_tool(
         .invoke_with_bytes(&name, &body, principal, "rest")
         .await
     {
-        Ok(mut d) => match wrap_a2ui_if_requested(&mut d, requested) {
-            Ok(()) => (StatusCode::OK, Json(envelope(&d))).into_response(),
-            Err(e) => error_response(&e, Some(trace_id.as_str())),
-        },
+        Ok(mut d) => {
+            // Capture any per-turn tool trace the upstream attached under
+            // `_meta.tool_trace` BEFORE the A2UI wrap rewrites `d.result` and
+            // drops `_meta` — then reflect it as an envelope sibling (REST has
+            // no top-level `_meta`; `trace_id` rides the same way). Only a
+            // structured array is mirrored, never a scalar/object blob.
+            let tool_trace = d
+                .result
+                .get("_meta")
+                .and_then(|m| m.get("tool_trace"))
+                .filter(|t| t.is_array())
+                .cloned();
+            match wrap_a2ui_if_requested(&mut d, requested) {
+                Ok(()) => {
+                    let mut body = envelope(&d);
+                    if let Some(trace) = tool_trace {
+                        body["tool_trace"] = trace;
+                    }
+                    (StatusCode::OK, Json(body)).into_response()
+                }
+                Err(e) => error_response(&e, Some(trace_id.as_str())),
+            }
+        }
         Err(e) => error_response(&e, Some(trace_id.as_str())),
     }
 }

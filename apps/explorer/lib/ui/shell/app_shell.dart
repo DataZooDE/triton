@@ -6,7 +6,6 @@ import '../features/dashboard/dashboard_page.dart';
 import '../features/manifest/manifest_page.dart';
 import '../features/metrics/metrics_page.dart';
 import '../features/settings/settings_page.dart';
-import '../features/trace/trace_page.dart';
 
 /// Top-level navigation rail + IndexedStack — same pattern as
 /// `heron/lib/ui/focus_layout.dart`. Wide screens get the rail;
@@ -21,7 +20,9 @@ class AppShell extends StatefulWidget {
   State<AppShell> createState() => _AppShellState();
 }
 
-enum _Pane { console, dashboard, trace, manifest, audit, metrics, settings }
+// The per-message trace now lives in the Console's inspect sidebar, so there
+// is no standalone Trace pane (its `/v1/trace/{id}` timeline moved there).
+enum _Pane { console, dashboard, manifest, audit, metrics, settings }
 
 class _AppShellState extends State<AppShell> {
   // Chat is the central entry point.
@@ -30,7 +31,6 @@ class _AppShellState extends State<AppShell> {
   static const _items = <_NavItem>[
     _NavItem(_Pane.console, Icons.forum_outlined, Icons.forum, 'Chat'),
     _NavItem(_Pane.dashboard, Icons.home_outlined, Icons.home, 'Dashboard'),
-    _NavItem(_Pane.trace, Icons.timeline_outlined, Icons.timeline, 'Trace'),
     _NavItem(
       _Pane.manifest,
       Icons.description_outlined,
@@ -60,7 +60,6 @@ class _AppShellState extends State<AppShell> {
       children: const [
         ConsolePage(),
         DashboardPage(),
-        TracePage(),
         ManifestPage(),
         AuditPage(),
         MetricsPage(),
