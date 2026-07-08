@@ -2472,6 +2472,7 @@ dependencies = [
  "tracing-subscriber",
  "triton-adapters-http",
  "triton-chat-discord",
+ "triton-chat-email",
  "triton-chat-googlechat",
  "triton-chat-msteams",
  "triton-chat-signal",
@@ -2515,10 +2516,15 @@ dependencies = [
 name = "triton-chat-email"
 version = "0.0.1"
 dependencies = [
+ "async-trait",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "triton-core",
+ "triton-manifest",
+ "triton-secrets",
 ]
 
 [[package]]

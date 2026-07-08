@@ -153,6 +153,11 @@ pub enum AdapterKind {
     MsTeams,
     Discord,
     GoogleChat,
+    /// Outbound-only email channel: a transactional-email HTTP API courier.
+    /// No inbound webhook (email intake is an escurel event, handled
+    /// elsewhere), so it declares `signature: trusted_socket` (the trust
+    /// boundary is the outbound API key + the substrate egress allowlist).
+    Email,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]

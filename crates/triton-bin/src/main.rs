@@ -1158,6 +1158,53 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                 }
+                AdapterKind::Email => {
+                    // Outbound-only: build the courier and register it under
+                    // the adapter name; no inbound route to merge.
+                    let api_base = std::env::var("TRITON_EMAIL_API_BASE")
+                        .unwrap_or_else(|_| triton_chat_email::CourierConfig::default().api_base);
+                    // NFR-S-4: outside `local` the transactional-email endpoint
+                    // MUST be HTTPS. The provider host varies per deploy, so it
+                    // is pinned by the substrate egress allowlist rather than a
+                    // fixed canonical host here; we enforce the scheme.
+                    if settings.env != "local" && !api_base.starts_with("https://") {
+                        tracing::error!(
+                            env = %settings.env,
+                            email_api_base = %api_base,
+                            "non-`local` env MUST use an https TRITON_EMAIL_API_BASE (NFR-S-4 egress allowlist)",
+                        );
+                        std::process::exit(2);
+                    }
+                    let courier_config = triton_chat_email::CourierConfig {
+                        api_base,
+                        timeout: settings.courier_timeout,
+                    };
+                    match triton_chat_email::EmailAdapter::from_manifest(
+                        name,
+                        adapter,
+                        resolver.as_ref(),
+                        dispatcher.clone(),
+                        courier_config,
+                    )
+                    .await
+                    {
+                        Ok(built) => {
+                            tracing::info!(adapter = %name, "email outbound adapter wired");
+                            outbound_couriers.insert(
+                                name.to_string(),
+                                Arc::new(built) as Arc<dyn triton_core::OutboundCourier>,
+                            );
+                        }
+                        Err(e) => {
+                            optional_adapters::handle_build_error(
+                                name,
+                                &e,
+                                &settings.optional_adapters,
+                                "email",
+                            );
+                        }
+                    }
+                }
                 _ => {
                     tracing::warn!(
                         adapter = %name,
