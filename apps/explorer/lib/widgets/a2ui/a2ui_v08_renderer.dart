@@ -38,15 +38,111 @@ class A2UIv08Renderer extends StatelessWidget {
       return inner is Map &&
           (inner['resource'] as String?)?.startsWith('ui://') == true;
     });
+    // A run of consecutive action buttons (the model's proposed follow-ups,
+    // plus an optional "Open report") collapses into one compact horizontal
+    // `Wrap` — mirroring the channel-chip row — instead of a tall stack of
+    // full-width buttons.
+    final children = <Widget>[];
+    final actions = <Widget>[];
+    void flushActions() {
+      if (actions.isEmpty) return;
+      children.add(Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: List.of(actions),
+        ),
+      ));
+      actions.clear();
+    }
+
+    for (final raw in stream) {
+      if (_isSuppressedReport(raw, hasResourceButton)) continue;
+      final action = _actionButton(context, raw);
+      if (action != null) {
+        actions.add(action);
+        continue;
+      }
+      flushActions();
+      children.add(_node(context, raw));
+    }
+    flushActions();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (final raw in stream) _node(context, raw, hasResourceButton),
-      ],
+      children: children,
     );
   }
 
-  Widget _node(BuildContext context, dynamic raw, bool hasResourceButton) {
+  /// An inline `Report` next to a resource button is opened by that sibling —
+  /// drop it here to avoid a duplicate control.
+  bool _isSuppressedReport(dynamic raw, bool hasResourceButton) {
+    if (!hasResourceButton || raw is! Map) return false;
+    final comp = raw['Component'];
+    return comp is Map && comp.containsKey('Report');
+  }
+
+  /// A compact follow-up button for an actionable component (`Button` or an
+  /// inline `Report` open-control), else null. Rendered into the `Wrap`.
+  Widget? _actionButton(BuildContext context, dynamic raw) {
+    if (raw is! Map) return null;
+    final component = (raw['Component'] as Map?)?.cast<String, dynamic>();
+    if (component == null || component.length != 1) return null;
+    final entry = component.entries.single;
+    final body = (entry.value as Map?)?.cast<String, dynamic>() ?? const {};
+    switch (entry.key) {
+      case 'Button':
+        final label = (body['label'] as String?) ?? '';
+        final action = (body['action'] as Map?)?.cast<String, dynamic>();
+        return _followUp(
+          context,
+          label,
+          onAction == null || action == null
+              ? null
+              : () => onAction!(
+                    action['tool'] as String,
+                    ((action['args'] as Map?)?.cast<String, dynamic>()) ??
+                        const {},
+                  ),
+        );
+      case 'Report':
+        final reportId = (body['report_id'] as String?) ?? '';
+        final rawArgs = (body['args'] as Map?)?.cast<String, dynamic>() ??
+            <String, dynamic>{};
+        return _followUp(
+          context,
+          'Open report: $reportId',
+          onAction == null || reportId.isEmpty
+              ? null
+              : () => onAction!(
+                    'render_report',
+                    {...rawArgs, 'report_id': reportId},
+                  ),
+        );
+      default:
+        return null;
+    }
+  }
+
+  /// A compact, tertiary-accented action button — visually distinct from the
+  /// neutral channel chips, small enough that several fit on one `Wrap` line.
+  Widget _followUp(BuildContext context, String label, VoidCallback? onPressed) {
+    final scheme = Theme.of(context).colorScheme;
+    return FilledButton.tonal(
+      onPressed: onPressed,
+      style: FilledButton.styleFrom(
+        backgroundColor: scheme.tertiaryContainer,
+        foregroundColor: scheme.onTertiaryContainer,
+        visualDensity: VisualDensity.compact,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        textStyle: Theme.of(context).textTheme.labelLarge,
+      ),
+      child: Text(label),
+    );
+  }
+
+  Widget _node(BuildContext context, dynamic raw) {
     if (raw is! Map) return _unknown('not an object');
     final component = (raw['Component'] as Map?)?.cast<String, dynamic>();
     if (component == null) return _unknown('missing Component wrapper');
@@ -69,25 +165,6 @@ class A2UIv08Renderer extends StatelessWidget {
           child: Text(
             (body['text'] as String?) ?? '',
             style: const TextStyle(fontStyle: FontStyle.italic),
-          ),
-        );
-      case 'Button':
-        final label = (body['label'] as String?) ?? '';
-        final action = (body['action'] as Map?)?.cast<String, dynamic>();
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: FilledButton.tonal(
-              onPressed: onAction == null || action == null
-                  ? null
-                  : () => onAction!(
-                        action['tool'] as String,
-                        ((action['args'] as Map?)?.cast<String, dynamic>()) ??
-                            const {},
-                      ),
-              child: Text(label),
-            ),
           ),
         );
       case 'Selection':
@@ -145,28 +222,8 @@ class A2UIv08Renderer extends StatelessWidget {
                 ))
             .toList(growable: false);
         return _Dashboard(title: title, tiles: tiles);
-      case 'Report':
-        // See the v0.9 renderer: suppressed next to a resource button;
-        // otherwise an open control that dispatches (peacock renders).
-        if (hasResourceButton) return const SizedBox.shrink();
-        final reportId = (body['report_id'] as String?) ?? '';
-        final rawArgs =
-            (body['args'] as Map?)?.cast<String, dynamic>() ?? <String, dynamic>{};
-        return Padding(
-          padding: const EdgeInsets.symmetric(vertical: 6),
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: FilledButton.tonal(
-              onPressed: onAction == null || reportId.isEmpty
-                  ? null
-                  : () => onAction!(
-                        'render_report',
-                        {...rawArgs, 'report_id': reportId},
-                      ),
-              child: Text('Open report: $reportId'),
-            ),
-          ),
-        );
+      // `Button` and `Report` are actionable components handled in `build` —
+      // they collapse into the compact follow-up `Wrap`, never reaching here.
       case 'Sources':
         final items = ((body['items'] as List?) ?? const [])
             .whereType<Map>()

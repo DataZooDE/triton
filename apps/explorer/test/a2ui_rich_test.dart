@@ -129,6 +129,81 @@ const _v09Dashboard = {
   ],
 };
 
+const _v08Buttons = {
+  'version': '0.8',
+  'stream': [
+    {
+      'Component': {
+        'Text': {'text': 'Here you go.'},
+      },
+    },
+    {
+      'Component': {
+        'Button': {
+          'label': 'More detail',
+          'action': {
+            'tool': 'ask',
+            'args': {'q': 'detail'},
+          },
+        },
+      },
+    },
+    {
+      'Component': {
+        'Button': {
+          'label': 'Summarize',
+          'action': {
+            'tool': 'ask',
+            'args': {'q': 'summary'},
+          },
+        },
+      },
+    },
+    {
+      'Component': {
+        'Button': {
+          'label': 'Chart it',
+          'action': {
+            'tool': 'ask',
+            'args': {'q': 'chart'},
+          },
+        },
+      },
+    },
+  ],
+};
+
+const _v09Buttons = {
+  'version': '0.9',
+  'stream': [
+    {'type': 'text', 'text': 'Here you go.'},
+    {
+      'type': 'button',
+      'label': 'More detail',
+      'action': {
+        'tool': 'ask',
+        'args': {'q': 'detail'},
+      },
+    },
+    {
+      'type': 'button',
+      'label': 'Summarize',
+      'action': {
+        'tool': 'ask',
+        'args': {'q': 'summary'},
+      },
+    },
+    {
+      'type': 'button',
+      'label': 'Chart it',
+      'action': {
+        'tool': 'ask',
+        'args': {'q': 'chart'},
+      },
+    },
+  ],
+};
+
 void main() {
   group('A2UIv08 rich components', () {
     testWidgets('Selection emits args_key when chip is tapped',
@@ -193,6 +268,41 @@ void main() {
       expect(find.text('1,284'), findsOneWidget);
       expect(find.text('-2 vs prior'), findsOneWidget);
     });
+
+    testWidgets('follow-up buttons share one compact horizontal Wrap',
+        (tester) async {
+      String? tool;
+      Map<String, dynamic>? args;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: A2UIv08Renderer(
+            envelope: _v08Buttons,
+            onAction: (t, a) {
+              tool = t;
+              args = a;
+            },
+          ),
+        ),
+      ));
+      // The three follow-ups collapse into a single Wrap (not a Column of
+      // full-width buttons), and stay tappable.
+      expect(find.byType(Wrap), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(Wrap),
+          matching: find.byType(FilledButton),
+        ),
+        findsNWidgets(3),
+      );
+      final style = tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, 'Summarize'))
+          .style;
+      expect(style?.tapTargetSize, MaterialTapTargetSize.shrinkWrap);
+      await tester.tap(find.widgetWithText(FilledButton, 'Summarize'));
+      await tester.pump();
+      expect(tool, 'ask');
+      expect(args, {'q': 'summary'});
+    });
   });
 
   group('A2UIv09 rich components', () {
@@ -248,6 +358,39 @@ void main() {
       ));
       expect(find.text('invocations'), findsOneWidget);
       expect(find.text('-2 vs prior'), findsOneWidget);
+    });
+
+    testWidgets('follow-up buttons share one compact horizontal Wrap',
+        (tester) async {
+      String? tool;
+      Map<String, dynamic>? args;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: A2UIv09Renderer(
+            envelope: _v09Buttons,
+            onAction: (t, a) {
+              tool = t;
+              args = a;
+            },
+          ),
+        ),
+      ));
+      expect(find.byType(Wrap), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byType(Wrap),
+          matching: find.byType(FilledButton),
+        ),
+        findsNWidgets(3),
+      );
+      final style = tester
+          .widget<FilledButton>(find.widgetWithText(FilledButton, 'Chart it'))
+          .style;
+      expect(style?.tapTargetSize, MaterialTapTargetSize.shrinkWrap);
+      await tester.tap(find.widgetWithText(FilledButton, 'Chart it'));
+      await tester.pump();
+      expect(tool, 'ask');
+      expect(args, {'q': 'chart'});
     });
   });
 }

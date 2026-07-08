@@ -195,6 +195,76 @@ class ChannelChrome extends StatelessWidget {
       );
 }
 
+/// An action button lifted from the answer's A2UI surface — its label plus
+/// (for reference) the tool/resource it would invoke. Rendered by
+/// [ChannelButtons] as a preview of the Adaptive-Card / rich-card actions the
+/// card and answer channels support.
+class ChannelButton {
+  const ChannelButton({required this.label, this.tool, this.resource});
+
+  final String label;
+  final String? tool;
+  final String? resource;
+}
+
+/// Whether [adapter]'s chrome can render action buttons. Card channels
+/// (MS Teams / Copilot / Google Chat) and the Gemini answer card render
+/// Adaptive-Card / rich-card actions; the pure-messaging bubble channels
+/// (WhatsApp / Telegram / Signal / Discord) can't — their buttons stay a
+/// "deferred" footnote chip.
+bool channelShowsButtons(String adapter) {
+  final skin = _skins[adapter];
+  return skin != null &&
+      (skin.kind == _Kind.card || skin.kind == _Kind.answer);
+}
+
+/// A row of the answer's action buttons, styled with the channel's brand
+/// accent to sit under its chrome (an Adaptive-Card / rich-card action row).
+/// Display-only — this is a preview, so the buttons aren't interactive, but
+/// they read clearly as buttons.
+class ChannelButtons extends StatelessWidget {
+  const ChannelButtons({
+    super.key,
+    required this.adapter,
+    required this.buttons,
+  });
+
+  final String adapter;
+  final List<ChannelButton> buttons;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent =
+        (_skins[adapter] ?? const _Skin(_Kind.card, Color(0xFF757575))).accent;
+    return KeyedSubtree(
+      key: ValueKey('channel-buttons-$adapter'),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          for (final b in buttons)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: accent.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: accent.withValues(alpha: 0.5)),
+              ),
+              child: Text(
+                b.label,
+                style: TextStyle(
+                  color: accent,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12.5,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 enum _Kind { bubble, card, answer }
 
 class _Skin {
