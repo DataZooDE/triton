@@ -236,6 +236,83 @@ async fn missing_outbound_scope_is_forbidden() {
     assert!(email.captured().is_empty(), "no scope → nothing couriered");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outbound_email_sanitises_dangerous_links_in_the_delivered_html() {
+    // A crafted markdown link in the surface text must not break out of the
+    // href attribute or smuggle a `javascript:` scheme into the mail body.
+    let issuer = TestIssuer::start().await;
+    let email = FakeEmailApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &email)).await;
+
+    let token = token_with_aud(&issuer, OUTBOUND_AUDIENCE);
+    let surface = json!({
+        "surface": { "components": [
+            { "kind": "text", "value":
+                "Heads up.\n\nrun [go](javascript:alert(1)) or [x](https://a\"onmouseover=alert(1))" }
+        ] }
+    });
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(&token)
+        .json(&json!({ "adapter": "email", "to": KNOWN_EMAIL, "result": surface }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+    assert_eq!(resp.status(), 202);
+
+    let sent = wait_for(Duration::from_secs(2), || {
+        email.captured().into_iter().next()
+    });
+    let html = sent.body["html"].as_str().expect("html body");
+    // The dangerous scheme never appears as an href; the quote can't break out.
+    assert!(
+        !html.contains("href=\"javascript:"),
+        "javascript scheme leaked into href: {html}"
+    );
+    assert!(
+        !html.contains("\"onmouseover"),
+        "quote broke out of the href attribute: {html}"
+    );
+    // The links still render (defanged to `#` / escaped quote), not dropped.
+    assert!(html.contains(">go</a>"), "link text still renders: {html}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mixed_case_recipient_is_accepted() {
+    // The sender_table binds `maria@company.example`; a caller addressing her
+    // with different casing must still authorize (email is case-insensitive).
+    let issuer = TestIssuer::start().await;
+    let email = FakeEmailApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &email)).await;
+
+    let token = token_with_aud(&issuer, OUTBOUND_AUDIENCE);
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "adapter": "email",
+            "to": "Maria@Company.Example",
+            "result": { "surface": { "components": [ { "kind": "text", "value": "hi" } ] } },
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+    assert_eq!(
+        resp.status(),
+        202,
+        "mixed-case recipient must authorize: {:?}",
+        resp.text().await.ok()
+    );
+
+    let sent = wait_for(Duration::from_secs(2), || {
+        email.captured().into_iter().next()
+    });
+    // Delivered to the address as the caller typed it (envelope unchanged).
+    assert_eq!(sent.body["to"], "Maria@Company.Example");
+}
+
 // ---- poll helpers (local copies, as in outbound.rs) ----
 
 fn wait_for_audit<F>(proc: &TritonProcess, deadline: Duration, mut matches: F) -> Value

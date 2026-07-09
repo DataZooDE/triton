@@ -147,8 +147,15 @@ impl EmailAdapter {
             .resolve(table_field)
             .await
             .map_err(|e| BuildError::Resolve("identity.table", e))?;
+        // Email addresses are matched case-insensitively (the domain always is,
+        // and practically the local part too), so normalise the table keys to
+        // lowercase at build; `authorize` normalises the recipient the same way.
         let sender_table: HashMap<String, RecipientClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+            serde_json::from_str::<HashMap<String, RecipientClaims>>(&table_json)
+                .map_err(|e| BuildError::TableParse(e.to_string()))?
+                .into_iter()
+                .map(|(k, v)| (k.trim().to_ascii_lowercase(), v))
+                .collect();
 
         let http = reqwest::Client::builder()
             .timeout(config.timeout)
@@ -190,7 +197,7 @@ impl OutboundCourier for EmailAdapter {
         req: &OutboundRequest,
         principal: &Principal,
     ) -> Result<(), TritonError> {
-        match self.sender_table.get(&req.to) {
+        match self.sender_table.get(&req.to.trim().to_ascii_lowercase()) {
             Some(claims) if claims.tenant == principal.tenant => Ok(()),
             Some(_) => Err(TritonError::Forbidden(format!(
                 "recipient {} is not in tenant `{}`",

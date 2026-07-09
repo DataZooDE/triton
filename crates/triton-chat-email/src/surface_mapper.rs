@@ -257,11 +257,37 @@ fn truncate_blocks(
     }
     // Always keep at least the first block so the mail isn't empty.
     let kept = kept.max(1);
-    (
-        html_blocks.into_iter().take(kept).collect(),
-        text_blocks.into_iter().take(kept).collect(),
-        true,
-    )
+    let mut kept_html: Vec<String> = html_blocks.into_iter().take(kept).collect();
+    let mut kept_text: Vec<String> = text_blocks.into_iter().take(kept).collect();
+    // Pathological single block larger than the whole budget: cut it at a UTF-8
+    // boundary so the ceiling is a genuine hard cap, not soft-by-one-block. This
+    // may leave that one block's tags unbalanced, but bounding the size matters
+    // more than balance for a surface this degenerate (real blocks are tiny).
+    if kept == 1 {
+        if let Some(first) = kept_html.first_mut()
+            && first.len() > budget
+        {
+            *first = truncate_str_to_boundary(first, budget);
+        }
+        if let Some(first) = kept_text.first_mut()
+            && first.len() > budget
+        {
+            *first = truncate_str_to_boundary(first, budget);
+        }
+    }
+    (kept_html, kept_text, true)
+}
+
+/// Truncate `s` to the largest UTF-8 char boundary `<= max` bytes.
+fn truncate_str_to_boundary(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
 }
 
 /// Wrap the rendered blocks in a minimal, self-contained HTML email document.
@@ -364,6 +390,27 @@ fn escape_attr(s: &str) -> String {
     escape_html(s).replace('"', "&quot;")
 }
 
+/// Sanitise a markdown-link URL for use as an `href`. The input has already
+/// been through [`escape_html`] (so `<`, `>`, `&` are neutralised), leaving two
+/// gaps this closes: (1) a `"` can still break out of the double-quoted
+/// attribute, and (2) any scheme — including `javascript:` / `data:` — would
+/// otherwise pass through. Only `http`, `https`, `mailto` and `ui://` links are
+/// kept; anything else collapses to `#`. Ampersands are left as their existing
+/// `&amp;` (no double-escaping).
+fn sanitize_href(escaped_url: &str) -> String {
+    let lower = escaped_url.trim().to_ascii_lowercase();
+    let allowed = lower.starts_with("http://")
+        || lower.starts_with("https://")
+        || lower.starts_with("mailto:")
+        || lower.starts_with("ui://");
+    if !allowed {
+        return "#".to_string();
+    }
+    // `escape_html` already handled `&`/`<`/`>`; only the attribute-breaking
+    // quote remains to neutralise.
+    escaped_url.replace('"', "&quot;")
+}
+
 /// Normalise the model's portable markdown into an HTML fragment: `#` headers
 /// → `<h3>`, `- `/`* ` bullets → `<ul><li>`, blank-line-separated runs → `<p>`
 /// (soft line breaks become `<br>`), and inline `**bold**`/`__bold__`,
@@ -426,7 +473,14 @@ fn inline_md(s: &str) -> String {
     static CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`\n]+)`").unwrap());
 
     let escaped = escape_html(s);
-    let linked = LINK.replace_all(&escaped, "<a href=\"$2\">$1</a>");
+    // The link text (`$1`) is already HTML-escaped; the URL (`$2`) is not safe
+    // for a double-quoted attribute (`escape_html` leaves `"` untouched) and is
+    // not scheme-checked. Route it through `sanitize_href` so a crafted link
+    // can neither break out of the `href` nor smuggle a `javascript:`/`data:`
+    // scheme into the delivered mail — matching the Button/Sources href paths.
+    let linked = LINK.replace_all(&escaped, |c: &regex::Captures| {
+        format!("<a href=\"{}\">{}</a>", sanitize_href(&c[2]), &c[1])
+    });
     let bold = BOLD_STAR.replace_all(&linked, "<strong>$1</strong>");
     let bold = BOLD_UNDER.replace_all(&bold, "<strong>$1</strong>");
     CODE.replace_all(&bold, "<code>$1</code>").into_owned()
@@ -644,5 +698,83 @@ mod tests {
     #[test]
     fn try_render_surface_none_on_non_surface() {
         assert!(try_render_surface(&serde_json::json!({ "echo": "x" })).is_none());
+    }
+
+    #[test]
+    fn markdown_link_cannot_break_out_of_the_href_attribute() {
+        // A `"` inside a link URL must not escape the double-quoted href and
+        // inject event-handler attributes into the delivered HTML. (Clean lead
+        // line so the derived subject/title doesn't echo the payload.)
+        let s = surface(vec![Component::Text {
+            value: "Summary.\n\nsee [click](https://x\"onmouseover=alert(1))".into(),
+        }]);
+        let r = render(&s).expect("renders");
+        // No unescaped quote immediately preceding a handler — the attribute
+        // was not broken; the quote is rendered as `&quot;`.
+        assert!(
+            !r.html.contains("\"onmouseover"),
+            "attribute breakout leaked: {}",
+            r.html
+        );
+        assert!(r.html.contains("&quot;onmouseover"));
+    }
+
+    #[test]
+    fn markdown_link_with_dangerous_scheme_is_neutralised() {
+        // `javascript:` / `data:` hrefs must be dropped to a safe placeholder.
+        // Lead line is clean so the assertions target the rendered body hrefs.
+        let s = surface(vec![Component::Text {
+            value: "Options.\n\ntap [here](javascript:alert(1)) or [x](data:text/html,<b>)".into(),
+        }]);
+        let r = render(&s).expect("renders");
+        // Both dangerous links collapse to the safe placeholder href.
+        assert_eq!(r.html.matches("href=\"#\"").count(), 2);
+        assert!(
+            !r.html.contains("href=\"javascript:"),
+            "js scheme leaked: {}",
+            r.html
+        );
+        assert!(
+            !r.html.contains("href=\"data:"),
+            "data scheme leaked: {}",
+            r.html
+        );
+        // The link text still renders; only the href is defanged.
+        assert!(r.html.contains(">here</a>"));
+    }
+
+    #[test]
+    fn markdown_link_with_allowed_scheme_is_preserved() {
+        let s = surface(vec![Component::Text {
+            value:
+                "open [report](https://example.com/r?a=1&b=2) and [doc](ui://peacock/document?id=x)"
+                    .into(),
+        }]);
+        let r = render(&s).expect("renders");
+        // http(s) and ui:// survive; the `&` is the correctly-escaped `&amp;`.
+        assert!(
+            r.html
+                .contains("href=\"https://example.com/r?a=1&amp;b=2\"")
+        );
+        assert!(r.html.contains("href=\"ui://peacock/document?id=x\""));
+        // No double-escaping of the ampersand.
+        assert!(!r.html.contains("&amp;amp;"));
+    }
+
+    #[test]
+    fn single_oversized_block_is_hard_capped() {
+        // A single block larger than the whole budget must still be bounded —
+        // the ceiling is a hard cap, not soft-by-one-block.
+        let s = surface(vec![Component::Text {
+            value: "y".repeat(EMAIL_HTML_MAX_BYTES + 50_000),
+        }]);
+        let r = render(&s).expect("renders");
+        assert!(r.truncated);
+        assert!(
+            r.html.len() <= EMAIL_HTML_MAX_BYTES + 512,
+            "html exceeded the hard cap: {} bytes",
+            r.html.len()
+        );
+        assert!(r.html.ends_with("</body></html>"));
     }
 }
