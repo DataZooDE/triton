@@ -1,0 +1,31 @@
+# #191 PR-T5 — Twilio-RCS adapter (text-only inbound + outbound).
+version: "0.2"
+
+adapters:
+  twilio-rcs:
+    kind: twilio_rcs
+    tool: echo
+    inbound:
+      kind: webhook
+      signature: twilio_signature
+      secret: twilio-auth-token-for-test
+      public_url: env://TRITON_TWILIO_RCS_PUBLIC_URL
+    outbound:
+      kind: rest_api
+      account_sid: ACtest00000000000000000000000000
+      token: twilio-auth-token-for-test
+      from: "rcs:brand_xyz123_agent"
+    identity:
+      kind: sender_table
+      table: '{"+491701234567":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+    rate_limit:
+      messages_per_sec: 6
+      burst: 2
+    correlation_key: twilio-rcs-correlation-key-unused
+
+tools:
+  echo:
+    surface_components: []
