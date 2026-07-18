@@ -274,6 +274,76 @@ fn missing_scheme_credential_refused() {
     );
 }
 
+/// #191: `signature: twilio_signature` is a closed-set value the parser
+/// MUST accept (unlike an unknown scheme, which `unknown_inbound_kind_
+/// refuses_at_parse`'s sibling for `signature` would reject) and whose
+/// required `secret` credential validate() MUST enforce, same as every
+/// other HMAC-family scheme.
+#[test]
+fn twilio_signature_scheme_parses_and_validates_with_secret() {
+    let m = Manifest::load(&fixture("manifest-twilio-signature-test.yaml")).expect("parse");
+    m.validate(Env::Production)
+        .expect("twilio_signature + secret present must pass validation");
+}
+
+#[test]
+fn twilio_signature_scheme_requires_secret() {
+    let m = Manifest::load(&fixture("manifest-twilio-signature-missing-cred.yaml")).expect("parse");
+    let err = m
+        .validate(Env::Production)
+        .expect_err("FR-L-4: twilio_signature MUST require `secret`");
+    assert!(
+        matches!(err, ManifestError::MissingSchemeCredential { .. }),
+        "expected MissingSchemeCredential, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("twilio_signature") && msg.contains("secret"),
+        "error should name the scheme + missing field, got: {msg}"
+    );
+}
+
+/// Codex review finding (#191): `outbound.from` is required at
+/// `TwilioWhatsAppAdapter::from_manifest` build time but wasn't checked
+/// by `Manifest::validate()` — a manifest missing it passed validation
+/// and only failed later at boot, unlike `account_sid` / `public_url`
+/// which are already caught at this layer.
+#[test]
+fn twilio_whatsapp_requires_outbound_from() {
+    let m = Manifest::load(&fixture("manifest-twilio-whatsapp-missing-from.yaml")).expect("parse");
+    let err = m
+        .validate(Env::Production)
+        .expect_err("twilio_whatsapp MUST require `outbound.from`");
+    assert!(
+        matches!(err, ManifestError::MissingSchemeCredential { .. }),
+        "expected MissingSchemeCredential, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("from"),
+        "error should name the missing field, got: {msg}"
+    );
+}
+
+/// Codex review finding (#191): the `public_url` M-SECRETS-1 exemption is
+/// meant for `twilio_whatsapp`'s own externally-visible webhook URL, not
+/// a secret. It must NOT let an unrelated adapter smuggle a literal
+/// credential past the production check just by naming a field
+/// `inbound.public_url` — inbound credentials are a flattened open map,
+/// so the exemption must be scoped to the adapter kind, not the field
+/// name alone.
+#[test]
+fn public_url_exemption_does_not_leak_to_other_adapter_kinds() {
+    let m = Manifest::load(&fixture("manifest-public-url-exemption-scoped.yaml")).expect("parse");
+    let err = m
+        .validate(Env::Production)
+        .expect_err("a non-twilio adapter's literal `inbound.public_url` must still be refused");
+    assert!(
+        matches!(err, ManifestError::LiteralCredentialInProd { .. }),
+        "expected LiteralCredentialInProd, got {err:?}"
+    );
+}
+
 #[test]
 fn literal_secret_refused_in_prod_admitted_in_dev() {
     let m = Manifest::load(&fixture("manifest-literal-secret.yaml")).expect("parse");
