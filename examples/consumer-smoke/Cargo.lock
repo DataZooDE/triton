@@ -2303,6 +2303,7 @@ dependencies = [
  "rsa",
  "serde",
  "serde_json",
+ "sha1",
  "sha2",
  "tiny-skia 0.11.4",
  "tokio",
