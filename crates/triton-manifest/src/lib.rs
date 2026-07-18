@@ -158,6 +158,13 @@ pub enum AdapterKind {
     /// elsewhere), so it declares `signature: trusted_socket` (the trust
     /// boundary is the outbound API key + the substrate egress allowlist).
     Email,
+    /// #191: WhatsApp via Twilio's Business Solution Provider path
+    /// (`inbound.kind: webhook`, `signature: twilio_signature`) — a
+    /// parallel, independently-selectable transport alongside
+    /// [`Self::WhatsappCloud`] (direct Meta Graph API) and
+    /// [`Self::WhatsappWeb`] (Baileys socket bridge). Operators choose
+    /// per manifest entry; this does not supersede the other two.
+    TwilioWhatsapp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -677,6 +684,36 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
         });
     }
 
+    // #191: Twilio's Messaging API addresses the account by `AccountSid`
+    // embedded in the outbound URL path
+    // (`/2010-04-01/Accounts/{account_sid}/Messages.json`) AND uses it as
+    // the HTTP Basic auth username (`token` is the password). Without it
+    // the courier has no account to post to or authenticate as.
+    if adapter.kind == AdapterKind::TwilioWhatsapp
+        && !adapter.outbound.credentials.contains_key("account_sid")
+    {
+        return Err(ManifestError::MissingSchemeCredential {
+            adapter: name.to_string(),
+            scheme: "kind=twilio_whatsapp".to_string(),
+            field: "account_sid".to_string(),
+        });
+    }
+
+    // #191: Twilio signs the exact externally-visible URL it POSTed to —
+    // axum's own view of the request URI cannot be trusted to reproduce
+    // that behind the substrate's reverse proxy (12-factor VII). The
+    // operator must configure it explicitly rather than have the adapter
+    // guess.
+    if adapter.kind == AdapterKind::TwilioWhatsapp
+        && !adapter.inbound.credentials.contains_key("public_url")
+    {
+        return Err(ManifestError::MissingSchemeCredential {
+            adapter: name.to_string(),
+            scheme: "kind=twilio_whatsapp".to_string(),
+            field: "public_url".to_string(),
+        });
+    }
+
     let identity_required = match adapter.identity.kind {
         IdentityKind::SenderTable => Some(("sender_table", "table")),
         IdentityKind::SelfEnrol => Some(("self_enrol", "fallback_table")),
@@ -703,6 +740,13 @@ fn visit_secrets(
 ) -> Result<(), ManifestError> {
     let mut paths: Vec<(String, &SecretField)> = Vec::new();
     for (k, v) in &adapter.inbound.credentials {
+        // #191: `public_url` (twilio_signature) is the adapter's own
+        // externally-visible webhook URL, not a secret — like
+        // `resolver_tool` below, exempt it so a production manifest can
+        // state it as a literal.
+        if k == "public_url" {
+            continue;
+        }
         paths.push((format!("adapters.{name}.inbound.{k}"), v));
     }
     for (k, v) in &adapter.outbound.credentials {
