@@ -1276,3 +1276,19 @@ a trap the next developer should not have to step in.
   an AI review's findings still need independent verification against
   the actual code and existing precedent before applying — some are
   real bugs, some are consistent-with-everything-else non-issues.
+
+- **"Decode the inbound interactive reply" doesn't mean the same thing
+  on every platform — check whether a correlation token is even
+  possible before assuming the Telegram/Discord pattern transfers.**
+  (#191, PR-T4) The original plan expected Twilio-WhatsApp's inbound
+  button-tap handling to mirror Telegram's `callback_query` decode (a
+  signed `(tool, args)` token as the button `id`). But PR-T3 already
+  established Twilio buttons live inside operator pre-authored Content
+  Templates — Triton never builds the button structure per-message, so
+  it never emits a correlation token as the payload in the first place.
+  Twilio's actual inbound shape (`ButtonPayload` + `ButtonText` on an
+  otherwise-ordinary inbound message, confirmed via the Messaging
+  webhook-parameters docs) meant the real fix was much smaller: prefer
+  `ButtonPayload` over `Body` as the routing text, dispatch through the
+  existing pipeline. Two-line diff instead of porting a signature-decode
+  path. Worth the research pass before writing code.
