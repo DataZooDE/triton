@@ -1,0 +1,34 @@
+# #191 PR-T2 — Twilio-WhatsApp adapter (text-only inbound + outbound).
+# Literal credentials — dev/test only; production requires env:// refs
+# (M-SECRETS-1). `public_url` is exempt from that check (not a secret —
+# see triton-manifest's visit_secrets).
+version: "0.2"
+
+adapters:
+  twilio-whatsapp:
+    kind: twilio_whatsapp
+    tool: echo
+    inbound:
+      kind: webhook
+      signature: twilio_signature
+      secret: twilio-auth-token-for-test
+      public_url: env://TRITON_TWILIO_WHATSAPP_PUBLIC_URL
+    outbound:
+      kind: rest_api
+      account_sid: ACtest00000000000000000000000000
+      token: twilio-auth-token-for-test
+      from: "whatsapp:+14155238886"
+    identity:
+      kind: sender_table
+      table: '{"+491701234567":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+    rate_limit:
+      messages_per_sec: 6
+      burst: 2
+    correlation_key: twilio-whatsapp-correlation-key-unused
+
+tools:
+  echo:
+    surface_components: []

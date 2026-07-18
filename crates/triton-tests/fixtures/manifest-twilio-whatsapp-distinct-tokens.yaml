@@ -1,0 +1,36 @@
+# #191 Codex review finding — `outbound.token` is required by the generic
+# `outbound.kind: rest_api` closed-set check but the adapter never read
+# it, silently reusing `inbound.secret` for BOTH inbound HMAC
+# verification AND the outbound HTTP Basic password. This fixture gives
+# them deliberately DIFFERENT values so a test can prove the outbound
+# Basic auth password comes from `outbound.token`, not `inbound.secret`.
+version: "0.2"
+
+adapters:
+  twilio-whatsapp:
+    kind: twilio_whatsapp
+    tool: echo
+    inbound:
+      kind: webhook
+      signature: twilio_signature
+      secret: inbound-signing-secret-DISTINCT
+      public_url: env://TRITON_TWILIO_WHATSAPP_PUBLIC_URL
+    outbound:
+      kind: rest_api
+      account_sid: ACtest00000000000000000000000000
+      token: outbound-basic-auth-token-DISTINCT
+      from: "whatsapp:+14155238886"
+    identity:
+      kind: sender_table
+      table: '{"+491701234567":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+    rate_limit:
+      messages_per_sec: 6
+      burst: 2
+    correlation_key: twilio-whatsapp-correlation-key-unused
+
+tools:
+  echo:
+    surface_components: []

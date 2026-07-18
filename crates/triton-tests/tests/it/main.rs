@@ -116,6 +116,14 @@ mod telegram_surface;
 mod telegram_upstream_identity;
 #[path = "../tool_trace.rs"]
 mod tool_trace;
+#[path = "../twilio_rcs.rs"]
+mod twilio_rcs;
+#[path = "../twilio_whatsapp.rs"]
+mod twilio_whatsapp;
+#[path = "../twilio_whatsapp_button_reply.rs"]
+mod twilio_whatsapp_button_reply;
+#[path = "../twilio_whatsapp_template.rs"]
+mod twilio_whatsapp_template;
 #[path = "../upstream_listing.rs"]
 mod upstream_listing;
 #[path = "../version.rs"]
