@@ -1,0 +1,25 @@
+# #191: `signature: twilio_signature` requires a `secret` field (the
+# Twilio Auth Token, used both to verify inbound HMAC-SHA1 signatures and
+# as the outbound HTTP Basic password). Without it, validation MUST
+# refuse. Uses `kind: telegram` because the required-credential check
+# for this scheme doesn't branch on adapter kind (unlike `trusted_socket`
+# which does for Signal) — this is a pure closed-set/credential test, not
+# an adapter-kind test.
+version: "0.2"
+adapters:
+  telegram:
+    kind: telegram
+    inbound:
+      kind: webhook
+      signature: twilio_signature
+      # MISSING: secret
+    outbound:
+      kind: rest_api
+      token: vault://kv/x#t
+    identity:
+      kind: sender_table
+      table: vault://kv/x#senders
+    degrade: { text: passthrough }
+    rate_limit: { messages_per_sec: 1, burst: 1 }
+    correlation_key: vault://kv/x#k
+tools: {}

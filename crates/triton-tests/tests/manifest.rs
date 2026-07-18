@@ -274,6 +274,35 @@ fn missing_scheme_credential_refused() {
     );
 }
 
+/// #191: `signature: twilio_signature` is a closed-set value the parser
+/// MUST accept (unlike an unknown scheme, which `unknown_inbound_kind_
+/// refuses_at_parse`'s sibling for `signature` would reject) and whose
+/// required `secret` credential validate() MUST enforce, same as every
+/// other HMAC-family scheme.
+#[test]
+fn twilio_signature_scheme_parses_and_validates_with_secret() {
+    let m = Manifest::load(&fixture("manifest-twilio-signature-test.yaml")).expect("parse");
+    m.validate(Env::Production)
+        .expect("twilio_signature + secret present must pass validation");
+}
+
+#[test]
+fn twilio_signature_scheme_requires_secret() {
+    let m = Manifest::load(&fixture("manifest-twilio-signature-missing-cred.yaml")).expect("parse");
+    let err = m
+        .validate(Env::Production)
+        .expect_err("FR-L-4: twilio_signature MUST require `secret`");
+    assert!(
+        matches!(err, ManifestError::MissingSchemeCredential { .. }),
+        "expected MissingSchemeCredential, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("twilio_signature") && msg.contains("secret"),
+        "error should name the scheme + missing field, got: {msg}"
+    );
+}
+
 #[test]
 fn literal_secret_refused_in_prod_admitted_in_dev() {
     let m = Manifest::load(&fixture("manifest-literal-secret.yaml")).expect("parse");
