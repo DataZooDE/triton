@@ -122,6 +122,8 @@ mod twilio_rcs;
 mod twilio_whatsapp;
 #[path = "../twilio_whatsapp_button_reply.rs"]
 mod twilio_whatsapp_button_reply;
+#[path = "../twilio_whatsapp_status_callback.rs"]
+mod twilio_whatsapp_status_callback;
 #[path = "../twilio_whatsapp_template.rs"]
 mod twilio_whatsapp_template;
 #[path = "../upstream_listing.rs"]

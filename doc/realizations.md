@@ -1312,3 +1312,22 @@ a trap the next developer should not have to step in.
   assumes a guard from elsewhere. Lesson restated because it bears
   repeating: never skip the full-suite run, no matter how contained a
   change looks.
+
+- **`Dispatcher::record_post`'s `status_detail` is `Option<&'static str>`
+  — a closed diagnostic-label set, not a place for dynamic data.**
+  (#191, PR-T6) First attempt at the delivery-receipt handler tried to
+  put the Twilio `MessageSid`/`ErrorCode` (both runtime `String`s) into
+  `status_detail` for correlation. Wouldn't compile: `PostResult<'a>`
+  types `status_detail` as `Option<&'static str>` specifically so every
+  call site passes a literal like `"rasterizer_call"`, not
+  caller-computed text. The actually-idiomatic fix, once noticed: the
+  audit record's `trace_id` field is `&'a str` (not `'static`) — so a
+  context-free event with no real principal (this codebase is
+  stateless, G-8; nothing survives from the original send to correlate
+  by) can carry a meaningful dynamic id there instead of a fresh
+  `uuid::Uuid::new_v4()`. Setting the synthetic `Principal.trace_id` to
+  the Twilio `MessageSid` gives free structured correlation with zero
+  new mechanism; the truly dynamic diagnostic detail (ErrorCode) rides
+  on a plain `tracing::warn!` line, matching how every other courier's
+  error path already logs before calling `record_post` with a static
+  label.

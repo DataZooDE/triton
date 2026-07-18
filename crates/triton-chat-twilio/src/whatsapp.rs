@@ -111,6 +111,12 @@ pub struct TwilioWhatsAppAdapter {
     /// means axum's own view of the request URI cannot be trusted to
     /// reproduce (12-factor VII: Fabio sits in front, not the binary).
     public_url: String,
+    /// PR-T6: the externally-visible URL Twilio's async delivery/read
+    /// status callbacks POST to — a SEPARATE URL from `public_url` (own
+    /// signature to verify against). `None` when the operator hasn't
+    /// configured one: no `StatusCallback` param is attached to outbound
+    /// sends and no `/status` route is mounted (opt-in, not required).
+    status_callback_public_url: Option<String>,
     /// Twilio WhatsApp sender, `whatsapp:+<E.164>` (manifest
     /// `outbound.from`).
     from: String,
@@ -189,6 +195,21 @@ impl TwilioWhatsAppAdapter {
             "inbound.public_url",
         )
         .await?;
+        // PR-T6: optional — only resolved (and only required to be
+        // resolvable) when the operator actually declared it.
+        let status_callback_public_url = match adapter
+            .inbound
+            .credentials
+            .get("status_callback_public_url")
+        {
+            Some(field) => Some(
+                resolver
+                    .resolve(field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("inbound.status_callback_public_url", e))?,
+            ),
+            None => None,
+        };
         let from = resolve(
             resolver,
             adapter.outbound.credentials.get("from"),
@@ -234,6 +255,7 @@ impl TwilioWhatsAppAdapter {
             outbound_token,
             account_sid,
             public_url,
+            status_callback_public_url,
             from,
             sender_table,
             inbound_tool: adapter.tool.clone(),
@@ -245,11 +267,28 @@ impl TwilioWhatsAppAdapter {
         })
     }
 
-    /// Mount the inbound webhook at `/<adapter-name>/webhook`.
+    /// Mount the inbound webhook at `/<adapter-name>/webhook`, plus the
+    /// delivery-receipt status-callback route at `/<adapter-name>/status`
+    /// when `status_callback_public_url` is configured (PR-T6, opt-in).
     pub fn router(self: Arc<Self>) -> Router {
+        let mut router = self.clone().webhook_router();
+        if self.status_callback_public_url.is_some() {
+            router = router.merge(self.status_router());
+        }
+        router
+    }
+
+    fn webhook_router(self: Arc<Self>) -> Router {
         let path = format!("/{}/webhook", self.name);
         Router::new()
             .route(&path, post(handle_webhook))
+            .with_state(self)
+    }
+
+    fn status_router(self: Arc<Self>) -> Router {
+        let path = format!("/{}/status", self.name);
+        Router::new()
+            .route(&path, post(handle_status_callback))
             .with_state(self)
     }
 }
@@ -365,6 +404,122 @@ async fn handle_webhook(
         Ok(()) => StatusCode::OK.into_response(),
         Err(resp) => resp,
     }
+}
+
+/// PR-T6: Twilio's async delivery/read receipt. Verified against the
+/// SAME `twilio_signature` scheme, over `status_callback_public_url`
+/// (a URL distinct from the inbound webhook's `public_url` — Twilio
+/// signs whichever exact URL it POSTed to). Triton is stateless (G-8):
+/// there is no lookup of the original send's audit context by
+/// `MessageSid`, so this emits its OWN `phase: post` audit line naming
+/// the `MessageSid` (and `ErrorCode`, if present) in `status_detail` —
+/// an operator correlates the two lines via log search on that id.
+///
+/// Only terminal statuses (`delivered`, `read`, `failed`, `undelivered`)
+/// get an audit line; intermediate ones (`queued`, `sent`, `sending`,
+/// `accepted`, ...) are silently 200'd — Twilio will call again as the
+/// message progresses, and there's nothing new to report yet.
+async fn handle_status_callback(
+    State(adapter): State<Arc<TwilioWhatsAppAdapter>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let pairs: Vec<(String, String)> = match serde_urlencoded::from_bytes(&body) {
+        Ok(p) => p,
+        Err(_) => {
+            record_rejection(
+                &adapter,
+                "-",
+                "-",
+                TritonError::Validation("malformed x-www-form-urlencoded body".into()),
+            );
+            return (StatusCode::BAD_REQUEST, "malformed").into_response();
+        }
+    };
+    let presented = headers
+        .get(HEADER_SIGNATURE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let pair_refs: Vec<(&str, &str)> = pairs
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    // `status_callback_public_url` is only `None` when this route isn't
+    // mounted at all (see `router()`), so reaching this handler means
+    // it's `Some`.
+    let Some(status_url) = adapter.status_callback_public_url.as_deref() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !signature::verify(status_url, &pair_refs, &adapter.auth_token, presented) {
+        record_rejection(
+            &adapter,
+            "-",
+            "-",
+            TritonError::Auth("bad X-Twilio-Signature".into()),
+        );
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+
+    let params: HashMap<&str, &str> = pair_refs.iter().copied().collect();
+    let message_sid = params.get("MessageSid").copied().unwrap_or("-");
+    let status = params.get("MessageStatus").copied().unwrap_or("");
+    let error_code = params.get("ErrorCode").copied();
+
+    // Stateless (G-8): no principal from the original send survives to
+    // now, so this uses the same synthetic subject/tenant shape
+    // `record_rejection` already established for context-free events —
+    // EXCEPT `trace_id`, which carries the Twilio `MessageSid` itself
+    // (not a fresh uuid) so an operator correlates this line back to the
+    // original `phase: post` line via log search on that id.
+    let synthetic = Principal {
+        sub: "-".to_string(),
+        scopes: Vec::new(),
+        groups: Vec::new(),
+        tenant: "-".to_string(),
+        raw_token: String::new(),
+        trace_id: message_sid.to_string(),
+    };
+    match status {
+        "delivered" | "read" => {
+            tracing::info!(message_sid, status, "twilio delivery receipt");
+            adapter.dispatcher.record_post(
+                OUTBOUND_TOOL,
+                PROTOCOL,
+                &synthetic,
+                0,
+                Ok((
+                    200,
+                    triton_core::audit::PostOutcome::Posted,
+                    Some("twilio_delivery_receipt"),
+                )),
+            );
+        }
+        "failed" | "undelivered" => {
+            tracing::warn!(
+                message_sid,
+                status,
+                error_code = error_code.unwrap_or("-"),
+                "twilio delivery receipt: failed"
+            );
+            let provider = TritonError::Provider(format!("twilio delivery status: {status}"));
+            adapter.dispatcher.record_post(
+                OUTBOUND_TOOL,
+                PROTOCOL,
+                &synthetic,
+                0,
+                Err((
+                    &provider,
+                    0,
+                    triton_core::audit::PostOutcome::Dropped,
+                    Some("twilio_delivery_receipt"),
+                )),
+            );
+        }
+        // Intermediate lifecycle states (queued/sending/sent/accepted/...)
+        // — nothing terminal to report yet.
+        _ => {}
+    }
+    StatusCode::OK.into_response()
 }
 
 async fn process_message(
@@ -545,11 +700,14 @@ async fn post_back(
     msg: &RenderedMessage,
 ) {
     let to_param = format!("whatsapp:{to}");
-    let params = [
+    let mut params = vec![
         ("From", adapter.from.as_str()),
         ("To", to_param.as_str()),
         ("Body", msg.text.as_str()),
     ];
+    if let Some(url) = adapter.status_callback_public_url.as_deref() {
+        params.push(("StatusCallback", url));
+    }
     let start = std::time::Instant::now();
     let outcome = adapter
         .courier
@@ -705,12 +863,15 @@ impl TwilioWhatsAppAdapter {
         let content_variables =
             serde_json::to_string(&serde_json::Value::Object(variables)).unwrap_or_default();
         let to_param = format!("whatsapp:{}", req.to);
-        let params = [
+        let mut params = vec![
             ("From", self.from.as_str()),
             ("To", to_param.as_str()),
             ("ContentSid", decl.name.as_str()),
             ("ContentVariables", content_variables.as_str()),
         ];
+        if let Some(url) = self.status_callback_public_url.as_deref() {
+            params.push(("StatusCallback", url));
+        }
         let start = std::time::Instant::now();
         let outcome = self
             .courier

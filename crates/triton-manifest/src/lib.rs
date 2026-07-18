@@ -775,7 +775,7 @@ fn visit_secrets(
         // flattened open map, so an unscoped exemption would let ANY
         // adapter smuggle a literal past M-SECRETS-1 just by naming a
         // field `public_url` (Codex review finding, #191).
-        if k == "public_url"
+        if (k == "public_url" || k == "status_callback_public_url")
             && matches!(
                 adapter.kind,
                 AdapterKind::TwilioWhatsapp | AdapterKind::TwilioRcs
