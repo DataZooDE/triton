@@ -1205,6 +1205,60 @@ async fn main() -> std::io::Result<()> {
                         }
                     }
                 }
+                AdapterKind::TwilioWhatsapp => {
+                    // NFR-S-4 v0.2: only `api.twilio.com` is on the
+                    // substrate ACL allowlist. Mirrors the WhatsApp
+                    // Cloud / graph.facebook.com pattern.
+                    const CANONICAL: &str = "https://api.twilio.com";
+                    let api_base = std::env::var("TRITON_TWILIO_API_BASE").unwrap_or_else(|_| {
+                        triton_chat_twilio::courier::CourierConfig::default().api_base
+                    });
+                    if settings.env != "local"
+                        && !is_canonical_url(&api_base, "https", "api.twilio.com")
+                    {
+                        tracing::error!(
+                            env = %settings.env,
+                            twilio_api_base = %api_base,
+                            "non-`local` env MUST use TRITON_TWILIO_API_BASE with host api.twilio.com (NFR-S-4 egress allowlist; canonical base {CANONICAL})",
+                        );
+                        std::process::exit(2);
+                    }
+                    let courier_config = triton_chat_twilio::courier::CourierConfig {
+                        api_base,
+                        timeout: settings.courier_timeout,
+                    };
+                    match triton_chat_twilio::TwilioWhatsAppAdapter::from_manifest(
+                        name,
+                        adapter,
+                        resolver.as_ref(),
+                        dispatcher.clone(),
+                        courier_config,
+                    )
+                    .await
+                    {
+                        Ok(built) => {
+                            tracing::info!(adapter = %name, "twilio_whatsapp webhook adapter wired");
+                            let built = Arc::new(built);
+                            outbound_couriers.insert(
+                                name.to_string(),
+                                built.clone() as Arc<dyn triton_core::OutboundCourier>,
+                            );
+                            let r = built.router();
+                            chat_router = Some(match chat_router.take() {
+                                Some(acc) => acc.merge(r),
+                                None => r,
+                            });
+                        }
+                        Err(e) => {
+                            optional_adapters::handle_build_error(
+                                name,
+                                &e,
+                                &settings.optional_adapters,
+                                "twilio_whatsapp",
+                            );
+                        }
+                    }
+                }
                 _ => {
                     tracing::warn!(
                         adapter = %name,

@@ -418,7 +418,16 @@ fn _assert_pipe_types() {
     }
 }
 
-fn free_tcp_port() -> u16 {
+/// Pick a free ephemeral TCP port (bind-then-drop probe). `pub` so a
+/// test that needs to know its chat-webhook port BEFORE spawning (e.g.
+/// #191's Twilio signature, which must sign the exact externally-visible
+/// URL) can pick one, override `TRITON_CHAT_WEBHOOK_PORT` via
+/// `spawn_with_env`'s `extra_env` (last-write-wins over the harness's own
+/// internally-picked port), and build requests against that same value
+/// directly — `TritonProcess::chat_webhook_addr` in that case reports the
+/// harness's original (unused) pick, not the override, so don't rely on
+/// it when you've overridden the port yourself.
+pub fn free_tcp_port() -> u16 {
     let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     l.local_addr().unwrap().port()
 }
