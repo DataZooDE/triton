@@ -699,6 +699,21 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
         });
     }
 
+    // #191 (Codex review finding): the courier's `From` sender number is
+    // just as load-bearing as `account_sid` — without it the adapter
+    // fails at build time, but that used to happen only AFTER a
+    // production manifest already passed `validate()`. Catch it at the
+    // same layer as `account_sid`.
+    if adapter.kind == AdapterKind::TwilioWhatsapp
+        && !adapter.outbound.credentials.contains_key("from")
+    {
+        return Err(ManifestError::MissingSchemeCredential {
+            adapter: name.to_string(),
+            scheme: "kind=twilio_whatsapp".to_string(),
+            field: "from".to_string(),
+        });
+    }
+
     // #191: Twilio signs the exact externally-visible URL it POSTed to —
     // axum's own view of the request URI cannot be trusted to reproduce
     // that behind the substrate's reverse proxy (12-factor VII). The
@@ -740,11 +755,15 @@ fn visit_secrets(
 ) -> Result<(), ManifestError> {
     let mut paths: Vec<(String, &SecretField)> = Vec::new();
     for (k, v) in &adapter.inbound.credentials {
-        // #191: `public_url` (twilio_signature) is the adapter's own
-        // externally-visible webhook URL, not a secret — like
-        // `resolver_tool` below, exempt it so a production manifest can
-        // state it as a literal.
-        if k == "public_url" {
+        // #191: `public_url` (twilio_whatsapp's `twilio_signature`) is
+        // the adapter's own externally-visible webhook URL, not a
+        // secret — like `resolver_tool` below, exempt it so a production
+        // manifest can state it as a literal. Scoped to the adapter kind
+        // (not just the field name) — inbound credentials are a
+        // flattened open map, so an unscoped exemption would let ANY
+        // adapter smuggle a literal past M-SECRETS-1 just by naming a
+        // field `public_url` (Codex review finding, #191).
+        if k == "public_url" && adapter.kind == AdapterKind::TwilioWhatsapp {
             continue;
         }
         paths.push((format!("adapters.{name}.inbound.{k}"), v));

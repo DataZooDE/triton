@@ -1248,3 +1248,31 @@ a trap the next developer should not have to step in.
   template *catalogue* design (map each distinct button-set shape the
   agent might emit to a pre-authored ContentSid), which is out of scope
   until a concrete need shows up.
+
+- **Codex review of the Twilio work (#191) found 4 real issues; one flag
+  turned out to match existing precedent.** Ran a security/correctness
+  review pass over PR-T1/T2/T3 before continuing to PR-T4. Confirmed and
+  fixed: (1) `outbound.token` was required by the generic `outbound.kind:
+  rest_api` closed-set check but the adapter never actually read it —
+  it silently reused `inbound.secret` for BOTH the inbound HMAC key and
+  the outbound HTTP Basic password, so a manifest could set them to
+  different values with no error and the wrong one would win silently.
+  Fixed by resolving `outbound.token` into its own field and using it for
+  Basic auth. (2) `outbound.from` was required at adapter-build time but
+  not checked by `Manifest::validate()`, so a manifest missing it passed
+  validation and only failed later at boot — added the same
+  kind-specific check `account_sid` already had. (3) The `public_url`
+  M-SECRETS-1 exemption matched on field NAME only, not adapter kind —
+  since inbound credentials are a flattened open map, ANY adapter could
+  smuggle a literal secret past the production check by naming a field
+  `inbound.public_url`. Scoped the exemption to `AdapterKind::
+  TwilioWhatsapp`. One flagged item did NOT need fixing: Codex noted
+  in-webhook rate-limiting happens after signature verification, so an
+  attacker could force unlimited cheap parse+HMAC work before being
+  throttled — checking WhatsApp Cloud's `verify_hmac256` confirmed this
+  is the established codebase pattern everywhere (verify first, THEN
+  rate-limit), not a Twilio-specific regression; changing it would be a
+  cross-cutting architecture change out of scope for this work. Lesson:
+  an AI review's findings still need independent verification against
+  the actual code and existing precedent before applying — some are
+  real bugs, some are consistent-with-everything-else non-issues.
