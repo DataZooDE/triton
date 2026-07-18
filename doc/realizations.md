@@ -1203,3 +1203,131 @@ a trap the next developer should not have to step in.
   input — accept `{surface}` directly OR reverse a negotiated envelope. A
   round-trip unit test (`build` then reverse == identity, every variant)
   pins it against drift when a new `Component` variant lands.
+
+- **Don't trust a memorized crypto test vector — fetch the source.** (#191,
+  `triton-chat-twilio`) Writing the `X-Twilio-Signature` unit test from
+  recollection alone produced a plausible-looking but wrong vector (wrong
+  host in the URL, a longer-than-real `CallSid`, and consequently a
+  fabricated expected signature) — it failed, and failed in a way that
+  looked like an algorithm bug rather than a bad fixture. `WebFetch`ing
+  Twilio's actual docs turned up the real values in one shot. Lesson:
+  when a red test's *first* failure is against a "well-known documented
+  vector" you typed from memory, verify the vector against a primary
+  source before spending time debugging the implementation — the fixture
+  is at least as likely to be wrong as the code.
+
+- **`SendGrid`'s courier and Twilio's inbound HMAC use different auth
+  shapes for the same account — don't assume one secret ⇒ one credential
+  field.** (#191) SendGrid's outbound API takes a Bearer API key; Twilio's
+  Messaging API (planned for the WhatsApp/RCS couriers) takes HTTP Basic
+  `AccountSid:AuthToken` on outbound but the bare Auth Token as an HMAC-SHA1
+  key on inbound — three different credential *shapes* riding on what an
+  operator thinks of as "my Twilio secret". `SignatureScheme::TwilioSignature`
+  only wires the inbound `secret` field in `triton-manifest`; the outbound
+  courier (PR-T2) will need its own `account_sid` + `token` fields on
+  `outbound.credentials`, resolved separately even though `token` and
+  `secret` may be configured to the same underlying value operationally.
+
+- **Twilio's WhatsApp channel cannot build interactive messages at
+  send-time — WhatsApp Cloud's `#94` model doesn't port.** (#191, PR-T3)
+  Planning assumed Twilio-WhatsApp buttons/lists would mirror WhatsApp
+  Cloud's `build_interactive_body` (render `Component::Button`/
+  `Selection` into an ad-hoc JSON payload per send, with a fresh signed
+  correlation token as the button `id` each time). Checking Twilio's
+  actual `Messages` resource docs first (before writing any code) showed
+  the only levers for rich content are `ContentSid` (a Twilio-assigned id
+  for an operator-pre-approved **Content Template**, authored via
+  Console/Content API ahead of time) and `ContentVariables` (fills the
+  template's `{{n}}` placeholders — text only, not button structure).
+  There is no path to send a NEW button set Twilio hasn't already seen.
+  So PR-T3 reuses the *existing* `category`/`variables` proactive-send
+  mechanism (#94's `OutboundRequest` fields, unchanged) to resolve
+  `ContentSid`, and dynamic `Button`/`Selection` rendering stays deferred
+  (counted, not built) — not a missing feature, a different platform
+  shape. Anyone extending this to real per-message interactivity needs a
+  template *catalogue* design (map each distinct button-set shape the
+  agent might emit to a pre-authored ContentSid), which is out of scope
+  until a concrete need shows up.
+
+- **Codex review of the Twilio work (#191) found 4 real issues; one flag
+  turned out to match existing precedent.** Ran a security/correctness
+  review pass over PR-T1/T2/T3 before continuing to PR-T4. Confirmed and
+  fixed: (1) `outbound.token` was required by the generic `outbound.kind:
+  rest_api` closed-set check but the adapter never actually read it —
+  it silently reused `inbound.secret` for BOTH the inbound HMAC key and
+  the outbound HTTP Basic password, so a manifest could set them to
+  different values with no error and the wrong one would win silently.
+  Fixed by resolving `outbound.token` into its own field and using it for
+  Basic auth. (2) `outbound.from` was required at adapter-build time but
+  not checked by `Manifest::validate()`, so a manifest missing it passed
+  validation and only failed later at boot — added the same
+  kind-specific check `account_sid` already had. (3) The `public_url`
+  M-SECRETS-1 exemption matched on field NAME only, not adapter kind —
+  since inbound credentials are a flattened open map, ANY adapter could
+  smuggle a literal secret past the production check by naming a field
+  `inbound.public_url`. Scoped the exemption to `AdapterKind::
+  TwilioWhatsapp`. One flagged item did NOT need fixing: Codex noted
+  in-webhook rate-limiting happens after signature verification, so an
+  attacker could force unlimited cheap parse+HMAC work before being
+  throttled — checking WhatsApp Cloud's `verify_hmac256` confirmed this
+  is the established codebase pattern everywhere (verify first, THEN
+  rate-limit), not a Twilio-specific regression; changing it would be a
+  cross-cutting architecture change out of scope for this work. Lesson:
+  an AI review's findings still need independent verification against
+  the actual code and existing precedent before applying — some are
+  real bugs, some are consistent-with-everything-else non-issues.
+
+- **"Decode the inbound interactive reply" doesn't mean the same thing
+  on every platform — check whether a correlation token is even
+  possible before assuming the Telegram/Discord pattern transfers.**
+  (#191, PR-T4) The original plan expected Twilio-WhatsApp's inbound
+  button-tap handling to mirror Telegram's `callback_query` decode (a
+  signed `(tool, args)` token as the button `id`). But PR-T3 already
+  established Twilio buttons live inside operator pre-authored Content
+  Templates — Triton never builds the button structure per-message, so
+  it never emits a correlation token as the payload in the first place.
+  Twilio's actual inbound shape (`ButtonPayload` + `ButtonText` on an
+  otherwise-ordinary inbound message, confirmed via the Messaging
+  webhook-parameters docs) meant the real fix was much smaller: prefer
+  `ButtonPayload` over `Body` as the routing text, dispatch through the
+  existing pipeline. Two-line diff instead of porting a signature-decode
+  path. Worth the research pass before writing code.
+
+- **`unreachable!()` guarded by a boolean computed in a SEPARATE match on
+  the same value is not actually unreachable if the two matches diverge
+  even slightly.** (#191, PR-T5) Refactoring the WhatsApp-only manifest
+  checks to also cover `twilio_rcs` introduced `let is_twilio_adapter =
+  matches!(adapter.kind, A | B); let label = match adapter.kind { A =>
+  .., B => .., _ => unreachable!() };` — looks safe (the `_` arm "can't"
+  fire because `is_twilio_adapter` already filtered), but `label` is
+  computed unconditionally for EVERY adapter kind on EVERY validate()
+  call, not just when `is_twilio_adapter` is true. Every non-Twilio
+  adapter (Telegram, Discord, WhatsApp Cloud, everything) hit the
+  `unreachable!()` and the whole binary panicked at boot. 171 of the 321
+  workspace tests failed instantly. Caught only because the end-of-task
+  ritual runs the FULL `cargo test --workspace`, not just the
+  newly-added tests — a scoped `cargo test twilio_rcs` run right before
+  this would have stayed green while everything else was on fire. Fix:
+  make the label an `Option`, not a value computed via a match that
+  assumes a guard from elsewhere. Lesson restated because it bears
+  repeating: never skip the full-suite run, no matter how contained a
+  change looks.
+
+- **`Dispatcher::record_post`'s `status_detail` is `Option<&'static str>`
+  — a closed diagnostic-label set, not a place for dynamic data.**
+  (#191, PR-T6) First attempt at the delivery-receipt handler tried to
+  put the Twilio `MessageSid`/`ErrorCode` (both runtime `String`s) into
+  `status_detail` for correlation. Wouldn't compile: `PostResult<'a>`
+  types `status_detail` as `Option<&'static str>` specifically so every
+  call site passes a literal like `"rasterizer_call"`, not
+  caller-computed text. The actually-idiomatic fix, once noticed: the
+  audit record's `trace_id` field is `&'a str` (not `'static`) — so a
+  context-free event with no real principal (this codebase is
+  stateless, G-8; nothing survives from the original send to correlate
+  by) can carry a meaningful dynamic id there instead of a fresh
+  `uuid::Uuid::new_v4()`. Setting the synthetic `Principal.trace_id` to
+  the Twilio `MessageSid` gives free structured correlation with zero
+  new mechanism; the truly dynamic diagnostic detail (ErrorCode) rides
+  on a plain `tracing::warn!` line, matching how every other courier's
+  error path already logs before calling `record_post` with a static
+  label.

@@ -1113,3 +1113,86 @@ async fn handle_email_send(
         axum::http::StatusCode::from_u16(state.status).unwrap_or(axum::http::StatusCode::OK);
     (status, Json(json!({ "id": "email_stub" }))).into_response()
 }
+
+// ---------- Twilio Messaging API fake (#191 twilio_whatsapp courier) ----------
+
+/// One captured Twilio Messages API send: the `Authorization` header (HTTP
+/// Basic, base64 `AccountSid:AuthToken`), the `AccountSid` from the URL
+/// path, and the decoded `application/x-www-form-urlencoded` body
+/// (`From`, `To`, `Body`, ...).
+#[derive(Debug, Clone)]
+pub struct TwilioSent {
+    pub authorization: String,
+    pub account_sid_in_path: String,
+    pub form: std::collections::HashMap<String, String>,
+}
+
+struct FakeTwilioState {
+    captured: Mutex<Vec<TwilioSent>>,
+    status: u16,
+}
+
+/// A fake Twilio Messaging REST API. Speaks the courier's real `POST
+/// /2010-04-01/Accounts/{AccountSid}/Messages.json` wire shape
+/// (form-encoded + HTTP Basic), capturing every send. Answers `201`
+/// (Twilio's real success code) with a stub `{"sid": "..."}` body by
+/// default.
+///
+/// No mocks per CLAUDE.md §1: a real axum HTTP server on a real TCP port.
+pub struct FakeTwilioApi {
+    addr: SocketAddr,
+    state: Arc<FakeTwilioState>,
+}
+
+impl FakeTwilioApi {
+    pub async fn start() -> Self {
+        Self::start_with_status(201).await
+    }
+
+    pub async fn start_with_status(status: u16) -> Self {
+        let state = Arc::new(FakeTwilioState {
+            captured: Mutex::new(Vec::new()),
+            status,
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/2010-04-01/Accounts/{account_sid}/Messages.json",
+            post(handle_twilio_send).with_state(state.clone()),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        Self { addr, state }
+    }
+
+    pub fn url(&self) -> String {
+        format!("http://{}", self.addr)
+    }
+
+    pub fn captured(&self) -> Vec<TwilioSent> {
+        self.state.captured.lock().unwrap().clone()
+    }
+}
+
+async fn handle_twilio_send(
+    State(state): State<Arc<FakeTwilioState>>,
+    Path(account_sid_in_path): Path<String>,
+    headers: axum::http::HeaderMap,
+    axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let authorization = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    state.captured.lock().unwrap().push(TwilioSent {
+        authorization,
+        account_sid_in_path,
+        form,
+    });
+    let status =
+        axum::http::StatusCode::from_u16(state.status).unwrap_or(axum::http::StatusCode::CREATED);
+    (status, Json(json!({ "sid": "SMstub", "status": "queued" }))).into_response()
+}

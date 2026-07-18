@@ -1,0 +1,35 @@
+# #191 PR-T3 — Twilio-WhatsApp Content Template proactive sends.
+version: "0.2"
+
+adapters:
+  twilio-whatsapp:
+    kind: twilio_whatsapp
+    tool: echo
+    inbound:
+      kind: webhook
+      signature: twilio_signature
+      secret: twilio-auth-token-for-test
+      public_url: env://TRITON_TWILIO_WHATSAPP_PUBLIC_URL
+    outbound:
+      kind: rest_api
+      account_sid: ACtest00000000000000000000000000
+      token: twilio-auth-token-for-test
+      from: "whatsapp:+14155238886"
+    identity:
+      kind: sender_table
+      table: '{"+491701234567":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+    rate_limit:
+      messages_per_sec: 6
+      burst: 2
+    correlation_key: twilio-whatsapp-correlation-key-unused
+    templates:
+      utility:
+        name: HXtest00000000000000000000000000
+        language: en
+
+tools:
+  echo:
+    surface_components: []
