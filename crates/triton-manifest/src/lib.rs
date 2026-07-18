@@ -194,6 +194,16 @@ pub enum SignatureScheme {
     /// closed; runtime relies on NFR-S-4 egress allowlist instead of
     /// a per-message signature scheme.
     TrustedSocket,
+    /// #191: Twilio's `X-Twilio-Signature` header — HMAC-SHA1 over the
+    /// full request URL with every `application/x-www-form-urlencoded`
+    /// POST param sorted by key and appended as `key+value` (no
+    /// delimiter), base64-encoded. Distinct from [`Self::Hmac256`]
+    /// (which signs the raw JSON body) because Twilio's algorithm signs
+    /// the URL + form params, not the body bytes. The verification
+    /// itself lives in `triton-chat-twilio` (mirrors every other scheme:
+    /// the adapter crate owns the crypto, this crate only owns the
+    /// closed-set discriminator + required-credential wiring).
+    TwilioSignature,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -609,6 +619,11 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
             ],
             _ => &[],
         },
+        // #191: the Auth Token doubles as both the HMAC-SHA1 signing key
+        // (inbound) and the HTTP Basic password (outbound) — Twilio issues
+        // only one secret per account. `secret` matches the naming other
+        // HMAC-family schemes already use.
+        SignatureScheme::TwilioSignature => &[("twilio_signature", "secret")],
     };
     for (scheme, field) in inbound_required {
         if !adapter.inbound.credentials.contains_key(*field) {
