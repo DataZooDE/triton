@@ -1227,3 +1227,24 @@ a trap the next developer should not have to step in.
   courier (PR-T2) will need its own `account_sid` + `token` fields on
   `outbound.credentials`, resolved separately even though `token` and
   `secret` may be configured to the same underlying value operationally.
+
+- **Twilio's WhatsApp channel cannot build interactive messages at
+  send-time — WhatsApp Cloud's `#94` model doesn't port.** (#191, PR-T3)
+  Planning assumed Twilio-WhatsApp buttons/lists would mirror WhatsApp
+  Cloud's `build_interactive_body` (render `Component::Button`/
+  `Selection` into an ad-hoc JSON payload per send, with a fresh signed
+  correlation token as the button `id` each time). Checking Twilio's
+  actual `Messages` resource docs first (before writing any code) showed
+  the only levers for rich content are `ContentSid` (a Twilio-assigned id
+  for an operator-pre-approved **Content Template**, authored via
+  Console/Content API ahead of time) and `ContentVariables` (fills the
+  template's `{{n}}` placeholders — text only, not button structure).
+  There is no path to send a NEW button set Twilio hasn't already seen.
+  So PR-T3 reuses the *existing* `category`/`variables` proactive-send
+  mechanism (#94's `OutboundRequest` fields, unchanged) to resolve
+  `ContentSid`, and dynamic `Button`/`Selection` rendering stays deferred
+  (counted, not built) — not a missing feature, a different platform
+  shape. Anyone extending this to real per-message interactivity needs a
+  template *catalogue* design (map each distinct button-set shape the
+  agent might emit to a pre-authored ContentSid), which is out of scope
+  until a concrete need shows up.

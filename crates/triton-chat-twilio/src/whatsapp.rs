@@ -18,9 +18,28 @@
 //!    (`triton_chat_twilio::courier::TwilioCourierClient`, also used by
 //!    the planned RCS adapter).
 //!
-//! Deferred to follow-up PRs: interactive buttons/lists/templates
-//! (PR-T3), inbound button-tap decode (PR-T4), `upstream` identity mode,
-//! delivery-receipt status callbacks (PR-T6).
+//! PR-T3 adds Content Template proactive sends (`category` +
+//! `variables` on `OutboundRequest`, #94's existing mechanism, reused
+//! verbatim): Twilio's WhatsApp channel requires a pre-approved Content
+//! Template (referenced by `ContentSid`) for anything beyond a free-form
+//! reply inside an active conversation — there is no ad-hoc
+//! "build-buttons-at-send-time" the way Meta's direct Graph API allows
+//! (`POST /Messages.json` only exposes `ContentSid` + `ContentVariables`
+//! for rich content). So unlike WhatsApp Cloud, dynamically rendering a
+//! surface's `Button`/`Selection` components into an interactive message
+//! is NOT implementable without an operator pre-authoring a template per
+//! distinct button set — a genuine platform constraint, not an
+//! oversight. Runtime Button/Selection components stay deferred
+//! (counted in `deferred_*`, same as PR-T2) until/unless a template
+//! catalogue mechanism is designed for them.
+//!
+//! Deferred to follow-up PRs: inbound button-tap decode (PR-T4, for taps
+//! on messages a Content Template sent), `upstream` identity mode,
+//! delivery-receipt status callbacks (PR-T6), 24-hour service-window
+//! enforcement (WhatsApp Cloud's `is_within_window`/`stamp_service_window`
+//! — Twilio's WhatsApp carries the same Meta-imposed window, but nothing
+//! currently rejects a free-form send outside it; harmless in test/dev,
+//! worth adding before relying on this in production).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,7 +53,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde::Deserialize;
 use triton_core::{Dispatcher, OutboundCourier, OutboundRequest, Principal, TritonError};
-use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
+use triton_manifest::{
+    Adapter, AdapterKind, IdentityKind, SignatureScheme, TemplateCategory, TemplateDecl,
+};
 use triton_secrets::{ResolveError, SecretResolver};
 
 use crate::courier::{CourierConfig, PostLabel, TwilioCourierClient};
@@ -83,6 +104,11 @@ pub struct TwilioWhatsAppAdapter {
     courier: TwilioCourierClient,
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
+    /// PR-T3: Content Templates (Twilio `ContentSid`s), keyed by the same
+    /// Meta template category taxonomy WhatsApp Cloud's `templates` map
+    /// uses (#94) — reused as-is since Meta's approval categories apply
+    /// regardless of which BSP relays the send.
+    templates: HashMap<TemplateCategory, TemplateDecl>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -174,6 +200,11 @@ impl TwilioWhatsAppAdapter {
             adapter.rate_limit.messages_per_sec,
             adapter.rate_limit.burst,
         );
+        // PR-T3: templates are copied from the manifest at boot — Triton
+        // owns category → ContentSid selection, the agent only hints the
+        // category (mirrors WhatsApp Cloud's #94).
+        let templates: HashMap<TemplateCategory, TemplateDecl> =
+            adapter.templates.clone().into_iter().collect();
 
         Ok(Self {
             name: name.to_string(),
@@ -187,6 +218,7 @@ impl TwilioWhatsAppAdapter {
             courier,
             rate_limit,
             per_tenant_limit,
+            templates,
         })
     }
 
@@ -574,15 +606,19 @@ impl OutboundCourier for TwilioWhatsAppAdapter {
         }
     }
 
-    /// Deliver an agent-initiated send. PR-T2 scope: unconditional
-    /// free-form text — the Meta 24-hour service-window + template
-    /// requirement (which Twilio's WhatsApp BSP path also carries) is
-    /// deferred to PR-T3 alongside the rest of the template machinery.
+    /// Deliver an agent-initiated send. With a `category` hint, Triton
+    /// resolves the manifest Content Template and posts `ContentSid` +
+    /// `ContentVariables` (PR-T3). Without one: unconditional free-form
+    /// text — the Meta 24-hour service-window enforcement WhatsApp
+    /// Cloud has is not yet ported here (see module docs).
     async fn deliver(
         &self,
         req: &OutboundRequest,
         principal: &Principal,
     ) -> Result<(), TritonError> {
+        if let Some(category) = req.category.as_deref() {
+            return self.deliver_template(req, principal, category).await;
+        }
         let rendered = match render_dispatch_result(&req.result) {
             Ok(r) => r,
             Err(surface_mapper::RenderError::EmptyAfterRender) => {
@@ -593,6 +629,60 @@ impl OutboundCourier for TwilioWhatsAppAdapter {
         };
         log_deferrals(OUTBOUND_TOOL, &rendered);
         post_back(self, principal, OUTBOUND_TOOL, &req.to, &rendered).await;
+        Ok(())
+    }
+}
+
+impl TwilioWhatsAppAdapter {
+    /// Resolve the agent's category hint to a manifest Content Template
+    /// and post `ContentSid` + `ContentVariables`. Selection lives here
+    /// (Triton owns the platform surface); the agent supplied only the
+    /// category + ordered body variables (#94, PR-T3).
+    async fn deliver_template(
+        &self,
+        req: &OutboundRequest,
+        principal: &Principal,
+        category: &str,
+    ) -> Result<(), TritonError> {
+        let parsed: triton_manifest::TemplateCategory = serde_json::from_value(
+            serde_json::Value::String(category.to_string()),
+        )
+        .map_err(|_| {
+            TritonError::Validation(format!(
+                "unknown template category `{category}` (expected utility|marketing|authentication)"
+            ))
+        })?;
+        let Some(decl) = self.templates.get(&parsed) else {
+            return Err(TritonError::Validation(format!(
+                "no template configured for category `{category}` on adapter `{}`",
+                self.name
+            )));
+        };
+        // Twilio's Content Template variables are keyed by position as
+        // strings ("1", "2", ...), matching the `{{1}}`/`{{2}}`
+        // placeholders the template itself defines.
+        let variables: serde_json::Map<String, serde_json::Value> = req
+            .variables
+            .iter()
+            .enumerate()
+            .map(|(i, v)| ((i + 1).to_string(), serde_json::Value::String(v.clone())))
+            .collect();
+        let content_variables =
+            serde_json::to_string(&serde_json::Value::Object(variables)).unwrap_or_default();
+        let to_param = format!("whatsapp:{}", req.to);
+        let params = [
+            ("From", self.from.as_str()),
+            ("To", to_param.as_str()),
+            ("ContentSid", decl.name.as_str()),
+            ("ContentVariables", content_variables.as_str()),
+        ];
+        let start = std::time::Instant::now();
+        let outcome = self
+            .courier
+            .send_message(&self.account_sid, &self.auth_token, &params)
+            .await;
+        let latency_ms = start.elapsed().as_millis() as u64;
+        record_post_outcome(self, OUTBOUND_TOOL, principal, latency_ms, outcome);
         Ok(())
     }
 }
