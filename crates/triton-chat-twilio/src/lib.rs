@@ -7,9 +7,11 @@
 //! `doc/realizations.md` for the PR sequence.
 
 pub mod courier;
+pub mod rcs;
 pub mod signature;
 pub mod surface_mapper;
 pub mod whatsapp;
+pub use rcs::TwilioRcsAdapter;
 pub use whatsapp::TwilioWhatsAppAdapter;
 
 #[cfg(test)]

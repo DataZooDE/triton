@@ -165,6 +165,14 @@ pub enum AdapterKind {
     /// [`Self::WhatsappWeb`] (Baileys socket bridge). Operators choose
     /// per manifest entry; this does not supersede the other two.
     TwilioWhatsapp,
+    /// #191: RCS (Rich Communication Services) via Twilio
+    /// (`inbound.kind: webhook`, `signature: twilio_signature`). Shares
+    /// the same Twilio Messaging API courier + signature scheme as
+    /// [`Self::TwilioWhatsapp`]; unlike WhatsApp, plain text ships via
+    /// `Body` directly — no Content Template required outside rich
+    /// cards/carousels (out of scope for the text-only PR that
+    /// introduces this kind).
+    TwilioRcs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -684,47 +692,51 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
         });
     }
 
-    // #191: Twilio's Messaging API addresses the account by `AccountSid`
+    // #191: every Twilio-backed adapter (WhatsApp, RCS) shares the same
+    // Messaging API courier + signature scheme, so they share the same
+    // three manifest requirements below.
+    let twilio_kind_label = match adapter.kind {
+        AdapterKind::TwilioWhatsapp => Some("twilio_whatsapp"),
+        AdapterKind::TwilioRcs => Some("twilio_rcs"),
+        _ => None,
+    };
+    let is_twilio_adapter = twilio_kind_label.is_some();
+    let twilio_kind_label = twilio_kind_label.unwrap_or_default();
+
+    // Twilio's Messaging API addresses the account by `AccountSid`
     // embedded in the outbound URL path
     // (`/2010-04-01/Accounts/{account_sid}/Messages.json`) AND uses it as
     // the HTTP Basic auth username (`token` is the password). Without it
     // the courier has no account to post to or authenticate as.
-    if adapter.kind == AdapterKind::TwilioWhatsapp
-        && !adapter.outbound.credentials.contains_key("account_sid")
-    {
+    if is_twilio_adapter && !adapter.outbound.credentials.contains_key("account_sid") {
         return Err(ManifestError::MissingSchemeCredential {
             adapter: name.to_string(),
-            scheme: "kind=twilio_whatsapp".to_string(),
+            scheme: format!("kind={twilio_kind_label}"),
             field: "account_sid".to_string(),
         });
     }
 
-    // #191 (Codex review finding): the courier's `From` sender number is
-    // just as load-bearing as `account_sid` — without it the adapter
-    // fails at build time, but that used to happen only AFTER a
+    // (Codex review finding on #191's WhatsApp PR): the courier's `From`
+    // sender is just as load-bearing as `account_sid` — without it the
+    // adapter fails at build time, but that used to happen only AFTER a
     // production manifest already passed `validate()`. Catch it at the
     // same layer as `account_sid`.
-    if adapter.kind == AdapterKind::TwilioWhatsapp
-        && !adapter.outbound.credentials.contains_key("from")
-    {
+    if is_twilio_adapter && !adapter.outbound.credentials.contains_key("from") {
         return Err(ManifestError::MissingSchemeCredential {
             adapter: name.to_string(),
-            scheme: "kind=twilio_whatsapp".to_string(),
+            scheme: format!("kind={twilio_kind_label}"),
             field: "from".to_string(),
         });
     }
 
-    // #191: Twilio signs the exact externally-visible URL it POSTed to —
-    // axum's own view of the request URI cannot be trusted to reproduce
-    // that behind the substrate's reverse proxy (12-factor VII). The
-    // operator must configure it explicitly rather than have the adapter
-    // guess.
-    if adapter.kind == AdapterKind::TwilioWhatsapp
-        && !adapter.inbound.credentials.contains_key("public_url")
-    {
+    // Twilio signs the exact externally-visible URL it POSTed to — axum's
+    // own view of the request URI cannot be trusted to reproduce that
+    // behind the substrate's reverse proxy (12-factor VII). The operator
+    // must configure it explicitly rather than have the adapter guess.
+    if is_twilio_adapter && !adapter.inbound.credentials.contains_key("public_url") {
         return Err(ManifestError::MissingSchemeCredential {
             adapter: name.to_string(),
-            scheme: "kind=twilio_whatsapp".to_string(),
+            scheme: format!("kind={twilio_kind_label}"),
             field: "public_url".to_string(),
         });
     }
@@ -755,15 +767,20 @@ fn visit_secrets(
 ) -> Result<(), ManifestError> {
     let mut paths: Vec<(String, &SecretField)> = Vec::new();
     for (k, v) in &adapter.inbound.credentials {
-        // #191: `public_url` (twilio_whatsapp's `twilio_signature`) is
-        // the adapter's own externally-visible webhook URL, not a
-        // secret — like `resolver_tool` below, exempt it so a production
-        // manifest can state it as a literal. Scoped to the adapter kind
+        // #191: `public_url` (`twilio_signature`'s adapters) is the
+        // adapter's own externally-visible webhook URL, not a secret —
+        // like `resolver_tool` below, exempt it so a production manifest
+        // can state it as a literal. Scoped to the Twilio adapter kinds
         // (not just the field name) — inbound credentials are a
         // flattened open map, so an unscoped exemption would let ANY
         // adapter smuggle a literal past M-SECRETS-1 just by naming a
         // field `public_url` (Codex review finding, #191).
-        if k == "public_url" && adapter.kind == AdapterKind::TwilioWhatsapp {
+        if k == "public_url"
+            && matches!(
+                adapter.kind,
+                AdapterKind::TwilioWhatsapp | AdapterKind::TwilioRcs
+            )
+        {
             continue;
         }
         paths.push((format!("adapters.{name}.inbound.{k}"), v));

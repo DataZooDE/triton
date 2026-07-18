@@ -344,6 +344,23 @@ fn public_url_exemption_does_not_leak_to_other_adapter_kinds() {
     );
 }
 
+/// #191 PR-T5: `kind: twilio_rcs` shares the same required-credential
+/// wiring as `twilio_whatsapp` (`account_sid`, `from`, `public_url`) —
+/// proves the closed set accepts the new kind and the shared checks
+/// apply to it too. Uses `Env::Dev` since the fixture (shared with the
+/// twilio_rcs integration test) carries literal dev-only credentials.
+#[test]
+fn twilio_rcs_manifest_parses_and_validates() {
+    let m = Manifest::load(&fixture("manifest-twilio-rcs-test.yaml")).expect("parse");
+    let warnings = m
+        .validate(Env::Dev)
+        .expect("twilio_rcs with all required credentials must pass validation");
+    assert!(
+        !warnings.is_empty(),
+        "dev-mode literal credentials should still warn"
+    );
+}
+
 #[test]
 fn literal_secret_refused_in_prod_admitted_in_dev() {
     let m = Manifest::load(&fixture("manifest-literal-secret.yaml")).expect("parse");
