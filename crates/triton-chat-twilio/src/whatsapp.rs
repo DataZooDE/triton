@@ -85,9 +85,18 @@ pub struct SenderClaims {
 
 pub struct TwilioWhatsAppAdapter {
     name: String,
-    /// Twilio Auth Token — doubles as the HMAC-SHA1 signing key (inbound)
-    /// and the HTTP Basic password (outbound).
+    /// `inbound.secret` — the HMAC-SHA1 key verifying `X-Twilio-Signature`.
+    /// Operationally the same underlying Twilio Auth Token as
+    /// `outbound_token` below, but resolved and used independently: a
+    /// manifest that sets them to different values must fail closed at
+    /// the courier (wrong Basic auth password) rather than silently
+    /// accept whichever one happens to be configured (Codex review
+    /// finding, #191 — `outbound.token` used to be required by the
+    /// manifest's closed set but never actually consulted).
     auth_token: String,
+    /// `outbound.token` — the HTTP Basic auth password for the Messages
+    /// API courier.
+    outbound_token: String,
     account_sid: String,
     /// The exact externally-visible URL Twilio POSTs to (e.g.
     /// `https://gateway.example.com/twilio-whatsapp/webhook`) — Twilio
@@ -155,6 +164,12 @@ impl TwilioWhatsAppAdapter {
             "inbound.secret",
         )
         .await?;
+        let outbound_token = resolve(
+            resolver,
+            adapter.outbound.credentials.get("token"),
+            "outbound.token",
+        )
+        .await?;
         let account_sid = resolve(
             resolver,
             adapter.outbound.credentials.get("account_sid"),
@@ -209,6 +224,7 @@ impl TwilioWhatsAppAdapter {
         Ok(Self {
             name: name.to_string(),
             auth_token,
+            outbound_token,
             account_sid,
             public_url,
             from,
@@ -518,7 +534,7 @@ async fn post_back(
     let start = std::time::Instant::now();
     let outcome = adapter
         .courier
-        .send_message(&adapter.account_sid, &adapter.auth_token, &params)
+        .send_message(&adapter.account_sid, &adapter.outbound_token, &params)
         .await;
     let latency_ms = start.elapsed().as_millis() as u64;
     record_post_outcome(adapter, tool_name, principal, latency_ms, outcome);
@@ -679,7 +695,7 @@ impl TwilioWhatsAppAdapter {
         let start = std::time::Instant::now();
         let outcome = self
             .courier
-            .send_message(&self.account_sid, &self.auth_token, &params)
+            .send_message(&self.account_sid, &self.outbound_token, &params)
             .await;
         let latency_ms = start.elapsed().as_millis() as u64;
         record_post_outcome(self, OUTBOUND_TOOL, principal, latency_ms, outcome);

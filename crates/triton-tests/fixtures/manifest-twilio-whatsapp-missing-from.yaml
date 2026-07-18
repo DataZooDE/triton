@@ -1,0 +1,26 @@
+# #191 Codex review finding — `outbound.from` is required at adapter-build
+# time (TwilioWhatsAppAdapter::from_manifest) but was NOT checked by
+# Manifest::validate(), so a manifest missing it passed validation and
+# only failed later at boot. This fixture omits `from`; validate() MUST
+# now catch it at the same layer as `account_sid` / `public_url`.
+version: "0.2"
+adapters:
+  twilio-whatsapp:
+    kind: twilio_whatsapp
+    inbound:
+      kind: webhook
+      signature: twilio_signature
+      secret: vault://kv/x#secret
+      public_url: https://gateway.example.com/twilio-whatsapp/webhook
+    outbound:
+      kind: rest_api
+      account_sid: vault://kv/x#account_sid
+      token: vault://kv/x#token
+      # MISSING: from
+    identity:
+      kind: sender_table
+      table: vault://kv/x#senders
+    degrade: { text: passthrough, narration: passthrough }
+    rate_limit: { messages_per_sec: 1, burst: 1 }
+    correlation_key: vault://kv/x#k
+tools: {}

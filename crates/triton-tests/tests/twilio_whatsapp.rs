@@ -230,6 +230,75 @@ async fn missing_body_is_silently_acked() {
     let _ = proc;
 }
 
+/// Codex review finding (#191): `outbound.token` is required by the
+/// generic `outbound.kind: rest_api` closed-set check, but nothing
+/// actually read it — the adapter silently reused `inbound.secret` for
+/// BOTH the inbound HMAC key and the outbound HTTP Basic password. This
+/// fixture gives the two fields deliberately different values; if the
+/// bug were still present, the inbound HMAC (which must use
+/// `inbound.secret`) would still verify, but the outbound Basic-auth
+/// password would (wrongly) also be `inbound.secret` instead of
+/// `outbound.token`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outbound_basic_auth_uses_outbound_token_not_inbound_secret() {
+    const INBOUND_SECRET: &str = "inbound-signing-secret-DISTINCT";
+    const OUTBOUND_TOKEN: &str = "outbound-basic-auth-token-DISTINCT";
+
+    let port = triton_tests::free_tcp_port();
+    let twilio = FakeTwilioApi::start().await;
+    let manifest_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-twilio-whatsapp-distinct-tokens.yaml")
+        .display()
+        .to_string();
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), manifest_path),
+        ("TRITON_TWILIO_API_BASE".to_string(), twilio.url()),
+        ("TRITON_CHAT_WEBHOOK_PORT".to_string(), port.to_string()),
+        (
+            "TRITON_TWILIO_WHATSAPP_PUBLIC_URL".to_string(),
+            format!("http://127.0.0.1:{port}{}", webhook_path()),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let base_url = format!("http://127.0.0.1:{port}");
+    let webhook_url = format!("{base_url}{}", webhook_path());
+
+    // Inbound HMAC must use `inbound.secret` (INBOUND_SECRET) — this
+    // signed request should verify.
+    let form = [
+        ("From", "whatsapp:+491701234567"),
+        ("To", FROM_SENDER),
+        ("Body", "distinct-token check"),
+    ];
+    let sig = sign(&webhook_url, &form, INBOUND_SECRET);
+    let resp = post_webhook(&base_url, &form, &sig).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "inbound HMAC must verify against inbound.secret"
+    );
+
+    let captured = wait_for(Duration::from_secs(2), || {
+        let v = twilio.captured();
+        (!v.is_empty()).then_some(v)
+    });
+    let sent = &captured[0];
+    let expected_auth = {
+        use base64::Engine;
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD
+                .encode(format!("{ACCOUNT_SID}:{OUTBOUND_TOKEN}"))
+        )
+    };
+    assert_eq!(
+        sent.authorization, expected_auth,
+        "outbound Basic auth password must come from outbound.token, not inbound.secret"
+    );
+    let _ = proc;
+}
+
 fn wait_for_audit<F>(proc: &TritonProcess, deadline: Duration, mut matches: F) -> Value
 where
     F: FnMut(&Value) -> bool,

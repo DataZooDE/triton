@@ -43,8 +43,12 @@ pub fn verify(url: &str, params: &[(&str, &str)], auth_token: &str, presented: &
     };
     mac.update(signing_string(url, params).as_bytes());
     let computed = mac.finalize().into_bytes();
-    // Constant-time on content; a length mismatch makes `ct_eq` return 0
-    // (false) without panicking or short-circuiting on length first.
+    // The length check DOES short-circuit before `ct_eq` — this only
+    // ever reveals "was the decoded signature 20 bytes", never anything
+    // about its content, and matches the same length-then-ct_eq shape
+    // WhatsApp Cloud's own `verify_hmac256` uses (established codebase
+    // precedent, not a Twilio-specific deviation; Codex review raised
+    // this — see doc/realizations.md).
     presented_bytes.len() == computed.len() && presented_bytes.ct_eq(&computed).into()
 }
 
