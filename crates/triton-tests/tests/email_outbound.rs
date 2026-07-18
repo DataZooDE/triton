@@ -3,12 +3,16 @@
 //! A registered agent submits a proactive email; Triton resolves the email
 //! adapter's courier, renders the surface through the email surface mapper
 //! (the SAME one the `/v1/surface/render` preview uses), and POSTs
-//! `{from, to, subject, html, text}` to the transactional-email API. Email
-//! has no service window, so a rendered surface ships directly.
+//! SendGrid's real `v3/mail/send` envelope (`personalizations[].to[]` +
+//! `.subject`, `from.email`, `content: [{type, value}]`) to the
+//! transactional-email API. Email has no service window, so a rendered
+//! surface ships directly.
 //!
 //! Auth mirrors the WhatsApp outbound suite: a dedicated outbound audience +
 //! the `outbound:send` scope + a sender_table tenant binding. No mocks: real
-//! binary, real Ed25519 OIDC issuer, real HTTP to the in-repo `FakeEmailApi`.
+//! binary, real Ed25519 OIDC issuer, real HTTP to the in-repo `FakeEmailApi`
+//! (which now speaks `POST /v3/mail/send` and answers 202 with no body,
+//! matching SendGrid's actual API rather than an invented shape).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -110,21 +114,36 @@ async fn outbound_email_renders_complete_and_couriers_to_the_api() {
         resp.text().await.ok()
     );
 
-    // The courier POSTed the email to the transactional API with the resolved
-    // API key, the derived subject, and an HTML body that renders the message
-    // COMPLETE: the button as a link and the report caption inline.
+    // The courier POSTed the email to SendGrid's real `v3/mail/send` shape
+    // with the resolved API key, the derived subject, and an HTML body that
+    // renders the message COMPLETE: the button as a link and the report
+    // caption inline.
     let sent = wait_for(Duration::from_secs(2), || {
         email.captured().into_iter().next()
     });
     assert_eq!(sent.bearer, format!("Bearer {API_KEY}"));
-    assert_eq!(sent.body["from"], FROM);
-    assert_eq!(sent.body["to"], KNOWN_EMAIL);
+    assert_eq!(sent.body["from"]["email"], FROM);
+    let personalization = &sent.body["personalizations"][0];
+    assert_eq!(personalization["to"][0]["email"], KNOWN_EMAIL);
     assert_eq!(
-        sent.body["subject"], "Initech renewal is at risk.",
+        personalization["subject"], "Initech renewal is at risk.",
         "subject derived from lead text (markdown stripped): {}",
         sent.body
     );
-    let html = sent.body["html"].as_str().expect("html body");
+    let content = sent.body["content"].as_array().expect("content array");
+    let plain = content
+        .iter()
+        .find(|c| c["type"] == "text/plain")
+        .expect("text/plain part")["value"]
+        .as_str()
+        .expect("text/plain value");
+    let html = content
+        .iter()
+        .find(|c| c["type"] == "text/html")
+        .expect("text/html part")["value"]
+        .as_str()
+        .expect("text/html value");
+    assert!(!plain.is_empty(), "plain-text part is non-empty");
     assert!(html.starts_with("<!doctype html>"), "full document: {html}");
     assert!(
         html.contains("<strong>Initech</strong>"),
@@ -264,7 +283,14 @@ async fn outbound_email_sanitises_dangerous_links_in_the_delivered_html() {
     let sent = wait_for(Duration::from_secs(2), || {
         email.captured().into_iter().next()
     });
-    let html = sent.body["html"].as_str().expect("html body");
+    let html = sent.body["content"]
+        .as_array()
+        .expect("content array")
+        .iter()
+        .find(|c| c["type"] == "text/html")
+        .expect("text/html part")["value"]
+        .as_str()
+        .expect("text/html value");
     // The dangerous scheme never appears as an href; the quote can't break out.
     assert!(
         !html.contains("href=\"javascript:"),
@@ -310,7 +336,10 @@ async fn mixed_case_recipient_is_accepted() {
         email.captured().into_iter().next()
     });
     // Delivered to the address as the caller typed it (envelope unchanged).
-    assert_eq!(sent.body["to"], "Maria@Company.Example");
+    assert_eq!(
+        sent.body["personalizations"][0]["to"][0]["email"],
+        "Maria@Company.Example"
+    );
 }
 
 // ---- poll helpers (local copies, as in outbound.rs) ----

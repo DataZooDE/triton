@@ -1,9 +1,10 @@
 # Email outbound channel adapter (literal credentials — dev/test only).
 # Outbound-only: no inbound webhook route is wired; `inbound.kind: webhook`
 # + `signature: trusted_socket` is the carrier declaration that routes the
-# adapter through Triton's courier-building path. The transactional-email
-# endpoint comes from `TRITON_EMAIL_API_BASE` (pointed at the fake sink in
-# tests); `outbound.token` is the API key, `outbound.from` the sender.
+# adapter through Triton's courier-building path. The provider is Twilio
+# SendGrid's `v3/mail/send` API; the endpoint comes from
+# `TRITON_EMAIL_API_BASE` (pointed at the fake sink in tests); `outbound.token`
+# is the SendGrid API key, `outbound.from` the sender address.
 version: "0.2"
 
 adapters:

@@ -5,8 +5,25 @@
 //! inbound webhook, no service window, no message templates, and no
 //! interactive-callback signing (its buttons are plain links). `deliver`
 //! renders the surface through the SAME [`crate::surface_mapper`] the preview
-//! uses, then POSTs `{from, to, subject, html, text}` to the provider. Audit
-//! stays in the dispatcher via [`Dispatcher::record_post`] (ADR-6).
+//! uses, then POSTs it to Twilio SendGrid's real `v3/mail/send` API:
+//!
+//! ```json
+//! {
+//!   "personalizations": [{ "to": [{ "email": "<to>" }], "subject": "<subject>" }],
+//!   "from": { "email": "<from>" },
+//!   "content": [
+//!     { "type": "text/plain", "value": "<text>" },
+//!     { "type": "text/html", "value": "<html>" }
+//!   ]
+//! }
+//! ```
+//!
+//! SendGrid answers `202 Accepted` with an empty body on success (the
+//! message id rides the `X-Message-Id` response header, which we don't
+//! need); errors come back as non-2xx with a `{errors: [...]}` envelope we
+//! don't need to parse either — only the status code drives the
+//! posted/retry/dropped classification. Audit stays in the dispatcher via
+//! [`Dispatcher::record_post`] (ADR-6).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,9 +45,9 @@ pub const PROTOCOL: &str = "email";
 /// couriers' `outbound`).
 const OUTBOUND_TOOL: &str = "outbound";
 
-/// Configuration for the outbound courier. `api_base` is the transactional
-/// email provider's endpoint (env `TRITON_EMAIL_API_BASE`, pointed at the
-/// in-repo fake in tests); the courier POSTs to `{api_base}/send`.
+/// Configuration for the outbound courier. `api_base` is SendGrid's API
+/// endpoint (env `TRITON_EMAIL_API_BASE`, pointed at the in-repo fake in
+/// tests); the courier POSTs to `{api_base}/v3/mail/send`.
 #[derive(Debug, Clone)]
 pub struct CourierConfig {
     pub api_base: String,
@@ -40,7 +57,7 @@ pub struct CourierConfig {
 impl Default for CourierConfig {
     fn default() -> Self {
         Self {
-            api_base: "https://api.email.example".to_string(),
+            api_base: "https://api.sendgrid.com".to_string(),
             timeout: Duration::from_secs(10),
         }
     }
@@ -232,13 +249,17 @@ impl OutboundCourier for EmailAdapter {
             }
         };
         let body = json!({
-            "from": self.from,
-            "to": req.to,
-            "subject": rendered.subject,
-            "html": rendered.html,
-            "text": rendered.text,
+            "personalizations": [{
+                "to": [{ "email": req.to }],
+                "subject": rendered.subject,
+            }],
+            "from": { "email": self.from },
+            "content": [
+                { "type": "text/plain", "value": rendered.text },
+                { "type": "text/html", "value": rendered.html },
+            ],
         });
-        let url = format!("{}/send", self.api_base);
+        let url = format!("{}/v3/mail/send", self.api_base);
         let start = Instant::now();
         let outcome = self
             .http
