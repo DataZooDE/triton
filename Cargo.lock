@@ -2572,6 +2572,7 @@ dependencies = [
  "tokio",
  "tracing",
  "triton-core",
+ "triton-correlation",
  "triton-manifest",
  "triton-secrets",
  "url",

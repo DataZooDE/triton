@@ -66,6 +66,8 @@ mod metrics;
 mod metrics_endpoint;
 #[path = "../msteams.rs"]
 mod msteams;
+#[path = "../msteams_callback.rs"]
+mod msteams_callback;
 #[path = "../oidc.rs"]
 mod oidc;
 #[path = "../optional_adapters.rs"]
