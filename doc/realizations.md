@@ -1227,3 +1227,32 @@ a trap the next developer should not have to step in.
   `record_post(Posted, 200)` after the inline dispatch so the audit pivot
   still shows the callback produced a reply; otherwise an in-place
   drill-down looks like a dispatch with no response.
+
+- **Teams renders dashboards natively, so its image path is only for
+  `Report` — don't port Google Chat's rasteriser.** (#200) Google Chat's
+  `…/img/{token}` route serves two kinds: a dashboard *spec* rasterised
+  in-process (`triton-rasterizer`) and an upstream-rendered chart PNG.
+  Teams projects a `Dashboard` onto a native `FactSet` (architecture.md
+  §8.7), so the rasteriser kind is dead weight there — the Teams `…/img/`
+  route serves ONLY the `RENDER_REPORT_IMG_MARKER` (upstream PNG) kind,
+  which drops the `triton-rasterizer` dep and the whole `DASHBOARD_MARKER`
+  branch. Copy the shape, not the scope.
+
+- **An Adaptive Card action can't take a brand hex colour — theming is
+  title+logo only.** (#200) Google Chat's Cards v2 button accepts a
+  `{red,green,blue}` colour, so `get_theme`'s `brand_color` brands the
+  button. Adaptive Cards only expose named `Action.Style`
+  (`positive`/`destructive`) and named `TextBlock` colours — no arbitrary
+  hex — so the Teams `CardChrome` carries `brand_color` for parity/logging
+  but renders only the title + logo header. Don't spend effort trying to
+  map hex onto an Adaptive Card action; it isn't expressible.
+
+- **`get_theme`/`render_report` are dispatched at reply-build time, so
+  gate them behind actually building a card.** (#200) Fetching the theme
+  and rendering a report happen inside the async reply builder, each an
+  extra `dispatcher.invoke`. A plain-text reply (no card) must skip them
+  entirely — both to avoid the latency and to keep the audit stream clean
+  for deployments with no `get_theme` upstream (an unknown-tool invoke
+  still emits an error line). The builder returns early with `Text(...)`
+  before any theme/report dispatch when the surface has no Report,
+  Dashboard, interactive control, or inline PNG.

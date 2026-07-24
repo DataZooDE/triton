@@ -1,0 +1,36 @@
+# #200 integration manifest. MS Teams adapter whose inbound text routes
+# to the `assistant` upstream (so the reply is a card), with `render_report`
+# and `get_theme` upstreams wired via TRITON_STATIC_UPSTREAMS in the test.
+# Literal credentials (dev mode only).
+version: "0.2"
+
+adapters:
+  msteams:
+    kind: ms_teams
+    tool: assistant
+    inbound:
+      kind: webhook
+      signature: bot_framework_jwt
+      audience: triton-msteams-test-appid
+    outbound:
+      kind: bot_connector
+      client_id: triton-msteams-test-appid
+      client_secret: literal-client-secret-for-test
+    identity:
+      kind: sender_table
+      table: '{"29:1abc":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: adaptive_card
+      selections: adaptive_card
+      forms: adaptive_card
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  assistant:
+    surface_components: []

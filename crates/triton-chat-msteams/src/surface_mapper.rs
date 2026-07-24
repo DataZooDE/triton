@@ -15,6 +15,13 @@
 //! handler verifies it before re-dispatching, so a crafted Activity
 //! can't drive an arbitrary tool.
 //!
+//! Issue #200 adds the display side: an inline `Report` renders as an
+//! Adaptive Card `Image` (the upstream-rendered chart PNG, served from
+//! a signed `…/img/{token}` route in `lib.rs`), and every card is
+//! branded from the report upstream's `get_theme` ([`CardChrome`]).
+//! Unlike Google Chat's Cards v2, an Adaptive Card action can't take an
+//! arbitrary hex colour, so theming expresses the title + logo only.
+//!
 //! No HTML escaping: Teams renders Activity `text` as Markdown by
 //! default, but for the conservative text slice we keep
 //! `textFormat: plain` and pass the raw string through. Adaptive Card
@@ -431,8 +438,9 @@ pub fn build_adaptive_card(
     text: &str,
     dashboard: Option<&DashboardData>,
     signed: &[(InteractiveSpec, String)],
+    chrome: &CardChrome,
 ) -> Value {
-    let mut body: Vec<Value> = Vec::new();
+    let mut body: Vec<Value> = chrome.header_elements();
     if !text.is_empty() {
         body.push(json!({ "type": "TextBlock", "text": text, "wrap": true }));
     }
@@ -559,6 +567,138 @@ pub fn invoke_message_response(text: &str) -> Value {
     })
 }
 
+// ---- Inline Report images + card theming (#200) ------------------
+
+/// Extract an inline `Report` request `(report_id, args)` from a result
+/// surface, if present. The handler dispatches `render_report` with
+/// these and embeds the returned chart image in the same reply — so an
+/// agent can surface a rich chart without the user clicking a button.
+pub fn report_from_result(result: &Value) -> Option<(String, Value)> {
+    let surface = extract_surface(result).ok()?;
+    surface.components.iter().find_map(|c| match c {
+        Component::Report { report_id, args } => Some((report_id.clone(), args.clone())),
+        _ => None,
+    })
+}
+
+/// Placement of the chrome's `logo_url` on the rendered card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogoStyle {
+    /// Small round image beside the header title (square icon logos).
+    #[default]
+    Avatar,
+    /// Full-width image at the top of the card (wide wordmark logos).
+    Banner,
+}
+
+/// The card chrome (header title/logo) — fetched per reply from the
+/// report upstream's `get_theme` tool. Peacock owns ALL theming; this
+/// adapter only consumes the resolved values. Default = unbranded.
+///
+/// Note: Adaptive Cards can't take an arbitrary hex colour on actions
+/// (unlike Google Chat's Cards v2, whose buttons accept `#RRGGBB`), so
+/// `brand_color` is carried for parity/logging but is not rendered —
+/// title + logo are the expressible chrome.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CardChrome {
+    /// Card header title (`--pk-name`).
+    pub title: Option<String>,
+    /// Card header logo — a public HTTPS image URL (`--pk-logo`).
+    pub logo_url: Option<String>,
+    /// Primary brand colour as `#RRGGBB` (`--pk-brand`). Carried for
+    /// parity; not natively expressible on an Adaptive Card action.
+    pub brand_color: Option<String>,
+    /// How `logo_url` is placed (`--pk-logo-style`).
+    pub logo_style: LogoStyle,
+}
+
+impl CardChrome {
+    /// Parse a `get_theme` tool result (`{title, logo_url, logo_style,
+    /// brand_color, …}`). Absent/null fields stay unbranded; an unknown
+    /// logo_style is the default — theming never fails a reply.
+    pub fn from_get_theme(result: &Value) -> Self {
+        let get = |k: &str| {
+            result
+                .get(k)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        CardChrome {
+            title: get("title"),
+            logo_url: get("logo_url"),
+            brand_color: get("brand_color"),
+            logo_style: match result.get("logo_style").and_then(Value::as_str) {
+                Some("banner") => LogoStyle::Banner,
+                _ => LogoStyle::Avatar,
+            },
+        }
+    }
+
+    /// The Adaptive Card body elements that render this chrome at the
+    /// top of a card: a full-width logo (banner) or an avatar+title
+    /// column (avatar), then the title. Empty when unbranded.
+    fn header_elements(&self) -> Vec<Value> {
+        let mut out: Vec<Value> = Vec::new();
+        let title = self.title.as_deref().filter(|s| !s.is_empty());
+        let logo = self.logo_url.as_deref().filter(|s| !s.is_empty());
+        match (self.logo_style, logo) {
+            (LogoStyle::Banner, Some(url)) => {
+                // Full-width wordmark above the title.
+                out.push(json!({
+                    "type": "Image", "url": url, "size": "Stretch", "altText": title.unwrap_or("logo")
+                }));
+                if let Some(t) = title {
+                    out.push(json!({
+                        "type": "TextBlock", "text": t, "size": "Large", "weight": "Bolder", "wrap": true
+                    }));
+                }
+            }
+            (LogoStyle::Avatar, Some(url)) => {
+                // Small round avatar beside the title in a two-column row.
+                let mut cols = vec![json!({
+                    "type": "Column", "width": "auto",
+                    "items": [ { "type": "Image", "url": url, "size": "Small", "style": "Person", "altText": title.unwrap_or("logo") } ]
+                })];
+                if let Some(t) = title {
+                    cols.push(json!({
+                        "type": "Column", "width": "stretch", "verticalContentAlignment": "Center",
+                        "items": [ { "type": "TextBlock", "text": t, "size": "Large", "weight": "Bolder", "wrap": true } ]
+                    }));
+                }
+                out.push(json!({ "type": "ColumnSet", "columns": cols }));
+            }
+            (_, None) => {
+                if let Some(t) = title {
+                    out.push(json!({
+                        "type": "TextBlock", "text": t, "size": "Large", "weight": "Bolder", "wrap": true
+                    }));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Build an Adaptive Card carrying a single upstream-rendered chart
+/// image (served at a signed `…/img/{token}` URL) plus an optional
+/// caption and the theme chrome. Used for a `render_report` result
+/// whose own components this adapter can't map — the PNG is the
+/// renderable artifact.
+pub fn build_image_card(caption: &str, image_url: &str, chrome: &CardChrome) -> Value {
+    let mut body: Vec<Value> = chrome.header_elements();
+    if !caption.is_empty() {
+        body.push(json!({ "type": "TextBlock", "text": caption, "wrap": true }));
+    }
+    body.push(json!({ "type": "Image", "url": image_url, "size": "Stretch", "altText": "chart" }));
+    json!({
+        "type": "AdaptiveCard",
+        "$schema": ADAPTIVE_CARD_SCHEMA,
+        "version": ADAPTIVE_CARD_VERSION,
+        "body": body,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,7 +806,7 @@ mod tests {
             },
             "TOKEN.MAC".to_string(),
         )];
-        let card = build_adaptive_card("Hello, alice.", None, &signed);
+        let card = build_adaptive_card("Hello, alice.", None, &signed, &CardChrome::default());
         assert_eq!(card["type"], "AdaptiveCard");
         // Text lands in a body TextBlock.
         assert_eq!(card["body"][0]["type"], "TextBlock");
@@ -714,7 +854,7 @@ mod tests {
                 "FORM.MAC".to_string(),
             ),
         ];
-        let card = build_adaptive_card("", None, &signed);
+        let card = build_adaptive_card("", None, &signed, &CardChrome::default());
         let body = card["body"].as_array().expect("body array");
         // Dropdown named after args_key.
         let choiceset = body
@@ -758,7 +898,7 @@ mod tests {
         let dash = dashboard_from_result(&result).expect("dashboard lifted");
         assert_eq!(dash.0, "Stock at risk (€)");
         assert_eq!(dash.1.len(), 2);
-        let card = build_adaptive_card("top risk", Some(&dash), &[]);
+        let card = build_adaptive_card("top risk", Some(&dash), &[], &CardChrome::default());
         let body = card["body"].as_array().expect("body");
         let factset = body
             .iter()
@@ -772,7 +912,7 @@ mod tests {
 
     #[test]
     fn card_activity_and_invoke_response_shapes() {
-        let card = build_adaptive_card("hi", None, &[]);
+        let card = build_adaptive_card("hi", None, &[], &CardChrome::default());
         let activity = build_card_activity_body("28:bot", "a:conv", "29:user", card.clone());
         assert_eq!(activity["type"], "message");
         assert_eq!(
@@ -790,5 +930,82 @@ mod tests {
         assert_eq!(inv["statusCode"], 200);
         assert_eq!(inv["type"], ADAPTIVE_CARD_CONTENT_TYPE);
         assert_eq!(inv["value"]["type"], "AdaptiveCard");
+    }
+
+    #[test]
+    fn report_component_is_lifted_for_inline_render() {
+        let result = json!({
+            "surface": { "components": [
+                { "kind": "text", "value": "over-dependent on Alpine" },
+                { "kind": "report", "report_id": "supplier-concentration",
+                  "args": { "top_n": 10 } }
+            ] }
+        });
+        let (id, args) = report_from_result(&result).expect("report lifted");
+        assert_eq!(id, "supplier-concentration");
+        assert_eq!(args["top_n"], 10);
+        // No report component → None.
+        assert!(
+            report_from_result(&json!({
+                "surface": { "components": [ { "kind": "text", "value": "hi" } ] }
+            }))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn chrome_from_get_theme_and_header_elements() {
+        let theme = json!({
+            "title": "DataZoo Supplier Risk",
+            "logo_url": "https://brand.example/logo.png",
+            "logo_style": "banner",
+            "brand_color": "#1A73E8"
+        });
+        let chrome = CardChrome::from_get_theme(&theme);
+        assert_eq!(chrome.title.as_deref(), Some("DataZoo Supplier Risk"));
+        assert_eq!(chrome.logo_style, LogoStyle::Banner);
+
+        // A themed card carries the banner logo + title at the top.
+        let card = build_adaptive_card("hi", None, &[], &chrome);
+        let body = card["body"].as_array().unwrap();
+        assert_eq!(body[0]["type"], "Image");
+        assert_eq!(body[0]["url"], "https://brand.example/logo.png");
+        assert!(
+            body.iter()
+                .any(|w| w["type"] == "TextBlock" && w["text"] == "DataZoo Supplier Risk")
+        );
+
+        // Avatar style nests the logo + title in a ColumnSet.
+        let avatar = CardChrome {
+            title: Some("Acme".into()),
+            logo_url: Some("https://x.example/a.png".into()),
+            brand_color: None,
+            logo_style: LogoStyle::Avatar,
+        };
+        let card = build_adaptive_card("hi", None, &[], &avatar);
+        assert_eq!(card["body"][0]["type"], "ColumnSet");
+
+        // Unbranded → no header elements.
+        let plain = build_adaptive_card("hi", None, &[], &CardChrome::default());
+        assert_eq!(plain["body"][0]["type"], "TextBlock");
+        assert_eq!(plain["body"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn image_card_carries_the_chart_and_caption() {
+        let chrome = CardChrome::default();
+        let card = build_image_card(
+            "↳ concentration chart",
+            "https://t.example/msteams/img/TOK",
+            &chrome,
+        );
+        assert_eq!(card["type"], "AdaptiveCard");
+        let body = card["body"].as_array().unwrap();
+        assert!(
+            body.iter()
+                .any(|w| w["type"] == "TextBlock" && w["text"] == "↳ concentration chart")
+        );
+        let img = body.iter().find(|w| w["type"] == "Image").expect("image");
+        assert_eq!(img["url"], "https://t.example/msteams/img/TOK");
     }
 }

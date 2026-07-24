@@ -21,8 +21,8 @@ pub mod token_client;
 
 pub use surface_mapper::RenderedMessage;
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -30,8 +30,10 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
+use base64::Engine;
 use serde::Deserialize;
 use serde_json::Value;
+use surface_mapper::CardChrome;
 use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, OutboundKind, SignatureScheme};
 use triton_secrets::{ResolveError, SecretResolver};
@@ -40,6 +42,49 @@ use jwt_verifier::{JwtVerifier, VerifiedClaims};
 use token_client::TokenClient;
 
 pub const PROTOCOL: &str = "messenger:msteams";
+
+/// Correlation-token "tool" marker for an upstream-rendered chart-image
+/// token (peacock `render_report`, which returns its own PNG). Lets the
+/// `…/img/` route reject a button/form callback token replayed there.
+const RENDER_REPORT_IMG_MARKER: &str = "__render_report_png";
+
+/// Cap on an image-URL correlation token. Larger than a button token
+/// (it carries an image id), still bounded well under any URL limit.
+const IMAGE_TOKEN_CAP: usize = 8192;
+
+/// A tiny FIFO-bounded byte cache for upstream-rendered chart images
+/// (#200). An upstream (`render_report`) hands us a fully-rendered PNG
+/// inline in its result; Teams can only show an image by URL, so we
+/// stash the already-authorised bytes here and serve them at a signed
+/// `…/img/{token}` URL. Ephemeral by design: bounded, in-memory, lost
+/// on restart (cards are short-lived; a stale image just 404s).
+#[derive(Default)]
+struct ImageCache {
+    map: HashMap<String, Vec<u8>>,
+    order: VecDeque<String>,
+}
+
+impl ImageCache {
+    /// Keep at most this many images (a handful of concurrent chats').
+    const CAP: usize = 64;
+
+    fn insert(&mut self, id: String, bytes: Vec<u8>) {
+        if self.map.contains_key(&id) {
+            return;
+        }
+        self.map.insert(id.clone(), bytes);
+        self.order.push_back(id);
+        while self.order.len() > Self::CAP {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+    }
+
+    fn get(&self, id: &str) -> Option<Vec<u8>> {
+        self.map.get(id).cloned()
+    }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SenderClaims {
@@ -123,6 +168,9 @@ pub struct MsTeamsAdapter {
     http: reqwest::Client,
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
+    /// Ephemeral cache of upstream-rendered chart PNGs served at the
+    /// signed `…/img/{token}` route (#200).
+    image_cache: Arc<Mutex<ImageCache>>,
 }
 
 impl MsTeamsAdapter {
@@ -287,15 +335,148 @@ impl MsTeamsAdapter {
             http,
             rate_limit,
             per_tenant_limit,
+            image_cache: Arc::new(Mutex::new(ImageCache::default())),
         })
     }
 
     pub fn router(self: Arc<Self>) -> Router {
         let name = self.name.clone();
-        let path = format!("/{name}/webhook");
+        let webhook = format!("/{name}/webhook");
+        // On-demand chart images: the Teams client fetches `…/img/{token}`
+        // anonymously (no Bot Framework JWT), where `token` is the signed
+        // image id. The HMAC signature is the only gate — only URLs this
+        // adapter minted resolve (#200).
+        let img = format!("/{name}/img/{{token}}");
         Router::new()
-            .route(&path, post(handle_webhook))
+            .route(&webhook, post(handle_webhook))
+            .route(&img, axum::routing::get(serve_image_png))
             .with_state(self)
+    }
+}
+
+/// GET `…/img/{token}` — decode the signed token and return the cached
+/// upstream-rendered chart PNG. Unauthenticated by design (the Teams
+/// image proxy fetches card images anonymously); the HMAC-signed token
+/// is the capability, so a forged token or a button/form token replayed
+/// here 404s. Per architecture.md §8.7 Teams renders dashboards
+/// natively (FactSet), so — unlike Google Chat — there is no in-process
+/// rasteriser path here; only pre-rendered upstream PNGs are served.
+async fn serve_image_png(
+    State(adapter): State<Arc<MsTeamsAdapter>>,
+    axum::extract::Path(token): axum::extract::Path<String>,
+) -> Response {
+    let (marker, spec) = match triton_correlation::decode_with_cap(
+        &token,
+        &adapter.correlation_key,
+        IMAGE_TOKEN_CAP,
+    ) {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
+    };
+    if marker != RENDER_REPORT_IMG_MARKER {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let id = spec.get("id").and_then(Value::as_str).unwrap_or_default();
+    match adapter.image_cache.lock().unwrap().get(id) {
+        Some(png) => (
+            StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "image/png"),
+                (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
+            ],
+            png,
+        )
+            .into_response(),
+        None => (StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
+/// Public HTTPS base URL for the chart-image route the Teams client
+/// fetches. Prefer an explicit `TRITON_MSTEAMS_PUBLIC_BASE`; else derive
+/// it from the inbound request's forwarded host (a tunnel/proxy sets it
+/// to the public hostname). `None` → no reachable base, so a report
+/// falls back to text instead of an unreachable image URL.
+fn public_base(headers: &HeaderMap) -> Option<String> {
+    if let Ok(base) = std::env::var("TRITON_MSTEAMS_PUBLIC_BASE") {
+        let base = base.trim().trim_end_matches('/');
+        if !base.is_empty() {
+            return Some(base.to_string());
+        }
+    }
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(axum::http::header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|h| !h.is_empty())?;
+    // A loopback host (no proxy header) isn't reachable by the client.
+    if host.starts_with("localhost") || host.starts_with("127.0.0.1") {
+        return None;
+    }
+    Some(format!("https://{host}"))
+}
+
+/// Extract a fully-rendered chart PNG an upstream returned inline.
+/// `render_report` carries it at `structuredContent.result._meta.png_base64`;
+/// we search for the first `png_base64` string anywhere in the result so
+/// we're robust to the exact nesting, then base64-decode it.
+fn upstream_png_bytes(result: &Value) -> Option<Vec<u8>> {
+    fn find(v: &Value) -> Option<&str> {
+        match v {
+            Value::Object(m) => m
+                .get("png_base64")
+                .and_then(Value::as_str)
+                .or_else(|| m.values().find_map(find)),
+            Value::Array(a) => a.iter().find_map(find),
+            _ => None,
+        }
+    }
+    let b64 = find(result)?;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64.as_bytes())
+        .ok()
+}
+
+/// Cache an upstream-rendered chart PNG and sign a `…/img/{token}` URL
+/// the Teams client can fetch it from. `None` when there's no reachable
+/// public base (caller then falls back to text).
+fn upstream_image_url(adapter: &MsTeamsAdapter, base: &str, png: Vec<u8>) -> Option<String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    let token = triton_correlation::encode_with_cap(
+        RENDER_REPORT_IMG_MARKER,
+        &serde_json::json!({ "id": id }),
+        &adapter.correlation_key,
+        IMAGE_TOKEN_CAP,
+    )
+    .ok()?;
+    adapter.image_cache.lock().unwrap().insert(id, png);
+    Some(format!(
+        "{}/{}/img/{token}",
+        base.trim_end_matches('/'),
+        adapter.name
+    ))
+}
+
+/// Fetch the card chrome (header/logo) from the report upstream's
+/// `get_theme` tool — peacock owns ALL theming; this adapter only
+/// consumes the resolved values. No `get_theme` upstream registered ⇒
+/// unbranded (debug-logged), so a themeless deployment is unaffected.
+async fn fetch_theme(adapter: &MsTeamsAdapter, principal: &Principal) -> CardChrome {
+    match adapter
+        .dispatcher
+        .invoke(
+            "get_theme",
+            serde_json::json!({}),
+            principal.clone(),
+            PROTOCOL,
+        )
+        .await
+    {
+        Ok(t) => CardChrome::from_get_theme(&t.result),
+        Err(e) => {
+            tracing::debug!(error = %e, "msteams: no get_theme upstream; unbranded card");
+            CardChrome::default()
+        }
     }
 }
 
@@ -454,6 +635,10 @@ async fn handle_webhook(
     //   * anything else (conversationUpdate, typing, messageReaction,
     //     ...) — silently 200'd so the Bot Connector doesn't retry.
     //     Not auth-relevant: the JWT was already verified.
+    // The public base for any `…/img/{token}` chart URL a reply might
+    // carry (#200), derived from the inbound request's forwarded host.
+    let public_base = public_base(&headers);
+
     match activity.kind.as_deref() {
         Some("invoke") if activity.name.as_deref() == Some("adaptiveCard/action") => {
             let value = activity.value.clone().unwrap_or(Value::Null);
@@ -463,6 +648,7 @@ async fn handle_webhook(
                 &activity,
                 &value,
                 CallbackKind::Execute,
+                public_base.as_deref(),
             )
             .await
         }
@@ -474,13 +660,14 @@ async fn handle_webhook(
                     &activity,
                     &value,
                     CallbackKind::Submit,
+                    public_base.as_deref(),
                 )
                 .await;
             }
             let Some(text) = activity.text.as_ref().filter(|t| !t.is_empty()) else {
                 return StatusCode::OK.into_response();
             };
-            dispatch_message(&adapter, &verified, &activity, text).await
+            dispatch_message(&adapter, &verified, &activity, text, public_base.as_deref()).await
         }
         _ => StatusCode::OK.into_response(),
     }
@@ -656,6 +843,7 @@ async fn dispatch_message(
     verified: &VerifiedClaims,
     activity: &Activity,
     text: &str,
+    public_base: Option<&str>,
 ) -> Response {
     let sender = match resolve_sender(adapter, activity) {
         Ok(s) => s,
@@ -684,6 +872,7 @@ async fn dispatch_message(
         &sender,
         &conversation_id,
         &recipient_id,
+        public_base,
     )
     .await
 }
@@ -701,6 +890,7 @@ async fn handle_callback(
     activity: &Activity,
     value: &Value,
     kind: CallbackKind,
+    public_base: Option<&str>,
 ) -> Response {
     let sender = match resolve_sender(adapter, activity) {
         Ok(s) => s,
@@ -750,7 +940,7 @@ async fn handle_callback(
 
     match kind {
         CallbackKind::Execute => {
-            dispatch_and_refresh_card(adapter, &tool_name, args, &sender).await
+            dispatch_and_refresh_card(adapter, &tool_name, args, &sender, public_base).await
         }
         CallbackKind::Submit => {
             let (conversation_id, recipient_id) =
@@ -766,6 +956,7 @@ async fn handle_callback(
                 &sender,
                 &conversation_id,
                 &recipient_id,
+                public_base,
             )
             .await
         }
@@ -803,6 +994,7 @@ fn convo_and_recipient(
 
 /// Dispatch `(tool, args)` and POST the rendered reply back through the
 /// bot connector. Used by the message and `Action.Submit` paths.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_and_post_reply(
     adapter: &Arc<MsTeamsAdapter>,
     verified: &VerifiedClaims,
@@ -811,6 +1003,7 @@ async fn dispatch_and_post_reply(
     sender: &ResolvedSender,
     conversation_id: &str,
     recipient_id: &str,
+    public_base: Option<&str>,
 ) -> Response {
     let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
@@ -825,13 +1018,23 @@ async fn dispatch_and_post_reply(
         Ok(dispatch) => {
             // `recipient.id` is the bot (reply `from`); `from.id` is the
             // user (reply `recipient`).
-            let body = build_reply_body(
+            let bot_id = recipient_id;
+            let user_id = &sender.from_id;
+            let body = match build_reply_content(
                 adapter,
-                recipient_id,
-                conversation_id,
-                &sender.from_id,
                 &dispatch.result,
-            );
+                public_base,
+                &principal_for_post,
+            )
+            .await
+            {
+                ReplyContent::Card(card) => {
+                    surface_mapper::build_card_activity_body(bot_id, conversation_id, user_id, card)
+                }
+                ReplyContent::Text(msg) => {
+                    surface_mapper::build_activity_body(bot_id, conversation_id, user_id, &msg)
+                }
+            };
             post_reply(
                 adapter,
                 verified,
@@ -862,6 +1065,7 @@ async fn dispatch_and_refresh_card(
     tool_name: &str,
     args: Value,
     sender: &ResolvedSender,
+    public_base: Option<&str>,
 ) -> Response {
     let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
@@ -874,11 +1078,16 @@ async fn dispatch_and_refresh_card(
 
     match result {
         Ok(dispatch) => {
-            let response_body = match render_card_content(adapter, &dispatch.result) {
-                Some(card) => surface_mapper::invoke_card_response(card),
-                None => surface_mapper::invoke_message_response(
-                    &text_reply_message(&dispatch.result).text,
-                ),
+            let response_body = match build_reply_content(
+                adapter,
+                &dispatch.result,
+                public_base,
+                &principal_for_post,
+            )
+            .await
+            {
+                ReplyContent::Card(card) => surface_mapper::invoke_card_response(card),
+                ReplyContent::Text(msg) => surface_mapper::invoke_message_response(&msg.text),
             };
             // Audit the inline card reply as a successful post so the
             // pivot shows the callback produced a reply.
@@ -904,39 +1113,112 @@ async fn dispatch_and_refresh_card(
     }
 }
 
-/// Turn a dispatch result into an outbound reply Activity body: an
-/// Adaptive Card when the surface carries interactive controls or a
-/// dashboard, otherwise the plain-text Activity.
-fn build_reply_body(
-    adapter: &MsTeamsAdapter,
-    bot_id: &str,
-    conversation_id: &str,
-    recipient_id: &str,
-    result: &Value,
-) -> Value {
-    if let Some(card) = render_card_content(adapter, result) {
-        surface_mapper::build_card_activity_body(bot_id, conversation_id, recipient_id, card)
-    } else {
-        let msg = text_reply_message(result);
-        surface_mapper::build_activity_body(bot_id, conversation_id, recipient_id, &msg)
-    }
+/// The rendered reply for a dispatch result — an Adaptive Card or the
+/// plain-text fallback. The post path wraps `Card` in a reply Activity
+/// / `Text` in a text Activity; the invoke path returns `Card` as a
+/// refreshed card / `Text` as an invoke message.
+enum ReplyContent {
+    Card(Value),
+    Text(RenderedMessage),
 }
 
-/// Build the Adaptive Card `content` for a result, or `None` when the
-/// surface has no interactive controls or dashboard (caller then sends
-/// a plain-text reply). Each interactive control's `(tool, base_args)`
-/// is signed here — the adapter holds the correlation key.
-fn render_card_content(adapter: &MsTeamsAdapter, result: &Value) -> Option<Value> {
+/// Turn a dispatch result into the reply content. Builds an Adaptive
+/// Card when the surface carries an inline `Report` (dispatch
+/// `render_report`, embed the chart image), a `Dashboard`, or
+/// interactive controls; every card is branded from the report
+/// upstream's `get_theme`. Otherwise falls back to plain text (#155,
+/// #200).
+async fn build_reply_content(
+    adapter: &Arc<MsTeamsAdapter>,
+    result: &Value,
+    public_base: Option<&str>,
+    principal: &Principal,
+) -> ReplyContent {
+    let report = surface_mapper::report_from_result(result);
     let specs = surface_mapper::interactive_from_result(result);
     let dashboard = surface_mapper::dashboard_from_result(result);
-    if specs.is_empty() && dashboard.is_none() {
-        return None;
+    let inline_png = upstream_png_bytes(result);
+
+    // Nothing card-worthy → plain text (no get_theme dispatch).
+    if report.is_none() && specs.is_empty() && dashboard.is_none() && inline_png.is_none() {
+        return ReplyContent::Text(text_reply_message(result));
     }
+
+    // The card chrome (header/logo) comes from the report upstream's
+    // `get_theme` — unbranded if no such upstream is registered.
+    let chrome = fetch_theme(adapter, principal).await;
+
+    // The agent's short answer text (empty for an image-/action-only
+    // surface). Used as the caption / card lead.
     let text = match surface_mapper::try_render_surface(result) {
         Some(Ok(r)) => r.text,
         _ => String::new(),
     };
-    let signed: Vec<(surface_mapper::InteractiveSpec, String)> = specs
+
+    // A native Dashboard owns the visual slot (rendered as a FactSet);
+    // otherwise an inline Report or a tool-returned PNG becomes the
+    // card's image.
+    if dashboard.is_none() {
+        // Inline Report: dispatch `render_report` and embed the chart.
+        if let (Some((report_id, args)), Some(base)) = (&report, public_base) {
+            let mut rargs = if args.is_object() {
+                args.clone()
+            } else {
+                serde_json::json!({})
+            };
+            rargs["report_id"] = serde_json::json!(report_id);
+            match adapter
+                .dispatcher
+                .invoke("render_report", rargs, principal.clone(), PROTOCOL)
+                .await
+            {
+                Ok(rep) => {
+                    if let Some(url) = upstream_png_bytes(&rep.result)
+                        .and_then(|png| upstream_image_url(adapter, base, png))
+                    {
+                        return ReplyContent::Card(surface_mapper::build_image_card(
+                            &text, &url, &chrome,
+                        ));
+                    }
+                    tracing::warn!(report = %report_id, "msteams: render_report returned no chart image; sending without it");
+                }
+                Err(e) => {
+                    tracing::warn!(report = %report_id, error = %e, "msteams: inline render_report failed; sending without the chart");
+                }
+            }
+        }
+        // The dispatched tool ITSELF returned a chart PNG (it WAS a
+        // render_report-like tool whose own components this adapter
+        // can't map): serve that PNG as the card image.
+        if let (Some(png), Some(base)) = (inline_png, public_base)
+            && let Some(url) = upstream_image_url(adapter, base, png)
+        {
+            return ReplyContent::Card(surface_mapper::build_image_card("", &url, &chrome));
+        }
+    }
+
+    // Interactive / dashboard card.
+    let signed = sign_specs(adapter, specs);
+    if signed.is_empty() && dashboard.is_none() {
+        // Report/png couldn't render and nothing else is card-worthy.
+        return ReplyContent::Text(text_reply_message(result));
+    }
+    ReplyContent::Card(surface_mapper::build_adaptive_card(
+        &text,
+        dashboard.as_ref(),
+        &signed,
+        &chrome,
+    ))
+}
+
+/// Sign each interactive control's `(tool, base_args)` into a
+/// correlation token (the adapter holds the key). Oversized tokens are
+/// dropped with a warning rather than failing the whole reply.
+fn sign_specs(
+    adapter: &MsTeamsAdapter,
+    specs: Vec<surface_mapper::InteractiveSpec>,
+) -> Vec<(surface_mapper::InteractiveSpec, String)> {
+    specs
         .into_iter()
         .filter_map(|spec| {
             match triton_correlation::encode_with_cap(
@@ -956,17 +1238,7 @@ fn render_card_content(adapter: &MsTeamsAdapter, result: &Value) -> Option<Value
                 }
             }
         })
-        .collect();
-    // Every interactive control dropped and no dashboard → nothing to
-    // put on a card; fall back to text.
-    if signed.is_empty() && dashboard.is_none() {
-        return None;
-    }
-    Some(surface_mapper::build_adaptive_card(
-        &text,
-        dashboard.as_ref(),
-        &signed,
-    ))
+        .collect()
 }
 
 /// Render a non-interactive result to the plain-text [`RenderedMessage`]

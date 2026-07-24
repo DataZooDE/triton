@@ -12,6 +12,9 @@ triton-correlation = { path = "../triton-correlation" }
 triton-manifest = { path = "../triton-manifest" }
 triton-secrets = { path = "../triton-secrets" }
 axum = { workspace = true }
+# Decode an upstream-rendered chart PNG (peacock render_report `png_base64`)
+# to serve it from the signed `…/img/{token}` route (#200).
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 jsonwebtoken = "9"
 reqwest = { workspace = true }
