@@ -59,7 +59,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
 
     for c in &surface.components {
         match c {
-            Component::Text { value } => chunks.push(value.clone()),
+            Component::Text { value, .. } => chunks.push(value.clone()),
             Component::Narration { text } => chunks.push(format!("_{text}_")),
             Component::Sources { items } => {
                 if !items.is_empty() {
@@ -70,6 +70,13 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             // `Report` is an optional inline chart rendered out-of-band by
             // adapters that support it (Google Chat); ignored here.
             Component::Report { .. } => {}
+            // Twilio delivers into WhatsApp, whose ``` block is monospace —
+            // the only way a diff's +/- markers line up. Same degrade the
+            // Meta WhatsApp mapper states for the same end surface.
+            Component::Diff { lines } => chunks.push(format!(
+                "```\n{}\n```",
+                triton_core::a2ui::diff_to_text(lines)
+            )),
             Component::Button { .. } => deferred_buttons += 1,
             Component::Selection { .. } => deferred_selections += 1,
             Component::Form { .. } => deferred_forms += 1,
@@ -114,6 +121,7 @@ mod tests {
         let surface = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "hello".to_string(),
                 },
                 Component::Narration {
@@ -131,9 +139,11 @@ mod tests {
         let surface = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "hi".to_string(),
                 },
                 Component::Button {
+                    primary: false,
                     label: "Go".to_string(),
                     tool: "t".to_string(),
                     args: serde_json::json!({}),
@@ -175,6 +185,7 @@ mod tests {
     fn oversized_text_is_truncated_with_sentinel() {
         let surface = Surface {
             components: vec![Component::Text {
+                pills: Default::default(),
                 value: "x".repeat(TWILIO_TEXT_MAX_BYTES + 500),
             }],
         };
@@ -182,6 +193,33 @@ mod tests {
         assert!(r.truncated);
         assert!(r.text.len() <= TWILIO_TEXT_MAX_BYTES);
         assert!(r.text.ends_with("1600-byte limit]"));
+    }
+
+    #[test]
+    fn diff_renders_as_a_monospace_fenced_block() {
+        use triton_core::a2ui::DiffLine;
+        let surface = Surface {
+            components: vec![Component::Diff {
+                lines: vec![
+                    DiffLine::Ctx {
+                        text: "ctx".to_string(),
+                    },
+                    DiffLine::Del {
+                        text: "gone".to_string(),
+                    },
+                    DiffLine::Add {
+                        text: "kept".to_string(),
+                    },
+                ],
+            }],
+        };
+        let r = render(&surface).expect("renders");
+        // Twilio delivers to WhatsApp, whose ``` block is monospace — the
+        // only way a diff's +/- markers line up under a proportional font.
+        assert!(r.text.starts_with("```\n"), "fenced: {:?}", r.text);
+        assert!(r.text.ends_with("\n```"), "fenced: {:?}", r.text);
+        assert!(r.text.contains("- gone"), "del line: {:?}", r.text);
+        assert!(r.text.contains("+ kept"), "add line: {:?}", r.text);
     }
 
     #[test]
