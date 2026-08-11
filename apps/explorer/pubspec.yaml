@@ -20,6 +20,11 @@ dependencies:
   # mobile-only; `oidc` runs in browsers where the explorer lives.
   oidc: ^0.13.0
   oidc_default_store: ^0.5.0
+  # Hosts `ui://` MCP-Apps resources on Android/iOS (#201). First-party, and
+  # the only arm that needs it — web uses `dart:html`, desktop has no
+  # implementation and falls back to the resource's source. Unused on the web
+  # build, which is what CI compiles.
+  webview_flutter: ^4.14.1
 
 dev_dependencies:
   flutter_test:

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../providers/api_provider.dart';
-import 'html_embed_stub.dart' if (dart.library.html) 'html_embed_web.dart';
+import 'html_embed.dart';
 
 /// Fetches an MCP-Apps `ui://` resource via Triton's `resources/read`
 /// (Triton proxies it to the owning upstream — e.g. a Peacock report — per
@@ -11,7 +11,8 @@ import 'html_embed_stub.dart' if (dart.library.html) 'html_embed_web.dart';
 /// This is what turns the Explorer into a generic surface for *interactive*
 /// upstreams: any tool result that carries `_meta.ui.resourceUri` can be
 /// rendered inline, with no knowledge of the upstream's component vocabulary.
-/// On non-web targets it degrades to the HTML source (no DOM to host).
+/// Android and iOS host the same iframe inside a webview (#201); desktop, with
+/// no webview implementation to use, still degrades to the HTML source.
 class UiResourceView extends ConsumerStatefulWidget {
   const UiResourceView({
     super.key,
