@@ -1035,10 +1035,12 @@ async fn handle_whatsapp_media(
     Json(json!({ "id": "media_id_stub" }))
 }
 
-// ---------- transactional-email API fake (email channel courier) ----------
+// ---------- SendGrid API fake (email channel courier) ----------
 
 /// One captured email send: the bearer (the resolved API key) and the JSON
-/// body `{from, to, subject, html, text}` the [`EmailAdapter`] POSTed.
+/// body [`EmailAdapter`] POSTed — SendGrid's real `v3/mail/send` envelope
+/// (`personalizations[].to[]`/`.subject`, `from.email`, `content: [{type,
+/// value}]`).
 #[derive(Debug, Clone)]
 pub struct EmailSent {
     pub bearer: String,
@@ -1050,9 +1052,10 @@ struct FakeEmailState {
     status: u16,
 }
 
-/// A fake transactional-email HTTP API for the email outbound courier.
-/// Speaks the courier's `POST /send` wire shape (JSON `{from, to, subject,
-/// html, text}` + `Authorization: Bearer <api-key>`), capturing every send.
+/// A fake SendGrid HTTP API for the email outbound courier. Speaks the
+/// courier's real `POST /v3/mail/send` wire shape + `Authorization: Bearer
+/// <api-key>`, capturing every send. Answers `202` with an empty body on
+/// success, matching SendGrid's actual response (no `id` field to parse).
 ///
 /// No mocks per CLAUDE.md §1: a real axum HTTP server on a real TCP port;
 /// the binary's email courier POSTs to it over real HTTP.
@@ -1063,7 +1066,7 @@ pub struct FakeEmailApi {
 
 impl FakeEmailApi {
     pub async fn start() -> Self {
-        Self::start_with_status(200).await
+        Self::start_with_status(202).await
     }
 
     /// Same as [`start`](Self::start) but every POST answers `status` (still
@@ -1075,8 +1078,10 @@ impl FakeEmailApi {
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
         let addr = listener.local_addr().unwrap();
-        let router =
-            Router::new().route("/send", post(handle_email_send).with_state(state.clone()));
+        let router = Router::new().route(
+            "/v3/mail/send",
+            post(handle_email_send).with_state(state.clone()),
+        );
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
@@ -1110,6 +1115,10 @@ async fn handle_email_send(
         .unwrap()
         .push(EmailSent { bearer, body });
     let status =
-        axum::http::StatusCode::from_u16(state.status).unwrap_or(axum::http::StatusCode::OK);
-    (status, Json(json!({ "id": "email_stub" }))).into_response()
+        axum::http::StatusCode::from_u16(state.status).unwrap_or(axum::http::StatusCode::ACCEPTED);
+    // SendGrid's real 202 response body is empty; error bodies carry
+    // `{errors: [...]}` that the courier doesn't parse either — only the
+    // status code drives the posted/retry/dropped classification, so an
+    // empty body is faithful for both branches.
+    (status, ()).into_response()
 }
