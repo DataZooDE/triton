@@ -2616,6 +2616,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "triton-chat-twilio"
+version = "0.0.1"
+dependencies = [
+ "base64",
+ "hmac",
+ "sha1",
+ "subtle",
+]
+
+[[package]]
 name = "triton-chat-whatsapp"
 version = "0.0.1"
 dependencies = [

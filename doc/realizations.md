@@ -1203,3 +1203,27 @@ a trap the next developer should not have to step in.
   input — accept `{surface}` directly OR reverse a negotiated envelope. A
   round-trip unit test (`build` then reverse == identity, every variant)
   pins it against drift when a new `Component` variant lands.
+
+- **Don't trust a memorized crypto test vector — fetch the source.** (#191,
+  `triton-chat-twilio`) Writing the `X-Twilio-Signature` unit test from
+  recollection alone produced a plausible-looking but wrong vector (wrong
+  host in the URL, a longer-than-real `CallSid`, and consequently a
+  fabricated expected signature) — it failed, and failed in a way that
+  looked like an algorithm bug rather than a bad fixture. `WebFetch`ing
+  Twilio's actual docs turned up the real values in one shot. Lesson:
+  when a red test's *first* failure is against a "well-known documented
+  vector" you typed from memory, verify the vector against a primary
+  source before spending time debugging the implementation — the fixture
+  is at least as likely to be wrong as the code.
+
+- **`SendGrid`'s courier and Twilio's inbound HMAC use different auth
+  shapes for the same account — don't assume one secret ⇒ one credential
+  field.** (#191) SendGrid's outbound API takes a Bearer API key; Twilio's
+  Messaging API (planned for the WhatsApp/RCS couriers) takes HTTP Basic
+  `AccountSid:AuthToken` on outbound but the bare Auth Token as an HMAC-SHA1
+  key on inbound — three different credential *shapes* riding on what an
+  operator thinks of as "my Twilio secret". `SignatureScheme::TwilioSignature`
+  only wires the inbound `secret` field in `triton-manifest`; the outbound
+  courier (PR-T2) will need its own `account_sid` + `token` fields on
+  `outbound.credentials`, resolved separately even though `token` and
+  `secret` may be configured to the same underlying value operationally.
