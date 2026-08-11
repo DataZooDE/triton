@@ -15,7 +15,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:triton_explorer/api/mcp_client.dart';
 import 'package:triton_explorer/api/models.dart';
 import 'package:triton_explorer/providers/api_provider.dart';
-import 'package:triton_explorer/widgets/a2ui/markdown_lite.dart';
+import 'package:a2ui_flutter/a2ui_flutter.dart';
 import 'package:triton_explorer/widgets/a2ui/ui_resource_view.dart';
 import 'package:triton_explorer/widgets/channel/channel_view.dart';
 

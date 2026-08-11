@@ -14,8 +14,7 @@ import 'package:triton_explorer/api/mcp_client.dart';
 import 'package:triton_explorer/api/models.dart';
 import 'package:triton_explorer/providers/api_provider.dart';
 import 'package:triton_explorer/ui/features/console/console_page.dart';
-import 'package:triton_explorer/widgets/a2ui/a2ui_v08_renderer.dart';
-import 'package:triton_explorer/widgets/a2ui/a2ui_v09_renderer.dart';
+import 'package:a2ui_flutter/a2ui_flutter.dart';
 
 const _docUri = 'ui://peacock/document?skill=account&id=initech-corp';
 

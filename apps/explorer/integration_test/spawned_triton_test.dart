@@ -23,7 +23,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
 import 'package:triton_explorer/api/rest_client.dart';
-import 'package:triton_explorer/widgets/a2ui/a2ui_renderer.dart';
+import 'package:a2ui_flutter/a2ui_flutter.dart';
 
 const _kBinaryPathEnv = 'TRITON_BIN_PATH';
 

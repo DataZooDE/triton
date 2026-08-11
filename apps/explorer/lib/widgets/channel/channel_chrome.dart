@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../a2ui/markdown_lite.dart';
+import 'package:a2ui_flutter/a2ui_flutter.dart';
 
 /// Paints a rendered channel payload as the *product* it targets, so the
 /// per-turn preview shows a real rendering experience rather than one generic

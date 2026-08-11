@@ -10,6 +10,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # The A2UI renderer, extracted so hosts other than this app can depend on
+  # it (triton#202). Path dependency on a sibling package in this repo — the
+  # same shape escurel uses for escurel_explorer_kit.
+  a2ui_flutter:
+    path: ../../packages/a2ui_flutter
   cupertino_icons: ^1.0.8
   flutter_riverpod: ^2.5.1
   go_router: ^14.6.0

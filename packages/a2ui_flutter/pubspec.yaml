@@ -1,0 +1,22 @@
+name: a2ui_flutter
+description: >-
+  Reusable Flutter rendering for the A2UI wire contract — the shared core
+  behind Triton's Explorer and embedding hosts.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ^3.12.0
+  flutter: '>=3.16.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
