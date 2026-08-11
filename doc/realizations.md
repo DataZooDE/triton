@@ -1292,3 +1292,23 @@ a trap the next developer should not have to step in.
   `ButtonPayload` over `Body` as the routing text, dispatch through the
   existing pipeline. Two-line diff instead of porting a signature-decode
   path. Worth the research pass before writing code.
+
+- **`unreachable!()` guarded by a boolean computed in a SEPARATE match on
+  the same value is not actually unreachable if the two matches diverge
+  even slightly.** (#191, PR-T5) Refactoring the WhatsApp-only manifest
+  checks to also cover `twilio_rcs` introduced `let is_twilio_adapter =
+  matches!(adapter.kind, A | B); let label = match adapter.kind { A =>
+  .., B => .., _ => unreachable!() };` — looks safe (the `_` arm "can't"
+  fire because `is_twilio_adapter` already filtered), but `label` is
+  computed unconditionally for EVERY adapter kind on EVERY validate()
+  call, not just when `is_twilio_adapter` is true. Every non-Twilio
+  adapter (Telegram, Discord, WhatsApp Cloud, everything) hit the
+  `unreachable!()` and the whole binary panicked at boot. 171 of the 321
+  workspace tests failed instantly. Caught only because the end-of-task
+  ritual runs the FULL `cargo test --workspace`, not just the
+  newly-added tests — a scoped `cargo test twilio_rcs` run right before
+  this would have stayed green while everything else was on fire. Fix:
+  make the label an `Option`, not a value computed via a match that
+  assumes a guard from elsewhere. Lesson restated because it bears
+  repeating: never skip the full-suite run, no matter how contained a
+  change looks.
