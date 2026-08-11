@@ -6,9 +6,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:triton_explorer/widgets/a2ui/a2ui_v08_renderer.dart';
-import 'package:triton_explorer/widgets/a2ui/a2ui_v09_renderer.dart';
-import 'package:triton_explorer/widgets/a2ui/markdown_lite.dart';
+import 'package:a2ui_flutter/a2ui_flutter.dart';
 
 void main() {
   testWidgets('MarkdownLite renders bold/bullets/links without raw markers',

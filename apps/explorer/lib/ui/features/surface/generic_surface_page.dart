@@ -4,7 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../api/models.dart';
 import '../../../providers/api_provider.dart';
 import '../../../providers/runtime_provider.dart';
-import '../../../widgets/a2ui/a2ui_renderer.dart';
+import 'package:a2ui_flutter/a2ui_flutter.dart';
 import '../../../widgets/a2ui/ui_resource_view.dart';
 
 /// A chrome-free, full-bleed render of one tool's A2UI surface — the Explorer

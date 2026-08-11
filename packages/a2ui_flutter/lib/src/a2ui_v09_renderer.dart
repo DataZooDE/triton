@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import 'component_builder.dart';
 import 'markdown_lite.dart';
 import 'sources_row.dart';
 
@@ -17,6 +18,7 @@ class A2UIv09Renderer extends StatelessWidget {
     required this.envelope,
     this.onAction,
     this.onOpenResource,
+    this.componentBuilder,
   });
 
   final Map<String, dynamic> envelope;
@@ -24,6 +26,10 @@ class A2UIv09Renderer extends StatelessWidget {
 
   /// A `sources` chip was tapped: open its `ui://` resource inline.
   final void Function(String uri)? onOpenResource;
+
+  /// A host's per-node override, consulted before every rule below.
+  /// See [A2uiComponentBuilder].
+  final A2uiComponentBuilder? componentBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -53,6 +59,16 @@ class A2UIv09Renderer extends StatelessWidget {
     }
 
     for (final raw in stream) {
+      // The host first, and before the placement rules below — see
+      // [A2uiComponentBuilder] for why its opinion wins outright.
+      final hosted = componentBuilder == null || raw is! Map
+          ? null
+          : componentBuilder!(context, raw.cast<String, dynamic>());
+      if (hosted != null) {
+        flushActions();
+        children.add(hosted);
+        continue;
+      }
       if (_isSuppressedReport(raw, hasResourceButton)) continue;
       final action = _actionButton(context, raw);
       if (action != null) {

@@ -14,14 +14,18 @@
 #   ghcr.io/datazoode/dz-triton-explorer:<sha>
 #
 # The Dockerfile copies only `apps/explorer/{lib,web,pubspec.*,
-# analysis_options.yaml}` into the build stage so changes outside the
-# explorer don't bust the layer cache.
+# analysis_options.yaml}` plus the `a2ui_flutter` package it path-depends
+# on, so changes elsewhere in the repo don't bust the layer cache. The repo
+# layout is reproduced under /src because the path dependency in
+# apps/explorer/pubspec.yaml is relative (`../../packages/a2ui_flutter`).
 
 # ----- stage 1: build -----
 FROM ghcr.io/cirruslabs/flutter:3.44.0 AS build
-WORKDIR /src
+WORKDIR /src/apps/explorer
 
-# Copy only what the build needs (cache-stable).
+# Copy only what the build needs (cache-stable). The package first: it is
+# the stabler of the two, so an explorer-only change keeps its layer.
+COPY packages/a2ui_flutter /src/packages/a2ui_flutter
 COPY apps/explorer/pubspec.yaml apps/explorer/pubspec.lock* ./
 RUN flutter pub get
 
@@ -33,7 +37,7 @@ RUN flutter build web --release --base-href=/
 
 # ----- stage 2: runtime -----
 FROM nginxinc/nginx-unprivileged:1.27-alpine
-COPY --from=build /src/build/web /usr/share/nginx/html
+COPY --from=build /src/apps/explorer/build/web /usr/share/nginx/html
 # nginx.conf is an envsubst TEMPLATE: the base image entrypoint renders
 # /etc/nginx/templates/*.template → /etc/nginx/conf.d/ at start, substituting
 # ${TRITON_UPSTREAM} (the Triton host this SPA reverse-proxies /v1/* to, set
