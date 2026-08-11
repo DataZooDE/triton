@@ -240,6 +240,13 @@ class A2UIv09Renderer extends StatelessWidget {
         );
       // `button` and `report` are actionable nodes handled in `build` — they
       // collapse into the compact follow-up `Wrap`, so they never reach here.
+      case 'diff':
+        return _Diff(
+          lines: ((map['lines'] as List?) ?? const [])
+              .whereType<Map>()
+              .map((l) => l.cast<String, dynamic>())
+              .toList(growable: false),
+        );
       case 'sources':
         final items = ((map['items'] as List?) ?? const [])
             .whereType<Map>()
@@ -271,6 +278,95 @@ class A2UIv09Renderer extends StatelessWidget {
 // SegmentedButton for selection where v0.8 used ChoiceChip — the
 // renderers can diverge without affecting each other.
 // ---------------------------------------------------------------
+
+/// The `diff` component's default presentation: a monospace block where only
+/// added and removed lines are tinted.
+///
+/// Context is left plain deliberately — if every line is highlighted, none of
+/// them is, and the change actually being approved stops standing out.
+///
+/// A `fold` starts collapsed behind its line count and expands on tap. It is
+/// never expanded by default: a diff is mostly unchanged context, and showing
+/// all of it buries the change.
+class _Diff extends StatefulWidget {
+  const _Diff({required this.lines});
+  final List<Map<String, dynamic>> lines;
+
+  @override
+  State<_Diff> createState() => _DiffState();
+}
+
+class _DiffState extends State<_Diff> {
+  final _open = <int>{};
+
+  @override
+  Widget build(BuildContext context) => Card(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var i = 0; i < widget.lines.length; i++)
+              _line(context, widget.lines[i], i),
+          ],
+        ),
+      );
+
+  Widget _line(BuildContext context, Map<String, dynamic> l, int index) {
+    final scheme = Theme.of(context).colorScheme;
+    final op = l['op'] as String? ?? 'ctx';
+    if (op == 'fold') {
+      final hidden = ((l['hidden'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((h) => h.cast<String, dynamic>())
+          .toList(growable: false);
+      final expanded = _open.contains(index);
+      final count = l['count'] ?? hidden.length;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          InkWell(
+            onTap: () => setState(
+              () => expanded ? _open.remove(index) : _open.add(index),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Text(
+                expanded
+                    ? 'Hide $count unchanged lines'
+                    : 'Show $count unchanged lines',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: scheme.primary,
+                ),
+              ),
+            ),
+          ),
+          if (expanded)
+            // -1: a hidden line owns no fold state of its own.
+            for (final h in hidden) _line(context, h, -1),
+        ],
+      );
+    }
+    final background = switch (op) {
+      'add' => scheme.primaryContainer,
+      'del' => scheme.errorContainer,
+      _ => null,
+    };
+    final marker = switch (op) {
+      'add' => '+',
+      'del' => '-',
+      _ => ' ',
+    };
+    return Container(
+      color: background,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+      child: Text(
+        '$marker ${l['text'] ?? ''}',
+        style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+      ),
+    );
+  }
+}
 
 class _OptionPair {
   const _OptionPair({required this.label, required this.value});

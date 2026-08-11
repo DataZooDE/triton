@@ -115,7 +115,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     let mut deferred_dashboards = 0usize;
     for c in &surface.components {
         match c {
-            Component::Text { value } => {
+            Component::Text { value, .. } => {
                 // The answer: normalise the model's portable markdown (bold,
                 // bullets, links, headers) into Google Chat's text syntax.
                 chunks.push(to_google_chat(value));
@@ -136,6 +136,15 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
                 // Google Chat renders as *bold* — the whole answer used to come
                 // through here, so every reply was one bold blob.
                 chunks.push(format!("_{}_", escape_underscore(text)));
+            }
+            // Google Chat's triple-backtick block is monospace, which is the
+            // only way a diff's +/- markers line up. No `escape_underscore`
+            // here: inside the block the content is taken literally.
+            Component::Diff { lines } => {
+                chunks.push(format!(
+                    "```\n{}\n```",
+                    triton_core::a2ui::diff_to_text(lines)
+                ));
             }
             Component::Button { .. } => {
                 deferred_buttons += 1;
@@ -549,7 +558,9 @@ pub fn dashboard_from_result(result: &Value) -> Option<DashboardData> {
 pub fn report_from_result(result: &Value) -> Option<(String, Value)> {
     let surface = extract_surface(result).ok()?;
     surface.components.iter().find_map(|c| match c {
-        Component::Report { report_id, args } => Some((report_id.clone(), args.clone())),
+        Component::Report {
+            report_id, args, ..
+        } => Some((report_id.clone(), args.clone())),
         _ => None,
     })
 }
@@ -738,6 +749,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "hello".into(),
                 },
                 Component::Narration {
@@ -755,6 +767,7 @@ mod tests {
     fn text_only_renders_plain() {
         let s = Surface {
             components: vec![Component::Text {
+                pills: Default::default(),
                 value: "plain".into(),
             }],
         };
@@ -767,8 +780,12 @@ mod tests {
         use triton_core::a2ui::{DashboardTile, FormField, FormFieldKind, SelectionOption};
         let s = Surface {
             components: vec![
-                Component::Text { value: "x".into() },
+                Component::Text {
+                    pills: Default::default(),
+                    value: "x".into(),
+                },
                 Component::Button {
+                    primary: false,
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: serde_json::json!({}),
@@ -786,6 +803,8 @@ mod tests {
                 Component::Form {
                     title: "Title".into(),
                     fields: vec![FormField {
+                        placeholder: None,
+                        default_value: None,
                         name: "n".into(),
                         label: "L".into(),
                         kind: FormFieldKind::String,
@@ -827,6 +846,7 @@ mod tests {
         // nothing to render and the courier must NOT post.
         let s = Surface {
             components: vec![Component::Button {
+                primary: false,
                 label: "Click".into(),
                 tool: "narrate".into(),
                 args: serde_json::json!({}),
@@ -853,7 +873,10 @@ mod tests {
     fn oversized_text_is_truncated_below_cap() {
         let big = "x".repeat(40_000);
         let s = Surface {
-            components: vec![Component::Text { value: big }],
+            components: vec![Component::Text {
+                pills: Default::default(),
+                value: big,
+            }],
         };
         let r = render(&s).expect("renders");
         assert!(r.truncated);
@@ -864,6 +887,7 @@ mod tests {
     #[test]
     fn truncation_drops_tail_chunks_when_head_fits() {
         let small = Component::Text {
+            pills: Default::default(),
             value: "y".repeat(2_000),
         };
         let s = Surface {
@@ -888,6 +912,7 @@ mod tests {
         let fourbyte = "\u{1D11E}"; // U+1D11E (𝄞), 4 bytes
         let s = Surface {
             components: vec![Component::Text {
+                pills: Default::default(),
                 value: fourbyte.repeat(10_000),
             }],
         };
@@ -905,9 +930,15 @@ mod tests {
     fn multi_component_ordering_is_preserved() {
         let s = Surface {
             components: vec![
-                Component::Text { value: "1".into() },
+                Component::Text {
+                    pills: Default::default(),
+                    value: "1".into(),
+                },
                 Component::Narration { text: "2".into() },
-                Component::Text { value: "3".into() },
+                Component::Text {
+                    pills: Default::default(),
+                    value: "3".into(),
+                },
                 Component::Narration { text: "4".into() },
             ],
         };

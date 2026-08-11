@@ -11,6 +11,8 @@
 //! caller has negotiated A2UI, deserialises the `surface` value
 //! into [`Surface`] and hands it to the version's `build` function.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -34,6 +36,14 @@ pub struct Surface {
 pub enum Component {
     Text {
         value: String,
+        /// Display names for the `[[skill::id]]` wikilinks inside `value`,
+        /// keyed by **id**. A wikilink must never reach a reader as raw
+        /// syntax, but the label can only come from a read the *caller* is
+        /// entitled to make — so an id the caller may not see simply has no
+        /// entry and the renderer degrades to the bare id. Absence is the
+        /// mechanism, which is why this is a map rather than a list of pairs.
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        pills: BTreeMap<String, String>,
     },
     Button {
         label: String,
@@ -44,6 +54,11 @@ pub enum Component {
         /// that can embed resources may auto-open it; others ignore it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resource: Option<String>,
+        /// The one action the surface is actually asking for. A bool rather
+        /// than an open style field: hosts own their look, and an agent that
+        /// can name colours will eventually name the wrong one.
+        #[serde(default, skip_serializing_if = "is_false")]
+        primary: bool,
     },
     Narration {
         text: String,
@@ -85,6 +100,22 @@ pub enum Component {
         report_id: String,
         #[serde(default)]
         args: Value,
+        /// An optional inline preview, for hosts that cannot dispatch
+        /// `render_report` at all (a phone, a chat channel). Carried
+        /// *alongside* `report_id` rather than instead of it, so one envelope
+        /// serves both: the Explorer dispatches, the phone draws these.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        series: Vec<f64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        labels: Vec<String>,
+    },
+    /// A readable diff of the page a proposal would write (BR-HIL-1) — the
+    /// component a human-in-the-loop approval is built on: what the consultant
+    /// signs off is what this shows.
+    Diff {
+        lines: Vec<DiffLine>,
     },
     /// Click-to-open references — "Sources" — to the documents a reply
     /// touched (created/updated records). Each item names an MCP-App
@@ -96,6 +127,63 @@ pub enum Component {
     Sources {
         items: Vec<SourceItem>,
     },
+}
+
+/// One line of a [`Component::Diff`], tagged by its `op` so a host switches
+/// on a single key.
+///
+/// `Fold` is the phone-shaped variant: a diff is mostly unchanged context, and
+/// drawing all of it buries the change being approved. It carries the hidden
+/// lines *with it* rather than eliding them — expanding must not need a second
+/// round trip, because a diff the consultant cannot fully inspect is not a
+/// diff they can meaningfully approve.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum DiffLine {
+    Add {
+        text: String,
+    },
+    Del {
+        text: String,
+    },
+    Ctx {
+        text: String,
+    },
+    Fold {
+        count: usize,
+        #[serde(default)]
+        hidden: Vec<DiffLine>,
+    },
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// A [`Component::Diff`] as plain unified-diff text — the degrade for every
+/// channel with no diff primitive of its own.
+///
+/// Version-agnostic on purpose: this operates on the canonical model, not on
+/// either wire shape, so it is not the shared base between v0.8 and v0.9 that
+/// ADR-4 forbids.
+///
+/// A fold stays folded, and says how many lines it is holding. Expanding it
+/// here would undo the only reason it exists — a diff is mostly context, and
+/// on a channel where the reader cannot collapse it again, that context buries
+/// the change being approved.
+pub fn diff_to_text(lines: &[DiffLine]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        match line {
+            DiffLine::Add { text } => out.push_str(&format!("+ {text}\n")),
+            DiffLine::Del { text } => out.push_str(&format!("- {text}\n")),
+            DiffLine::Ctx { text } => out.push_str(&format!("  {text}\n")),
+            DiffLine::Fold { count, .. } => {
+                out.push_str(&format!("@@ {count} unchanged lines @@\n"))
+            }
+        }
+    }
+    out.trim_end().to_string()
 }
 
 /// One clickable reference in a [`Component::Sources`] row.
@@ -119,6 +207,17 @@ pub struct FormField {
     pub kind: FormFieldKind,
     #[serde(default)]
     pub required: bool,
+    /// Hint text shown in an empty control. Never submitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    /// A value that survives an untouched submit — distinct from
+    /// `placeholder` on purpose: a hint that submitted itself would put words
+    /// the agent never proposed into a record a consultant signed off.
+    ///
+    /// Free JSON because the three field kinds carry three value types. Named
+    /// `default_value` in Rust only because `default` is a keyword.
+    #[serde(default, rename = "default", skip_serializing_if = "Option::is_none")]
+    pub default_value: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -228,6 +327,9 @@ fn v09_node_to_component(node: &Value) -> Option<Component> {
     match ty {
         "text" => {
             obj.insert("value".into(), node.get("text")?.clone());
+            if let Some(p) = node.get("pills") {
+                obj.insert("pills".into(), p.clone());
+            }
         }
         "narration" => {
             obj.insert("text".into(), node.get("text")?.clone());
@@ -242,6 +344,9 @@ fn v09_node_to_component(node: &Value) -> Option<Component> {
             );
             if let Some(r) = node.get("resource") {
                 obj.insert("resource".into(), r.clone());
+            }
+            if let Some(p) = node.get("primary") {
+                obj.insert("primary".into(), p.clone());
             }
         }
         "selection" => {
@@ -265,6 +370,14 @@ fn v09_node_to_component(node: &Value) -> Option<Component> {
                 "args".into(),
                 node.get("args").cloned().unwrap_or_else(empty),
             );
+            for k in ["title", "series", "labels"] {
+                if let Some(v) = node.get(k) {
+                    obj.insert(k.to_string(), v.clone());
+                }
+            }
+        }
+        "diff" => {
+            obj.insert("lines".into(), node.get("lines")?.clone());
         }
         "sources" => {
             obj.insert("items".into(), node.get("items")?.clone());
@@ -275,6 +388,45 @@ fn v09_node_to_component(node: &Value) -> Option<Component> {
 }
 
 #[cfg(test)]
+mod diff_degrade_tests {
+    use super::*;
+
+    /// The text degrade of a diff, for the channels with no diff primitive.
+    ///
+    /// A fold stays folded. It is tempting to expand it — the lines are right
+    /// there — but the fold exists precisely because that context buries the
+    /// change being approved, and a chat reader cannot collapse it again. The
+    /// marker names the count so nothing looks silently omitted.
+    #[test]
+    fn a_fold_degrades_to_a_marker_and_never_expands() {
+        let text = diff_to_text(&[
+            DiffLine::Ctx {
+                text: "tier: enterprise".into(),
+            },
+            DiffLine::Fold {
+                count: 42,
+                hidden: vec![DiffLine::Ctx {
+                    text: "buried line".into(),
+                }],
+            },
+            DiffLine::Del {
+                text: "status: prospect".into(),
+            },
+            DiffLine::Add {
+                text: "status: active".into(),
+            },
+        ]);
+        assert!(text.contains("@@ 42 unchanged lines @@"), "{text}");
+        assert!(!text.contains("buried line"), "{text}");
+        // Positive control: the change itself, with its markers, IS rendered —
+        // so "buried line is absent" is not just an empty string passing.
+        assert!(text.contains("- status: prospect"), "{text}");
+        assert!(text.contains("+ status: active"), "{text}");
+        assert!(text.contains("  tier: enterprise"), "{text}");
+    }
+}
+
+#[cfg(test)]
 mod reverse_tests {
     use super::*;
     use serde_json::json;
@@ -282,7 +434,12 @@ mod reverse_tests {
     fn sample_surface() -> Surface {
         Surface {
             components: vec![
-                Component::Text { value: "hi".into() },
+                Component::Text {
+                    value: "hi [[customer::h]]".into(),
+                    pills: [("h".to_string(), "Hoffmann".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
                 Component::Narration {
                     text: "note".into(),
                 },
@@ -291,6 +448,7 @@ mod reverse_tests {
                     tool: "render_report".into(),
                     args: json!({ "id": "x" }),
                     resource: Some("ui://peacock/x".into()),
+                    primary: true,
                 },
                 Component::Selection {
                     prompt: "pick".into(),
@@ -308,6 +466,8 @@ mod reverse_tests {
                         label: "L".into(),
                         kind: FormFieldKind::Integer,
                         required: true,
+                        placeholder: Some("how many".into()),
+                        default_value: Some(json!(2)),
                     }],
                     submit_label: "Go".into(),
                     tool: "t".into(),
@@ -323,6 +483,20 @@ mod reverse_tests {
                 Component::Report {
                     report_id: "r".into(),
                     args: json!({ "a": 1 }),
+                    title: Some("R".into()),
+                    series: vec![1.0, 2.0],
+                    labels: vec!["a".into(), "b".into()],
+                },
+                Component::Diff {
+                    lines: vec![
+                        DiffLine::Ctx { text: "c".into() },
+                        DiffLine::Fold {
+                            count: 3,
+                            hidden: vec![DiffLine::Ctx { text: "h".into() }],
+                        },
+                        DiffLine::Del { text: "d".into() },
+                        DiffLine::Add { text: "a".into() },
+                    ],
                 },
                 Component::Sources {
                     items: vec![SourceItem {

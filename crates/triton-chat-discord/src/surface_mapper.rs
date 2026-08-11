@@ -136,7 +136,7 @@ pub fn render(
     let mut first_dashboard: Option<RasterDashboard> = None;
     for c in &surface.components {
         match c {
-            Component::Text { value } => {
+            Component::Text { value, .. } => {
                 chunks.push(md_escape(value));
             }
             // `Report` is an optional inline chart rendered out-of-band by
@@ -152,6 +152,15 @@ pub fn render(
             }
             Component::Narration { text } => {
                 chunks.push(format!("*{}*", md_escape(text)));
+            }
+            // A fenced `diff` block. NOT `md_escape`d: inside a fence Discord
+            // takes the content literally, and escaping it would put stray
+            // backslashes into the very lines the reader is checking.
+            Component::Diff { lines } => {
+                chunks.push(format!(
+                    "```diff\n{}\n```",
+                    triton_core::a2ui::diff_to_text(lines)
+                ));
             }
             Component::Button {
                 label, tool, args, ..
@@ -627,6 +636,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "hello".into(),
                 },
                 Component::Narration {
@@ -643,6 +653,7 @@ mod tests {
     fn markdown_special_chars_are_escaped() {
         let s = Surface {
             components: vec![Component::Text {
+                pills: Default::default(),
                 value: "a*b_c~d".into(),
             }],
         };
@@ -656,9 +667,11 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "label".into(),
                 },
                 Component::Button {
+                    primary: false,
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: json!({}),
@@ -686,6 +699,7 @@ mod tests {
     fn button_only_surface_synthesises_placeholder() {
         let s = Surface {
             components: vec![Component::Button {
+                primary: false,
                 label: "Refresh".into(),
                 tool: "narrate".into(),
                 args: json!({}),
@@ -711,6 +725,7 @@ mod tests {
         // 12 buttons → 3 rows (5, 5, 2). All ship.
         let components = (0..12)
             .map(|i| Component::Button {
+                primary: false,
                 label: format!("b{i}"),
                 tool: "narrate".into(),
                 args: json!({ "s": format!("p{i}") }),
@@ -737,6 +752,7 @@ mod tests {
         // 30 buttons → 25 ship (5×5), 5 deferred.
         let components = (0..30)
             .map(|i| Component::Button {
+                primary: false,
                 label: format!("b{i}"),
                 tool: "narrate".into(),
                 args: json!({ "s": format!("p{i}") }),
@@ -773,6 +789,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "header".into(),
                 },
                 Component::Dashboard {
@@ -877,6 +894,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "header".into(),
                 },
                 Component::Selection {
@@ -934,7 +952,10 @@ mod tests {
             .collect();
         let s = Surface {
             components: vec![
-                Component::Text { value: "x".into() },
+                Component::Text {
+                    pills: Default::default(),
+                    value: "x".into(),
+                },
                 Component::Selection {
                     prompt: "p".into(),
                     options,
@@ -961,7 +982,10 @@ mod tests {
     fn oversized_content_truncates_with_sentinel() {
         let big = "x".repeat(5_000);
         let s = Surface {
-            components: vec![Component::Text { value: big }],
+            components: vec![Component::Text {
+                pills: Default::default(),
+                value: big,
+            }],
         };
         let r = render(&s, TEST_KEY).expect("renders");
         assert!(r.truncated);
