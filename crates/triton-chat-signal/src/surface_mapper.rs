@@ -74,7 +74,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     let mut deferred_dashboards = 0usize;
     for c in &surface.components {
         match c {
-            Component::Text { value } => {
+            Component::Text { value, .. } => {
                 chunks.push(value.clone());
             }
             // `Report` is an optional inline chart rendered out-of-band by
@@ -96,6 +96,12 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
                 // escape table is necessary because the body is
                 // plain text, not HTML.
                 chunks.push(format!("_{text}_"));
+            }
+            // Signal has no fenced-code primitive, so the diff goes in as
+            // plain lines. The +/- markers still carry it: a reader can tell
+            // an added line from a removed one without a monospace font.
+            Component::Diff { lines } => {
+                chunks.push(triton_core::a2ui::diff_to_text(lines));
             }
             Component::Button { .. } => {
                 // Signal has no button primitive over signald.
@@ -221,6 +227,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "hello".into(),
                 },
                 Component::Narration {
@@ -246,6 +253,7 @@ mod tests {
         // genuinely unrenderable.
         let s = Surface {
             components: vec![Component::Button {
+                primary: false,
                 label: "Refresh".into(),
                 tool: "narrate".into(),
                 args: json!({}),
@@ -260,9 +268,11 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "click below".into(),
                 },
                 Component::Button {
+                    primary: false,
                     label: "Go".into(),
                     tool: "narrate".into(),
                     args: json!({}),
@@ -280,6 +290,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "header".into(),
                 },
                 Component::Dashboard {
@@ -303,6 +314,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "context".into(),
                 },
                 Component::Selection {
@@ -325,7 +337,10 @@ mod tests {
     fn oversized_text_is_truncated_below_cap() {
         let big = "x".repeat(10_000);
         let s = Surface {
-            components: vec![Component::Text { value: big }],
+            components: vec![Component::Text {
+                pills: Default::default(),
+                value: big,
+            }],
         };
         let r = render(&s).expect("renders");
         assert!(r.truncated);
@@ -338,6 +353,7 @@ mod tests {
         let fourbyte = "𝄞";
         let s = Surface {
             components: vec![Component::Text {
+                pills: Default::default(),
                 value: fourbyte.repeat(1000),
             }],
         };
@@ -351,6 +367,7 @@ mod tests {
     #[test]
     fn truncation_drops_tail_chunks() {
         let small = Component::Text {
+            pills: Default::default(),
             value: "x".repeat(500),
         };
         let s = Surface {

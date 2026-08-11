@@ -1,9 +1,8 @@
 // The seam that makes this a package rather than a moved folder.
 //
 // An embedding host has two needs the Explorer never had: kinds the wire
-// vocabulary does not define (Heron's `diff` on an approval, Peacock's
-// `vega`-with-a-live-chart in its iframe runtime), and the occasional
-// built-in it wants to draw its own way. Both are the same hook: a builder
+// vocabulary does not define (Peacock's `vega`-with-a-live-chart in its
+// iframe runtime), and the occasional built-in it wants to draw its own way. Both are the same hook: a builder
 // consulted before the built-in switch, where returning null means "I have no
 // opinion, carry on".
 //
@@ -34,7 +33,7 @@ Future<void> pump(
 Map<String, dynamic> get _hostKindV09 => {
       'version': '0.9',
       'stream': [
-        {'type': 'diff', 'summary': 'three lines changed'},
+        {'type': 'hologram', 'summary': 'three lines changed'},
       ],
     };
 
@@ -44,7 +43,7 @@ Map<String, dynamic> get _hostKindV08 => {
       'stream': [
         {
           'Component': {
-            'Diff': {'summary': 'three lines changed'},
+            'Hologram': {'summary': 'three lines changed'},
           },
         },
       ],
@@ -60,11 +59,11 @@ void main() {
       await pump(
         tester,
         _hostKindV09,
-        componentBuilder: (context, node) => node['type'] == 'diff'
-            ? Text('diff: ${node['summary']}')
+        componentBuilder: (context, node) => node['type'] == 'hologram'
+            ? Text('hologram: ${node['summary']}')
             : null,
       );
-      expect(find.text('diff: three lines changed'), findsOneWidget);
+      expect(find.text('hologram: three lines changed'), findsOneWidget);
     });
 
     testWidgets('without the builder the same node degrades to unknown-kind',
@@ -72,7 +71,7 @@ void main() {
       // The control for the test above: proves the kind really is unknown to
       // the package, so the builder is what rendered it and not a built-in.
       await pump(tester, _hostKindV09);
-      expect(find.textContaining('unknown v0.9 type: diff'), findsOneWidget);
+      expect(find.textContaining('unknown v0.9 type: hologram'), findsOneWidget);
       expect(find.textContaining('three lines changed'), findsNothing);
     });
 
@@ -131,11 +130,13 @@ void main() {
         _hostKindV08,
         componentBuilder: (context, node) {
           final inner = (node['Component'] as Map?)?.cast<String, dynamic>();
-          final diff = inner?['Diff'] as Map?;
-          return diff == null ? null : Text('diff: ${diff['summary']}');
+          final hologram = inner?['Hologram'] as Map?;
+          return hologram == null
+              ? null
+              : Text('hologram: ${hologram['summary']}');
         },
       );
-      expect(find.text('diff: three lines changed'), findsOneWidget);
+      expect(find.text('hologram: three lines changed'), findsOneWidget);
     });
 
     testWidgets('without the builder the v0.8 node degrades to unknown-kind',

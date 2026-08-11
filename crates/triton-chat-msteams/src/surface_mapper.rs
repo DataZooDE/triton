@@ -68,7 +68,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     let mut deferred_dashboards = 0usize;
     for c in &surface.components {
         match c {
-            Component::Text { value } => chunks.push(value.clone()),
+            Component::Text { value, .. } => chunks.push(value.clone()),
             // `Report` is an optional inline chart rendered out-of-band by
             // adapters that support it (Google Chat); ignored by the text mapper.
             Component::Report { .. } => {}
@@ -81,6 +81,12 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
                 }
             }
             Component::Narration { text } => chunks.push(format!("_{}_", text)),
+            // A fenced `diff` block: the +/- markers only line up in a
+            // fixed-width font, and the fence is what gets one.
+            Component::Diff { lines } => chunks.push(format!(
+                "```diff\n{}\n```",
+                triton_core::a2ui::diff_to_text(lines)
+            )),
             Component::Button { .. } => deferred_buttons += 1,
             Component::Selection { .. } => deferred_selections += 1,
             Component::Form { .. } => deferred_forms += 1,
@@ -199,6 +205,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "hello".into(),
                 },
                 Component::Narration {
@@ -222,7 +229,10 @@ mod tests {
     fn oversized_text_is_truncated_below_cap() {
         let big = "x".repeat(10_000);
         let s = Surface {
-            components: vec![Component::Text { value: big }],
+            components: vec![Component::Text {
+                pills: Default::default(),
+                value: big,
+            }],
         };
         let r = render(&s).expect("renders");
         assert!(r.truncated);
@@ -234,8 +244,12 @@ mod tests {
     fn buttons_are_counted_as_deferred() {
         let s = Surface {
             components: vec![
-                Component::Text { value: "x".into() },
+                Component::Text {
+                    pills: Default::default(),
+                    value: "x".into(),
+                },
                 Component::Button {
+                    primary: false,
                     label: "Click".into(),
                     tool: "narrate".into(),
                     args: json!({}),

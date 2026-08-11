@@ -136,7 +136,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
 
     for c in &surface.components {
         match c {
-            Component::Text { value } => {
+            Component::Text { value, .. } => {
                 chunks.push(value.clone());
                 raw_sources.push(Some(RawChunk {
                     kind: RawKind::Text,
@@ -160,6 +160,17 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
                     kind: RawKind::Narration,
                     raw: text.clone(),
                 }));
+            }
+            // WhatsApp's ``` block is monospace — the only way a diff's +/-
+            // markers line up. `None` as its raw source: a diff cut in half by
+            // the budget is not a diff, so the truncation path must fall back
+            // to the sentinel rather than re-wrap half of it as if it read.
+            Component::Diff { lines } => {
+                chunks.push(format!(
+                    "```\n{}\n```",
+                    triton_core::a2ui::diff_to_text(lines)
+                ));
+                raw_sources.push(None);
             }
             Component::Button {
                 label, tool, args, ..
@@ -561,6 +572,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "hello".into(),
                 },
                 Component::Narration {
@@ -586,9 +598,11 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "preamble".into(),
                 },
                 Component::Button {
+                    primary: false,
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: json!({}),
@@ -606,6 +620,8 @@ mod tests {
                 Component::Form {
                     title: "form".into(),
                     fields: vec![FormField {
+                        placeholder: None,
+                        default_value: None,
                         name: "name".into(),
                         label: "Name".into(),
                         kind: FormFieldKind::String,
@@ -703,6 +719,7 @@ mod tests {
         use serde_json::json;
         let s = Surface {
             components: vec![Component::Button {
+                primary: false,
                 label: "Click".into(),
                 tool: "narrate".into(),
                 args: json!({}),
@@ -722,6 +739,7 @@ mod tests {
         // WhatsApp reply-button messages carry at most 3 buttons.
         use serde_json::json;
         let button = |label: &str| Component::Button {
+            primary: false,
             label: label.into(),
             tool: "narrate".into(),
             args: json!({ "subject": label }),
@@ -730,6 +748,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "pick".into(),
                 },
                 button("a"),
@@ -748,7 +767,10 @@ mod tests {
     fn oversized_text_is_truncated_below_cap() {
         let big = "x".repeat(10_000);
         let s = Surface {
-            components: vec![Component::Text { value: big }],
+            components: vec![Component::Text {
+                pills: Default::default(),
+                value: big,
+            }],
         };
         let r = render(&s, &KEY).expect("renders");
         assert!(r.truncated);
@@ -761,6 +783,7 @@ mod tests {
         let fourbyte = "𝄞"; // U+1D11E, 4 bytes
         let s = Surface {
             components: vec![Component::Text {
+                pills: Default::default(),
                 value: fourbyte.repeat(2000),
             }],
         };
