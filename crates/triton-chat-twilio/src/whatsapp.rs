@@ -33,10 +33,17 @@
 //! (counted in `deferred_*`, same as PR-T2) until/unless a template
 //! catalogue mechanism is designed for them.
 //!
-//! Deferred to follow-up PRs: inbound button-tap decode (PR-T4, for taps
-//! on messages a Content Template sent), `upstream` identity mode,
-//! delivery-receipt status callbacks (PR-T6), 24-hour service-window
-//! enforcement (WhatsApp Cloud's `is_within_window`/`stamp_service_window`
+//! PR-T4 handles inbound button taps: since Twilio buttons aren't built
+//! dynamically per message (see above), there's no signed correlation
+//! token to decode the way Telegram's `callback_query` handler does — a
+//! tap arrives as an ordinary inbound message carrying `ButtonPayload`
+//! (the operator-authored postback string) alongside an often-empty
+//! `Body`, so `handle_webhook` just prefers `ButtonPayload` over `Body`
+//! as the routing text and dispatches through the same path.
+//!
+//! Deferred to follow-up PRs: `upstream` identity mode, delivery-receipt
+//! status callbacks (PR-T6), 24-hour service-window enforcement
+//! (WhatsApp Cloud's `is_within_window`/`stamp_service_window`
 //! — Twilio's WhatsApp carries the same Meta-imposed window, but nothing
 //! currently rejects a free-form send outside it; harmless in test/dev,
 //! worth adding before relying on this in production).
@@ -324,11 +331,23 @@ async fn handle_webhook(
 
     let params: HashMap<&str, &str> = pair_refs.iter().copied().collect();
     let from = params.get("From").copied().unwrap_or("");
-    let text = params.get("Body").copied().unwrap_or("");
+    // PR-T4: a tap on a Quick Reply / List button from a Content
+    // Template arrives as an ordinary inbound message carrying
+    // `ButtonPayload` (the operator-authored postback string baked into
+    // the template at authoring time) alongside an often-empty `Body`.
+    // There's no correlation token to decode here (unlike Telegram's
+    // callback_query) — Twilio buttons aren't built dynamically per
+    // message (see PR-T3), so `ButtonPayload` IS the routing input, same
+    // as typed text. Prefer it when present; fall back to `Body`
+    // otherwise so plain messages are unaffected.
+    let text = match params.get("ButtonPayload").copied() {
+        Some(payload) if !payload.is_empty() => payload,
+        _ => params.get("Body").copied().unwrap_or(""),
+    };
     // Statuses / delivery receipts land on the separate status-callback
-    // route (PR-T6); an inbound message webhook with no `Body` (e.g. a
-    // media-only message we don't model yet) is silently 200'd so Twilio
-    // doesn't retry.
+    // route (PR-T6); an inbound message webhook with no `Body` or
+    // `ButtonPayload` (e.g. a media-only message we don't model yet) is
+    // silently 200'd so Twilio doesn't retry.
     if text.is_empty() {
         return StatusCode::OK.into_response();
     }
