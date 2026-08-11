@@ -1227,3 +1227,52 @@ a trap the next developer should not have to step in.
   courier (PR-T2) will need its own `account_sid` + `token` fields on
   `outbound.credentials`, resolved separately even though `token` and
   `secret` may be configured to the same underlying value operationally.
+
+- **Twilio's WhatsApp channel cannot build interactive messages at
+  send-time — WhatsApp Cloud's `#94` model doesn't port.** (#191, PR-T3)
+  Planning assumed Twilio-WhatsApp buttons/lists would mirror WhatsApp
+  Cloud's `build_interactive_body` (render `Component::Button`/
+  `Selection` into an ad-hoc JSON payload per send, with a fresh signed
+  correlation token as the button `id` each time). Checking Twilio's
+  actual `Messages` resource docs first (before writing any code) showed
+  the only levers for rich content are `ContentSid` (a Twilio-assigned id
+  for an operator-pre-approved **Content Template**, authored via
+  Console/Content API ahead of time) and `ContentVariables` (fills the
+  template's `{{n}}` placeholders — text only, not button structure).
+  There is no path to send a NEW button set Twilio hasn't already seen.
+  So PR-T3 reuses the *existing* `category`/`variables` proactive-send
+  mechanism (#94's `OutboundRequest` fields, unchanged) to resolve
+  `ContentSid`, and dynamic `Button`/`Selection` rendering stays deferred
+  (counted, not built) — not a missing feature, a different platform
+  shape. Anyone extending this to real per-message interactivity needs a
+  template *catalogue* design (map each distinct button-set shape the
+  agent might emit to a pre-authored ContentSid), which is out of scope
+  until a concrete need shows up.
+
+- **Codex review of the Twilio work (#191) found 4 real issues; one flag
+  turned out to match existing precedent.** Ran a security/correctness
+  review pass over PR-T1/T2/T3 before continuing to PR-T4. Confirmed and
+  fixed: (1) `outbound.token` was required by the generic `outbound.kind:
+  rest_api` closed-set check but the adapter never actually read it —
+  it silently reused `inbound.secret` for BOTH the inbound HMAC key and
+  the outbound HTTP Basic password, so a manifest could set them to
+  different values with no error and the wrong one would win silently.
+  Fixed by resolving `outbound.token` into its own field and using it for
+  Basic auth. (2) `outbound.from` was required at adapter-build time but
+  not checked by `Manifest::validate()`, so a manifest missing it passed
+  validation and only failed later at boot — added the same
+  kind-specific check `account_sid` already had. (3) The `public_url`
+  M-SECRETS-1 exemption matched on field NAME only, not adapter kind —
+  since inbound credentials are a flattened open map, ANY adapter could
+  smuggle a literal secret past the production check by naming a field
+  `inbound.public_url`. Scoped the exemption to `AdapterKind::
+  TwilioWhatsapp`. One flagged item did NOT need fixing: Codex noted
+  in-webhook rate-limiting happens after signature verification, so an
+  attacker could force unlimited cheap parse+HMAC work before being
+  throttled — checking WhatsApp Cloud's `verify_hmac256` confirmed this
+  is the established codebase pattern everywhere (verify first, THEN
+  rate-limit), not a Twilio-specific regression; changing it would be a
+  cross-cutting architecture change out of scope for this work. Lesson:
+  an AI review's findings still need independent verification against
+  the actual code and existing precedent before applying — some are
+  real bugs, some are consistent-with-everything-else non-issues.
