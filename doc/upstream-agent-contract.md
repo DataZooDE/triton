@@ -99,6 +99,7 @@ fresh RS256 JWT minted by Triton itself
 | `sub` | **`Principal.sub` — the resolved sender.** For a chat inbound this is the subject the adapter's identity strategy produced (e.g. the `sender_table` mapping for the sender's `wa_id`); for a trio call it is the verified API caller's subject |
 | `tenant` | **Default:** `TRITON_STATIC_UPSTREAM_TENANT` when set, else absent — deployment-level config, *not* the per-sender tenant. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110):** the resolved sender's `Principal.tenant` instead |
 | `triton_sender_scopes` | Absent by default. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110/#114):** the resolved sender's scopes as a **JSON array** under this private claim — deliberately NOT the standard OAuth2 `scope`, since it's resolver-derived *authentication* data, not authorization Triton granted; a downstream must opt in to read it. Values are sanitised + capped, and intersected with `TRITON_STATIC_UPSTREAM_SCOPE_ALLOWLIST` when set. Omitted when empty |
+| `triton_sender_groups` | Absent by default. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true`:** the resolved sender's group memberships as a **JSON array** under this private claim — deliberately NOT `roles`, which a downstream like escurel derives admin from, so a resolver-supplied value can never escalate. Sanitised + capped like scopes, and intersected with `TRITON_STATIC_UPSTREAM_GROUP_ALLOWLIST` when set. Omitted when empty. Consume it by pointing your groups claim at `triton_sender_groups` |
 | `iat` / `exp` | now / now + TTL, TTL clamped to **≤ 300 s** |
 
 Notes for agent authors:
@@ -112,6 +113,16 @@ Notes for agent authors:
   lookup off `sub`. The flag applies to the
   signed static-upstream path only; the Consul/Vault path carries no
   sender identity (it mints a Triton-workload token).
+- **Diagnosing "my agent sees no groups".** Forwarding-off is silent from
+  the caller's side — the call authenticates and a group-filtering agent
+  simply returns nothing, which looks exactly like a broken filter in the
+  agent. Triton says which it is, in its own log:
+  - once at startup, `static-upstream principal forwarding decision`
+    with `forward_principal`, `scope_allowlist_size`,
+    `group_allowlist_size` (and the matching `*_enforced` flags, since
+    "no allowlist" and "an empty allowlist" both read as size 0);
+  - once per process at the moment memberships are actually dropped, a
+    `warn` naming `dropped_groups` (the count only — never the values).
 - Verify the token like any OIDC bearer: fetch JWKS from the issuer,
   check `iss`, your `aud`, `exp`, and the algorithm. Recipe:
   `examples/adk-hello-agent/src/main.rs` (`verify_bearer`).

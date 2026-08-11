@@ -311,9 +311,12 @@ async fn main() -> std::io::Result<()> {
                                 .collect(),
                         )
                     };
+                // The forwarding decision itself (the flag + the allowlist
+                // sizes) is logged by the router in `with_signer`, next to the
+                // code that adds or withholds the claims — deliberately not
+                // duplicated here, so there is exactly one line to grep for.
                 tracing::info!(
-                    spec = %spec, aud = %aud, tenant = %tenant, forward_principal,
-                    scope_allowlist = ?settings.static_upstream_scope_allowlist,
+                    spec = %spec, aud = %aud, tenant = %tenant,
                     "static upstream: dispatching by name with signed RS256 JWTs"
                 );
                 su.with_signer(
