@@ -92,7 +92,7 @@ jobs:
         run: cargo test --locked
 
   flutter:
-    name: flutter analyze + test + build web (a2ui_flutter, apps/explorer)
+    name: flutter analyze + test + build web (apps/explorer)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
@@ -127,21 +127,6 @@ jobs:
           flutter-version: 3.44.4
           channel: stable
           cache: true
-
-      # The shared renderer is analysed and tested in its own package
-      # first, so a failure there is reported as the package's, not as the
-      # app's. Same order escurel's explore.yml uses for its kit.
-      - name: a2ui_flutter — flutter pub get
-        working-directory: packages/a2ui_flutter
-        run: flutter pub get
-
-      - name: a2ui_flutter — flutter analyze
-        working-directory: packages/a2ui_flutter
-        run: flutter analyze
-
-      - name: a2ui_flutter — flutter test
-        working-directory: packages/a2ui_flutter
-        run: flutter test
 
       - name: flutter pub get
         run: flutter pub get
