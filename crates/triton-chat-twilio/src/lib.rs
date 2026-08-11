@@ -6,7 +6,11 @@
 //! outbound courier land in follow-up PRs once this is proven — see
 //! `doc/realizations.md` for the PR sequence.
 
+pub mod courier;
 pub mod signature;
+pub mod surface_mapper;
+pub mod whatsapp;
+pub use whatsapp::TwilioWhatsAppAdapter;
 
 #[cfg(test)]
 mod signature_tests {
