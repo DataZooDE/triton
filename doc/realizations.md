@@ -1204,6 +1204,30 @@ a trap the next developer should not have to step in.
   round-trip unit test (`build` then reverse == identity, every variant)
   pins it against drift when a new `Component` variant lands.
 
+- **Teams gathers *every* card input with *any* action, so a preset
+  button's callback also carries blank sibling inputs — the merge must
+  skip empties.** (#155) When an Adaptive Card holds a preset `Button`
+  (`Action.Execute`, signed args) *and* a `Selection`/`Form`, tapping the
+  button still submits the card's whole input set: the callback's `value`
+  (or `value.action.data`) contains the button's signed `ct` plus every
+  other input keyed *blank*. If the callback blindly merges those onto the
+  token's decoded base args, the blanks clobber the button's own preset
+  args (e.g. wipe its `subject`). `merge_inputs` filters out empty values
+  before overlaying — only a value the user actually typed/selected wins.
+  Same trap Google Chat's `CARD_CLICKED` hit; both adapters share the
+  fix. The token still fixes only the *tool* + preset args against
+  tampering; the merged inputs are user query params, unsigned by design.
+
+- **A Teams `Action.Execute` reply is the HTTP response, not an outbound
+  POST — audit it as a `post` anyway or the pivot goes blind.** (#155) The
+  message and `Action.Submit` paths POST a reply Activity to `serviceUrl`
+  (courier → `record_post`). `Action.Execute` (universal action) instead
+  returns the refreshed card *inline* in the invoke's 200 body, so there's
+  no courier call to hang a `record_post` on. Emit a synthetic
+  `record_post(Posted, 200)` after the inline dispatch so the audit pivot
+  still shows the callback produced a reply; otherwise an in-place
+  drill-down looks like a dispatch with no response.
+
 - **Don't trust a memorized crypto test vector — fetch the source.** (#191,
   `triton-chat-twilio`) Writing the `X-Twilio-Signature` unit test from
   recollection alone produced a plausible-looking but wrong vector (wrong

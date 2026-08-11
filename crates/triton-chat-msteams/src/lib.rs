@@ -110,7 +110,8 @@ pub struct MsTeamsAdapter {
     name: String,
     #[allow(dead_code)]
     audience: String,
-    #[allow(dead_code)]
+    /// HMAC key signing/verifying the correlation tokens on Adaptive
+    /// Card actions and the inbound callback (issue #155).
     correlation_key: Vec<u8>,
     identity: IdentityMode,
     /// Manifest `tool`: where plain inbound text dispatches (default
@@ -328,6 +329,15 @@ struct Activity {
     channel_id: Option<String>,
     #[serde(default, rename = "channelData")]
     channel_data: Option<ChannelData>,
+    /// Present on an `invoke` Activity (`adaptiveCard/action`) and on a
+    /// `message` carrying an `Action.Submit` payload — the card's
+    /// gathered inputs plus the action's `data` (which holds the signed
+    /// correlation token). Issue #155.
+    #[serde(default)]
+    value: Option<Value>,
+    /// The invoke name (`adaptiveCard/action` for a universal action).
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -432,42 +442,93 @@ async fn handle_webhook(
         }
     };
 
-    // Non-`message` activity types (conversationUpdate, typing,
-    // messageReaction, ...) are silently 200'd so the Bot Connector
-    // doesn't retry. They're not auth-relevant — the JWT was
-    // already verified — and PR 35 intentionally only dispatches
-    // text messages.
-    if activity.kind.as_deref() != Some("message") {
-        return StatusCode::OK.into_response();
+    // Route by Activity type (issue #155):
+    //   * `invoke` / `adaptiveCard/action` — an `Action.Execute`
+    //     universal action. The signed token in `value.action.data`
+    //     re-invokes a tool; the reply is a refreshed card returned in
+    //     the HTTP response (in-place drill-down).
+    //   * `message` with a `value` — an `Action.Submit` from a card.
+    //     Same verify-and-route, but the reply is POSTed back as a new
+    //     Activity.
+    //   * `message` with `text` — a typed message (the text path).
+    //   * anything else (conversationUpdate, typing, messageReaction,
+    //     ...) — silently 200'd so the Bot Connector doesn't retry.
+    //     Not auth-relevant: the JWT was already verified.
+    match activity.kind.as_deref() {
+        Some("invoke") if activity.name.as_deref() == Some("adaptiveCard/action") => {
+            let value = activity.value.clone().unwrap_or(Value::Null);
+            handle_callback(
+                &adapter,
+                &verified,
+                &activity,
+                &value,
+                CallbackKind::Execute,
+            )
+            .await
+        }
+        Some("message") => {
+            if let Some(value) = activity.value.clone() {
+                return handle_callback(
+                    &adapter,
+                    &verified,
+                    &activity,
+                    &value,
+                    CallbackKind::Submit,
+                )
+                .await;
+            }
+            let Some(text) = activity.text.as_ref().filter(|t| !t.is_empty()) else {
+                return StatusCode::OK.into_response();
+            };
+            dispatch_message(&adapter, &verified, &activity, text).await
+        }
+        _ => StatusCode::OK.into_response(),
     }
-    let Some(text) = activity.text.as_ref().filter(|t| !t.is_empty()) else {
-        return StatusCode::OK.into_response();
-    };
-
-    dispatch_message(&adapter, &verified, &activity, text).await
 }
 
-async fn dispatch_message(
+/// Which card action produced an inbound callback — decides the reply
+/// channel: `Execute` refreshes the card in the HTTP response, `Submit`
+/// POSTs a new reply Activity.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CallbackKind {
+    Execute,
+    Submit,
+}
+
+/// Identity resolved off an inbound Activity: the channel-scoped
+/// `from.id` (always the reply target) plus the `(sub, scopes, tenant)`
+/// the sender maps to. Shared by the text-message and callback paths.
+struct ResolvedSender {
+    from_id: String,
+    sub: String,
+    scopes: Vec<String>,
+    tenant: String,
+}
+
+/// FR-I-7 sender resolution. Returns the resolved sender or a ready
+/// rejection `Response` (already audited). Identical semantics for a
+/// typed message, an `Action.Submit`, and an `Action.Execute`.
+// The `Err` is an axum `Response` (inherently large); boxing it would
+// add an allocation on every rejection for no real benefit.
+#[allow(clippy::result_large_err)]
+fn resolve_sender(
     adapter: &Arc<MsTeamsAdapter>,
-    verified: &VerifiedClaims,
     activity: &Activity,
-    text: &str,
-) -> Response {
-    // The `from.id` carries the channel-scoped id (`29:...`); we
-    // always need it as the outbound reply target, regardless of how
-    // identity is resolved.
+) -> Result<ResolvedSender, Response> {
+    // The `from.id` carries the channel-scoped id (`29:...`); we always
+    // need it as the outbound reply target, regardless of how identity
+    // is resolved.
     let Some(from) = activity.from.as_ref() else {
         record_rejection(
             adapter,
             "-",
             "-",
-            TritonError::Validation("message activity missing from.id".into()),
+            TritonError::Validation("activity missing from.id".into()),
         );
-        return (StatusCode::BAD_REQUEST, "missing from.id").into_response();
+        return Err((StatusCode::BAD_REQUEST, "missing from.id").into_response());
     };
 
-    // FR-I-7 sender resolution → (sub, scopes, tenant).
-    let resolved = match &adapter.identity {
+    let (sub, scopes, tenant) = match &adapter.identity {
         IdentityMode::SenderTable(table) => match table.get(&from.id) {
             Some(c) => (c.sub.clone(), c.scopes.clone(), c.tenant.clone()),
             None => {
@@ -477,7 +538,7 @@ async fn dispatch_message(
                     "-",
                     TritonError::Auth(format!("unknown sender {}", from.id)),
                 );
-                return (StatusCode::UNAUTHORIZED, "unknown sender").into_response();
+                return Err((StatusCode::UNAUTHORIZED, "unknown sender").into_response());
             }
         },
         IdentityMode::Azure(cfg) => {
@@ -496,7 +557,7 @@ async fn dispatch_message(
                         activity.channel_id
                     )),
                 );
-                return (StatusCode::UNAUTHORIZED, "wrong channel").into_response();
+                return Err((StatusCode::UNAUTHORIZED, "wrong channel").into_response());
             }
             // sub = from.aadObjectId. Refuse rather than fall back to
             // the channel id: a message with no AAD object id can't
@@ -510,7 +571,7 @@ async fn dispatch_message(
                         "azure identity requires from.aadObjectId on the activity".into(),
                     ),
                 );
-                return (StatusCode::UNAUTHORIZED, "missing aadObjectId").into_response();
+                return Err((StatusCode::UNAUTHORIZED, "missing aadObjectId").into_response());
             };
             // tenant = channelData.tenant.id.
             let Some(tenant) = activity
@@ -528,7 +589,7 @@ async fn dispatch_message(
                         "azure identity requires channelData.tenant.id on the activity".into(),
                     ),
                 );
-                return (StatusCode::UNAUTHORIZED, "missing tenant").into_response();
+                return Err((StatusCode::UNAUTHORIZED, "missing tenant").into_response());
             };
             // Cross-tenant isolation: the inbound tenant MUST be on
             // the allowlist (guaranteed non-empty at build time).
@@ -539,51 +600,73 @@ async fn dispatch_message(
                     tenant,
                     TritonError::Auth(format!("tenant {tenant} not on allowed_tenants")),
                 );
-                return (StatusCode::UNAUTHORIZED, "tenant not allowed").into_response();
+                return Err((StatusCode::UNAUTHORIZED, "tenant not allowed").into_response());
             }
             (sub.clone(), cfg.scopes.clone(), tenant.to_string())
         }
     };
-    let (sub, scopes, tenant) = resolved;
 
-    // NFR-P-3 second tier: per-tenant fair-share. Bucketed by the
-    // resolved tenant id so a noisy tenant can't starve others.
-    if let Err(retry_after) = adapter.per_tenant_limit.try_take(&tenant) {
+    Ok(ResolvedSender {
+        from_id: from.id.clone(),
+        sub,
+        scopes,
+        tenant,
+    })
+}
+
+/// NFR-P-3 second tier: per-tenant fair-share. `Some(response)` is a
+/// ready 429 (already audited); `None` means the token was taken.
+fn check_tenant_limit(adapter: &Arc<MsTeamsAdapter>, sub: &str, tenant: &str) -> Option<Response> {
+    if let Err(retry_after) = adapter.per_tenant_limit.try_take(tenant) {
         record_rejection(
             adapter,
-            &sub,
-            &tenant,
+            sub,
+            tenant,
             TritonError::RateLimited(format!(
                 "tenant `{}` rate limit hit on adapter `{}`; retry in {:.2}s",
                 tenant, adapter.name, retry_after
             )),
         );
         let secs = retry_after.ceil().max(1.0) as u64;
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            [("Retry-After", secs.to_string())],
-            "tenant rate limited",
-        )
-            .into_response();
+        return Some(
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [("Retry-After", secs.to_string())],
+                "tenant rate limited",
+            )
+                .into_response(),
+        );
     }
+    None
+}
 
-    let Some(conversation) = activity.conversation.as_ref() else {
-        record_rejection(
-            adapter,
-            &sub,
-            &tenant,
-            TritonError::Validation("message activity missing conversation.id".into()),
-        );
-        return (StatusCode::BAD_REQUEST, "missing conversation.id").into_response();
+fn make_principal(sub: &str, scopes: &[String], tenant: &str) -> Principal {
+    Principal {
+        sub: sub.to_string(),
+        scopes: scopes.to_vec(),
+        groups: Vec::new(),
+        tenant: tenant.to_string(),
+        raw_token: String::new(),
+        trace_id: uuid::Uuid::new_v4().to_string(),
+    }
+}
+
+async fn dispatch_message(
+    adapter: &Arc<MsTeamsAdapter>,
+    verified: &VerifiedClaims,
+    activity: &Activity,
+    text: &str,
+) -> Response {
+    let sender = match resolve_sender(adapter, activity) {
+        Ok(s) => s,
+        Err(resp) => return resp,
     };
-    let Some(recipient) = activity.recipient.as_ref() else {
-        record_rejection(
-            adapter,
-            &sub,
-            &tenant,
-            TritonError::Validation("message activity missing recipient.id".into()),
-        );
-        return (StatusCode::BAD_REQUEST, "missing recipient.id").into_response();
+    if let Some(resp) = check_tenant_limit(adapter, &sender.sub, &sender.tenant) {
+        return resp;
+    }
+    let (conversation_id, recipient_id) = match convo_and_recipient(adapter, activity, &sender) {
+        Ok(v) => v,
+        Err(resp) => return resp,
     };
 
     // Strip the Teams `<at>@bot</at>` mention prefix the platform
@@ -591,55 +674,171 @@ async fn dispatch_message(
     // closing `</at>` (with whitespace trimmed) is what we route as
     // the command.
     let stripped = strip_mention_prefix(text);
-
-    let principal = Principal {
-        sub: sub.clone(),
-        scopes: scopes.clone(),
-        groups: Vec::new(),
-        tenant: tenant.clone(),
-        raw_token: String::new(),
-        trace_id: uuid::Uuid::new_v4().to_string(),
-    };
-    let principal_for_post = principal.clone();
-
     let (tool_name, args) = route_command(stripped, &adapter.inbound_tool);
+
+    dispatch_and_post_reply(
+        adapter,
+        verified,
+        &tool_name,
+        args,
+        &sender,
+        &conversation_id,
+        &recipient_id,
+    )
+    .await
+}
+
+/// Handle a card callback: verify the signed correlation token, merge
+/// the user's card inputs onto the token's base args, and re-dispatch
+/// the recovered `(tool, args)` with the resolved principal.
+///
+/// * `Execute` (universal action) returns the re-dispatched surface as
+///   a refreshed Adaptive Card in the HTTP response (in-place refresh).
+/// * `Submit` POSTs the reply back as a new Activity, like a message.
+async fn handle_callback(
+    adapter: &Arc<MsTeamsAdapter>,
+    verified: &VerifiedClaims,
+    activity: &Activity,
+    value: &Value,
+    kind: CallbackKind,
+) -> Response {
+    let sender = match resolve_sender(adapter, activity) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    if let Some(resp) = check_tenant_limit(adapter, &sender.sub, &sender.tenant) {
+        return resp;
+    }
+
+    // Pull the signed token + gathered card inputs out of the callback.
+    let Some((token, inputs)) = extract_callback(value, kind) else {
+        record_rejection(
+            adapter,
+            &sender.sub,
+            &sender.tenant,
+            TritonError::Validation("card callback missing correlation token".into()),
+        );
+        return (StatusCode::BAD_REQUEST, "missing action").into_response();
+    };
+
+    // Verify the HMAC BEFORE trusting the tool/args. A forged or
+    // tampered token — even on an authenticated webhook — is refused
+    // and audited as `error:auth`, never re-dispatched.
+    let (tool_name, mut args) = match triton_correlation::decode_with_cap(
+        &token,
+        &adapter.correlation_key,
+        surface_mapper::MSTEAMS_CORRELATION_CAP,
+    ) {
+        Ok(p) => p,
+        Err(_) => {
+            record_rejection(
+                adapter,
+                &sender.sub,
+                &sender.tenant,
+                TritonError::Auth("card callback correlation token invalid".into()),
+            );
+            return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        }
+    };
+    // Merge the user-supplied Selection/Form values onto the token's
+    // signed base args. The token fixed the TOOL (and any preset
+    // args); the inputs are user query params. Skip empty values —
+    // Teams gathers EVERY input on the card with ANY action, so a
+    // preset button also submits the (blank) sibling inputs; an empty
+    // merge would clobber the button's own preset args.
+    merge_inputs(&mut args, inputs);
+
+    match kind {
+        CallbackKind::Execute => {
+            dispatch_and_refresh_card(adapter, &tool_name, args, &sender).await
+        }
+        CallbackKind::Submit => {
+            let (conversation_id, recipient_id) =
+                match convo_and_recipient(adapter, activity, &sender) {
+                    Ok(v) => v,
+                    Err(resp) => return resp,
+                };
+            dispatch_and_post_reply(
+                adapter,
+                verified,
+                &tool_name,
+                args,
+                &sender,
+                &conversation_id,
+                &recipient_id,
+            )
+            .await
+        }
+    }
+}
+
+/// The conversation id + the inbound bot id (`recipient.id`) needed to
+/// address an outbound reply Activity. `Err` is a ready 400 (audited).
+#[allow(clippy::result_large_err)]
+fn convo_and_recipient(
+    adapter: &Arc<MsTeamsAdapter>,
+    activity: &Activity,
+    sender: &ResolvedSender,
+) -> Result<(String, String), Response> {
+    let Some(conversation) = activity.conversation.as_ref() else {
+        record_rejection(
+            adapter,
+            &sender.sub,
+            &sender.tenant,
+            TritonError::Validation("activity missing conversation.id".into()),
+        );
+        return Err((StatusCode::BAD_REQUEST, "missing conversation.id").into_response());
+    };
+    let Some(recipient) = activity.recipient.as_ref() else {
+        record_rejection(
+            adapter,
+            &sender.sub,
+            &sender.tenant,
+            TritonError::Validation("activity missing recipient.id".into()),
+        );
+        return Err((StatusCode::BAD_REQUEST, "missing recipient.id").into_response());
+    };
+    Ok((conversation.id.clone(), recipient.id.clone()))
+}
+
+/// Dispatch `(tool, args)` and POST the rendered reply back through the
+/// bot connector. Used by the message and `Action.Submit` paths.
+async fn dispatch_and_post_reply(
+    adapter: &Arc<MsTeamsAdapter>,
+    verified: &VerifiedClaims,
+    tool_name: &str,
+    args: Value,
+    sender: &ResolvedSender,
+    conversation_id: &str,
+    recipient_id: &str,
+) -> Response {
+    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let principal_for_post = principal.clone();
     let started = std::time::Instant::now();
     let result = adapter
         .dispatcher
-        .invoke(&tool_name, args, principal, PROTOCOL)
+        .invoke(tool_name, args, principal, PROTOCOL)
         .await;
     let latency_ms = started.elapsed().as_millis() as u64;
 
     match result {
         Ok(dispatch) => {
-            let rendered = match surface_mapper::try_render_surface(&dispatch.result) {
-                Some(Ok(r)) => r,
-                Some(Err(_)) => RenderedMessage {
-                    text: "(no content)".into(),
-                    deferred_buttons: 0,
-                    deferred_selections: 0,
-                    deferred_forms: 0,
-                    deferred_dashboards: 0,
-                    truncated: false,
-                },
-                None => RenderedMessage {
-                    text: surface_mapper::clamp_plain_text(&bare_text(&dispatch.result)),
-                    deferred_buttons: 0,
-                    deferred_selections: 0,
-                    deferred_forms: 0,
-                    deferred_dashboards: 0,
-                    truncated: false,
-                },
-            };
+            // `recipient.id` is the bot (reply `from`); `from.id` is the
+            // user (reply `recipient`).
+            let body = build_reply_body(
+                adapter,
+                recipient_id,
+                conversation_id,
+                &sender.from_id,
+                &dispatch.result,
+            );
             post_reply(
                 adapter,
                 verified,
-                &tool_name,
+                tool_name,
                 &principal_for_post,
-                &conversation.id,
-                &recipient.id,
-                &from.id,
-                &rendered,
+                conversation_id,
+                body,
                 latency_ms,
             )
             .await;
@@ -652,6 +851,184 @@ async fn dispatch_message(
             // Telegram + Discord.
             StatusCode::OK.into_response()
         }
+    }
+}
+
+/// Dispatch `(tool, args)` and return the rendered surface as a
+/// refreshed Adaptive Card in the invoke HTTP response (the
+/// `Action.Execute` in-place drill-down). No outbound POST.
+async fn dispatch_and_refresh_card(
+    adapter: &Arc<MsTeamsAdapter>,
+    tool_name: &str,
+    args: Value,
+    sender: &ResolvedSender,
+) -> Response {
+    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let principal_for_post = principal.clone();
+    let started = std::time::Instant::now();
+    let result = adapter
+        .dispatcher
+        .invoke(tool_name, args, principal, PROTOCOL)
+        .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(dispatch) => {
+            let response_body = match render_card_content(adapter, &dispatch.result) {
+                Some(card) => surface_mapper::invoke_card_response(card),
+                None => surface_mapper::invoke_message_response(
+                    &text_reply_message(&dispatch.result).text,
+                ),
+            };
+            // Audit the inline card reply as a successful post so the
+            // pivot shows the callback produced a reply.
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                latency_ms,
+                Ok((200, PostOutcome::Posted, None)),
+            );
+            (StatusCode::OK, axum::Json(response_body)).into_response()
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, class = %e.class(), "msteams callback dispatch failed");
+            // Return a valid (empty) invoke response so the client
+            // doesn't retry the universal action.
+            (
+                StatusCode::OK,
+                axum::Json(surface_mapper::invoke_message_response("(no content)")),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Turn a dispatch result into an outbound reply Activity body: an
+/// Adaptive Card when the surface carries interactive controls or a
+/// dashboard, otherwise the plain-text Activity.
+fn build_reply_body(
+    adapter: &MsTeamsAdapter,
+    bot_id: &str,
+    conversation_id: &str,
+    recipient_id: &str,
+    result: &Value,
+) -> Value {
+    if let Some(card) = render_card_content(adapter, result) {
+        surface_mapper::build_card_activity_body(bot_id, conversation_id, recipient_id, card)
+    } else {
+        let msg = text_reply_message(result);
+        surface_mapper::build_activity_body(bot_id, conversation_id, recipient_id, &msg)
+    }
+}
+
+/// Build the Adaptive Card `content` for a result, or `None` when the
+/// surface has no interactive controls or dashboard (caller then sends
+/// a plain-text reply). Each interactive control's `(tool, base_args)`
+/// is signed here — the adapter holds the correlation key.
+fn render_card_content(adapter: &MsTeamsAdapter, result: &Value) -> Option<Value> {
+    let specs = surface_mapper::interactive_from_result(result);
+    let dashboard = surface_mapper::dashboard_from_result(result);
+    if specs.is_empty() && dashboard.is_none() {
+        return None;
+    }
+    let text = match surface_mapper::try_render_surface(result) {
+        Some(Ok(r)) => r.text,
+        _ => String::new(),
+    };
+    let signed: Vec<(surface_mapper::InteractiveSpec, String)> = specs
+        .into_iter()
+        .filter_map(|spec| {
+            match triton_correlation::encode_with_cap(
+                spec.tool(),
+                &spec.base_args(),
+                &adapter.correlation_key,
+                surface_mapper::MSTEAMS_CORRELATION_CAP,
+            ) {
+                Ok(token) => Some((spec, token)),
+                Err(e) => {
+                    tracing::warn!(
+                        tool = spec.tool(),
+                        error = %e,
+                        "msteams: dropping interactive control (correlation token too large)"
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
+    // Every interactive control dropped and no dashboard → nothing to
+    // put on a card; fall back to text.
+    if signed.is_empty() && dashboard.is_none() {
+        return None;
+    }
+    Some(surface_mapper::build_adaptive_card(
+        &text,
+        dashboard.as_ref(),
+        &signed,
+    ))
+}
+
+/// Render a non-interactive result to the plain-text [`RenderedMessage`]
+/// (surface text, empty-surface sentinel, or clamped bare text).
+fn text_reply_message(result: &Value) -> RenderedMessage {
+    match surface_mapper::try_render_surface(result) {
+        Some(Ok(r)) => r,
+        Some(Err(_)) => RenderedMessage::text_only("(no content)".to_string()),
+        None => RenderedMessage::text_only(surface_mapper::clamp_plain_text(&bare_text(result))),
+    }
+}
+
+/// Pull the signed correlation token and the gathered card inputs out
+/// of a callback `value`. For `Execute` the payload sits under
+/// `value.action.data`; for `Submit` it is the `value` object itself.
+/// The `ct` key is the token; every other scalar is a user input.
+fn extract_callback(value: &Value, kind: CallbackKind) -> Option<(String, Vec<(String, String)>)> {
+    let data = match kind {
+        CallbackKind::Execute => value.get("action").and_then(|a| a.get("data"))?,
+        CallbackKind::Submit => value,
+    };
+    let obj = data.as_object()?;
+    let token = obj
+        .get(surface_mapper::TOKEN_DATA_KEY)?
+        .as_str()?
+        .to_string();
+    let inputs = obj
+        .iter()
+        .filter(|(k, _)| k.as_str() != surface_mapper::TOKEN_DATA_KEY)
+        .filter_map(|(k, v)| input_as_string(v).map(|s| (k.clone(), s)))
+        .collect();
+    Some((token, inputs))
+}
+
+/// Coerce an Adaptive Card input value to a string arg. Text/choice
+/// inputs arrive as strings, numbers as JSON numbers, toggles as
+/// bools; anything else is ignored.
+fn input_as_string(v: &Value) -> Option<String> {
+    match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// Merge non-empty card inputs onto the token's signed base args.
+fn merge_inputs(args: &mut Value, inputs: Vec<(String, String)>) {
+    let non_empty: Vec<(String, String)> =
+        inputs.into_iter().filter(|(_, v)| !v.is_empty()).collect();
+    if non_empty.is_empty() {
+        return;
+    }
+    let map = match args {
+        Value::Object(m) => m,
+        other => {
+            *other = Value::Object(Default::default());
+            other.as_object_mut().unwrap()
+        }
+    };
+    for (k, v) in non_empty {
+        map.insert(k, Value::String(v));
     }
 }
 
@@ -691,16 +1068,13 @@ fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn post_reply(
     adapter: &MsTeamsAdapter,
     verified: &VerifiedClaims,
     tool_name: &str,
     principal: &Principal,
     conversation_id: &str,
-    bot_id: &str,
-    recipient_id: &str,
-    msg: &RenderedMessage,
+    body: Value,
     dispatch_latency_ms: u64,
 ) {
     // The serviceUrl came from inside a JWT we verified — it's
@@ -710,7 +1084,6 @@ async fn post_reply(
     // ending with a trailing slash but we tolerate either.
     let base = verified.service_url.trim_end_matches('/');
     let url = format!("{}/v3/conversations/{}/activities", base, conversation_id);
-    let body = surface_mapper::build_activity_body(bot_id, conversation_id, recipient_id, msg);
 
     let post_started = std::time::Instant::now();
     let access_token = match adapter.token_client.access_token().await {

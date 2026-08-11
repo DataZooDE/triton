@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 triton-core = { path = "../triton-core" }
+triton-correlation = { path = "../triton-correlation" }
 triton-manifest = { path = "../triton-manifest" }
 triton-secrets = { path = "../triton-secrets" }
 axum = { workspace = true }
