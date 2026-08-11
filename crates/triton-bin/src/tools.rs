@@ -139,12 +139,14 @@ impl Tool for Narrate {
         let surface = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: format!("Hello, {}.", parsed.subject),
                 },
                 Component::Narration {
                     text: format!("This is a generated narration about {}.", parsed.subject),
                 },
                 Component::Button {
+                    primary: false,
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: serde_json::json!({ "subject": parsed.subject }),
@@ -193,6 +195,7 @@ impl Tool for DemoPanel {
         let surface = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "Triton demo panel".into(),
                 },
                 Component::Narration {
@@ -242,18 +245,24 @@ impl Tool for DemoPanel {
                     title: "Customer feedback".into(),
                     fields: vec![
                         FormField {
+                            placeholder: None,
+                            default_value: None,
                             name: "name".into(),
                             label: "Your name".into(),
                             kind: FormFieldKind::String,
                             required: true,
                         },
                         FormField {
+                            placeholder: None,
+                            default_value: None,
                             name: "rating".into(),
                             label: "Rating (1-5)".into(),
                             kind: FormFieldKind::Integer,
                             required: true,
                         },
                         FormField {
+                            placeholder: None,
+                            default_value: None,
                             name: "contact_ok".into(),
                             label: "OK to follow up?".into(),
                             kind: FormFieldKind::Boolean,
@@ -264,6 +273,7 @@ impl Tool for DemoPanel {
                     tool: "echo".into(),
                 },
                 Component::Button {
+                    primary: false,
                     label: "Refresh".into(),
                     tool: "demo_panel".into(),
                     args: serde_json::json!({}),
@@ -322,6 +332,8 @@ impl Tool for FormOnlyDemo {
             components: vec![Component::Form {
                 title: "Quick feedback".into(),
                 fields: vec![FormField {
+                    placeholder: None,
+                    default_value: None,
                     name: "message".into(),
                     label: "Your message".into(),
                     kind: FormFieldKind::String,
@@ -381,18 +393,24 @@ impl Tool for FormOnlyDemoMulti {
                 title: "Quick feedback (multi)".into(),
                 fields: vec![
                     FormField {
+                        placeholder: None,
+                        default_value: None,
                         name: "name".into(),
                         label: "name".into(),
                         kind: FormFieldKind::String,
                         required: true,
                     },
                     FormField {
+                        placeholder: None,
+                        default_value: None,
                         name: "age".into(),
                         label: "age".into(),
                         kind: FormFieldKind::Integer,
                         required: true,
                     },
                     FormField {
+                        placeholder: None,
+                        default_value: None,
                         name: "subscribe".into(),
                         label: "subscribe".into(),
                         kind: FormFieldKind::Boolean,

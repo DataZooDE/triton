@@ -29,6 +29,40 @@ client_id. If those env vars aren't set on Triton, the login screen
 shows a clear "operator hasn't registered me" message instead of
 failing PKCE opaquely.
 
+## Targets, and the `ui://` embedder
+
+Web is the product. Linux and Android exist so the *renderers* can be
+exercised where a browser can't: `ui://` MCP-Apps resources embed
+differently per target and #201 was the bug that fell out of assuming
+otherwise.
+
+| Target | `ui://` resource is… | Where |
+|---|---|---|
+| web | a sandboxed `<iframe srcdoc>` | `html_embed_web.dart` |
+| Android / iOS | that same iframe, inside a WebView | `html_embed_webview.dart` |
+| Linux / Windows / macOS | its HTML source — `webview_flutter` has no desktop implementation, so support is **deferred**, not silently broken | `html_embed_source.dart` |
+
+The bridge (`callServerTool` / `prompt` / `updateModelContext`) is the
+same on every arm that has one, and the guest HTML is byte-identical
+across them: an upstream never learns which host it landed in.
+
+Android sign-in is NOT wired up — `auth_manager.dart` builds an OIDC
+manager only on web — so the Android build is for renderer work, not a
+shipping mobile client.
+
+The device test for the bridge (needs a running emulator or a phone):
+
+```bash
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk   # a JDK 26 default breaks Gradle
+cd apps/explorer
+flutter test integration_test/ui_resource_embed_test.dart -d emulator-5554
+```
+
+It skips itself on desktop rather than passing vacuously. Everything it
+cannot see — the guest is encoded so it can't terminate the host's
+script block; desktop degrades instead of crashing — is covered on the
+VM by `test/html_embed_webview_test.dart`, which CI does run.
+
 ## Layout
 
 ```

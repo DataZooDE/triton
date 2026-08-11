@@ -17,7 +17,7 @@
 
 use serde_json::{Value, json};
 
-use super::{Component, FormFieldKind, Surface};
+use super::{Component, FormField, FormFieldKind, Surface};
 
 pub fn build(surface: &Surface) -> Value {
     let stream: Vec<Value> = surface.components.iter().map(component_to_json).collect();
@@ -29,13 +29,20 @@ pub fn build(surface: &Surface) -> Value {
 
 fn component_to_json(c: &Component) -> Value {
     let inner = match c {
-        Component::Text { value } => json!({ "Text": { "text": value } }),
+        Component::Text { value, pills } => {
+            let mut t = json!({ "text": value });
+            if !pills.is_empty() {
+                t["pills"] = json!(pills);
+            }
+            json!({ "Text": t })
+        }
         Component::Narration { text } => json!({ "Narration": { "text": text } }),
         Component::Button {
             label,
             tool,
             args,
             resource,
+            primary,
         } => {
             let mut b = json!({
                 "label": label,
@@ -43,6 +50,9 @@ fn component_to_json(c: &Component) -> Value {
             });
             if let Some(r) = resource {
                 b["resource"] = json!(r);
+            }
+            if *primary {
+                b["primary"] = json!(true);
             }
             json!({ "Button": b })
         }
@@ -69,12 +79,7 @@ fn component_to_json(c: &Component) -> Value {
         } => json!({
             "Form": {
                 "title": title,
-                "fields": fields.iter().map(|f| json!({
-                    "name": f.name,
-                    "label": f.label,
-                    "kind": form_kind_str(f.kind),
-                    "required": f.required,
-                })).collect::<Vec<_>>(),
+                "fields": fields.iter().map(form_field_to_json).collect::<Vec<_>>(),
                 "submit_label": submit_label,
                 "action": { "tool": tool }
             }
@@ -91,9 +96,26 @@ fn component_to_json(c: &Component) -> Value {
                 }).collect::<Vec<_>>(),
             }
         }),
-        Component::Report { report_id, args } => json!({
-            "Report": { "report_id": report_id, "args": args }
-        }),
+        Component::Report {
+            report_id,
+            args,
+            title,
+            series,
+            labels,
+        } => {
+            let mut r = json!({ "report_id": report_id, "args": args });
+            if let Some(t) = title {
+                r["title"] = json!(t);
+            }
+            if !series.is_empty() {
+                r["series"] = json!(series);
+            }
+            if !labels.is_empty() {
+                r["labels"] = json!(labels);
+            }
+            json!({ "Report": r })
+        }
+        Component::Diff { lines } => json!({ "Diff": { "lines": lines } }),
         Component::Sources { items } => json!({
             "Sources": {
                 "items": items.iter().map(|i| json!({
@@ -104,6 +126,25 @@ fn component_to_json(c: &Component) -> Value {
         }),
     };
     json!({ "Component": inner })
+}
+
+/// Same omit-when-unset rule as v0.9 — see `v09::form_field_to_json`. The
+/// duplication is deliberate: ADR-4 keeps the two builders self-contained so a
+/// schema change in one version cannot ripple into the other.
+fn form_field_to_json(f: &FormField) -> Value {
+    let mut o = json!({
+        "name": f.name,
+        "label": f.label,
+        "kind": form_kind_str(f.kind),
+        "required": f.required,
+    });
+    if let Some(p) = &f.placeholder {
+        o["placeholder"] = json!(p);
+    }
+    if let Some(d) = &f.default_value {
+        o["default"] = d.clone();
+    }
+    o
 }
 
 fn form_kind_str(k: FormFieldKind) -> &'static str {

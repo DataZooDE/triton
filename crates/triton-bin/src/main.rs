@@ -311,9 +311,12 @@ async fn main() -> std::io::Result<()> {
                                 .collect(),
                         )
                     };
+                // The forwarding decision itself (the flag + the allowlist
+                // sizes) is logged by the router in `with_signer`, next to the
+                // code that adds or withholds the claims — deliberately not
+                // duplicated here, so there is exactly one line to grep for.
                 tracing::info!(
-                    spec = %spec, aud = %aud, tenant = %tenant, forward_principal,
-                    scope_allowlist = ?settings.static_upstream_scope_allowlist,
+                    spec = %spec, aud = %aud, tenant = %tenant,
                     "static upstream: dispatching by name with signed RS256 JWTs"
                 );
                 su.with_signer(
@@ -1201,6 +1204,113 @@ async fn main() -> std::io::Result<()> {
                                 &e,
                                 &settings.optional_adapters,
                                 "email",
+                            );
+                        }
+                    }
+                }
+                AdapterKind::TwilioWhatsapp => {
+                    // NFR-S-4 v0.2: only `api.twilio.com` is on the
+                    // substrate ACL allowlist. Mirrors the WhatsApp
+                    // Cloud / graph.facebook.com pattern.
+                    const CANONICAL: &str = "https://api.twilio.com";
+                    let api_base = std::env::var("TRITON_TWILIO_API_BASE").unwrap_or_else(|_| {
+                        triton_chat_twilio::courier::CourierConfig::default().api_base
+                    });
+                    if settings.env != "local"
+                        && !is_canonical_url(&api_base, "https", "api.twilio.com")
+                    {
+                        tracing::error!(
+                            env = %settings.env,
+                            twilio_api_base = %api_base,
+                            "non-`local` env MUST use TRITON_TWILIO_API_BASE with host api.twilio.com (NFR-S-4 egress allowlist; canonical base {CANONICAL})",
+                        );
+                        std::process::exit(2);
+                    }
+                    let courier_config = triton_chat_twilio::courier::CourierConfig {
+                        api_base,
+                        timeout: settings.courier_timeout,
+                    };
+                    match triton_chat_twilio::TwilioWhatsAppAdapter::from_manifest(
+                        name,
+                        adapter,
+                        resolver.as_ref(),
+                        dispatcher.clone(),
+                        courier_config,
+                    )
+                    .await
+                    {
+                        Ok(built) => {
+                            tracing::info!(adapter = %name, "twilio_whatsapp webhook adapter wired");
+                            let built = Arc::new(built);
+                            outbound_couriers.insert(
+                                name.to_string(),
+                                built.clone() as Arc<dyn triton_core::OutboundCourier>,
+                            );
+                            let r = built.router();
+                            chat_router = Some(match chat_router.take() {
+                                Some(acc) => acc.merge(r),
+                                None => r,
+                            });
+                        }
+                        Err(e) => {
+                            optional_adapters::handle_build_error(
+                                name,
+                                &e,
+                                &settings.optional_adapters,
+                                "twilio_whatsapp",
+                            );
+                        }
+                    }
+                }
+                AdapterKind::TwilioRcs => {
+                    // NFR-S-4 v0.2: same Twilio Messaging API + allowlist
+                    // as twilio_whatsapp.
+                    const CANONICAL: &str = "https://api.twilio.com";
+                    let api_base = std::env::var("TRITON_TWILIO_API_BASE").unwrap_or_else(|_| {
+                        triton_chat_twilio::courier::CourierConfig::default().api_base
+                    });
+                    if settings.env != "local"
+                        && !is_canonical_url(&api_base, "https", "api.twilio.com")
+                    {
+                        tracing::error!(
+                            env = %settings.env,
+                            twilio_api_base = %api_base,
+                            "non-`local` env MUST use TRITON_TWILIO_API_BASE with host api.twilio.com (NFR-S-4 egress allowlist; canonical base {CANONICAL})",
+                        );
+                        std::process::exit(2);
+                    }
+                    let courier_config = triton_chat_twilio::courier::CourierConfig {
+                        api_base,
+                        timeout: settings.courier_timeout,
+                    };
+                    match triton_chat_twilio::TwilioRcsAdapter::from_manifest(
+                        name,
+                        adapter,
+                        resolver.as_ref(),
+                        dispatcher.clone(),
+                        courier_config,
+                    )
+                    .await
+                    {
+                        Ok(built) => {
+                            tracing::info!(adapter = %name, "twilio_rcs webhook adapter wired");
+                            let built = Arc::new(built);
+                            outbound_couriers.insert(
+                                name.to_string(),
+                                built.clone() as Arc<dyn triton_core::OutboundCourier>,
+                            );
+                            let r = built.router();
+                            chat_router = Some(match chat_router.take() {
+                                Some(acc) => acc.merge(r),
+                                None => r,
+                            });
+                        }
+                        Err(e) => {
+                            optional_adapters::handle_build_error(
+                                name,
+                                &e,
+                                &settings.optional_adapters,
+                                "twilio_rcs",
                             );
                         }
                     }

@@ -1,0 +1,700 @@
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:flutter/material.dart';
+
+import 'component_builder.dart';
+import 'markdown_lite.dart';
+import 'sources_row.dart';
+
+/// A2UI v0.9 renderer. **No shared base** with v0.8 per ADR-4. The
+/// envelope uses lowercase `type`, no `Component` wrapper, action
+/// data inlined. Components: text / narration / button / selection /
+/// form / dashboard, plus the report kinds kpi / table / vega (so a
+/// report renderer's surface — e.g. Peacock — renders natively).
+class A2UIv09Renderer extends StatelessWidget {
+  const A2UIv09Renderer({
+    super.key,
+    required this.envelope,
+    this.onAction,
+    this.onOpenResource,
+    this.componentBuilder,
+  });
+
+  final Map<String, dynamic> envelope;
+  final void Function(String tool, Map<String, dynamic> args)? onAction;
+
+  /// A `sources` chip was tapped: open its `ui://` resource inline.
+  final void Function(String uri)? onOpenResource;
+
+  /// A host's per-node override, consulted before every rule below.
+  /// See [A2uiComponentBuilder].
+  final A2uiComponentBuilder? componentBuilder;
+
+  @override
+  Widget build(BuildContext context) {
+    final stream = (envelope['stream'] as List?) ?? const [];
+    // A sibling button carrying a ui:// resource is the open affordance
+    // (hosts auto-open it) — inline `report` nodes are suppressed next to
+    // it to avoid a duplicate control.
+    final hasResourceButton = stream.any((c) =>
+        c is Map && (c['resource'] as String?)?.startsWith('ui://') == true);
+    // A run of consecutive action buttons (the model's proposed follow-ups,
+    // plus an optional "Open report") collapses into one compact horizontal
+    // `Wrap` — mirroring the channel-chip row — instead of a tall stack of
+    // full-width buttons.
+    final children = <Widget>[];
+    final actions = <Widget>[];
+    void flushActions() {
+      if (actions.isEmpty) return;
+      children.add(Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Wrap(
+          spacing: 8,
+          runSpacing: 4,
+          children: List.of(actions),
+        ),
+      ));
+      actions.clear();
+    }
+
+    for (final raw in stream) {
+      // The host first, and before the placement rules below — see
+      // [A2uiComponentBuilder] for why its opinion wins outright.
+      final hosted = componentBuilder == null || raw is! Map
+          ? null
+          : componentBuilder!(context, raw.cast<String, dynamic>());
+      if (hosted != null) {
+        flushActions();
+        children.add(hosted);
+        continue;
+      }
+      if (_isSuppressedReport(raw, hasResourceButton)) continue;
+      final action = _actionButton(context, raw);
+      if (action != null) {
+        actions.add(action);
+        continue;
+      }
+      flushActions();
+      children.add(_node(context, raw));
+    }
+    flushActions();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: children,
+    );
+  }
+
+  /// An inline `report` next to a resource button is opened by that sibling —
+  /// drop it here to avoid a duplicate control.
+  bool _isSuppressedReport(dynamic raw, bool hasResourceButton) =>
+      hasResourceButton && raw is Map && raw['type'] == 'report';
+
+  /// A compact follow-up button for an actionable node (`button` or an inline
+  /// `report` open-control), else null. Rendered into the horizontal `Wrap`.
+  Widget? _actionButton(BuildContext context, dynamic raw) {
+    if (raw is! Map) return null;
+    final map = raw.cast<String, dynamic>();
+    switch (map['type']) {
+      case 'button':
+        final label = (map['label'] as String?) ?? '';
+        final action = (map['action'] as Map?)?.cast<String, dynamic>();
+        return _followUp(
+          context,
+          label,
+          onAction == null || action == null
+              ? null
+              : () => onAction!(
+                    action['tool'] as String,
+                    ((action['args'] as Map?)?.cast<String, dynamic>()) ??
+                        const {},
+                  ),
+        );
+      case 'report':
+        final reportId = (map['report_id'] as String?) ?? '';
+        final rawArgs = (map['args'] as Map?)?.cast<String, dynamic>() ??
+            <String, dynamic>{};
+        return _followUp(
+          context,
+          'Open report: $reportId',
+          onAction == null || reportId.isEmpty
+              ? null
+              : () => onAction!(
+                    'render_report',
+                    {...rawArgs, 'report_id': reportId},
+                  ),
+        );
+      default:
+        return null;
+    }
+  }
+
+  /// A compact, tertiary-accented action button — visually distinct from the
+  /// neutral channel chips, small enough that several fit on one `Wrap` line.
+  Widget _followUp(BuildContext context, String label, VoidCallback? onPressed) {
+    final scheme = Theme.of(context).colorScheme;
+    return FilledButton.tonal(
+      onPressed: onPressed,
+      style: FilledButton.styleFrom(
+        backgroundColor: scheme.tertiaryContainer,
+        foregroundColor: scheme.onTertiaryContainer,
+        visualDensity: VisualDensity.compact,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        textStyle: Theme.of(context).textTheme.labelLarge,
+      ),
+      child: Text(label),
+    );
+  }
+
+  Widget _node(BuildContext context, dynamic raw) {
+    if (raw is! Map) return _unknown('not an object');
+    final map = raw.cast<String, dynamic>();
+    final type = map['type'] as String?;
+    switch (type) {
+      case 'text':
+        // Chat text may carry light portable markdown (the same subset the
+        // Google Chat adapter normalises) — render it, don't show raw `**`.
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: MarkdownLite((map['text'] as String?) ?? ''),
+        );
+      case 'narration':
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Text(
+            (map['text'] as String?) ?? '',
+            style: const TextStyle(fontStyle: FontStyle.italic),
+          ),
+        );
+      case 'selection':
+        final prompt = (map['prompt'] as String?) ?? '';
+        final tool = (map['tool'] as String?) ?? '';
+        final argsKey = (map['args_key'] as String?) ?? 'value';
+        final options = ((map['options'] as List?) ?? const [])
+            .cast<Map>()
+            .map((o) => _OptionPair(
+                  label: (o['label'] as String?) ?? '',
+                  value: (o['value'] as String?) ?? '',
+                ))
+            .toList(growable: false);
+        return _Selection(
+          prompt: prompt,
+          options: options,
+          onPick: onAction == null
+              ? null
+              : (value) => onAction!(tool, {argsKey: value}),
+        );
+      case 'form':
+        final title = (map['title'] as String?) ?? '';
+        final submitLabel = (map['submit_label'] as String?) ?? 'Submit';
+        final tool = (map['tool'] as String?) ?? '';
+        final fields = ((map['fields'] as List?) ?? const [])
+            .cast<Map>()
+            .map((f) => _FormFieldSpec(
+                  name: (f['name'] as String?) ?? '',
+                  label: (f['label'] as String?) ?? '',
+                  kind: (f['kind'] as String?) ?? 'string',
+                  required: (f['required'] as bool?) ?? false,
+                ))
+            .toList(growable: false);
+        return _Form(
+          title: title,
+          fields: fields,
+          submitLabel: submitLabel,
+          onSubmit: onAction == null
+              ? null
+              : (values) => onAction!(tool, values),
+        );
+      case 'dashboard':
+        final title = (map['title'] as String?) ?? '';
+        final tiles = ((map['tiles'] as List?) ?? const [])
+            .cast<Map>()
+            .map((t) => _Tile(
+                  label: (t['label'] as String?) ?? '',
+                  value: (t['value'] as String?) ?? '',
+                  trend: t['trend'] as String?,
+                ))
+            .toList(growable: false);
+        return _Dashboard(title: title, tiles: tiles);
+      case 'kpi':
+        return _Kpi(
+          label: (map['label'] as String?) ?? '',
+          value: (map['value'] ?? '').toString(),
+          trend: map['trend'] as String?,
+        );
+      case 'table':
+        final columns = ((map['columns'] as List?) ?? const [])
+            .map((c) => c.toString())
+            .toList(growable: false);
+        final rows = ((map['rows'] as List?) ?? const [])
+            .map((r) => ((r as List?) ?? const [])
+                .map((c) => c?.toString() ?? '')
+                .toList(growable: false))
+            .toList(growable: false);
+        return _DataTableView(columns: columns, rows: rows);
+      case 'vega':
+        return _Vega(
+          title: map['title'] as String?,
+          pngBase64: map['png_base64'] as String?,
+        );
+      // `button` and `report` are actionable nodes handled in `build` — they
+      // collapse into the compact follow-up `Wrap`, so they never reach here.
+      case 'diff':
+        return _Diff(
+          lines: ((map['lines'] as List?) ?? const [])
+              .whereType<Map>()
+              .map((l) => l.cast<String, dynamic>())
+              .toList(growable: false),
+        );
+      case 'sources':
+        final items = ((map['items'] as List?) ?? const [])
+            .whereType<Map>()
+            .map((i) => SourceChip(
+                  label: (i['label'] as String?) ?? '',
+                  resource: (i['resource'] as String?) ?? '',
+                ))
+            .toList(growable: false);
+        return SourcesRow(items: items, onOpen: onOpenResource);
+      default:
+        return _unknown('unknown v0.9 type: $type');
+    }
+  }
+
+  Widget _unknown(String message) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Card(
+          color: Colors.amber.shade100,
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: Text(message),
+          ),
+        ),
+      );
+}
+
+// ---------------------------------------------------------------
+// Rich-component helpers — local to v0.9 per ADR-4. v0.9 uses
+// SegmentedButton for selection where v0.8 used ChoiceChip — the
+// renderers can diverge without affecting each other.
+// ---------------------------------------------------------------
+
+/// The `diff` component's default presentation: a monospace block where only
+/// added and removed lines are tinted.
+///
+/// Context is left plain deliberately — if every line is highlighted, none of
+/// them is, and the change actually being approved stops standing out.
+///
+/// A `fold` starts collapsed behind its line count and expands on tap. It is
+/// never expanded by default: a diff is mostly unchanged context, and showing
+/// all of it buries the change.
+class _Diff extends StatefulWidget {
+  const _Diff({required this.lines});
+  final List<Map<String, dynamic>> lines;
+
+  @override
+  State<_Diff> createState() => _DiffState();
+}
+
+class _DiffState extends State<_Diff> {
+  final _open = <int>{};
+
+  @override
+  Widget build(BuildContext context) => Card(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (var i = 0; i < widget.lines.length; i++)
+              _line(context, widget.lines[i], i),
+          ],
+        ),
+      );
+
+  Widget _line(BuildContext context, Map<String, dynamic> l, int index) {
+    final scheme = Theme.of(context).colorScheme;
+    final op = l['op'] as String? ?? 'ctx';
+    if (op == 'fold') {
+      final hidden = ((l['hidden'] as List?) ?? const [])
+          .whereType<Map>()
+          .map((h) => h.cast<String, dynamic>())
+          .toList(growable: false);
+      final expanded = _open.contains(index);
+      final count = l['count'] ?? hidden.length;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          InkWell(
+            onTap: () => setState(
+              () => expanded ? _open.remove(index) : _open.add(index),
+            ),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Text(
+                expanded
+                    ? 'Hide $count unchanged lines'
+                    : 'Show $count unchanged lines',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: scheme.primary,
+                ),
+              ),
+            ),
+          ),
+          if (expanded)
+            // -1: a hidden line owns no fold state of its own.
+            for (final h in hidden) _line(context, h, -1),
+        ],
+      );
+    }
+    final background = switch (op) {
+      'add' => scheme.primaryContainer,
+      'del' => scheme.errorContainer,
+      _ => null,
+    };
+    final marker = switch (op) {
+      'add' => '+',
+      'del' => '-',
+      _ => ' ',
+    };
+    return Container(
+      color: background,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+      child: Text(
+        '$marker ${l['text'] ?? ''}',
+        style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
+      ),
+    );
+  }
+}
+
+class _OptionPair {
+  const _OptionPair({required this.label, required this.value});
+  final String label;
+  final String value;
+}
+
+class _FormFieldSpec {
+  const _FormFieldSpec({
+    required this.name,
+    required this.label,
+    required this.kind,
+    required this.required,
+  });
+  final String name;
+  final String label;
+  final String kind;
+  final bool required;
+}
+
+class _Tile {
+  const _Tile({required this.label, required this.value, this.trend});
+  final String label;
+  final String value;
+  final String? trend;
+}
+
+class _Selection extends StatefulWidget {
+  const _Selection({
+    required this.prompt,
+    required this.options,
+    required this.onPick,
+  });
+  final String prompt;
+  final List<_OptionPair> options;
+  final ValueChanged<String>? onPick;
+
+  @override
+  State<_Selection> createState() => _SelectionState();
+}
+
+class _SelectionState extends State<_Selection> {
+  String? _picked;
+
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(widget.prompt),
+            const SizedBox(height: 8),
+            SegmentedButton<String>(
+              segments: [
+                for (final o in widget.options)
+                  ButtonSegment(value: o.value, label: Text(o.label)),
+              ],
+              selected: {?_picked},
+              emptySelectionAllowed: true,
+              showSelectedIcon: false,
+              onSelectionChanged: widget.onPick == null
+                  ? null
+                  : (s) {
+                      if (s.isEmpty) return;
+                      setState(() => _picked = s.first);
+                      widget.onPick!(s.first);
+                    },
+            ),
+          ],
+        ),
+      );
+}
+
+class _Form extends StatefulWidget {
+  const _Form({
+    required this.title,
+    required this.fields,
+    required this.submitLabel,
+    required this.onSubmit,
+  });
+  final String title;
+  final List<_FormFieldSpec> fields;
+  final String submitLabel;
+  final ValueChanged<Map<String, dynamic>>? onSubmit;
+
+  @override
+  State<_Form> createState() => _FormStateView();
+}
+
+class _FormStateView extends State<_Form> {
+  final _values = <String, dynamic>{};
+  final _controllers = <String, TextEditingController>{};
+
+  @override
+  void dispose() {
+    for (final c in _controllers.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  TextEditingController _ctrl(String name) =>
+      _controllers.putIfAbsent(name, TextEditingController.new);
+
+  @override
+  Widget build(BuildContext context) => Card(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(widget.title,
+                  style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              for (final f in widget.fields) _fieldFor(f),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerRight,
+                child: FilledButton(
+                  onPressed: widget.onSubmit == null
+                      ? null
+                      : () => widget.onSubmit!(Map.unmodifiable(_values)),
+                  child: Text(widget.submitLabel),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+
+  Widget _fieldFor(_FormFieldSpec f) {
+    final label = f.required ? '${f.label} *' : f.label;
+    if (f.kind == 'boolean') {
+      return SwitchListTile(
+        title: Text(label),
+        value: _values[f.name] as bool? ?? false,
+        onChanged: (v) => setState(() => _values[f.name] = v),
+      );
+    }
+    final isInt = f.kind == 'integer';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: TextField(
+        controller: _ctrl(f.name),
+        keyboardType: isInt
+            ? const TextInputType.numberWithOptions(decimal: false)
+            : TextInputType.text,
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+        ),
+        onChanged: (v) {
+          if (v.isEmpty) {
+            _values.remove(f.name);
+            return;
+          }
+          _values[f.name] = isInt ? int.tryParse(v) ?? v : v;
+        },
+      ),
+    );
+  }
+}
+
+/// A single headline metric (a report's `kpi` component).
+class _Kpi extends StatelessWidget {
+  const _Kpi({required this.label, required this.value, this.trend});
+  final String label;
+  final String value;
+  final String? trend;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      )),
+              const SizedBox(height: 4),
+              Text(value, style: Theme.of(context).textTheme.headlineSmall),
+              if (trend != null) ...[
+                const SizedBox(height: 2),
+                Text(trend!, style: Theme.of(context).textTheme.bodySmall),
+              ],
+            ],
+          ),
+        ),
+      );
+}
+
+/// A report's `table` component → a scrollable `DataTable`.
+class _DataTableView extends StatelessWidget {
+  const _DataTableView({required this.columns, required this.rows});
+  final List<String> columns;
+  final List<List<String>> rows;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: DataTable(
+            columns: [
+              for (final c in columns) DataColumn(label: Text(c)),
+            ],
+            rows: [
+              for (final r in rows)
+                DataRow(cells: [
+                  for (var i = 0; i < columns.length; i++)
+                    DataCell(Text(i < r.length ? r[i] : '')),
+                ]),
+            ],
+          ),
+        ),
+      );
+}
+
+/// A report's `vega` chart. A full Vega-Lite renderer is out of scope for
+/// the SPA; when the producer ships a rasterised `png_base64` (Peacock does)
+/// we show it, otherwise a placeholder pointing at the embedded report.
+class _Vega extends StatelessWidget {
+  const _Vega({this.title, this.pngBase64});
+  final String? title;
+  final String? pngBase64;
+
+  @override
+  Widget build(BuildContext context) {
+    final bytes = _decode(pngBase64);
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (title != null && title!.isNotEmpty) ...[
+              Text(title!, style: Theme.of(context).textTheme.titleSmall),
+              const SizedBox(height: 8),
+            ],
+            if (bytes != null)
+              Image.memory(bytes, fit: BoxFit.contain)
+            else
+              Text(
+                'chart (open the embedded report to view)',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      fontStyle: FontStyle.italic,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static Uint8List? _decode(String? b64) {
+    if (b64 == null || b64.isEmpty) return null;
+    final cleaned = b64.contains(',') ? b64.split(',').last : b64;
+    try {
+      return base64Decode(cleaned);
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+class _Dashboard extends StatelessWidget {
+  const _Dashboard({required this.title, required this.tiles});
+  final String title;
+  final List<_Tile> tiles;
+
+  @override
+  Widget build(BuildContext context) => Card(
+        margin: const EdgeInsets.symmetric(vertical: 6),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  for (final t in tiles)
+                    Container(
+                      constraints: const BoxConstraints(minWidth: 140),
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context)
+                            .colorScheme
+                            .surfaceContainerHigh,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(t.label,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .bodySmall
+                                  ?.copyWith(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                                  )),
+                          const SizedBox(height: 4),
+                          Text(t.value,
+                              style:
+                                  Theme.of(context).textTheme.titleLarge),
+                          if (t.trend != null) ...[
+                            const SizedBox(height: 2),
+                            Text(t.trend!,
+                                style: Theme.of(context).textTheme.bodySmall),
+                          ],
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+}

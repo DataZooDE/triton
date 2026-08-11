@@ -20,6 +20,7 @@
 //!     instead of making every caller wait out the per-call timeout.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -112,6 +113,14 @@ pub struct StaticUpstream {
     /// `principal.groups ∩ allowlist`; `None` → caps only. Ignored unless
     /// `forward_principal`.
     forward_group_allowlist: Option<HashSet<String>>,
+    /// Observability only (no behaviour): latched once we've warned that a
+    /// resolved sender's group memberships were dropped because forwarding
+    /// is off. The failure this prevents is silent and expensive — the
+    /// caller authenticates fine, a group-filtering upstream returns
+    /// nothing, and that is indistinguishable from a broken filter in the
+    /// upstream. Latched (not counted) so a busy gateway logs the diagnosis
+    /// once instead of once per call.
+    forward_groups_dropped_warned: AtomicBool,
     /// FR-U-3/4 per-tool circuit breaker, keyed by tool name. Each slot
     /// is an `Arc<Mutex<…>>` so a streaming dispatch can hand the slot to
     /// a `Finalized` finalizer that updates the breaker at stream
@@ -173,6 +182,7 @@ impl StaticUpstream {
             forward_principal: false,
             forward_scope_allowlist: None,
             forward_group_allowlist: None,
+            forward_groups_dropped_warned: AtomicBool::new(false),
             breakers: RwLock::new(HashMap::new()),
             circuit_open_after,
             circuit_cooldown,
@@ -200,6 +210,28 @@ impl StaticUpstream {
         self.forward_principal = forward_principal;
         self.forward_scope_allowlist = forward_scope_allowlist;
         self.forward_group_allowlist = forward_group_allowlist;
+        // State the forwarding decision ONCE, here at the router — the place
+        // that adds (or withholds) `triton_sender_scopes` /
+        // `triton_sender_groups`. Without it, an operator whose upstream sees
+        // no groups cannot tell a deliberately-off flag from a broken filter
+        // downstream, because both look like an empty result to the caller.
+        // `*_enforced` is separate from `*_size` because "no allowlist" (caps
+        // only, everything passes) and "an empty allowlist" are different
+        // configurations that would otherwise both read as size 0.
+        tracing::info!(
+            forward_principal = self.forward_principal,
+            scope_allowlist_enforced = self.forward_scope_allowlist.is_some(),
+            scope_allowlist_size = self
+                .forward_scope_allowlist
+                .as_ref()
+                .map_or(0, HashSet::len),
+            group_allowlist_enforced = self.forward_group_allowlist.is_some(),
+            group_allowlist_size = self
+                .forward_group_allowlist
+                .as_ref()
+                .map_or(0, HashSet::len),
+            "static-upstream principal forwarding decision (TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL)"
+        );
         self
     }
 
@@ -261,6 +293,23 @@ impl StaticUpstream {
                         sanitise_scopes(&principal.groups, self.forward_group_allowlist.as_ref());
                     (tenant, scopes, groups)
                 } else {
+                    // This is the exact instant the memberships disappear: a
+                    // resolved sender HAS groups and the token we are about to
+                    // mint will carry none. Say so, once — otherwise the only
+                    // symptom is a group-filtered upstream returning nothing,
+                    // which reads as an upstream bug. Log the COUNT only: the
+                    // values are sender attributes, and the count is all an
+                    // operator needs to recognise the failure.
+                    if !principal.groups.is_empty()
+                        && !self
+                            .forward_groups_dropped_warned
+                            .swap(true, Ordering::Relaxed)
+                    {
+                        tracing::warn!(
+                            dropped_groups = principal.groups.len(),
+                            "resolved sender has group memberships but principal forwarding is OFF; the minted upstream token carries no `triton_sender_groups`. An upstream that filters by group will see nothing. Set TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true (and TRITON_STATIC_UPSTREAM_GROUP_ALLOWLIST) if that is not intended. Warned once per process."
+                        );
+                    }
                     (self.tenant.clone(), Vec::new(), Vec::new())
                 };
                 s.sign(&auds, &principal.sub, &tenant, &scopes, &groups, TOKEN_TTL)

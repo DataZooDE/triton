@@ -10,6 +10,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  # The A2UI renderer, extracted so hosts other than this app can depend on
+  # it (triton#202). Path dependency on a sibling package in this repo — the
+  # same shape escurel uses for escurel_explorer_kit.
+  a2ui_flutter:
+    path: ../../packages/a2ui_flutter
   cupertino_icons: ^1.0.8
   flutter_riverpod: ^2.5.1
   go_router: ^14.6.0
@@ -20,6 +25,11 @@ dependencies:
   # mobile-only; `oidc` runs in browsers where the explorer lives.
   oidc: ^0.13.0
   oidc_default_store: ^0.5.0
+  # Hosts `ui://` MCP-Apps resources on Android/iOS (#201). First-party, and
+  # the only arm that needs it — web uses `dart:html`, desktop has no
+  # implementation and falls back to the resource's source. Unused on the web
+  # build, which is what CI compiles.
+  webview_flutter: ^4.14.1
 
 dev_dependencies:
   flutter_test:

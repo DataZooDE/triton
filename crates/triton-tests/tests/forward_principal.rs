@@ -85,7 +85,11 @@ fn inbound_envelope(wa_id: &str, text: &str) -> Value {
         "entry": [{ "id": "0", "changes": [{ "value": {
             "messaging_product": "whatsapp",
             "metadata": { "display_phone_number": "15555555555", "phone_number_id": "100200300" },
-            "messages": [{ "from": wa_id, "id": "wamid.X", "timestamp": "1700000000",
+            // The message id is derived from the body so a test can post
+            // two DISTINCT inbounds (needed to prove a warn is rate-limited
+            // rather than emitted per call) without them looking like a
+            // redelivery of the same message.
+            "messages": [{ "from": wa_id, "id": format!("wamid.{text}"), "timestamp": "1700000000",
                 "type": "text", "text": { "body": text } }]
         }, "field": "messages" }] }]
     })
@@ -417,6 +421,243 @@ async fn forward_on_applies_group_allowlist() {
         claims["triton_sender_groups"],
         json!(["team-acme"]),
         "only allowlisted groups forwarded (`secret-cabal` dropped): {claims}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Observability of the forwarding decision (DX, not security).
+//
+// The failure these pin: with forwarding OFF, a caller authenticates fine and
+// a group-filtering upstream returns NOTHING. That is indistinguishable from a
+// broken scope filter in the upstream, and it cost a consuming project a full
+// debugging cycle. Triton must SAY that it made the decision (once, at
+// startup) and SAY when the data actually disappears (at the mint).
+// ---------------------------------------------------------------------------
+
+/// Substring identifying the once-at-startup forwarding-decision line.
+const DECISION_LOG: &str = "static-upstream principal forwarding decision";
+/// Substring identifying the at-the-mint "groups were dropped" warning.
+const DROPPED_LOG: &str = "principal forwarding is OFF";
+
+/// Triton logs JSON on stdout; stderr is folded in so a panic/backtrace
+/// shows up in the failure message too.
+fn log_lines(proc: &TritonProcess) -> Vec<String> {
+    let mut lines = proc.stdout_snapshot();
+    lines.extend(proc.stderr_snapshot());
+    lines
+}
+
+fn log_hits(proc: &TritonProcess, needle: &str) -> usize {
+    log_lines(proc)
+        .iter()
+        .filter(|l| l.contains(needle))
+        .count()
+}
+
+/// Block until the command agent has been dispatched to `n` times.
+fn wait_for_bearers(agent: &FakeAgent, n: usize) -> Vec<String> {
+    wait_for(Duration::from_secs(5), || {
+        let seen = agent.bearers_seen();
+        (seen.len() >= n).then_some(seen)
+    })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_logs_forwarding_off_exactly_once() {
+    // The decision line must be a CONFIG line, not a per-request one: two
+    // dispatches, still one line. (Its `forward_principal=true` counterpart
+    // is the positive control in `startup_logs_forwarding_on_with_allowlist_size`.)
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "groups": ["team-acme"],
+        "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for(&whatsapp, &agent, &resolver, false),
+    )
+    .await;
+
+    for text in ["one", "two"] {
+        let resp = post_inbound(&proc, UNKNOWN_WA_ID, text).await;
+        assert!(resp.status().is_success(), "{}", resp.status());
+    }
+    wait_for_bearers(&agent, 2);
+
+    let logs = log_lines(&proc).join("\n");
+    assert_eq!(
+        log_hits(&proc, DECISION_LOG),
+        1,
+        "the forwarding decision is logged once at config time, not per call: {logs}"
+    );
+    assert!(
+        logs.contains("\"forward_principal\":false"),
+        "the decision line must name the OFF state: {logs}"
+    );
+    assert!(
+        logs.contains("\"group_allowlist_size\":0"),
+        "the decision line must name the group allowlist size: {logs}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn startup_logs_forwarding_on_with_allowlist_size() {
+    // Positive control for the line above: the SAME fields must report the
+    // ON state and the real allowlist size, so an operator reading the line
+    // can tell a configured allowlist from an absent one.
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "scopes": ["chat"],
+        "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+
+    let mut env = env_for(&whatsapp, &agent, &resolver, true);
+    env.insert(
+        "TRITON_STATIC_UPSTREAM_GROUP_ALLOWLIST".to_string(),
+        "team-acme,ops".to_string(),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    let resp = post_inbound(&proc, UNKNOWN_WA_ID, "hi").await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    wait_for_bearers(&agent, 1);
+
+    let logs = log_lines(&proc).join("\n");
+    assert_eq!(log_hits(&proc, DECISION_LOG), 1, "{logs}");
+    assert!(
+        logs.contains("\"forward_principal\":true"),
+        "the decision line must name the ON state: {logs}"
+    );
+    assert!(
+        logs.contains("\"group_allowlist_size\":2"),
+        "the decision line must name the configured allowlist size: {logs}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_off_warns_once_at_the_instant_groups_are_dropped() {
+    // The precise instant the information disappears: a resolved sender WITH
+    // memberships is minted into a token that will carry none. Warn there —
+    // and only once, so a busy gateway can't flood the log.
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "groups": ["team-acme", "moderator"],
+        "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for(&whatsapp, &agent, &resolver, false),
+    )
+    .await;
+
+    for text in ["one", "two"] {
+        let resp = post_inbound(&proc, UNKNOWN_WA_ID, text).await;
+        assert!(resp.status().is_success(), "{}", resp.status());
+    }
+    let bearers = wait_for_bearers(&agent, 2);
+
+    // The loss is real: the token genuinely carries no groups.
+    let claims = jwt_claims(&bearers[0]);
+    assert!(
+        claims.get("triton_sender_groups").is_none(),
+        "precondition: forwarding off drops the groups: {claims}"
+    );
+    let logs = log_lines(&proc).join("\n");
+    assert_eq!(
+        log_hits(&proc, DROPPED_LOG),
+        1,
+        "one warn for two dispatches (rate-limited, not per call): {logs}"
+    );
+    assert!(
+        logs.contains("\"dropped_groups\":2"),
+        "the warn must say how much was dropped: {logs}"
+    );
+    // Never log the membership VALUES — they are sender attributes, and the
+    // count is all an operator needs to recognise the failure.
+    assert!(
+        !logs.contains("team-acme"),
+        "the warn must not print membership values: {logs}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_on_does_not_warn_about_dropped_groups() {
+    // Nothing is lost when forwarding is on, so the warn must stay silent.
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "groups": ["team-acme"],
+        "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for(&whatsapp, &agent, &resolver, true),
+    )
+    .await;
+
+    let resp = post_inbound(&proc, UNKNOWN_WA_ID, "hi").await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let bearers = wait_for_bearers(&agent, 1);
+
+    // Positive control: the groups really did ride the token, and the log
+    // snapshot really is populated and searchable (the decision line is
+    // there) — so the absence below is silence, not a broken probe.
+    let claims = jwt_claims(&bearers[0]);
+    assert_eq!(claims["triton_sender_groups"], json!(["team-acme"]));
+    let logs = log_lines(&proc).join("\n");
+    assert_eq!(log_hits(&proc, DECISION_LOG), 1, "{logs}");
+    assert_eq!(
+        log_hits(&proc, DROPPED_LOG),
+        0,
+        "nothing was dropped, so nothing to warn about: {logs}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forward_off_is_silent_when_the_sender_has_no_groups() {
+    // Forwarding off is the DEFAULT. A sender with no memberships loses
+    // nothing, so the warn must not fire — otherwise every default
+    // deployment logs a warning that means nothing.
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "scopes": ["chat"],
+        "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for(&whatsapp, &agent, &resolver, false),
+    )
+    .await;
+
+    let resp = post_inbound(&proc, UNKNOWN_WA_ID, "hi").await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+    wait_for_bearers(&agent, 1);
+
+    // Positive control, as above: the snapshot is populated and searchable.
+    let logs = log_lines(&proc).join("\n");
+    assert_eq!(log_hits(&proc, DECISION_LOG), 1, "{logs}");
+    assert_eq!(
+        log_hits(&proc, DROPPED_LOG),
+        0,
+        "no memberships means no loss, so no warn: {logs}"
     );
 }
 

@@ -243,7 +243,7 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
     let mut first_dashboard: Option<RasterDashboard> = None;
     for c in &surface.components {
         match c {
-            Component::Text { value } => {
+            Component::Text { value, .. } => {
                 chunks.push(PreRender::text(value));
             }
             // `Report` is an optional inline chart rendered out-of-band by
@@ -262,6 +262,19 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
             }
             Component::Narration { text } => {
                 chunks.push(PreRender::narration(text));
+            }
+            // Telegram's `<pre>` is the only thing here that gets a diff a
+            // fixed-width font, which is the only way its +/- markers line up.
+            // Escaped, because diff content is page text and page text can
+            // contain anything.
+            Component::Diff { lines } => {
+                chunks.push(PreRender::pre_rendered(
+                    format!(
+                        "<pre>{}</pre>",
+                        html_escape(&triton_core::a2ui::diff_to_text(lines))
+                    ),
+                    true,
+                ));
             }
             Component::Button {
                 label, tool, args, ..
@@ -647,6 +660,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "hello".into(),
                 },
                 Component::Narration {
@@ -665,6 +679,7 @@ mod tests {
     fn text_only_omits_parse_mode() {
         let s = Surface {
             components: vec![Component::Text {
+                pills: Default::default(),
                 value: "plain".into(),
             }],
         };
@@ -679,6 +694,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "Header".into(),
                 },
                 Component::Selection {
@@ -735,6 +751,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "header".into(),
                 },
                 Component::Dashboard {
@@ -820,6 +837,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "context".into(),
                 },
                 Component::Selection {
@@ -845,9 +863,11 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "label".into(),
                 },
                 Component::Button {
+                    primary: false,
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: json!({}),
@@ -880,9 +900,11 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "still rendered".into(),
                 },
                 Component::Button {
+                    primary: false,
                     label: "Refresh".into(),
                     tool: "narrate".into(),
                     args: big_args,
@@ -900,6 +922,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "a < b & c > d".into(),
                 },
                 Component::Narration {
@@ -933,6 +956,7 @@ mod tests {
         // and the signed buttons still ship.
         let s = Surface {
             components: vec![Component::Button {
+                primary: false,
                 label: "Click".into(),
                 tool: "narrate".into(),
                 args: json!({}),
@@ -949,7 +973,10 @@ mod tests {
     fn oversized_text_is_truncated_below_cap() {
         let big = "x".repeat(10_000);
         let s = Surface {
-            components: vec![Component::Text { value: big }],
+            components: vec![Component::Text {
+                pills: Default::default(),
+                value: big,
+            }],
         };
         let r = render(&s, TEST_KEY).expect("renders");
         assert!(r.truncated);
@@ -964,6 +991,7 @@ mod tests {
         let fourbyte = "𝄞"; // U+1D11E, 4 bytes
         let s = Surface {
             components: vec![Component::Text {
+                pills: Default::default(),
                 value: fourbyte.repeat(2000),
             }],
         };
@@ -985,7 +1013,10 @@ mod tests {
         // the output contains only complete entities.
         let big = "<".repeat(2000); // each `<` → `&lt;` (4 bytes)
         let s = Surface {
-            components: vec![Component::Text { value: big }],
+            components: vec![Component::Text {
+                pills: Default::default(),
+                value: big,
+            }],
         };
         let r = render(&s, TEST_KEY).expect("renders");
         assert!(r.truncated);
@@ -1028,6 +1059,7 @@ mod tests {
         // keep the leading prefix that fits and drop the tail.
         // Every accepted chunk must be intact (not partially cut).
         let small = Component::Text {
+            pills: Default::default(),
             value: "x".repeat(500),
         };
         let s = Surface {
@@ -1052,6 +1084,8 @@ mod tests {
             components: vec![Component::Form {
                 title: "Feedback".into(),
                 fields: vec![FormField {
+                    placeholder: None,
+                    default_value: None,
                     name: "name".into(),
                     label: "Your name".into(),
                     kind: FormFieldKind::String,
@@ -1077,11 +1111,14 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "header".into(),
                 },
                 Component::Form {
                     title: "Feedback".into(),
                     fields: vec![FormField {
+                        placeholder: None,
+                        default_value: None,
                         name: "name".into(),
                         label: "Your name".into(),
                         kind: FormFieldKind::String,
@@ -1099,7 +1136,10 @@ mod tests {
     #[test]
     fn non_form_single_component_surface_is_not_form_only() {
         let s = Surface {
-            components: vec![Component::Text { value: "hi".into() }],
+            components: vec![Component::Text {
+                pills: Default::default(),
+                value: "hi".into(),
+            }],
         };
         let result = json!({ "surface": s });
         assert!(try_extract_form_only(&result).is_none());
@@ -1112,9 +1152,15 @@ mod tests {
         // tool intended.
         let s = Surface {
             components: vec![
-                Component::Text { value: "1".into() },
+                Component::Text {
+                    pills: Default::default(),
+                    value: "1".into(),
+                },
                 Component::Narration { text: "2".into() },
-                Component::Text { value: "3".into() },
+                Component::Text {
+                    pills: Default::default(),
+                    value: "3".into(),
+                },
                 Component::Narration { text: "4".into() },
             ],
         };

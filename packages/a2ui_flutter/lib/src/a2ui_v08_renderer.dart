@@ -1,38 +1,49 @@
-import 'dart:convert';
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 
+import 'component_builder.dart';
 import 'markdown_lite.dart';
 import 'sources_row.dart';
 
-/// A2UI v0.9 renderer. **No shared base** with v0.8 per ADR-4. The
-/// envelope uses lowercase `type`, no `Component` wrapper, action
-/// data inlined. Components: text / narration / button / selection /
-/// form / dashboard, plus the report kinds kpi / table / vega (so a
-/// report renderer's surface — e.g. Peacock — renders natively).
-class A2UIv09Renderer extends StatelessWidget {
-  const A2UIv09Renderer({
+/// A2UI v0.8 renderer. **No shared base** with v0.9, per ADR-4 — this
+/// file owns the full v0.8 envelope shape so the schema can evolve
+/// without rippling. The envelope wraps each stream entry in a
+/// PascalCase `Component` object:
+///
+/// ```json
+/// { "Component": { "Text"|"Narration"|"Button"|"Selection"|"Form"|"Dashboard": {...} } }
+/// ```
+///
+/// Unknown component kinds render as a yellow debug card so the
+/// operator sees what's missing instead of a silent skip.
+class A2UIv08Renderer extends StatelessWidget {
+  const A2UIv08Renderer({
     super.key,
     required this.envelope,
     this.onAction,
     this.onOpenResource,
+    this.componentBuilder,
   });
 
   final Map<String, dynamic> envelope;
   final void Function(String tool, Map<String, dynamic> args)? onAction;
 
-  /// A `sources` chip was tapped: open its `ui://` resource inline.
+  /// A `Sources` chip was tapped: open its `ui://` resource inline.
   final void Function(String uri)? onOpenResource;
+
+  /// A host's per-node override, consulted before every rule below.
+  /// See [A2uiComponentBuilder].
+  final A2uiComponentBuilder? componentBuilder;
 
   @override
   Widget build(BuildContext context) {
     final stream = (envelope['stream'] as List?) ?? const [];
-    // A sibling button carrying a ui:// resource is the open affordance
-    // (hosts auto-open it) — inline `report` nodes are suppressed next to
-    // it to avoid a duplicate control.
-    final hasResourceButton = stream.any((c) =>
-        c is Map && (c['resource'] as String?)?.startsWith('ui://') == true);
+    // v0.8 wraps components; the resource rides the inner Button object.
+    final hasResourceButton = stream.any((c) {
+      final comp = (c is Map) ? c['Component'] : null;
+      final inner = (comp is Map) ? comp['Button'] : null;
+      return inner is Map &&
+          (inner['resource'] as String?)?.startsWith('ui://') == true;
+    });
     // A run of consecutive action buttons (the model's proposed follow-ups,
     // plus an optional "Open report") collapses into one compact horizontal
     // `Wrap` — mirroring the channel-chip row — instead of a tall stack of
@@ -53,6 +64,16 @@ class A2UIv09Renderer extends StatelessWidget {
     }
 
     for (final raw in stream) {
+      // The host first, and before the placement rules below — see
+      // [A2uiComponentBuilder] for why its opinion wins outright.
+      final hosted = componentBuilder == null || raw is! Map
+          ? null
+          : componentBuilder!(context, raw.cast<String, dynamic>());
+      if (hosted != null) {
+        flushActions();
+        children.add(hosted);
+        continue;
+      }
       if (_isSuppressedReport(raw, hasResourceButton)) continue;
       final action = _actionButton(context, raw);
       if (action != null) {
@@ -69,20 +90,26 @@ class A2UIv09Renderer extends StatelessWidget {
     );
   }
 
-  /// An inline `report` next to a resource button is opened by that sibling —
+  /// An inline `Report` next to a resource button is opened by that sibling —
   /// drop it here to avoid a duplicate control.
-  bool _isSuppressedReport(dynamic raw, bool hasResourceButton) =>
-      hasResourceButton && raw is Map && raw['type'] == 'report';
+  bool _isSuppressedReport(dynamic raw, bool hasResourceButton) {
+    if (!hasResourceButton || raw is! Map) return false;
+    final comp = raw['Component'];
+    return comp is Map && comp.containsKey('Report');
+  }
 
-  /// A compact follow-up button for an actionable node (`button` or an inline
-  /// `report` open-control), else null. Rendered into the horizontal `Wrap`.
+  /// A compact follow-up button for an actionable component (`Button` or an
+  /// inline `Report` open-control), else null. Rendered into the `Wrap`.
   Widget? _actionButton(BuildContext context, dynamic raw) {
     if (raw is! Map) return null;
-    final map = raw.cast<String, dynamic>();
-    switch (map['type']) {
-      case 'button':
-        final label = (map['label'] as String?) ?? '';
-        final action = (map['action'] as Map?)?.cast<String, dynamic>();
+    final component = (raw['Component'] as Map?)?.cast<String, dynamic>();
+    if (component == null || component.length != 1) return null;
+    final entry = component.entries.single;
+    final body = (entry.value as Map?)?.cast<String, dynamic>() ?? const {};
+    switch (entry.key) {
+      case 'Button':
+        final label = (body['label'] as String?) ?? '';
+        final action = (body['action'] as Map?)?.cast<String, dynamic>();
         return _followUp(
           context,
           label,
@@ -94,9 +121,9 @@ class A2UIv09Renderer extends StatelessWidget {
                         const {},
                   ),
         );
-      case 'report':
-        final reportId = (map['report_id'] as String?) ?? '';
-        final rawArgs = (map['args'] as Map?)?.cast<String, dynamic>() ??
+      case 'Report':
+        final reportId = (body['report_id'] as String?) ?? '';
+        final rawArgs = (body['args'] as Map?)?.cast<String, dynamic>() ??
             <String, dynamic>{};
         return _followUp(
           context,
@@ -133,47 +160,55 @@ class A2UIv09Renderer extends StatelessWidget {
 
   Widget _node(BuildContext context, dynamic raw) {
     if (raw is! Map) return _unknown('not an object');
-    final map = raw.cast<String, dynamic>();
-    final type = map['type'] as String?;
-    switch (type) {
-      case 'text':
-        // Chat text may carry light portable markdown (the same subset the
-        // Google Chat adapter normalises) — render it, don't show raw `**`.
+    final component = (raw['Component'] as Map?)?.cast<String, dynamic>();
+    if (component == null) return _unknown('missing Component wrapper');
+    if (component.length != 1) {
+      return _unknown('expected one key in Component, got ${component.keys}');
+    }
+    final entry = component.entries.single;
+    final kind = entry.key;
+    final body = (entry.value as Map?)?.cast<String, dynamic>() ?? const {};
+    switch (kind) {
+      case 'Text':
+        // Chat text may carry light portable markdown — render it.
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
-          child: MarkdownLite((map['text'] as String?) ?? ''),
+          child: MarkdownLite((body['text'] as String?) ?? ''),
         );
-      case 'narration':
+      case 'Narration':
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
           child: Text(
-            (map['text'] as String?) ?? '',
+            (body['text'] as String?) ?? '',
             style: const TextStyle(fontStyle: FontStyle.italic),
           ),
         );
-      case 'selection':
-        final prompt = (map['prompt'] as String?) ?? '';
-        final tool = (map['tool'] as String?) ?? '';
-        final argsKey = (map['args_key'] as String?) ?? 'value';
-        final options = ((map['options'] as List?) ?? const [])
+      case 'Selection':
+        final prompt = (body['prompt'] as String?) ?? '';
+        final options = ((body['options'] as List?) ?? const [])
             .cast<Map>()
             .map((o) => _OptionPair(
                   label: (o['label'] as String?) ?? '',
                   value: (o['value'] as String?) ?? '',
                 ))
             .toList(growable: false);
+        final action = (body['action'] as Map?)?.cast<String, dynamic>();
         return _Selection(
           prompt: prompt,
           options: options,
-          onPick: onAction == null
+          onPick: onAction == null || action == null
               ? null
-              : (value) => onAction!(tool, {argsKey: value}),
+              : (value) => onAction!(
+                    action['tool'] as String,
+                    {
+                      (action['args_key'] as String?) ?? 'value': value,
+                    },
+                  ),
         );
-      case 'form':
-        final title = (map['title'] as String?) ?? '';
-        final submitLabel = (map['submit_label'] as String?) ?? 'Submit';
-        final tool = (map['tool'] as String?) ?? '';
-        final fields = ((map['fields'] as List?) ?? const [])
+      case 'Form':
+        final title = (body['title'] as String?) ?? '';
+        final submitLabel = (body['submit_label'] as String?) ?? 'Submit';
+        final fields = ((body['fields'] as List?) ?? const [])
             .cast<Map>()
             .map((f) => _FormFieldSpec(
                   name: (f['name'] as String?) ?? '',
@@ -182,17 +217,19 @@ class A2UIv09Renderer extends StatelessWidget {
                   required: (f['required'] as bool?) ?? false,
                 ))
             .toList(growable: false);
+        final action = (body['action'] as Map?)?.cast<String, dynamic>();
         return _Form(
           title: title,
           fields: fields,
           submitLabel: submitLabel,
-          onSubmit: onAction == null
+          onSubmit: onAction == null || action == null
               ? null
-              : (values) => onAction!(tool, values),
+              : (values) =>
+                  onAction!(action['tool'] as String, values),
         );
-      case 'dashboard':
-        final title = (map['title'] as String?) ?? '';
-        final tiles = ((map['tiles'] as List?) ?? const [])
+      case 'Dashboard':
+        final title = (body['title'] as String?) ?? '';
+        final tiles = ((body['tiles'] as List?) ?? const [])
             .cast<Map>()
             .map((t) => _Tile(
                   label: (t['label'] as String?) ?? '',
@@ -201,31 +238,10 @@ class A2UIv09Renderer extends StatelessWidget {
                 ))
             .toList(growable: false);
         return _Dashboard(title: title, tiles: tiles);
-      case 'kpi':
-        return _Kpi(
-          label: (map['label'] as String?) ?? '',
-          value: (map['value'] ?? '').toString(),
-          trend: map['trend'] as String?,
-        );
-      case 'table':
-        final columns = ((map['columns'] as List?) ?? const [])
-            .map((c) => c.toString())
-            .toList(growable: false);
-        final rows = ((map['rows'] as List?) ?? const [])
-            .map((r) => ((r as List?) ?? const [])
-                .map((c) => c?.toString() ?? '')
-                .toList(growable: false))
-            .toList(growable: false);
-        return _DataTableView(columns: columns, rows: rows);
-      case 'vega':
-        return _Vega(
-          title: map['title'] as String?,
-          pngBase64: map['png_base64'] as String?,
-        );
-      // `button` and `report` are actionable nodes handled in `build` — they
-      // collapse into the compact follow-up `Wrap`, so they never reach here.
-      case 'sources':
-        final items = ((map['items'] as List?) ?? const [])
+      // `Button` and `Report` are actionable components handled in `build` —
+      // they collapse into the compact follow-up `Wrap`, never reaching here.
+      case 'Sources':
+        final items = ((body['items'] as List?) ?? const [])
             .whereType<Map>()
             .map((i) => SourceChip(
                   label: (i['label'] as String?) ?? '',
@@ -234,7 +250,7 @@ class A2UIv09Renderer extends StatelessWidget {
             .toList(growable: false);
         return SourcesRow(items: items, onOpen: onOpenResource);
       default:
-        return _unknown('unknown v0.9 type: $type');
+        return _unknown('unknown v0.8 component kind: $kind');
     }
   }
 
@@ -251,9 +267,7 @@ class A2UIv09Renderer extends StatelessWidget {
 }
 
 // ---------------------------------------------------------------
-// Rich-component helpers — local to v0.9 per ADR-4. v0.9 uses
-// SegmentedButton for selection where v0.8 used ChoiceChip — the
-// renderers can diverge without affecting each other.
+// Rich-component helpers — local to v0.8 per ADR-4.
 // ---------------------------------------------------------------
 
 class _OptionPair {
@@ -307,21 +321,21 @@ class _SelectionState extends State<_Selection> {
           children: [
             Text(widget.prompt),
             const SizedBox(height: 8),
-            SegmentedButton<String>(
-              segments: [
-                for (final o in widget.options)
-                  ButtonSegment(value: o.value, label: Text(o.label)),
+            Wrap(
+              spacing: 8,
+              children: [
+                for (final opt in widget.options)
+                  ChoiceChip(
+                    label: Text(opt.label),
+                    selected: _picked == opt.value,
+                    onSelected: widget.onPick == null
+                        ? null
+                        : (_) {
+                            setState(() => _picked = opt.value);
+                            widget.onPick!(opt.value);
+                          },
+                  ),
               ],
-              selected: {?_picked},
-              emptySelectionAllowed: true,
-              showSelectedIcon: false,
-              onSelectionChanged: widget.onPick == null
-                  ? null
-                  : (s) {
-                      if (s.isEmpty) return;
-                      setState(() => _picked = s.first);
-                      widget.onPick!(s.first);
-                    },
             ),
           ],
         ),
@@ -416,113 +430,6 @@ class _FormStateView extends State<_Form> {
         },
       ),
     );
-  }
-}
-
-/// A single headline metric (a report's `kpi` component).
-class _Kpi extends StatelessWidget {
-  const _Kpi({required this.label, required this.value, this.trend});
-  final String label;
-  final String value;
-  final String? trend;
-
-  @override
-  Widget build(BuildContext context) => Card(
-        margin: const EdgeInsets.symmetric(vertical: 6),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(label,
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
-                      )),
-              const SizedBox(height: 4),
-              Text(value, style: Theme.of(context).textTheme.headlineSmall),
-              if (trend != null) ...[
-                const SizedBox(height: 2),
-                Text(trend!, style: Theme.of(context).textTheme.bodySmall),
-              ],
-            ],
-          ),
-        ),
-      );
-}
-
-/// A report's `table` component → a scrollable `DataTable`.
-class _DataTableView extends StatelessWidget {
-  const _DataTableView({required this.columns, required this.rows});
-  final List<String> columns;
-  final List<List<String>> rows;
-
-  @override
-  Widget build(BuildContext context) => Card(
-        margin: const EdgeInsets.symmetric(vertical: 6),
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: DataTable(
-            columns: [
-              for (final c in columns) DataColumn(label: Text(c)),
-            ],
-            rows: [
-              for (final r in rows)
-                DataRow(cells: [
-                  for (var i = 0; i < columns.length; i++)
-                    DataCell(Text(i < r.length ? r[i] : '')),
-                ]),
-            ],
-          ),
-        ),
-      );
-}
-
-/// A report's `vega` chart. A full Vega-Lite renderer is out of scope for
-/// the SPA; when the producer ships a rasterised `png_base64` (Peacock does)
-/// we show it, otherwise a placeholder pointing at the embedded report.
-class _Vega extends StatelessWidget {
-  const _Vega({this.title, this.pngBase64});
-  final String? title;
-  final String? pngBase64;
-
-  @override
-  Widget build(BuildContext context) {
-    final bytes = _decode(pngBase64);
-    return Card(
-      margin: const EdgeInsets.symmetric(vertical: 6),
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (title != null && title!.isNotEmpty) ...[
-              Text(title!, style: Theme.of(context).textTheme.titleSmall),
-              const SizedBox(height: 8),
-            ],
-            if (bytes != null)
-              Image.memory(bytes, fit: BoxFit.contain)
-            else
-              Text(
-                'chart (open the embedded report to view)',
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                      fontStyle: FontStyle.italic,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  static Uint8List? _decode(String? b64) {
-    if (b64 == null || b64.isEmpty) return null;
-    final cleaned = b64.contains(',') ? b64.split(',').last : b64;
-    try {
-      return base64Decode(cleaned);
-    } catch (_) {
-      return null;
-    }
   }
 }
 

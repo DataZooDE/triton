@@ -520,6 +520,8 @@ mod tests {
 
     fn field(name: &str, label: &str, kind: FormFieldKind, required: bool) -> FormField {
         FormField {
+            placeholder: None,
+            default_value: None,
             name: name.into(),
             label: label.into(),
             kind,

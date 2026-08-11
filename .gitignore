@@ -40,6 +40,13 @@ apps/explorer/*.iml
 apps/explorer/pubspec.lock
 apps/explorer/linux/flutter/ephemeral/
 
+# Cargo's `debug` rule at the top of this file is unanchored, so it also
+# swallows Android's `app/src/debug/` SOURCE SET — whose manifest is what
+# grants INTERNET to debug builds. Without it the Flutter tool cannot reach
+# the app's VM service and `flutter test integration_test/ -d <android>`
+# fails to connect. Re-include it explicitly.
+!apps/explorer/android/app/src/debug/
+
 # rodney browser-smoke screenshots
 deploy/local-e2e/.rodney-out/
 

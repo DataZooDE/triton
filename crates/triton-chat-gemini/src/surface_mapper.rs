@@ -64,8 +64,14 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     for c in &surface.components {
         match c {
             // Markdown passthrough — Gemini renders the emphasis/lists as-is.
-            Component::Text { value } => chunks.push(value.clone()),
+            Component::Text { value, .. } => chunks.push(value.clone()),
             Component::Narration { text } => chunks.push(text.clone()),
+            // A fenced `diff` block: the +/- markers only line up in a
+            // fixed-width font, and the fence is what gets one.
+            Component::Diff { lines } => chunks.push(format!(
+                "```diff\n{}\n```",
+                triton_core::a2ui::diff_to_text(lines)
+            )),
             Component::Dashboard { title, tiles } => chunks.push(dashboard_table(title, tiles)),
             Component::Sources { items } => {
                 if !items.is_empty() {
@@ -176,6 +182,7 @@ mod tests {
         let s = Surface {
             components: vec![
                 Component::Text {
+                    pills: Default::default(),
                     value: "Revenue is **up**.".into(),
                 },
                 Component::Narration {
@@ -236,8 +243,12 @@ mod tests {
     fn interactive_controls_are_deferred() {
         let s = Surface {
             components: vec![
-                Component::Text { value: "hi".into() },
+                Component::Text {
+                    pills: Default::default(),
+                    value: "hi".into(),
+                },
                 Component::Button {
+                    primary: false,
                     label: "Go".into(),
                     tool: "narrate".into(),
                     args: json!({}),

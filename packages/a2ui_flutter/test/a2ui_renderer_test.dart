@@ -7,9 +7,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:triton_explorer/widgets/a2ui/a2ui_renderer.dart';
-import 'package:triton_explorer/widgets/a2ui/a2ui_v08_renderer.dart';
-import 'package:triton_explorer/widgets/a2ui/a2ui_v09_renderer.dart';
+import 'package:a2ui_flutter/a2ui_flutter.dart';
 
 void main() {
   group('A2UIv08Renderer', () {

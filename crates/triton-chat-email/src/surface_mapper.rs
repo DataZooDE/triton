@@ -100,7 +100,7 @@ pub fn render(surface: &Surface) -> Result<RenderedEmail, RenderError> {
 
     for c in &surface.components {
         match c {
-            Component::Text { value } => {
+            Component::Text { value, .. } => {
                 flush(&mut pending, &mut html_blocks, &mut text_blocks);
                 html_blocks.push(md_to_html(value));
                 // The plaintext alternative drops emphasis fences so it reads
@@ -184,6 +184,18 @@ pub fn render(surface: &Surface) -> Result<RenderedEmail, RenderError> {
                     escape_html(report_id)
                 ));
                 text_blocks.push(format!("\u{1F4CA} {report_id}"));
+            }
+            // A diff is monospace or it is not a diff — the +/- markers only
+            // line up in a fixed-width block. Escaped, because diff content is
+            // page text and page text can contain anything.
+            Component::Diff { lines } => {
+                flush(&mut pending, &mut html_blocks, &mut text_blocks);
+                let text = triton_core::a2ui::diff_to_text(lines);
+                html_blocks.push(format!(
+                    "<pre style=\"font-family:monospace\">{}</pre>",
+                    escape_html(&text)
+                ));
+                text_blocks.push(text);
             }
             Component::Sources { items } => {
                 flush(&mut pending, &mut html_blocks, &mut text_blocks);
@@ -312,7 +324,7 @@ fn wrap_document(subject: &str, blocks: &[String], truncated: bool) -> String {
 /// markers and clamped to a sane length. Falls back to [`DEFAULT_SUBJECT`].
 pub fn derive_subject(surface: &Surface) -> String {
     let lead = surface.components.iter().find_map(|c| match c {
-        Component::Text { value } => value
+        Component::Text { value, .. } => value
             .lines()
             .map(str::trim)
             .find(|l| !l.is_empty())
@@ -510,6 +522,7 @@ mod tests {
     #[test]
     fn text_becomes_html_with_subject_from_lead() {
         let s = surface(vec![Component::Text {
+            pills: Default::default(),
             value: "**Initech** leads revenue.\n\n- widgets\n- services".into(),
         }]);
         let r = render(&s).expect("renders");
@@ -530,15 +543,18 @@ mod tests {
     fn buttons_render_as_links_not_deferred() {
         let s = surface(vec![
             Component::Text {
+                pills: Default::default(),
                 value: "Top customers".into(),
             },
             Component::Button {
+                primary: false,
                 label: "What does Initech buy?".into(),
                 tool: "assistant".into(),
                 args: serde_json::json!({ "question": "what does initech buy?" }),
                 resource: None,
             },
             Component::Button {
+                primary: false,
                 label: "Open report".into(),
                 tool: "render_report".into(),
                 args: serde_json::json!({}),
@@ -583,9 +599,13 @@ mod tests {
     fn report_renders_a_caption() {
         let s = surface(vec![
             Component::Text {
+                pills: Default::default(),
                 value: "See the chart".into(),
             },
             Component::Report {
+                title: None,
+                series: Vec::new(),
+                labels: Vec::new(),
                 report_id: "sales-by-customer".into(),
                 args: serde_json::json!({}),
             },
@@ -600,6 +620,8 @@ mod tests {
         let s = surface(vec![Component::Form {
             title: "Allocate".into(),
             fields: vec![FormField {
+                placeholder: None,
+                default_value: None,
                 name: "material".into(),
                 label: "Material".into(),
                 kind: FormFieldKind::String,
@@ -645,6 +667,7 @@ mod tests {
     #[test]
     fn html_special_chars_are_escaped() {
         let s = surface(vec![Component::Text {
+            pills: Default::default(),
             value: "5 < 10 & \"quoted\" > tag".into(),
         }]);
         let r = render(&s).expect("renders");
@@ -674,6 +697,7 @@ mod tests {
     #[test]
     fn subject_strips_heading_and_bold_and_clamps() {
         let s = surface(vec![Component::Text {
+            pills: Default::default(),
             value: "## **Q3 renewal** at risk for the whole account portfolio and then some more text that runs well beyond the clamp limit to force truncation here".into(),
         }]);
         let r = render(&s).expect("renders");
@@ -685,6 +709,7 @@ mod tests {
     #[test]
     fn oversized_body_truncates_between_blocks() {
         let big = Component::Text {
+            pills: Default::default(),
             value: "x".repeat(4_000),
         };
         let s = surface((0..200).map(|_| big.clone()).collect());
@@ -706,6 +731,7 @@ mod tests {
         // inject event-handler attributes into the delivered HTML. (Clean lead
         // line so the derived subject/title doesn't echo the payload.)
         let s = surface(vec![Component::Text {
+            pills: Default::default(),
             value: "Summary.\n\nsee [click](https://x\"onmouseover=alert(1))".into(),
         }]);
         let r = render(&s).expect("renders");
@@ -724,6 +750,7 @@ mod tests {
         // `javascript:` / `data:` hrefs must be dropped to a safe placeholder.
         // Lead line is clean so the assertions target the rendered body hrefs.
         let s = surface(vec![Component::Text {
+            pills: Default::default(),
             value: "Options.\n\ntap [here](javascript:alert(1)) or [x](data:text/html,<b>)".into(),
         }]);
         let r = render(&s).expect("renders");
@@ -746,6 +773,7 @@ mod tests {
     #[test]
     fn markdown_link_with_allowed_scheme_is_preserved() {
         let s = surface(vec![Component::Text {
+            pills: Default::default(),
             value:
                 "open [report](https://example.com/r?a=1&b=2) and [doc](ui://peacock/document?id=x)"
                     .into(),
@@ -766,6 +794,7 @@ mod tests {
         // A single block larger than the whole budget must still be bounded —
         // the ceiling is a hard cap, not soft-by-one-block.
         let s = surface(vec![Component::Text {
+            pills: Default::default(),
             value: "y".repeat(EMAIL_HTML_MAX_BYTES + 50_000),
         }]);
         let r = render(&s).expect("renders");
