@@ -18,7 +18,9 @@ class A2UIv09Renderer extends StatelessWidget {
     required this.envelope,
     this.onAction,
     this.onOpenResource,
+    this.onResourceAction,
     this.componentBuilder,
+    this.unknownComponentBuilder,
   });
 
   final Map<String, dynamic> envelope;
@@ -27,9 +29,19 @@ class A2UIv09Renderer extends StatelessWidget {
   /// A `sources` chip was tapped: open its `ui://` resource inline.
   final void Function(String uri)? onOpenResource;
 
+  /// A `button` carrying a `resource` was tapped. Falls back to [onAction]
+  /// when the host has not supplied it, which is what keeps a resource button
+  /// behaving exactly as it did for hosts that predate the callback.
+  /// See [A2uiResourceActionCallback].
+  final A2uiResourceActionCallback? onResourceAction;
+
   /// A host's per-node override, consulted before every rule below.
   /// See [A2uiComponentBuilder].
   final A2uiComponentBuilder? componentBuilder;
+
+  /// What to draw for a `type` this tree does not know; null keeps the amber
+  /// debug card. See [A2uiUnknownComponentBuilder].
+  final A2uiUnknownComponentBuilder? unknownComponentBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -102,15 +114,15 @@ class A2UIv09Renderer extends StatelessWidget {
         return _followUp(
           context,
           label,
-          onAction == null || action == null
-              ? null
-              : () => onAction!(
-                    action['tool'] as String,
-                    ((action['args'] as Map?)?.cast<String, dynamic>()) ??
-                        const {},
-                  ),
+          action == null ? null : _dispatch(action, map['resource'] as String?),
+          primary: map['primary'] == true,
         );
       case 'report':
+        // A report that inlines a preview is a block, not a chip: it renders
+        // through `_node` (which draws the preview AND, when the host can
+        // dispatch, the same open control). Only a dispatch-only report — the
+        // pre-#206 shape — collapses into the follow-up row, unchanged.
+        if (_hasPreview(map)) return null;
         final reportId = (map['report_id'] as String?) ?? '';
         final rawArgs = (map['args'] as Map?)?.cast<String, dynamic>() ??
             <String, dynamic>{};
@@ -129,15 +141,53 @@ class A2UIv09Renderer extends StatelessWidget {
     }
   }
 
+  /// Where a button's tap goes.
+  ///
+  /// A `resource` reaches [onResourceAction] **whole** — tool, args and uri
+  /// together, because a resource button is an action that also names a view.
+  /// A host that has not supplied that callback gets the `(tool, args)`
+  /// dispatch it has always had: the resource is unreachable for it, exactly
+  /// as before, rather than the tap silently changing meaning.
+  VoidCallback? _dispatch(Map<String, dynamic> action, String? resource) {
+    final tool = (action['tool'] as String?) ?? '';
+    final args =
+        ((action['args'] as Map?)?.cast<String, dynamic>()) ?? const {};
+    final resourceSink = onResourceAction;
+    if (resource != null && resource.isNotEmpty && resourceSink != null) {
+      return () => resourceSink(tool, args, resource);
+    }
+    final sink = onAction;
+    return sink == null ? null : () => sink(tool, args);
+  }
+
+  /// Whether a `report` node carries the inline preview #206 added beside
+  /// `report_id` — the thing a host that cannot dispatch `render_report`
+  /// draws instead.
+  static bool _hasPreview(Map<String, dynamic> map) =>
+      (map['title'] as String?)?.isNotEmpty == true ||
+      (map['series'] as List?)?.isNotEmpty == true ||
+      (map['labels'] as List?)?.isNotEmpty == true;
+
   /// A compact, tertiary-accented action button — visually distinct from the
   /// neutral channel chips, small enough that several fit on one `Wrap` line.
-  Widget _followUp(BuildContext context, String label, VoidCallback? onPressed) {
+  ///
+  /// [primary] weights the one action the surface is actually asking for. A
+  /// contrast, not a restyle: its siblings keep the tonal weighting every
+  /// button had before, or "primary" would mean nothing.
+  Widget _followUp(
+    BuildContext context,
+    String label,
+    VoidCallback? onPressed, {
+    bool primary = false,
+  }) {
     final scheme = Theme.of(context).colorScheme;
-    return FilledButton.tonal(
+    return FilledButton(
       onPressed: onPressed,
       style: FilledButton.styleFrom(
-        backgroundColor: scheme.tertiaryContainer,
-        foregroundColor: scheme.onTertiaryContainer,
+        backgroundColor:
+            primary ? scheme.primary : scheme.tertiaryContainer,
+        foregroundColor:
+            primary ? scheme.onPrimary : scheme.onTertiaryContainer,
         visualDensity: VisualDensity.compact,
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -148,16 +198,30 @@ class A2UIv09Renderer extends StatelessWidget {
   }
 
   Widget _node(BuildContext context, dynamic raw) {
-    if (raw is! Map) return _unknown('not an object');
+    if (raw is! Map) {
+      return _unknown(context, 'not an object', const <String, dynamic>{});
+    }
     final map = raw.cast<String, dynamic>();
     final type = map['type'] as String?;
     switch (type) {
       case 'text':
         // Chat text may carry light portable markdown (the same subset the
         // Google Chat adapter normalises) — render it, don't show raw `**`.
+        //
+        // The pills map is passed even when the node omits it (an empty map,
+        // never null): omission means "no label was resolvable", which is the
+        // D27 degrade — every wikilink shows its bare id. Passing null here
+        // would mean "this contract has no wikilinks" and would leak `[[…]]`
+        // to the reader in exactly the case where the labels were withheld.
         return Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
-          child: MarkdownLite((map['text'] as String?) ?? ''),
+          child: MarkdownLite(
+            (map['text'] as String?) ?? '',
+            pills: (map['pills'] as Map?)?.map(
+                  (k, v) => MapEntry('$k', '$v'),
+                ) ??
+                const <String, String>{},
+          ),
         );
       case 'narration':
         return Padding(
@@ -196,6 +260,13 @@ class A2UIv09Renderer extends StatelessWidget {
                   label: (f['label'] as String?) ?? '',
                   kind: (f['kind'] as String?) ?? 'string',
                   required: (f['required'] as bool?) ?? false,
+                  placeholder: f['placeholder'] as String?,
+                  // `containsKey`, not `!= null`: a field the agent explicitly
+                  // proposed as null is a proposal, and collapsing it into
+                  // "no default" would be the same silent-substitution bug
+                  // this field exists to fix, one level down.
+                  hasDefault: f.containsKey('default'),
+                  defaultValue: f['default'],
                 ))
             .toList(growable: false);
         return _Form(
@@ -238,8 +309,33 @@ class A2UIv09Renderer extends StatelessWidget {
           title: map['title'] as String?,
           pngBase64: map['png_base64'] as String?,
         );
-      // `button` and `report` are actionable nodes handled in `build` — they
-      // collapse into the compact follow-up `Wrap`, so they never reach here.
+      // `button` and a dispatch-only `report` are actionable nodes handled in
+      // `build` — they collapse into the compact follow-up `Wrap`, so they
+      // never reach here. A `report` carrying an inline preview does.
+      case 'report':
+        final reportId = (map['report_id'] as String?) ?? '';
+        final rawArgs = (map['args'] as Map?)?.cast<String, dynamic>() ??
+            <String, dynamic>{};
+        return _ReportPreview(
+          title: (map['title'] as String?) ?? '',
+          series: ((map['series'] as List?) ?? const [])
+              .whereType<num>()
+              .map((n) => n.toDouble())
+              .toList(growable: false),
+          labels: ((map['labels'] as List?) ?? const [])
+              .map((l) => l.toString())
+              .toList(growable: false),
+          // Beside the preview, never instead of it: the same envelope has to
+          // work in a host that can dispatch `render_report` and one that
+          // cannot, and that is the whole degradation contract.
+          openLabel: 'Open report: $reportId',
+          onOpen: onAction == null || reportId.isEmpty
+              ? null
+              : () => onAction!(
+                    'render_report',
+                    {...rawArgs, 'report_id': reportId},
+                  ),
+        );
       case 'diff':
         return _Diff(
           lines: ((map['lines'] as List?) ?? const [])
@@ -257,20 +353,28 @@ class A2UIv09Renderer extends StatelessWidget {
             .toList(growable: false);
         return SourcesRow(items: items, onOpen: onOpenResource);
       default:
-        return _unknown('unknown v0.9 type: $type');
+        return _unknown(context, 'unknown v0.9 type: $type', map);
     }
   }
 
-  Widget _unknown(String message) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: Card(
-          color: Colors.amber.shade100,
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Text(message),
-          ),
+  Widget _unknown(
+    BuildContext context,
+    String message,
+    Map<String, dynamic> node,
+  ) {
+    final hosted = unknownComponentBuilder;
+    if (hosted != null) return hosted(context, node);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Card(
+        color: Colors.amber.shade100,
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: Text(message),
         ),
-      );
+      ),
+    );
+  }
 }
 
 // ---------------------------------------------------------------
@@ -368,6 +472,92 @@ class _DiffState extends State<_Diff> {
   }
 }
 
+/// The inline preview a `report` may carry beside its `report_id` (#206).
+///
+/// Deliberately the cheapest chart that is still a chart: a bar per value with
+/// its label under it. This is the rung *below* dispatching `render_report`,
+/// for a host that cannot dispatch at all — its job is to show the shape of
+/// the number, not to compete with the real report. Colours come from the
+/// host's scheme; this package is host-agnostic and hosts own their look.
+class _ReportPreview extends StatelessWidget {
+  const _ReportPreview({
+    required this.title,
+    required this.series,
+    required this.labels,
+    required this.openLabel,
+    required this.onOpen,
+  });
+
+  final String title;
+  final List<double> series;
+  final List<String> labels;
+  final String openLabel;
+  final VoidCallback? onOpen;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final max = series.isEmpty
+        ? 1.0
+        : series.fold<double>(0, (a, b) => b > a ? b : a);
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (title.isNotEmpty)
+              Text(title, style: Theme.of(context).textTheme.titleSmall),
+            if (series.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 96,
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    for (var i = 0; i < series.length; i++)
+                      Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.end,
+                            children: [
+                              Container(
+                                height: max <= 0
+                                    ? 4
+                                    : 4 + (series[i] / max) * 60,
+                                decoration: BoxDecoration(
+                                  color: scheme.primary,
+                                  borderRadius: BorderRadius.circular(3),
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                i < labels.length ? labels[i] : '',
+                                overflow: TextOverflow.ellipsis,
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+            if (onOpen != null)
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton(onPressed: onOpen, child: Text(openLabel)),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _OptionPair {
   const _OptionPair({required this.label, required this.value});
   final String label;
@@ -380,11 +570,28 @@ class _FormFieldSpec {
     required this.label,
     required this.kind,
     required this.required,
+    this.placeholder,
+    this.hasDefault = false,
+    this.defaultValue,
   });
   final String name;
   final String label;
   final String kind;
   final bool required;
+
+  /// Hint text. Never a value — see [hasDefault].
+  final String? placeholder;
+
+  /// Whether the agent proposed a value for this field.
+  ///
+  /// Separate from [defaultValue] being null because they answer different
+  /// questions, and the two must not be conflated: a placeholder that
+  /// submitted itself, or a "no proposal" that submitted the empty string,
+  /// would put words the agent never proposed into a record a consultant
+  /// signed off. When this is false the field contributes **no key at all**
+  /// to the submitted map, which is exactly what a pre-#206 envelope did.
+  final bool hasDefault;
+  final Object? defaultValue;
 }
 
 class _Tile {
@@ -461,6 +668,41 @@ class _FormStateView extends State<_Form> {
   final _controllers = <String, TextEditingController>{};
 
   @override
+  void initState() {
+    super.initState();
+    _seedDefaults();
+  }
+
+  @override
+  void didUpdateWidget(_Form old) {
+    super.didUpdateWidget(old);
+    // A new surface for the same form slot brings new proposals. Seeding is
+    // still idempotent per field name, so a value the user has already touched
+    // survives a rebuild that did not change the field.
+    _seedDefaults();
+  }
+
+  /// Seed the values the agent proposed, so an **untouched** submit carries
+  /// them instead of nulls. Only fields that actually carry a `default` are
+  /// seeded: a field with none must stay absent from the map, because inventing
+  /// an empty string for it would be a value the agent never proposed — the
+  /// same class of bug, in the opposite direction.
+  void _seedDefaults() {
+    for (final f in widget.fields) {
+      if (!f.hasDefault || f.name.isEmpty || _values.containsKey(f.name)) {
+        continue;
+      }
+      final value = f.kind == 'integer' && f.defaultValue is String
+          ? int.tryParse(f.defaultValue as String) ?? f.defaultValue
+          : f.defaultValue;
+      _values[f.name] = value;
+      if (f.kind != 'boolean') {
+        _ctrl(f.name).text = value == null ? '' : '$value';
+      }
+    }
+  }
+
+  @override
   void dispose() {
     for (final c in _controllers.values) {
       c.dispose();
@@ -517,6 +759,7 @@ class _FormStateView extends State<_Form> {
             : TextInputType.text,
         decoration: InputDecoration(
           labelText: label,
+          hintText: f.placeholder,
           border: const OutlineInputBorder(),
         ),
         onChanged: (v) {

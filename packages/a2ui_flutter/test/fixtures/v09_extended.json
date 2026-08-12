@@ -1,0 +1,86 @@
+{
+  "stream": [
+    {
+      "pills": {
+        "hoffmann": "Hoffmann Automotive"
+      },
+      "text": "Filing on [[customer::hoffmann]] today, cc [[customer::secret]]",
+      "type": "text"
+    },
+    {
+      "action": {
+        "args": {
+          "id": "p1"
+        },
+        "tool": "heron_approve"
+      },
+      "label": "Approve",
+      "primary": true,
+      "type": "button"
+    },
+    {
+      "action": {
+        "args": {},
+        "tool": "heron_reject"
+      },
+      "label": "Reject",
+      "type": "button"
+    },
+    {
+      "fields": [
+        {
+          "default": "30d",
+          "kind": "string",
+          "label": "Window",
+          "name": "window",
+          "placeholder": "e.g. 30d",
+          "required": false
+        },
+        {
+          "default": 25,
+          "kind": "integer",
+          "label": "Limit",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "default": true,
+          "kind": "boolean",
+          "label": "Dry run",
+          "name": "dry",
+          "required": true
+        },
+        {
+          "kind": "string",
+          "label": "Note",
+          "name": "note",
+          "placeholder": "optional note",
+          "required": false
+        }
+      ],
+      "submit_label": "Run",
+      "title": "Run skill",
+      "tool": "heron_run",
+      "type": "form"
+    },
+    {
+      "args": {
+        "window": "90d"
+      },
+      "labels": [
+        "Q1",
+        "Q2",
+        "Q3"
+      ],
+      "report_id": "renewals",
+      "series": [
+        4.0,
+        8.0,
+        6.0
+      ],
+      "title": "Renewals",
+      "type": "report"
+    }
+  ],
+  "version": "0.9"
+}

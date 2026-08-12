@@ -22,3 +22,46 @@ typedef A2uiComponentBuilder = Widget? Function(
   BuildContext context,
   Map<String, dynamic> node,
 );
+
+/// What to draw for a stream node no renderer in this package recognises.
+///
+/// [A2uiComponentBuilder] cannot express this. Returning null from it means
+/// *decline*, which falls through to the built-in amber debug card — so a host
+/// has no way to say "render nothing, deliberately". That default is right for
+/// an operator console (the Explorer: an unmapped kind is exactly what you want
+/// to see) and wrong on an end-user's phone, where a debug card is noise about
+/// a problem the reader cannot act on.
+///
+/// A builder rather than a `strict`/`lenient` flag: a flag names two points on
+/// a line hosts want a third point on — hide it, show the card, or draw a
+/// host-shaped "this needs an app update" of your own. The return type is
+/// non-nullable precisely because null is what the other hook already means;
+/// a host that wants nothing returns `SizedBox.shrink()`, and says so.
+///
+/// Consulted only *after* [A2uiComponentBuilder] has declined and the version's
+/// own switch has found no rule. Leaving it null keeps the debug card.
+typedef A2uiUnknownComponentBuilder = Widget Function(
+  BuildContext context,
+  Map<String, dynamic> node,
+);
+
+/// A `button` that carries a `resource` was tapped.
+///
+/// A sibling of `onAction` rather than a widening of it. `onAction` is
+/// `(tool, args)`, and a v0.9 button may name an MCP-App resource
+/// (`ui://…`) *alongside* its tool call — the report-as-surface pattern. The
+/// three ways to reach it are not equivalent:
+///
+///  * widening `onAction` to a third parameter would break every existing
+///    two-argument host at compile time, and this package is already consumed;
+///  * routing it through `onOpenResource` (the `sources` chip seam) would drop
+///    the tool call, and a resource button is an *action* that also names a
+///    view — not a link;
+///  * so: a separate optional callback carrying all three. A host that has not
+///    heard of it keeps today's `onAction` dispatch exactly, which is what
+///    makes this additive.
+typedef A2uiResourceActionCallback = void Function(
+  String tool,
+  Map<String, dynamic> args,
+  String resource,
+);

@@ -14,7 +14,8 @@ import 'sources_row.dart';
 /// ```
 ///
 /// Unknown component kinds render as a yellow debug card so the
-/// operator sees what's missing instead of a silent skip.
+/// operator sees what's missing instead of a silent skip — unless the host
+/// supplies an [unknownComponentBuilder] and asks for something else.
 class A2UIv08Renderer extends StatelessWidget {
   const A2UIv08Renderer({
     super.key,
@@ -22,6 +23,7 @@ class A2UIv08Renderer extends StatelessWidget {
     this.onAction,
     this.onOpenResource,
     this.componentBuilder,
+    this.unknownComponentBuilder,
   });
 
   final Map<String, dynamic> envelope;
@@ -33,6 +35,13 @@ class A2UIv08Renderer extends StatelessWidget {
   /// A host's per-node override, consulted before every rule below.
   /// See [A2uiComponentBuilder].
   final A2uiComponentBuilder? componentBuilder;
+
+  /// What to draw for a kind this tree does not know. The seam is mirrored
+  /// from v0.9 deliberately: ADR-4 keeps the trees independent, which makes it
+  /// easy to give one an affordance and forget the other, and a host whose
+  /// unknown-kind policy silently stops applying on v0.8 is worse off than
+  /// with no hook at all. See [A2uiUnknownComponentBuilder].
+  final A2uiUnknownComponentBuilder? unknownComponentBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -159,11 +168,16 @@ class A2UIv08Renderer extends StatelessWidget {
   }
 
   Widget _node(BuildContext context, dynamic raw) {
-    if (raw is! Map) return _unknown('not an object');
+    final node =
+        raw is Map ? raw.cast<String, dynamic>() : const <String, dynamic>{};
+    if (raw is! Map) return _unknown(context, 'not an object', node);
     final component = (raw['Component'] as Map?)?.cast<String, dynamic>();
-    if (component == null) return _unknown('missing Component wrapper');
+    if (component == null) {
+      return _unknown(context, 'missing Component wrapper', node);
+    }
     if (component.length != 1) {
-      return _unknown('expected one key in Component, got ${component.keys}');
+      return _unknown(context,
+          'expected one key in Component, got ${component.keys}', node);
     }
     final entry = component.entries.single;
     final kind = entry.key;
@@ -250,20 +264,28 @@ class A2UIv08Renderer extends StatelessWidget {
             .toList(growable: false);
         return SourcesRow(items: items, onOpen: onOpenResource);
       default:
-        return _unknown('unknown v0.8 component kind: $kind');
+        return _unknown(context, 'unknown v0.8 component kind: $kind', node);
     }
   }
 
-  Widget _unknown(String message) => Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4),
-        child: Card(
-          color: Colors.amber.shade100,
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Text(message),
-          ),
+  Widget _unknown(
+    BuildContext context,
+    String message,
+    Map<String, dynamic> node,
+  ) {
+    final hosted = unknownComponentBuilder;
+    if (hosted != null) return hosted(context, node);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Card(
+        color: Colors.amber.shade100,
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: Text(message),
         ),
-      );
+      ),
+    );
+  }
 }
 
 // ---------------------------------------------------------------
