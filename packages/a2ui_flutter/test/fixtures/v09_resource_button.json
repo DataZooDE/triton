@@ -1,0 +1,21 @@
+{
+  "stream": [
+    {
+      "text": "The renewals view is ready.",
+      "type": "text"
+    },
+    {
+      "action": {
+        "args": {
+          "report_id": "renewals"
+        },
+        "tool": "render_report"
+      },
+      "label": "Open renewals",
+      "primary": true,
+      "resource": "ui://peacock/report/renewals?window=90d",
+      "type": "button"
+    }
+  ],
+  "version": "0.9"
+}

@@ -19,7 +19,9 @@ class A2UIRenderer extends StatelessWidget {
     this.version,
     this.onAction,
     this.onOpenResource,
+    this.onResourceAction,
     this.componentBuilder,
+    this.unknownComponentBuilder,
   });
 
   final Map<String, dynamic> envelope;
@@ -34,8 +36,16 @@ class A2UIRenderer extends StatelessWidget {
   /// Sources never auto-open — this fires only on an explicit tap.
   final void Function(String uri)? onOpenResource;
 
+  /// A `button` carrying a `resource` was tapped (v0.9 only — v0.8 buttons
+  /// have no resource slot). See [A2uiResourceActionCallback].
+  final A2uiResourceActionCallback? onResourceAction;
+
   /// A host's per-node override. See [A2uiComponentBuilder].
   final A2uiComponentBuilder? componentBuilder;
+
+  /// What to draw for a kind this package does not know.
+  /// See [A2uiUnknownComponentBuilder]; null keeps the debug card.
+  final A2uiUnknownComponentBuilder? unknownComponentBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -47,13 +57,16 @@ class A2UIRenderer extends StatelessWidget {
             envelope: inner,
             onAction: onAction,
             onOpenResource: onOpenResource,
-            componentBuilder: componentBuilder);
+            componentBuilder: componentBuilder,
+            unknownComponentBuilder: unknownComponentBuilder);
       case '0.9':
         return A2UIv09Renderer(
             envelope: inner,
             onAction: onAction,
             onOpenResource: onOpenResource,
-            componentBuilder: componentBuilder);
+            onResourceAction: onResourceAction,
+            componentBuilder: componentBuilder,
+            unknownComponentBuilder: unknownComponentBuilder);
       default:
         return Card(
           color: Colors.amber.shade100,

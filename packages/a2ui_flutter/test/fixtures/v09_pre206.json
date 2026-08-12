@@ -1,0 +1,52 @@
+{
+  "stream": [
+    {
+      "text": "Filing on [[customer::hoffmann]] today",
+      "type": "text"
+    },
+    {
+      "action": {
+        "args": {
+          "id": "p1"
+        },
+        "tool": "heron_approve"
+      },
+      "label": "Approve",
+      "type": "button"
+    },
+    {
+      "fields": [
+        {
+          "kind": "string",
+          "label": "Window",
+          "name": "window",
+          "required": false
+        },
+        {
+          "kind": "integer",
+          "label": "Limit",
+          "name": "limit",
+          "required": false
+        },
+        {
+          "kind": "boolean",
+          "label": "Dry run",
+          "name": "dry",
+          "required": true
+        }
+      ],
+      "submit_label": "Run",
+      "title": "Run skill",
+      "tool": "heron_run",
+      "type": "form"
+    },
+    {
+      "args": {
+        "window": "90d"
+      },
+      "report_id": "renewals",
+      "type": "report"
+    }
+  ],
+  "version": "0.9"
+}
