@@ -28,6 +28,7 @@ use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{self, McpSessions, McpState};
 use triton_adapters_http::rest::{self, RestState, RuntimeDiscovery};
 use triton_core::{Dispatcher, RuntimeInfo, ToolRegistry};
+use triton_identity::{OidcConfig, OidcVerifier};
 
 /// Options for the embedded host.
 pub struct EmbedOpts {
@@ -38,6 +39,17 @@ pub struct EmbedOpts {
     /// (the embedded `/explorer` needs none). Set this if you run the SPA
     /// from a different origin (e.g. `flutter run`).
     pub cors_origins: Vec<String>,
+    /// The inbound identity boundary. `None` = dev-token-only, which a
+    /// release build (`--no-default-features`) compiles out — so a
+    /// production host that leaves this `None` serves NOTHING. Build it
+    /// with [`EmbedOpts::oidc`].
+    pub oidc: Option<Arc<OidcVerifier>>,
+    /// Reported at `/v1/runtime` so a caller (and the Explorer SPA) can
+    /// discover how to authenticate. `oidc_issuer: null` there is the
+    /// symptom of an embedded host with no identity configured.
+    pub oidc_issuer: Option<String>,
+    pub oidc_audience: Option<String>,
+    pub oidc_client_id: Option<String>,
 }
 
 impl Default for EmbedOpts {
@@ -47,6 +59,10 @@ impl Default for EmbedOpts {
             port: 8088,
             env: "dev".to_string(),
             cors_origins: Vec::new(),
+            oidc: None,
+            oidc_issuer: None,
+            oidc_audience: None,
+            oidc_client_id: None,
         }
     }
 }
@@ -77,14 +93,60 @@ impl EmbedOpts {
         self.cors_origins = origins;
         self
     }
+
+    /// Verify inbound bearers as OIDC tokens from `issuer`, addressed to
+    /// `audience`. This is what makes the embedded host usable in
+    /// production: once set, [`IdentityProvider`] treats OIDC as the ONLY
+    /// accepted identity and the dev-token path is closed even in a
+    /// `dev-token` build.
+    ///
+    /// `jwks_url` is optional — leave it `None` for any issuer that
+    /// publishes `/.well-known/openid-configuration` (Google does), and
+    /// set it only for issuers that serve a bare JWKS. Note that Triton's
+    /// own JWKS path is `/.well-known/jwks.json`; `/jwks.json` belongs to
+    /// a different service and yields a silent 404 where every token then
+    /// fails to verify.
+    pub fn oidc(
+        mut self,
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        jwks_url: Option<String>,
+    ) -> Self {
+        let issuer = issuer.into();
+        let audience = audience.into();
+        let mut cfg = OidcConfig::new(issuer.clone(), audience.clone());
+        if let Some(url) = jwks_url {
+            cfg = cfg.with_jwks_url(url);
+        }
+        self.oidc = Some(Arc::new(OidcVerifier::new(cfg)));
+        self.oidc_issuer = Some(issuer);
+        // For Google (and most public IdPs) the OAuth client ID *is* the
+        // audience, so default it here; `oidc_client_id` overrides for
+        // issuers where the two differ.
+        self.oidc_client_id.get_or_insert_with(|| audience.clone());
+        self.oidc_audience = Some(audience);
+        self
+    }
+
+    /// Override the client ID advertised at `/v1/runtime` when it is not
+    /// the same string as the audience.
+    pub fn oidc_client_id(mut self, client_id: impl Into<String>) -> Self {
+        self.oidc_client_id = Some(client_id.into());
+        self
+    }
 }
 
 /// Compose the single-port router for an already-built [`Dispatcher`].
 /// Public so tests (and advanced hosts) can drive it without binding a
-/// port. Identity is dev-token-only here (no OIDC issuer); production
-/// hosts that need OIDC should build their own [`RestState`] etc.
+/// port.
+///
+/// Identity comes from [`EmbedOpts::oidc`]. When it is unset the host is
+/// dev-token-only — fine for `cargo run`, but a release build compiles the
+/// dev token out, so an unset issuer in production means every request is
+/// rejected while `/healthz` keeps answering. `/v1/runtime` reports the
+/// issuer precisely so that state is visible rather than inferred.
 pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
-    let identity = Arc::new(IdentityProvider::new(None));
+    let identity = Arc::new(IdentityProvider::new(opts.oidc.clone()));
     let metrics = dispatcher.metrics();
     let version = env!("CARGO_PKG_VERSION").to_string();
 
@@ -99,9 +161,9 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         image_sha: None,
         package_version: version,
         binary_sha: "embedded".to_string(),
-        oidc_issuer: None,
-        oidc_audience: None,
-        oidc_client_id: None,
+        oidc_issuer: opts.oidc_issuer.clone(),
+        oidc_audience: opts.oidc_audience.clone(),
+        oidc_client_id: opts.oidc_client_id.clone(),
         // Single-port host: MCP/A2A are nested under these paths, so the
         // SPA reaches the whole trio same-origin (no port-swap).
         mcp_base: Some("/mcp".to_string()),

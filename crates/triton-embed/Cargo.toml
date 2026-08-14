@@ -17,6 +17,10 @@ triton-core = { path = "../triton-core" }
 # default-features = false so `--no-default-features` on this crate also
 # disables dev-token downstream (ADR-10: never in release).
 triton-adapters-http = { path = "../triton-adapters-http", default-features = false }
+# The OIDC verifier. Without it this crate can only ever be dev-token-only,
+# and a release build (`--no-default-features`) compiles the dev token out —
+# so the embedded host would accept NOTHING. See `EmbedOpts::oidc`.
+triton-identity = { path = "../triton-identity" }
 axum = { workspace = true }
 tokio = { workspace = true }
 anyhow = "1"

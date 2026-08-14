@@ -2682,6 +2682,7 @@ dependencies = [
  "tokio",
  "triton-adapters-http",
  "triton-core",
+ "triton-identity",
 ]
 
 [[package]]
