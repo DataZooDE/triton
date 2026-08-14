@@ -127,7 +127,10 @@ async fn runtime_advertises_the_issuer() {
         .expect("json");
 
     assert_eq!(runtime["oidc_issuer"], ISSUER, "issuer at /v1/runtime");
-    assert_eq!(runtime["oidc_audience"], AUDIENCE, "audience at /v1/runtime");
+    assert_eq!(
+        runtime["oidc_audience"], AUDIENCE,
+        "audience at /v1/runtime"
+    );
     // Defaults to the audience: for Google the OAuth client ID *is* the aud.
     assert_eq!(
         runtime["oidc_client_id"], AUDIENCE,
