@@ -1630,6 +1630,7 @@ fn build_registry(shadowed: &std::collections::HashSet<String>) -> ToolRegistry 
     #[cfg(feature = "dev-token")]
     register(Arc::new(tools::Delay));
     register(Arc::new(tools::Narrate));
+    register(Arc::new(tools::Help));
     #[cfg(feature = "dev-token")]
     register(Arc::new(tools::DemoPanel));
     #[cfg(feature = "dev-token")]

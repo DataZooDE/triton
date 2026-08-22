@@ -911,8 +911,60 @@ async fn unknown_sender_rejected() {
     assert_eq!(rejected["result"], "error:auth");
 }
 
+/// REMOVED_FROM_SPACE (and any unrecognized `type`) fall into the plain
+/// no-op catch-all — unlike ADDED_TO_SPACE, which now dispatches to `help`
+/// (see `added_to_space_dispatches_to_help_and_replies` below, #162/#165).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_message_event_types_silently_acked() {
+    let jwks = FakeGoogleJwks::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&jwks)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let token = jwks.sign_jwt(standard_claims());
+
+    let body = json!({
+        "type": "REMOVED_FROM_SPACE",
+        "eventTime": "2026-05-25T10:00:00.000Z",
+        "space": { "name": "spaces/AAA", "type": "DM" },
+        "user": { "name": "users/99" }
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&body)
+        .send()
+        .await
+        .expect("POST removed_from_space");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let resp_body: Value = resp.json().await.expect("response body");
+    // Empty object body — no `text` for Google to deliver.
+    assert!(
+        resp_body.as_object().map(|o| o.is_empty()).unwrap_or(false),
+        "non-MESSAGE event MUST ack with empty body; got: {resp_body}"
+    );
+
+    // Wait a moment for any audit lines to flush, then assert no
+    // dispatch / no rejected for this protocol. (Other non-google
+    // audit lines are fine.)
+    std::thread::sleep(Duration::from_millis(200));
+    let any_google: usize = proc
+        .stdout_snapshot()
+        .iter()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["kind"] == "audit" && v["protocol"] == "messenger:google_chat")
+        .count();
+    assert_eq!(
+        any_google, 0,
+        "REMOVED_FROM_SPACE MUST NOT produce any messenger:google_chat audit lines",
+    );
+}
+
+/// ADDED_TO_SPACE dispatches to `help` and replies synchronously with
+/// whatever that tool returns — the welcome message and the `/help`
+/// command share one source of truth (datazoo-agent-template#162).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn added_to_space_dispatches_to_help_and_replies() {
     let jwks = FakeGoogleJwks::start().await;
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&jwks)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
@@ -935,25 +987,10 @@ async fn non_message_event_types_silently_acked() {
     assert!(resp.status().is_success(), "{}", resp.status());
 
     let resp_body: Value = resp.json().await.expect("response body");
-    // Empty object body — no `text` for Google to deliver.
+    let text = resp_body["text"].as_str().unwrap_or_default();
     assert!(
-        resp_body.as_object().map(|o| o.is_empty()).unwrap_or(false),
-        "non-MESSAGE event MUST ack with empty body; got: {resp_body}"
-    );
-
-    // Wait a moment for any audit lines to flush, then assert no
-    // dispatch / no rejected for this protocol. (Other non-google
-    // audit lines are fine.)
-    std::thread::sleep(Duration::from_millis(200));
-    let any_google: usize = proc
-        .stdout_snapshot()
-        .iter()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|v| v["kind"] == "audit" && v["protocol"] == "messenger:google_chat")
-        .count();
-    assert_eq!(
-        any_google, 0,
-        "ADDED_TO_SPACE MUST NOT produce any messenger:google_chat audit lines",
+        !text.is_empty(),
+        "ADDED_TO_SPACE must reply with the help tool's text; got: {resp_body}"
     );
 }
 
@@ -1351,13 +1388,16 @@ async fn async_courier_acks_immediately_and_posts_reply() {
     let webhook = proc.chat_webhook_addr.expect("listener bound");
     let client = reqwest::Client::new();
 
-    // Warm the verifier's JWKS fetch with a non-MESSAGE event so the
-    // timed request below measures only the ack path.
+    // Warm the verifier's JWKS fetch with a non-MESSAGE, non-dispatching
+    // event so the timed request below measures only the ack path.
+    // REMOVED_FROM_SPACE (unlike ADDED_TO_SPACE, which now dispatches to
+    // `help` — #162/#165) always falls into the plain no-op ack, so this
+    // warm-up doesn't depend on `help` being registered in this manifest.
     let jwt = jwks.sign_jwt(standard_claims());
     let warm = client
         .post(format!("http://{webhook}/google_chat/webhook"))
         .header("authorization", format!("Bearer {jwt}"))
-        .json(&json!({ "type": "ADDED_TO_SPACE", "space": { "name": "spaces/AAA" } }))
+        .json(&json!({ "type": "REMOVED_FROM_SPACE", "space": { "name": "spaces/AAA" } }))
         .send()
         .await
         .expect("warm-up POST");

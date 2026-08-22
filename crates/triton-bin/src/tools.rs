@@ -53,6 +53,30 @@ impl Tool for Echo {
     }
 }
 
+/// Walking-skeleton stand-in for the `help` tool a consuming
+/// application registers for real (e.g. `datazoo-agent-template`'s
+/// `HelpTool`) — exercises the `route_command`/`ADDED_TO_SPACE`
+/// dispatch path in this binary's own test harness, which has no
+/// consuming application behind it. No args, unconditionally
+/// registered (production-safe, like `Echo`/`Narrate`) since `help`
+/// is a real production concept, not a dev-only demo.
+pub struct Help;
+
+#[async_trait]
+impl Tool for Help {
+    fn name(&self) -> &'static str {
+        "help"
+    }
+
+    fn input_schema(&self) -> Value {
+        serde_json::json!({ "type": "object", "properties": {} })
+    }
+
+    async fn invoke(&self, _args: Value, _principal: &ToolPrincipal) -> Result<Value, TritonError> {
+        Ok(serde_json::json!({ "text": "Ask me anything — I'll do my best to help." }))
+    }
+}
+
 /// Synchronously sleep for the requested number of milliseconds.
 /// Used by ACC-2's mid-flight-SIGTERM test. **Dev-only**: gated by
 /// the `dev-token` cargo feature so production builds
