@@ -893,14 +893,20 @@ async fn handle_webhook(
     };
 
     // Resolve the event into `(sender, tool, args)` for the shared
-    // identity → dispatch → reply tail below. Two interactive kinds:
-    //   * MESSAGE      — a typed message; `route_command` picks the tool.
-    //   * CARD_CLICKED — a button click; the signed correlation token on
+    // identity → dispatch → reply tail below. Three interactive kinds:
+    //   * MESSAGE        — a typed message; `route_command` picks the tool.
+    //   * CARD_CLICKED   — a button click; the signed correlation token on
     //     the button carries the `(tool, args)` to re-invoke. We
     //     HMAC-verify it here, so a forged click that reaches the
     //     (authenticated) webhook still can't drive an arbitrary tool.
-    // Other events (ADDED_TO_SPACE, REMOVED_FROM_SPACE, ...) are acked
-    // 200 with an empty body so Google doesn't retry.
+    //   * ADDED_TO_SPACE — always routes to `help`, so the welcome message
+    //     and the `/help` command share one source of truth
+    //     (datazoo-agent-template#162). No correlation token or user text
+    //     is involved — this is Google announcing an install, not a user
+    //     action — so unlike CARD_CLICKED there's nothing to verify beyond
+    //     the webhook's own inbound signature.
+    // REMOVED_FROM_SPACE and anything else are acked 200 with an empty
+    // body so Google doesn't retry.
     // `action_echo` is `Some` only on a CARD_CLICKED — the reply prepends
     // it so chat history shows which control the user used.
     // Captured before the match below partially consumes `event`: the
@@ -996,6 +1002,20 @@ async fn handle_webhook(
                     .unwrap_or("")
                     .to_string();
                 (sender, tool, args, echo)
+            }
+            "ADDED_TO_SPACE" => {
+                let sender = event
+                    .user
+                    .as_ref()
+                    .and_then(|u| u.name.as_deref())
+                    .unwrap_or("")
+                    .to_string();
+                (
+                    sender,
+                    "help".to_string(),
+                    Value::Object(Default::default()),
+                    None,
+                )
             }
             _ => {
                 return (
@@ -1585,8 +1605,10 @@ async fn resolve_via_upstream(
 
 /// Strip a leading `@bot ` mention if present, then route by the
 /// first word. Mirrors Telegram's `route_command`: `/<tool> <rest>`
-/// goes to `tool` with `{ subject: rest }` for narrate, otherwise
-/// falls through to the manifest-configured default tool.
+/// goes to `tool` with `{ subject: rest }` for narrate, `help` (no
+/// args) for help, otherwise falls through to the manifest-configured
+/// default tool. `feedback` isn't recognized yet — it lands once the
+/// dispatcher-level `feedback` tool exists (datazoo-agent-template#164).
 fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     let trimmed = text
         .trim_start_matches("@bot ")
@@ -1599,6 +1621,9 @@ fn route_command(text: &str, default_tool: &str) -> (String, Value) {
                 "narrate".to_string(),
                 serde_json::json!({ "subject": subject }),
             );
+        }
+        if tool == "help" {
+            return ("help".to_string(), serde_json::json!({}));
         }
     }
     (
@@ -1720,5 +1745,45 @@ mod tests {
             sub, "alice",
             "sender_table uses the table's sub, not the id"
         );
+    }
+
+    #[test]
+    fn route_command_recognizes_slash_help_with_no_args() {
+        let (tool, args) = route_command("/help", "assistant");
+        assert_eq!(tool, "help");
+        assert_eq!(args, serde_json::json!({}));
+    }
+
+    #[test]
+    fn route_command_recognizes_slash_help_after_a_mention() {
+        let (tool, args) = route_command("@bot /help", "assistant");
+        assert_eq!(tool, "help");
+        assert_eq!(args, serde_json::json!({}));
+    }
+
+    #[test]
+    fn route_command_ignores_trailing_text_after_help() {
+        // Unlike narrate, help takes no args — anything after "/help" is
+        // simply not read into the tool call.
+        let (tool, args) = route_command("/help please", "assistant");
+        assert_eq!(tool, "help");
+        assert_eq!(args, serde_json::json!({}));
+    }
+
+    #[test]
+    fn route_command_falls_through_to_default_for_unrecognized_slash_words() {
+        let (tool, args) = route_command("/feedback great app!", "assistant");
+        assert_eq!(tool, "assistant", "feedback isn't wired yet (#164)");
+        assert_eq!(
+            args,
+            serde_json::json!({ "message": "/feedback great app!" })
+        );
+    }
+
+    #[test]
+    fn route_command_plain_text_goes_to_default_tool() {
+        let (tool, args) = route_command("what's the weather", "assistant");
+        assert_eq!(tool, "assistant");
+        assert_eq!(args, serde_json::json!({ "message": "what's the weather" }));
     }
 }
