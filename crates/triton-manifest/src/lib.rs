@@ -654,15 +654,12 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
         OutboundKind::RestApi => &[("rest_api", "token")],
         OutboundKind::Socket => &[], // session-locality, no token
         // Bot Framework outbound mints OAuth2 access tokens from
-        // `login.microsoftonline.com/botframework.com/oauth2/v2.0/
-        // token` via the client_credentials grant — needs the
-        // bot's `client_id` + `client_secret` resolved at boot
-        // (PR 35). Mirrors the WhatsApp `phone_number_id`-style
-        // declared-required wiring.
-        OutboundKind::BotConnector => &[
-            ("bot_connector", "client_id"),
-            ("bot_connector", "client_secret"),
-        ],
+        // `login.microsoftonline.com` via the client_credentials
+        // grant — always needs the bot's `client_id` resolved at
+        // boot (PR 35). The client PROOF is checked separately
+        // below, because #212 added a second, secretless way to
+        // give it.
+        OutboundKind::BotConnector => &[("bot_connector", "client_id")],
     };
     for (scheme, field) in outbound_required {
         if !adapter.outbound.credentials.contains_key(*field) {
@@ -670,6 +667,44 @@ fn check_required_credentials(adapter: &Adapter, name: &str) -> Result<(), Manif
                 adapter: name.to_string(),
                 scheme: format!("outbound.kind={scheme}"),
                 field: (*field).to_string(),
+            });
+        }
+    }
+
+    // #212: a bot_connector proves itself with EXACTLY ONE of a
+    // `client_secret` or a `federated_token_file` (+ `tenant_id`) —
+    // the latter being an Entra federated credential, i.e. the pod's
+    // own projected ServiceAccount token used as an RFC 7523
+    // client_assertion, which is how a deployment runs with no static
+    // secret at all. Requiring exactly one is deliberate: accepting
+    // both would leave "which credential is actually in force?"
+    // answerable only by reading adapter code.
+    if adapter.outbound.kind == OutboundKind::BotConnector {
+        let has_secret = adapter.outbound.credentials.contains_key("client_secret");
+        let has_federated = adapter
+            .outbound
+            .credentials
+            .contains_key("federated_token_file");
+        if has_secret == has_federated {
+            return Err(ManifestError::MissingSchemeCredential {
+                adapter: name.to_string(),
+                scheme: "outbound.kind=bot_connector".to_string(),
+                field: if has_secret {
+                    "exactly one of client_secret or federated_token_file (both declared)"
+                        .to_string()
+                } else {
+                    "client_secret or federated_token_file".to_string()
+                },
+            });
+        }
+        // The federated grant is tenant-scoped: an Entra federated
+        // credential lives on an app in one tenant, and the shared
+        // `botframework.com` endpoint cannot verify it.
+        if has_federated && !adapter.outbound.credentials.contains_key("tenant_id") {
+            return Err(ManifestError::MissingSchemeCredential {
+                adapter: name.to_string(),
+                scheme: "outbound.kind=bot_connector (federated)".to_string(),
+                field: "tenant_id".to_string(),
             });
         }
     }

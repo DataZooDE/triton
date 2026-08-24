@@ -389,3 +389,118 @@ fn literal_secret_refused_in_prod_admitted_in_dev() {
     );
     assert!(warnings.iter().any(|w| w.contains("literal credential")));
 }
+
+// ---------- #212: bot_connector credential modes ----------
+
+/// Build a bot_connector manifest whose outbound credential block is
+/// exactly `creds`, so each test states only the thing under test.
+fn bot_connector_manifest(creds: &str) -> String {
+    format!(
+        r#"version: "0.2"
+adapters:
+  msteams:
+    kind: ms_teams
+    inbound:
+      kind: webhook
+      signature: bot_framework_jwt
+      audience: env://APP_ID
+    outbound:
+      kind: bot_connector
+{creds}
+    identity:
+      kind: sender_table
+      table: env://SENDER_TABLE
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: adaptive_card
+      selections: adaptive_card
+      forms: adaptive_card
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: env://CORR_KEY
+tools:
+  echo:
+    surface_components: []
+"#
+    )
+}
+
+fn validate_bot_connector(creds: &str) -> Result<(), ManifestError> {
+    let dir = std::env::temp_dir().join(format!(
+        "triton-manifest-botconn-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("m.yaml");
+    std::fs::write(&path, bot_connector_manifest(creds)).expect("write manifest");
+    let result = Manifest::load(&path).and_then(|m| m.validate(Env::Production).map(|_| ()));
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+#[test]
+fn bot_connector_accepts_a_client_secret() {
+    validate_bot_connector("      client_id: env://APP_ID\n      client_secret: env://APP_SECRET")
+        .expect("client_secret is a valid credential mode");
+}
+
+#[test]
+fn bot_connector_accepts_a_federated_token_file() {
+    // The no-static-secret mode: the pod's projected ServiceAccount
+    // token as an RFC 7523 client_assertion.
+    validate_bot_connector(
+        "      client_id: env://APP_ID\n      federated_token_file: env://AZURE_FEDERATED_TOKEN_FILE\n      tenant_id: env://AZURE_TENANT_ID",
+    )
+    .expect("federated_token_file + tenant_id is a valid credential mode");
+}
+
+#[test]
+fn bot_connector_refuses_both_credential_modes() {
+    // Declaring both leaves "which one is in force?" answerable only
+    // by reading adapter code — fail at boot instead.
+    let err = validate_bot_connector(
+        "      client_id: env://APP_ID\n      client_secret: env://APP_SECRET\n      federated_token_file: env://TOKEN_FILE\n      tenant_id: env://AZURE_TENANT_ID",
+    )
+    .expect_err("both credential modes must be refused");
+    assert!(
+        matches!(err, ManifestError::MissingSchemeCredential { .. }),
+        "expected MissingSchemeCredential, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("both declared"),
+        "error should say both were declared, got: {err}"
+    );
+}
+
+#[test]
+fn bot_connector_refuses_neither_credential_mode() {
+    let err = validate_bot_connector("      client_id: env://APP_ID")
+        .expect_err("a bot_connector must prove itself somehow");
+    assert!(
+        matches!(err, ManifestError::MissingSchemeCredential { .. }),
+        "expected MissingSchemeCredential, got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("client_secret") && msg.contains("federated_token_file"),
+        "error should name BOTH accepted modes so the operator can pick, got: {msg}"
+    );
+}
+
+#[test]
+fn federated_bot_connector_requires_a_tenant_id() {
+    // The federated grant is tenant-scoped; the shared
+    // botframework.com endpoint cannot verify a federated credential.
+    let err = validate_bot_connector(
+        "      client_id: env://APP_ID\n      federated_token_file: env://TOKEN_FILE",
+    )
+    .expect_err("federated mode needs a tenant");
+    assert!(
+        err.to_string().contains("tenant_id"),
+        "error should name tenant_id, got: {err}"
+    );
+}

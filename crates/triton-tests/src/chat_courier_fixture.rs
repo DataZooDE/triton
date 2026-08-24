@@ -511,6 +511,10 @@ pub struct FakeBotFramework {
 
 struct FakeBotFrameworkState {
     captured: Mutex<Vec<CapturedActivity>>,
+    /// Raw form bodies POSTed to the token endpoint, so a test can
+    /// assert WHICH grant the client used (client_secret vs
+    /// client_assertion) rather than only that a token came back.
+    token_requests: Mutex<Vec<String>>,
     access_token: String,
 }
 
@@ -532,6 +536,7 @@ impl FakeBotFramework {
 
         let state = Arc::new(FakeBotFrameworkState {
             captured: Mutex::new(Vec::new()),
+            token_requests: Mutex::new(Vec::new()),
             access_token: access_token.to_string(),
         });
 
@@ -573,9 +578,10 @@ impl FakeBotFramework {
             )
             .route(
                 "/oauth2/v2.0/token",
-                post(move || {
+                post(move |body: String| {
                     let s = token_state.clone();
                     async move {
+                        s.token_requests.lock().unwrap().push(body);
                         Json(json!({
                             "token_type": "Bearer",
                             "expires_in": 3600,
@@ -635,6 +641,11 @@ impl FakeBotFramework {
     /// Snapshot of every reply Activity the fixture captured.
     pub fn captured(&self) -> Vec<CapturedActivity> {
         self.state.captured.lock().unwrap().clone()
+    }
+
+    /// Raw form bodies seen at the token endpoint, in order.
+    pub fn token_requests(&self) -> Vec<String> {
+        self.state.token_requests.lock().unwrap().clone()
     }
 }
 

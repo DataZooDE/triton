@@ -1,0 +1,48 @@
+# Federated-credential variant of manifest-msteams-test.yaml (#212).
+# Same adapter, but the outbound credential is a federated token
+# file instead of a client_secret. Single Microsoft Teams adapter with
+# literal credentials (dev mode only). The sender_table is JSON-
+# encoded inline so tests don't need a Vault server.
+version: "0.2"
+
+adapters:
+  msteams:
+    kind: ms_teams
+    inbound:
+      kind: webhook
+      signature: bot_framework_jwt
+      # Bot's Microsoft App ID. JWTs whose `aud` claim doesn't
+      # match this value are refused.
+      audience: triton-msteams-test-appid
+    outbound:
+      kind: bot_connector
+      client_id: triton-msteams-test-appid
+      # No client_secret: this adapter proves itself with an Entra
+      # FEDERATED credential — the pod's projected ServiceAccount
+      # token, read from disk and sent as `client_assertion`. The
+      # path comes from env because the test writes a real token
+      # file to a temp dir; in production it is
+      # AZURE_FEDERATED_TOKEN_FILE.
+      federated_token_file: env://TRITON_MSTEAMS_FEDERATED_TOKEN_FILE
+      tenant_id: env://TRITON_MSTEAMS_TENANT_ID
+    identity:
+      kind: sender_table
+      # JSON: maps the AAD object id (`from.id`) to Principal claims.
+      table: '{"29:1abc":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: adaptive_card
+      selections: adaptive_card
+      forms: adaptive_card
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []
+  narrate:
+    surface_components: [text, narration, buttons]
