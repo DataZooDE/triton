@@ -159,17 +159,33 @@ async fn per_tenant_buckets_do_not_starve_each_other() {
     assert_eq!(send(43, "b3").await, 429);
 
     // Audit emits one rate-limit line per tenant.
-    let lines: Vec<Value> = proc
-        .stdout_snapshot()
-        .iter()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|v| {
-            v["kind"] == "audit"
-                && v["phase"] == "rejected"
-                && v["result"] == "error:ratelimit"
-                && v["protocol"] == "messenger:telegram"
-        })
-        .collect();
+    //
+    // POLL, don't snapshot once: the 429 response is written before
+    // the audit line has necessarily made it through the child's
+    // stdout pipe into our capture thread. A single snapshot here
+    // passes on an idle machine and fails under load with 2 of the
+    // 3 lines — a flake that gets likelier as the aggregated `it`
+    // binary grows more process-spawning tests.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let rate_limit_audits = |proc: &TritonProcess| -> Vec<Value> {
+        proc.stdout_snapshot()
+            .iter()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| {
+                v["kind"] == "audit"
+                    && v["phase"] == "rejected"
+                    && v["result"] == "error:ratelimit"
+                    && v["protocol"] == "messenger:telegram"
+            })
+            .collect()
+    };
+    let lines: Vec<Value> = loop {
+        let found = rate_limit_audits(&proc);
+        if found.len() >= 3 || Instant::now() >= deadline {
+            break found;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
     // Alpha bumped twice (a3, a4); beta once (b3).
     assert!(
         lines.len() >= 3,

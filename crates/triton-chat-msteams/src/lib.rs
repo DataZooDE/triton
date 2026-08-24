@@ -182,15 +182,54 @@ impl MsTeamsAdapter {
             .resolve(client_id_field)
             .await
             .map_err(|e| BuildError::Resolve("outbound.client_id", e))?;
-        let client_secret_field = adapter
-            .outbound
-            .credentials
-            .get("client_secret")
-            .ok_or(BuildError::MissingCredential("outbound.client_secret"))?;
-        let client_secret = resolver
-            .resolve(client_secret_field)
-            .await
-            .map_err(|e| BuildError::Resolve("outbound.client_secret", e))?;
+        // Exactly one outbound credential mode. `client_secret` is
+        // the original; `federated_token_file` (+ `tenant_id`) is the
+        // no-static-secret path for a pod holding an Entra federated
+        // credential. Declaring both is a configuration error worth
+        // failing on rather than silently preferring one — an
+        // operator who set both does not know which is in force.
+        let secret_field = adapter.outbound.credentials.get("client_secret");
+        let federated_field = adapter.outbound.credentials.get("federated_token_file");
+        let outbound_credential = match (secret_field, federated_field) {
+            (Some(_), Some(_)) => {
+                return Err(BuildError::Unsupported(
+                    "outbound.client_secret and outbound.federated_token_file are mutually \
+                     exclusive; declare exactly one"
+                        .into(),
+                ));
+            }
+            (None, None) => {
+                return Err(BuildError::MissingCredential(
+                    "outbound.client_secret or outbound.federated_token_file",
+                ));
+            }
+            (Some(field), None) => {
+                let secret = resolver
+                    .resolve(field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("outbound.client_secret", e))?;
+                OutboundCredential::Secret(secret)
+            }
+            (None, Some(field)) => {
+                let token_file = resolver
+                    .resolve(field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("outbound.federated_token_file", e))?;
+                let tenant_field = adapter
+                    .outbound
+                    .credentials
+                    .get("tenant_id")
+                    .ok_or(BuildError::MissingCredential("outbound.tenant_id"))?;
+                let tenant_id = resolver
+                    .resolve(tenant_field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("outbound.tenant_id", e))?;
+                OutboundCredential::Federated {
+                    token_file,
+                    tenant_id,
+                }
+            }
+        };
 
         let identity = match adapter.identity.kind {
             IdentityKind::SenderTable => {
@@ -266,9 +305,22 @@ impl MsTeamsAdapter {
             .unwrap_or_else(|| jwt_verifier::DEFAULT_OPENID_URL.to_string());
         let verifier = JwtVerifier::new(openid_url, audience.clone())
             .with_extra_service_url_hosts(overrides.extra_service_url_hosts);
-        let token_client = match overrides.token_url {
-            Some(url) => TokenClient::with_token_url(client_id, client_secret, url),
-            None => TokenClient::new(client_id, client_secret),
+        let token_client = match (outbound_credential, overrides.token_url) {
+            (OutboundCredential::Secret(secret), Some(url)) => {
+                TokenClient::with_token_url(client_id, secret, url)
+            }
+            (OutboundCredential::Secret(secret), None) => TokenClient::new(client_id, secret),
+            (OutboundCredential::Federated { token_file, .. }, Some(url)) => {
+                TokenClient::with_federated_token_url(client_id, token_file, url)
+            }
+            (
+                OutboundCredential::Federated {
+                    token_file,
+                    tenant_id,
+                },
+                None,
+            ) => TokenClient::with_federated_credential(client_id, &tenant_id, token_file)
+                .map_err(|e| BuildError::Unsupported(e.to_string()))?,
         };
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
@@ -297,6 +349,17 @@ impl MsTeamsAdapter {
             .route(&path, post(handle_webhook))
             .with_state(self)
     }
+}
+
+/// Which outbound credential the manifest declared. Resolved before
+/// the token client is built so the mutually-exclusive check reads
+/// as one decision rather than being spread across construction.
+enum OutboundCredential {
+    Secret(String),
+    Federated {
+        token_file: String,
+        tenant_id: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
