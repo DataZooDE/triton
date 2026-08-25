@@ -9,6 +9,10 @@ publish = false
 [dependencies]
 triton-core = { path = "../triton-core" }
 async-trait = "0.1"
+# Decodes a JWT payload for `unverified_issuer` (multi-issuer routing).
+# Already in the tree via jsonwebtoken; this makes the use direct rather
+# than accidental.
+base64 = "0.22"
 jsonwebtoken = "9"
 reqwest = { workspace = true }
 serde = { workspace = true }
@@ -23,5 +27,4 @@ uuid = { version = "1", features = ["v4"] }
 # (production supplies the key + JWKS via config), so it stays out of the build.
 rsa = "0.9"
 rand = "0.8"
-base64 = "0.22"
 

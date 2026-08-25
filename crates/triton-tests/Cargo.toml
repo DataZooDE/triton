@@ -27,6 +27,12 @@ triton-manifest = { path = "../triton-manifest" }
 triton-correlation = { path = "../triton-correlation" }
 triton-core = { path = "../triton-core" }
 triton-rasterizer = { path = "../triton-rasterizer" }
+# The embedded trio host, exercised by tests/multi_issuer.rs. No cycle:
+# triton-embed does not depend on this crate.
+triton-embed = { path = "../triton-embed" }
+# Implementing triton-core's `Tool` trait (it is #[async_trait]) for the
+# in-process router in tests/multi_issuer.rs.
+async-trait = "0.1"
 # Decode the rasterizer's PNG output to assert rendered text ink (#135).
 tiny-skia = { workspace = true }
 

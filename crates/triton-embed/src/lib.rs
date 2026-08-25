@@ -26,7 +26,7 @@ use triton_adapters_http::a2a::{self, A2aState, InMemoryTaskStore};
 use triton_adapters_http::cors;
 use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{self, McpSessions, McpState};
-use triton_adapters_http::rest::{self, RestState, RuntimeDiscovery};
+use triton_adapters_http::rest::{self, OidcProviderInfo, RestState, RuntimeDiscovery};
 use triton_core::{Dispatcher, RuntimeInfo, ToolRegistry};
 use triton_identity::{OidcConfig, OidcVerifier};
 
@@ -39,17 +39,24 @@ pub struct EmbedOpts {
     /// (the embedded `/explorer` needs none). Set this if you run the SPA
     /// from a different origin (e.g. `flutter run`).
     pub cors_origins: Vec<String>,
-    /// The inbound identity boundary. `None` = dev-token-only, which a
+    /// The inbound identity boundary: the accepted issuer/audience
+    /// pairs, in configuration order. EMPTY = dev-token-only, which a
     /// release build (`--no-default-features`) compiles out — so a
-    /// production host that leaves this `None` serves NOTHING. Build it
-    /// with [`EmbedOpts::oidc`].
-    pub oidc: Option<Arc<OidcVerifier>>,
+    /// production host that leaves this empty serves NOTHING. Build it
+    /// with [`EmbedOpts::oidc`], called once per accepted pair.
+    pub oidc: Vec<Arc<OidcVerifier>>,
     /// Reported at `/v1/runtime` so a caller (and the Explorer SPA) can
     /// discover how to authenticate. `oidc_issuer: null` there is the
     /// symptom of an embedded host with no identity configured.
     pub oidc_issuer: Option<String>,
     pub oidc_audience: Option<String>,
     pub oidc_client_id: Option<String>,
+    /// Every accepted `(issuer, audience)` pair, for `/v1/runtime`,
+    /// including when there is only one. The three scalars above keep
+    /// reporting the FIRST pair unchanged — they are a published
+    /// contract (ADR-0017's verification reads `oidc_issuer`), so
+    /// multi-issuer adds a field rather than redefining one.
+    pub oidc_providers: Vec<(String, String)>,
 }
 
 impl Default for EmbedOpts {
@@ -59,10 +66,11 @@ impl Default for EmbedOpts {
             port: 8088,
             env: "dev".to_string(),
             cors_origins: Vec::new(),
-            oidc: None,
+            oidc: Vec::new(),
             oidc_issuer: None,
             oidc_audience: None,
             oidc_client_id: None,
+            oidc_providers: Vec::new(),
         }
     }
 }
@@ -118,13 +126,21 @@ impl EmbedOpts {
         if let Some(url) = jwks_url {
             cfg = cfg.with_jwks_url(url);
         }
-        self.oidc = Some(Arc::new(OidcVerifier::new(cfg)));
-        self.oidc_issuer = Some(issuer);
-        // For Google (and most public IdPs) the OAuth client ID *is* the
-        // audience, so default it here; `oidc_client_id` overrides for
-        // issuers where the two differ.
-        self.oidc_client_id.get_or_insert_with(|| audience.clone());
-        self.oidc_audience = Some(audience);
+        self.oidc.push(Arc::new(OidcVerifier::new(cfg)));
+        self.oidc_providers.push((issuer.clone(), audience.clone()));
+        // The scalars describe the FIRST pair only, and later calls must
+        // not overwrite them: `/v1/runtime`'s `oidc_issuer` is what
+        // ADR-0017's verification reads, and the Explorer SPA redirects
+        // PKCE at it. Pair 1 is the human-login pair by convention;
+        // additional pairs are machine callers that never see this.
+        if self.oidc_issuer.is_none() {
+            self.oidc_issuer = Some(issuer);
+            // For Google (and most public IdPs) the OAuth client ID *is*
+            // the audience, so default it here; `oidc_client_id`
+            // overrides for issuers where the two differ.
+            self.oidc_client_id.get_or_insert_with(|| audience.clone());
+            self.oidc_audience = Some(audience);
+        }
         self
     }
 
@@ -146,7 +162,7 @@ impl EmbedOpts {
 /// rejected while `/healthz` keeps answering. `/v1/runtime` reports the
 /// issuer precisely so that state is visible rather than inferred.
 pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
-    let identity = Arc::new(IdentityProvider::new(opts.oidc.clone()));
+    let identity = Arc::new(IdentityProvider::with_verifiers(opts.oidc.clone(), false));
     let metrics = dispatcher.metrics();
     let version = env!("CARGO_PKG_VERSION").to_string();
 
@@ -164,6 +180,14 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         oidc_issuer: opts.oidc_issuer.clone(),
         oidc_audience: opts.oidc_audience.clone(),
         oidc_client_id: opts.oidc_client_id.clone(),
+        oidc_providers: opts
+            .oidc_providers
+            .iter()
+            .map(|(i, a)| OidcProviderInfo {
+                issuer: i.clone(),
+                audience: a.clone(),
+            })
+            .collect(),
         // Single-port host: MCP/A2A are nested under these paths, so the
         // SPA reaches the whole trio same-origin (no port-swap).
         mcp_base: Some("/mcp".to_string()),
