@@ -72,6 +72,8 @@ mod msteams;
 mod msteams_callback;
 #[path = "../msteams_federated.rs"]
 mod msteams_federated;
+#[path = "../multi_issuer.rs"]
+mod multi_issuer;
 #[path = "../oidc.rs"]
 mod oidc;
 #[path = "../optional_adapters.rs"]

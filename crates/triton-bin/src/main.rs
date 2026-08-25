@@ -147,6 +147,12 @@ async fn main() -> std::io::Result<()> {
         oidc_issuer: settings.oidc_issuer.clone(),
         oidc_audience: settings.oidc_audience.clone(),
         oidc_client_id: settings.explorer_client_id.clone(),
+        // triton-bin is single-pair (its settings expose one issuer), so
+        // this stays empty and `/v1/runtime` renders exactly as before —
+        // the field is skipped when empty. Multi-issuer is currently a
+        // triton-embed capability; wiring it here is a settings change,
+        // not a protocol one.
+        oidc_providers: Vec::new(),
         // Three-port default: MCP/A2A live on their own ports and the SPA
         // uses its dev port-swap, so both bases are None. Single-port mode
         // nests the trio under these paths (like triton-embed), so the SPA

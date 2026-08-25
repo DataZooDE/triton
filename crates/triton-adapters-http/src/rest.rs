@@ -45,6 +45,18 @@ pub struct RuntimeDiscovery {
     pub oidc_issuer: Option<String>,
     pub oidc_audience: Option<String>,
     pub oidc_client_id: Option<String>,
+    /// EVERY accepted issuer/audience pair, in configuration order —
+    /// including when there is only one, so a client reading this never
+    /// has to special-case "one pair means read the scalars instead".
+    ///
+    /// The three `oidc_*` scalars above keep their exact meaning and
+    /// still describe the FIRST pair: they are a published contract
+    /// (ADR-0017's verification reads `oidc_issuer`, and the Explorer
+    /// SPA points PKCE at it), so this is an additive field, never a
+    /// redefinition. Omitted when empty — a host with no OIDC at all, or
+    /// `triton-bin`, which is single-pair by construction.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub oidc_providers: Vec<OidcProviderInfo>,
     /// Base path/URL for the MCP and A2A surfaces, when they are NOT on
     /// the conventional dev ports (8001/8002). The embedded single-port
     /// host (triton-embed) sets these to `/mcp` and `/a2a` so the SPA can
@@ -54,6 +66,16 @@ pub struct RuntimeDiscovery {
     pub mcp_base: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub a2a_base: Option<String>,
+}
+
+/// One accepted OIDC issuer/audience pair, as advertised at
+/// `/v1/runtime`. Public config: both values are already visible in a
+/// PR diff and in browser URLs, and a caller needs them to know which
+/// token to present.
+#[derive(Clone, serde::Serialize)]
+pub struct OidcProviderInfo {
+    pub issuer: String,
+    pub audience: String,
 }
 
 /// Shared state owned by the binary, cloned into every handler via

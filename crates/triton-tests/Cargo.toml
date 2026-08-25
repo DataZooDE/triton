@@ -50,3 +50,16 @@ sha2 = "0.10"
 rand_core = { version = "0.6", features = ["getrandom"] }
 jsonwebtoken = "9"
 serde = { workspace = true }
+
+[dev-dependencies]
+# Used ONLY by this crate's own tests, never by the fixtures it exports —
+# keeping them out of [dependencies] means a downstream consumer of
+# triton-tests (see examples/consumer-smoke) does not inherit the embedded
+# trio host or async-trait just to spawn a TritonProcess.
+#
+# The embedded trio host, exercised by tests/multi_issuer.rs. No cycle:
+# triton-embed does not depend on this crate.
+triton-embed = { path = "../triton-embed" }
+# Implementing triton-core's `Tool` trait (it is #[async_trait]) for the
+# in-process router in tests/multi_issuer.rs.
+async-trait = "0.1"

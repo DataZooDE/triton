@@ -199,19 +199,18 @@ async fn button_click_dispatches_via_correlation_token() {
         triton_correlation::decode(nested_token, CORRELATION_KEY.as_bytes()).expect("verifies");
     assert_eq!(tool, "narrate");
 
-    // Audit: one dispatch + one post for this interaction.
-    let dispatches: usize = proc
-        .stdout_snapshot()
-        .iter()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|v| {
-            v["kind"] == "audit"
-                && v["phase"] == "dispatch"
-                && v["protocol"] == "messenger:discord"
-                && v["tool"] == "narrate"
-        })
-        .count();
-    assert!(dispatches >= 1, "expected a dispatch audit line");
+    // Audit: one dispatch + one post for this interaction. Polled, not
+    // snapshotted once — see the note on wait_for_audit's use below; the
+    // audit line races the HTTP response through the child's stdout pipe.
+    wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "dispatch"
+            && v["protocol"] == "messenger:discord"
+            && v["tool"] == "narrate"
+    });
+    wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit" && v["phase"] == "post" && v["protocol"] == "messenger:discord"
+    });
     let posts: usize = proc
         .stdout_snapshot()
         .iter()
@@ -601,6 +600,12 @@ async fn slash_command_dispatches_with_options_as_args() {
     // Audit pivot must record this as a normal dispatch on the
     // Discord protocol — no special "slash" phase, but with the
     // dispatched tool name.
+    wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "dispatch"
+            && v["protocol"] == "messenger:discord"
+            && v["tool"] == "narrate"
+    });
     let dispatches: usize = proc
         .stdout_snapshot()
         .iter()
@@ -812,22 +817,21 @@ async fn modal_submit_substitutes_values_and_dispatches() {
     );
 
     // Audit: dispatch on echo with the submitted values.
-    let dispatches: usize = proc
-        .stdout_snapshot()
-        .iter()
-        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-        .filter(|v| {
-            v["kind"] == "audit"
-                && v["phase"] == "dispatch"
-                && v["protocol"] == "messenger:discord"
-                && v["tool"] == "echo"
-                && v["tenant"] == "acme"
-        })
-        .count();
-    assert!(
-        dispatches >= 1,
-        "expected dispatch audit for echo from modal-submit",
-    );
+    //
+    // POLL via wait_for_audit rather than counting a single
+    // stdout_snapshot(): the HTTP response is written before the audit
+    // line has necessarily travelled the child's stdout pipe into our
+    // capture thread, so a one-shot count passes on an idle machine and
+    // fails under load. wait_for_audit panics with the captured stdout
+    // if it never arrives, which is a better failure message than
+    // `dispatches >= 1`.
+    wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit"
+            && v["phase"] == "dispatch"
+            && v["protocol"] == "messenger:discord"
+            && v["tool"] == "echo"
+            && v["tenant"] == "acme"
+    });
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

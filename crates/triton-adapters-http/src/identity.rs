@@ -30,7 +30,7 @@ use axum::http::HeaderName;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use triton_core::{Principal, TritonError};
-use triton_identity::OidcVerifier;
+use triton_identity::{OidcVerifier, issuer_matches, unverified_issuer};
 
 /// Header set by the upstream `oauth2-proxy` sidecar
 /// (`--pass-user-headers=true`). Matches what `auth-portal-dz`
@@ -45,7 +45,15 @@ const DEFAULT_DEV_TOKEN: &str = "dev-token";
 
 #[derive(Clone)]
 pub struct IdentityProvider {
-    oidc: Option<Arc<OidcVerifier>>,
+    /// Accepted OIDC issuer/audience pairs, in configuration order.
+    /// Empty = no OIDC boundary (dev-token / forwarded-auth paths).
+    ///
+    /// More than one entry is how a single agent serves callers from
+    /// different identity providers at once — e.g. Google for humans and
+    /// Entra for a Microsoft agent platform. They are alternatives, not
+    /// layers: a token satisfying ANY configured pair is accepted, and
+    /// each pair is as strong a boundary as it would be alone.
+    oidc: Vec<Arc<OidcVerifier>>,
     /// Whether `X-Forwarded-Email` should be honoured when present.
     /// Wired from `TRITON_TRUST_FORWARDED_AUTH`. ONLY safe when
     /// Triton binds loopback inside a Nomad alloc and the only thing
@@ -65,8 +73,18 @@ impl IdentityProvider {
     /// [`IdentityProvider::with_forwarded_auth`].
     pub fn new(oidc: Option<Arc<OidcVerifier>>) -> Self {
         Self {
-            oidc,
+            oidc: oidc.into_iter().collect(),
             trust_forwarded_auth: false,
+            dev_token: DEFAULT_DEV_TOKEN.to_string(),
+        }
+    }
+
+    /// Multi-issuer constructor. An empty vec behaves exactly like
+    /// `new(None)`; one entry exactly like `new(Some(_))`.
+    pub fn with_verifiers(oidc: Vec<Arc<OidcVerifier>>, trust_forwarded_auth: bool) -> Self {
+        Self {
+            oidc,
+            trust_forwarded_auth,
             dev_token: DEFAULT_DEV_TOKEN.to_string(),
         }
     }
@@ -78,7 +96,7 @@ impl IdentityProvider {
         trust_forwarded_auth: bool,
     ) -> Self {
         Self {
-            oidc,
+            oidc: oidc.into_iter().collect(),
             trust_forwarded_auth,
             dev_token: DEFAULT_DEV_TOKEN.to_string(),
         }
@@ -93,11 +111,11 @@ impl IdentityProvider {
     }
 
     pub async fn verify(&self, parts: &Parts) -> Result<Principal, TritonError> {
-        if let Some(verifier) = &self.oidc {
+        if !self.oidc.is_empty() {
             // OIDC live → only OIDC. The forwarded-auth fast-path is
             // disabled in this mode so a stale `trust_forwarded_auth=true`
             // env var can never override real PKCE.
-            return verify_bearer_via_oidc(verifier, parts).await;
+            return self.verify_bearer_via_oidc(parts).await;
         }
 
         // Trust flag set but no header — fall through to the dev-token
@@ -112,14 +130,43 @@ impl IdentityProvider {
         let token = bearer_from(parts)?;
         verify_dev_or_reject(token, &self.dev_token)
     }
-}
 
-async fn verify_bearer_via_oidc(
-    verifier: &OidcVerifier,
-    parts: &Parts,
-) -> Result<Principal, TritonError> {
-    let token = bearer_from(parts)?;
-    verifier.verify(token).await
+    /// Verify the bearer against whichever configured issuer the token
+    /// claims to come from.
+    ///
+    /// With exactly one verifier this calls it directly — same code path,
+    /// same error text as before multi-issuer existed, so a single-pair
+    /// deployment cannot regress.
+    ///
+    /// With several, the token's `iss` is peeked UNVERIFIED purely to
+    /// select a verifier; the selected one then performs the full check.
+    /// Selection is not trust: a token claiming someone else's issuer is
+    /// simply handed to that issuer's verifier, which rejects it. Trying
+    /// every verifier instead would be equally safe but would mean N
+    /// JWKS lookups per bad token, so an unmatched issuer is rejected
+    /// without a network call.
+    async fn verify_bearer_via_oidc(&self, parts: &Parts) -> Result<Principal, TritonError> {
+        let token = bearer_from(parts)?;
+        if let [only] = self.oidc.as_slice() {
+            return only.verify(token).await;
+        }
+        let claimed = unverified_issuer(token).ok_or_else(|| {
+            TritonError::Auth("bearer is not a JWT with a readable `iss` claim".into())
+        })?;
+        let verifier = self
+            .oidc
+            .iter()
+            .find(|v| issuer_matches(v.issuer(), &claimed))
+            .ok_or_else(|| {
+                // Name the rejected issuer, not the accepted list: the
+                // operator can read the accepted pairs from /v1/runtime,
+                // and an error is a poor place to enumerate config.
+                TritonError::Auth(format!(
+                    "no configured issuer accepts tokens from {claimed}"
+                ))
+            })?;
+        verifier.verify(token).await
+    }
 }
 
 fn bearer_from(parts: &Parts) -> Result<&str, TritonError> {

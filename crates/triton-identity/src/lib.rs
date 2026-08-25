@@ -79,6 +79,19 @@ pub struct OidcVerifier {
 }
 
 impl OidcVerifier {
+    /// The issuer this verifier is configured to trust. Exposed so a
+    /// multi-issuer caller can pick the right verifier for a token
+    /// BEFORE verifying it (see [`unverified_issuer`]) — the config
+    /// value, never anything read out of a token.
+    pub fn issuer(&self) -> &str {
+        &self.config.issuer
+    }
+
+    /// The audience this verifier requires.
+    pub fn audience(&self) -> &str {
+        &self.config.audience
+    }
+
     pub fn new(config: OidcConfig) -> Self {
         Self {
             config,
@@ -310,5 +323,115 @@ impl TokenClaims {
             return g.clone();
         }
         Vec::new()
+    }
+}
+
+/// Read the `iss` claim out of a JWT **without verifying anything**.
+///
+/// This exists for exactly one purpose: choosing WHICH configured
+/// verifier should get a token when several issuers are accepted. The
+/// value it returns is attacker-controlled and must never be used as
+/// evidence of anything. Nothing is trusted on the basis of this
+/// function's output — the selected verifier still checks the
+/// signature, `iss`, `aud`, `exp` and the algorithm allowlist, so a
+/// token claiming `iss: A` merely gets *offered* to A's verifier and
+/// is rejected there unless it genuinely came from A.
+///
+/// Returns `None` for anything that is not a well-formed JWT payload,
+/// which the caller treats as "no verifier matches" — i.e. rejection.
+pub fn unverified_issuer(token: &str) -> Option<String> {
+    use base64::Engine as _;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    json.get("iss")?.as_str().map(str::to_string)
+}
+
+/// Compare two issuer strings the way OIDC deployments actually vary:
+/// a trailing slash is not a different issuer. Everything else is an
+/// exact, case-sensitive match — issuers are URLs, and being lax here
+/// would widen the trust boundary rather than merely tidy it.
+pub fn issuer_matches(configured: &str, from_token: &str) -> bool {
+    configured.trim_end_matches('/') == from_token.trim_end_matches('/')
+}
+
+#[cfg(test)]
+mod multi_issuer_tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn jwt_with_payload(payload: &serde_json::Value) -> String {
+        let b64 = |b: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b);
+        format!(
+            "{}.{}.{}",
+            b64(br#"{"alg":"RS256","typ":"JWT"}"#),
+            b64(payload.to_string().as_bytes()),
+            b64(b"not-a-real-signature")
+        )
+    }
+
+    #[test]
+    fn reads_the_iss_claim_without_verifying() {
+        let t = jwt_with_payload(&serde_json::json!({
+            "iss": "https://accounts.google.com",
+            "aud": "client-1",
+        }));
+        assert_eq!(
+            unverified_issuer(&t).as_deref(),
+            Some("https://accounts.google.com")
+        );
+    }
+
+    #[test]
+    fn malformed_tokens_yield_no_issuer_rather_than_panicking() {
+        // Each of these reaches the peek from a real request path, so
+        // none may panic; `None` means "no verifier matches" upstream,
+        // which is a rejection.
+        for bad in [
+            "",
+            "not-a-jwt",
+            "only.two",
+            "a.!!!not-base64!!!.c",
+            // valid base64, not JSON
+            "a.aGVsbG8.c",
+            // valid JSON, no iss
+            "a.eyJhdWQiOiJ4In0.c",
+            // iss present but not a string
+            "a.eyJpc3MiOjQyfQ.c",
+        ] {
+            assert_eq!(unverified_issuer(bad), None, "input {bad:?}");
+        }
+    }
+
+    #[test]
+    fn issuer_match_tolerates_only_a_trailing_slash() {
+        assert!(issuer_matches("https://issuer.test", "https://issuer.test"));
+        assert!(issuer_matches(
+            "https://issuer.test/",
+            "https://issuer.test"
+        ));
+        assert!(issuer_matches(
+            "https://issuer.test",
+            "https://issuer.test/"
+        ));
+
+        // Everything else is a different issuer. A lax comparison here
+        // would widen the trust boundary, not tidy it.
+        assert!(!issuer_matches(
+            "https://issuer.test",
+            "https://issuer.test.evil"
+        ));
+        assert!(!issuer_matches("https://issuer.test", "http://issuer.test"));
+        assert!(!issuer_matches(
+            "https://issuer.test",
+            "https://ISSUER.test"
+        ));
+        assert!(!issuer_matches(
+            "https://issuer.test",
+            "https://issuer.test/x"
+        ));
+        assert!(!issuer_matches("https://issuer.test", ""));
     }
 }
