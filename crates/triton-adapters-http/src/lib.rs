@@ -14,6 +14,7 @@
 //!   backed by an in-memory task store (FR-A-7).
 
 pub mod a2a;
+pub mod a2a_spec;
 #[cfg(feature = "capture")]
 pub mod capture;
 pub mod cors;

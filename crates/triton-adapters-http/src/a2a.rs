@@ -69,7 +69,11 @@ impl InMemoryTaskStore {
         self.inner.lock().unwrap().states.get(trace_id).copied()
     }
 
-    fn record(&self, trace_id: &str, state: TaskState) {
+    /// `pub(crate)` rather than private: the spec-A2A facade in
+    /// `a2a_spec` records into the SAME store, so `tasks/get` answers
+    /// for a task created by either face of the adapter. Still not part
+    /// of the public API — nothing outside this crate writes task state.
+    pub(crate) fn record(&self, trace_id: &str, state: TaskState) {
         let mut g = self.inner.lock().unwrap();
         // Only a brand-new key extends the store; an update keeps the
         // existing position so the FIFO order tracks first-seen.

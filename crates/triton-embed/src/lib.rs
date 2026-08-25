@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use triton_adapters_http::a2a::{self, A2aState, InMemoryTaskStore};
+use triton_adapters_http::a2a_spec::{self, SpecA2aConfig};
 use triton_adapters_http::cors;
 use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{self, McpSessions, McpState};
@@ -51,6 +52,11 @@ pub struct EmbedOpts {
     pub oidc_issuer: Option<String>,
     pub oidc_audience: Option<String>,
     pub oidc_client_id: Option<String>,
+    /// Spec-A2A: the Agent Card's contents and the tool prose is
+    /// dispatched to. `None` (the default) leaves BOTH the JSON-RPC
+    /// route and the card unmounted, so the surface is exactly what it
+    /// was before spec-A2A existed. Set it with [`EmbedOpts::spec_a2a`].
+    pub spec_a2a: Option<SpecA2aConfig>,
     /// Every accepted `(issuer, audience)` pair, for `/v1/runtime`,
     /// including when there is only one. The three scalars above keep
     /// reporting the FIRST pair unchanged — they are a published
@@ -71,6 +77,7 @@ impl Default for EmbedOpts {
             oidc_audience: None,
             oidc_client_id: None,
             oidc_providers: Vec::new(),
+            spec_a2a: None,
         }
     }
 }
@@ -144,6 +151,32 @@ impl EmbedOpts {
         self
     }
 
+    /// Turn on the spec-conformant A2A face: JSON-RPC `message/send` +
+    /// `tasks/get` at the A2A base path, and the Agent Card at
+    /// `/.well-known/agent-card.json` (and `/.well-known/agent.json`).
+    ///
+    /// `public_url` is the externally reachable origin — the card must
+    /// advertise where CALLERS reach this agent, which a process behind
+    /// an ingress cannot infer from a request. `default_tool` is the one
+    /// tool plain text is dispatched to; the caller never names a tool.
+    pub fn spec_a2a(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        public_url: impl Into<String>,
+        default_tool: impl Into<String>,
+    ) -> Self {
+        self.spec_a2a = Some(SpecA2aConfig {
+            name: name.into(),
+            description: description.into(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            public_url: public_url.into(),
+            a2a_path: "/a2a".to_string(),
+            default_tool: default_tool.into(),
+        });
+        self
+    }
+
     /// Override the client ID advertised at `/v1/runtime` when it is not
     /// the same string as the audience.
     pub fn oidc_client_id(mut self, client_id: impl Into<String>) -> Self {
@@ -209,15 +242,35 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         sessions: McpSessions::new(),
         identity: identity.clone(),
     };
+    let dispatcher_for_card = dispatcher.clone();
     let a2a_state = A2aState {
         dispatcher,
         tasks: InMemoryTaskStore::new(),
         identity,
     };
 
+    // The spec-A2A JSON-RPC route answers at the A2A BASE path itself
+    // (`POST /a2a`), which is what an Agent Card's `url` points at,
+    // while the Triton-shaped `/a2a/message:send` keeps its own path.
+    let a2a_router = match &opts.spec_a2a {
+        Some(cfg) => a2a::router(a2a_state.clone())
+            .merge(a2a_spec::jsonrpc_router(a2a_state, Arc::new(cfg.clone()))),
+        None => a2a::router(a2a_state),
+    };
+
     let mut app = rest::router(rest_state)
         .nest("/mcp", mcp::router(mcp_state))
-        .nest("/a2a", a2a::router(a2a_state));
+        .nest("/a2a", a2a_router);
+
+    // The card is mounted at the HOST ROOT, not under /a2a: discovery
+    // looks at `<origin>/.well-known/...`.
+    if let Some(cfg) = &opts.spec_a2a {
+        app = app.merge(a2a_spec::card_router(a2a_spec::card_state(
+            cfg.clone(),
+            dispatcher_for_card,
+            opts.oidc_providers.clone(),
+        )));
+    }
 
     #[cfg(feature = "explorer-assets")]
     {
