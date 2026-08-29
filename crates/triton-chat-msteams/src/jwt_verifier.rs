@@ -106,15 +106,6 @@ impl VerifiedClaims {
 ///     multi-tenant shape rejects every single-tenant request, which is
 ///     a silent 401 that looks exactly like a misconfigured bot.
 struct TrustAnchor {
-    /// Whether tokens from this anchor carry a `serviceUrl` claim.
-    ///
-    /// Bot Framework's do — signed, and therefore trustworthy as a reply
-    /// target. Entra's (single-tenant) do NOT: they are ordinary AAD
-    /// access tokens, and `serviceUrl` is a Bot-Framework-specific claim.
-    /// For those the reply target arrives in the Activity BODY instead,
-    /// unsigned, so the host allowlist becomes the only thing standing
-    /// between us and POSTing a reply wherever a caller asks.
-    carries_service_url: bool,
     openid_url: String,
     /// Accepted `iss` values for tokens signed by this anchor's keys.
     issuers: Vec<String>,
@@ -198,7 +189,6 @@ impl JwtVerifier {
             .expect("reqwest client builds with valid options");
         Self {
             anchors: vec![TrustAnchor {
-                carries_service_url: true,
                 openid_url: openid_url.into(),
                 issuers: vec![EXPECTED_ISSUER.to_string()],
                 cache: Mutex::new(None),
@@ -229,8 +219,6 @@ impl JwtVerifier {
     pub fn with_single_tenant(mut self, tenant_id: &str) -> Result<Self, VerifyError> {
         let tenant = validate_tenant_id(tenant_id)?;
         self.anchors.push(TrustAnchor {
-            // Entra tokens have no serviceUrl claim — see TrustAnchor.
-            carries_service_url: false,
             openid_url: format!("{ENTRA_HOST}/{tenant}/v2.0/.well-known/openid-configuration"),
             issuers: vec![
                 format!("{ENTRA_HOST}/{tenant}/v2.0"),
@@ -324,9 +312,19 @@ impl JwtVerifier {
                 expected: anchor.issuers.join(" or "),
             });
         }
-        if anchor.carries_service_url && data.claims.service_url.is_empty() {
-            return Err(VerifyError::MissingClaim("serviceUrl"));
-        }
+        // NOTE: serviceUrl is NOT required from any anchor.
+        //
+        // The first attempt at this made it conditional on the anchor —
+        // Bot Framework signs it, Entra does not. That was wrong, and the
+        // live bot disproved it: its token matched the BOT FRAMEWORK
+        // anchor (kid in that keyset, iss api.botframework.com) and still
+        // carried no serviceUrl, so the request was refused anyway.
+        //
+        // What actually varies is the CLAIM, not the issuer. When it is
+        // present it is signed and preferred; when absent the caller
+        // falls back to the Activity body and allowlists it. Requiring it
+        // buys nothing — a token without it is not less trustworthy, it
+        // simply says less.
         // PR 37: NFR-S-4 host allowlist. A correctly-signed JWT can
         // still come from a Bot Framework developer playground that
         // sets `serviceUrl` to an attacker-controlled host. Refuse
@@ -612,19 +610,22 @@ mod service_url_source_tests {
     const TENANT: &str = "28c0071d-815c-4ace-a3b5-9a28bde005fd";
 
     #[test]
-    fn only_the_bot_framework_anchor_expects_a_signed_service_url() {
-        // This is the bug that made Teams silently 401 on 2026-08-29:
-        // the verifier demanded a `serviceUrl` claim that a single-tenant
-        // Entra token never carries, so signature and issuer passed and
-        // the request died on a missing claim.
+    fn no_anchor_requires_a_signed_service_url() {
+        // The bug that made Teams silently 401 on 2026-08-29, and then a
+        // second time: the verifier demanded a `serviceUrl` claim the
+        // live bot's token does not carry. The first fix tied the
+        // requirement to the ANCHOR (Bot Framework signs it, Entra does
+        // not) and the live bot disproved that too — its token matched
+        // the Bot Framework anchor and still had no serviceUrl.
+        //
+        // So neither anchor may require it. What varies is the claim.
         let v = JwtVerifier::new(DEFAULT_OPENID_URL, "app-id")
             .with_single_tenant(TENANT)
             .expect("valid tenant");
-        assert!(v.anchors[0].carries_service_url, "Bot Framework signs it");
-        assert!(
-            !v.anchors[1].carries_service_url,
-            "Entra does not — it is a Bot-Framework-specific claim"
-        );
+        assert_eq!(v.anchors.len(), 2);
+        // Nothing anchor-specific is left to assert about serviceUrl —
+        // the behaviour under test is that verification does not depend
+        // on it, which the absence of a MissingClaim path now guarantees.
     }
 
     #[test]
