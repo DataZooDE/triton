@@ -67,7 +67,7 @@ fn good_claims(fake: &FakeBotFramework) -> Value {
         "aud": AUDIENCE,
         "exp": now_unix() + 600,
         "iat": now_unix() - 5,
-        "serviceUrl": fake.service_url(),
+        "serviceurl": fake.service_url(),
     })
 }
 
