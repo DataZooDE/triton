@@ -414,6 +414,13 @@ struct Activity {
     recipient: Option<ActivityRecipient>,
     #[serde(default, rename = "channelId")]
     channel_id: Option<String>,
+    /// The reply target, as asserted by the REQUEST BODY.
+    ///
+    /// Only consulted for a single-tenant bot, whose Entra token carries
+    /// no signed `serviceUrl`. Unsigned, therefore checked against the
+    /// host allowlist before anything is POSTed to it.
+    #[serde(default, rename = "serviceUrl")]
+    service_url: Option<String>,
     #[serde(default, rename = "channelData")]
     channel_data: Option<ChannelData>,
     /// Present on an `invoke` Activity (`adaptiveCard/action`) and on a
@@ -534,6 +541,50 @@ async fn handle_webhook(
             );
             return (StatusCode::BAD_REQUEST, "malformed activity").into_response();
         }
+    };
+
+    // Resolve the reply target ONCE, here, so every downstream path sees
+    // a value that has already been checked.
+    //
+    // Multi-tenant: the token carried a SIGNED serviceUrl and the
+    // verifier already allowlisted it. Single-tenant: Entra's token has
+    // no such claim, so it comes from the Activity BODY — unsigned — and
+    // the host allowlist is the only thing preventing a caller from
+    // aiming our reply (bearing a real Bot Connector token) at a host
+    // they control. Refuse rather than fall back to anything.
+    let verified = match verified.service_url.clone() {
+        Some(signed) => VerifiedClaims {
+            service_url: Some(signed),
+        },
+        None => match activity.service_url.as_deref() {
+            Some(from_body) if adapter.verifier.service_url_allowed(from_body) => VerifiedClaims {
+                service_url: Some(from_body.to_string()),
+            },
+            Some(bad) => {
+                record_rejection(
+                    &adapter,
+                    "-",
+                    "-",
+                    TritonError::Auth(format!(
+                        "activity serviceUrl `{bad}` is not a documented Microsoft host"
+                    )),
+                );
+                return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+            }
+            None => {
+                record_rejection(
+                    &adapter,
+                    "-",
+                    "-",
+                    TritonError::Validation(
+                        "no serviceUrl: absent from both the token and the activity body, \
+                         so there is nowhere to send a reply"
+                            .into(),
+                    ),
+                );
+                return (StatusCode::BAD_REQUEST, "missing serviceUrl").into_response();
+            }
+        },
     };
 
     // Route by Activity type (issue #155):
@@ -1176,7 +1227,7 @@ async fn post_reply(
     // build the activities URL by joining serviceUrl + the
     // conversation path; the connector documents serviceUrl as
     // ending with a trailing slash but we tolerate either.
-    let base = verified.service_url.trim_end_matches('/');
+    let base = verified.reply_base().trim_end_matches('/');
     let url = format!("{}/v3/conversations/{}/activities", base, conversation_id);
 
     let post_started = std::time::Instant::now();
