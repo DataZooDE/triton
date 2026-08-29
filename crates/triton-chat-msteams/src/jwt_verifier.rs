@@ -140,8 +140,27 @@ struct OpenIdDiscovery {
 #[derive(Debug, Deserialize)]
 struct BotFrameworkClaims {
     iss: String,
+    /// The claim is `serviceurl`, ALL LOWERCASE.
+    ///
+    /// Not a style choice — it is what Microsoft signs. Their SDK pins it:
+    ///
+    /// ```text
+    /// // Microsoft.Bot.Connector/Authentication/AuthenticationConstants.cs
+    /// public const string ServiceUrlClaim = "serviceurl";
+    /// ```
+    ///
+    /// This read `serviceUrl` (camelCase) until 2026-08-29, and serde's
+    /// rename is case-sensitive, so a claim that WAS present always
+    /// deserialised as absent. That is the whole reason #220 and #221
+    /// exist: the lab bot 401'd every Activity with "missing required claim
+    /// `serviceUrl`" on a Bot Framework token that carried one.
+    ///
+    /// Note the Activity BODY is different and correctly stays camelCase
+    /// (`lib.rs`) — the Bot Framework REST schema really does spell the
+    /// field `serviceUrl` there. Only the JWT claim is lowercase, which is
+    /// exactly the sort of inconsistency that hides for a fortnight.
     #[serde(default)]
-    #[serde(rename = "serviceUrl")]
+    #[serde(rename = "serviceurl")]
     service_url: String,
 }
 
@@ -661,6 +680,49 @@ mod service_url_source_tests {
             }
             .reply_base(),
             "https://smba.trafficmanager.net/emea/"
+        );
+    }
+
+    /// The claim Microsoft actually signs is `serviceurl`, lowercase.
+    ///
+    /// This is a deserialisation-level pin, deliberately not routed through
+    /// the fixtures: for a fortnight the fixtures minted `serviceUrl` and the
+    /// struct read `serviceUrl`, so they agreed with each other and both
+    /// disagreed with Microsoft. Every test passed while the lab bot 401'd
+    /// every single Activity. A test that mints its own input cannot catch
+    /// that; this one asserts against the wire spelling directly.
+    ///
+    /// Source: Microsoft.Bot.Connector/Authentication/AuthenticationConstants.cs
+    ///   `public const string ServiceUrlClaim = "serviceurl";`
+    #[test]
+    fn the_wire_claim_is_lowercase_serviceurl() {
+        let wire = serde_json::json!({
+            "iss": "https://api.botframework.com",
+            "serviceurl": "https://smba.trafficmanager.net/teams/",
+        });
+        let claims: BotFrameworkClaims =
+            serde_json::from_value(wire).expect("Microsoft's shape deserialises");
+        assert_eq!(
+            claims.service_url, "https://smba.trafficmanager.net/teams/",
+            "the lowercase `serviceurl` claim must be read; reading `serviceUrl` \
+             here is what made a present claim look absent and 401'd the bot"
+        );
+    }
+
+    /// And the camelCase spelling must NOT satisfy it — otherwise a fixture
+    /// could quietly go back to minting the wrong key and this pin would stop
+    /// meaning anything.
+    #[test]
+    fn camel_case_service_url_is_not_the_claim() {
+        let wrong = serde_json::json!({
+            "iss": "https://api.botframework.com",
+            "serviceUrl": "https://smba.trafficmanager.net/teams/",
+        });
+        let claims: BotFrameworkClaims =
+            serde_json::from_value(wrong).expect("still deserialises; the field defaults");
+        assert!(
+            claims.service_url.is_empty(),
+            "camelCase must not be picked up — Microsoft does not send it in the JWT"
         );
     }
 }

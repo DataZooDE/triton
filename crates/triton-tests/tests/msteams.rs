@@ -68,7 +68,7 @@ fn good_claims(fake: &FakeBotFramework) -> Value {
         "aud": AUDIENCE,
         "exp": now_unix() + 600,
         "iat": now_unix() - 5,
-        "serviceUrl": fake.service_url(),
+        "serviceurl": fake.service_url(),
     })
 }
 
@@ -192,7 +192,7 @@ async fn expired_jwt_is_rejected() {
         "aud": AUDIENCE,
         "exp": now_unix() - 600,
         "iat": now_unix() - 1200,
-        "serviceUrl": fake.service_url(),
+        "serviceurl": fake.service_url(),
     });
     let jwt = fake.sign_jwt(expired);
 
@@ -430,7 +430,7 @@ async fn msteams_rejects_unexpected_service_url() {
     let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
 
     let mut claims = good_claims(&fake);
-    claims["serviceUrl"] = json!("https://attacker.example/v3/conversations/");
+    claims["serviceurl"] = json!("https://attacker.example/v3/conversations/");
     let jwt = fake.sign_jwt(claims);
 
     let resp = reqwest::Client::new()
@@ -507,7 +507,7 @@ async fn msteams_rejects_jwt_beyond_5min_skew() {
         // exp 6 minutes ago — beyond the 5-min leeway → rejected.
         "exp": now_unix() - 6 * 60,
         "iat": now_unix() - 12 * 60,
-        "serviceUrl": fake.service_url(),
+        "serviceurl": fake.service_url(),
     });
     let jwt = fake.sign_jwt(claims);
 

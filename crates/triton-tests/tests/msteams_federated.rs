@@ -145,7 +145,7 @@ async fn federated_credential_mints_a_token_and_couriers_the_reply() {
         "aud": AUDIENCE,
         "exp": now_unix() + 600,
         "iat": now_unix() - 5,
-        "serviceUrl": fake.service_url(),
+        "serviceurl": fake.service_url(),
     }));
 
     let resp = reqwest::Client::new()
@@ -216,7 +216,7 @@ async fn assertion_is_reread_per_refresh_not_cached_at_boot() {
         "aud": AUDIENCE,
         "exp": now_unix() + 600,
         "iat": now_unix() - 5,
-        "serviceUrl": fake.service_url(),
+        "serviceurl": fake.service_url(),
     }));
     let resp = reqwest::Client::new()
         .post(format!("http://{webhook}/msteams/webhook"))
