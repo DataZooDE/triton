@@ -35,10 +35,20 @@ use tokio::sync::Mutex;
 pub const DEFAULT_OPENID_URL: &str =
     "https://login.botframework.com/v1/.well-known/openidconfiguration";
 
-/// Expected `iss` value carried on Bot-Framework-signed JWTs. Note
-/// this differs from the discovery URL — Microsoft's connector
+/// Expected `iss` on Bot-Framework-signed JWTs (MULTI-tenant bots).
+/// Note this differs from the discovery URL — Microsoft's connector
 /// emits its tokens under `api.botframework.com`.
 const EXPECTED_ISSUER: &str = "https://api.botframework.com";
+
+/// Hardcoded Entra host used to derive a single-tenant bot's trust
+/// anchor. Only a validated tenant id is ever interpolated into it
+/// (NFR-S-4: the HOST is never configurable).
+const ENTRA_HOST: &str = "https://login.microsoftonline.com";
+
+/// Legacy (v1) Entra issuer host. A single-tenant bot's inbound token
+/// may carry either this or the v2 form depending on which endpoint
+/// minted it, so both are accepted for the SAME tenant.
+const ENTRA_V1_ISSUER_HOST: &str = "https://sts.windows.net";
 
 /// How long a fetched JWKS is reused before we re-discover keys.
 /// 5 minutes matches the Bot Framework SDK's documented cache TTL
@@ -64,11 +74,34 @@ pub struct VerifiedClaims {
 /// Bot Framework JWT verifier. One instance per adapter; the JWKS
 /// cache lives on the verifier itself so a hot path skips
 /// re-discovery on every request.
-pub struct JwtVerifier {
+/// One place inbound tokens may legitimately come from: a discovery
+/// document to fetch signing keys from, and the `iss` values a token
+/// signed by those keys is allowed to carry.
+///
+/// There are two in practice, and a deployment may need BOTH at once —
+/// an adapter serving a multi-tenant bot and a single-tenant bot has no
+/// way to know which kind a given request belongs to until it looks:
+///
+///   * **Multi-tenant** — keys from `login.botframework.com`, `iss` is
+///     `https://api.botframework.com`.
+///   * **Single-tenant** — Bot Framework does NOT sign these. Entra
+///     does, with the bot's home-tenant keys, so both the keyset and
+///     the issuer are tenant-scoped. A verifier built only for the
+///     multi-tenant shape rejects every single-tenant request, which is
+///     a silent 401 that looks exactly like a misconfigured bot.
+struct TrustAnchor {
     openid_url: String,
+    /// Accepted `iss` values for tokens signed by this anchor's keys.
+    issuers: Vec<String>,
+    /// Per-anchor, because the two anchors publish different keysets
+    /// and rotate independently.
+    cache: Mutex<Option<CachedJwks>>,
+}
+
+pub struct JwtVerifier {
+    anchors: Vec<TrustAnchor>,
     audience: String,
     http: reqwest::Client,
-    cache: Mutex<Option<CachedJwks>>,
     /// PR 37: NFR-S-4 host allowlist for the inbound JWT's
     /// `serviceUrl` claim. Production builds use the documented
     /// Microsoft hosts only ([`SERVICE_URL_HOST_SUFFIXES`]); test
@@ -123,10 +156,9 @@ pub enum VerifyError {
     #[error("jwt decode failed: {0}")]
     Decode(String),
     #[error("jwt issuer does not match expected `{expected}`; got `{actual}`")]
-    BadIssuer {
-        actual: String,
-        expected: &'static str,
-    },
+    BadIssuer { actual: String, expected: String },
+    #[error("invalid tenant id: {0}")]
+    InvalidTenant(String),
     #[error("jwt missing required claim `{0}`")]
     MissingClaim(&'static str),
     #[error("jwt `serviceUrl` `{0}` is not on the bot framework host allowlist")]
@@ -140,12 +172,45 @@ impl JwtVerifier {
             .build()
             .expect("reqwest client builds with valid options");
         Self {
-            openid_url: openid_url.into(),
+            anchors: vec![TrustAnchor {
+                openid_url: openid_url.into(),
+                issuers: vec![EXPECTED_ISSUER.to_string()],
+                cache: Mutex::new(None),
+            }],
             audience: audience.into(),
             http,
-            cache: Mutex::new(None),
             extra_service_url_hosts: Vec::new(),
         }
+    }
+
+    /// Additionally accept tokens for a SINGLE-TENANT bot registration
+    /// (`MsaAppType: SingleTenant`), which Entra signs with the bot's
+    /// home-tenant keys rather than Bot Framework's.
+    ///
+    /// Additive on purpose: the multi-tenant anchor stays configured, so
+    /// one adapter can serve both kinds and neither is weakened. A token
+    /// is still bound to exactly one anchor — the one whose keyset
+    /// actually signed it — and must carry that anchor's issuer.
+    ///
+    /// Both Entra issuer forms are accepted for this tenant: v2
+    /// (`login.microsoftonline.com/{tid}/v2.0`) and the v1 form
+    /// (`sts.windows.net/{tid}/`), because which one appears depends on
+    /// the endpoint that minted the token, not on anything we control.
+    ///
+    /// NFR-S-4 holds: the host is hardcoded and only a tenant id is
+    /// interpolated, after validating it as an opaque
+    /// `[A-Za-z0-9.-]` segment.
+    pub fn with_single_tenant(mut self, tenant_id: &str) -> Result<Self, VerifyError> {
+        let tenant = validate_tenant_id(tenant_id)?;
+        self.anchors.push(TrustAnchor {
+            openid_url: format!("{ENTRA_HOST}/{tenant}/v2.0/.well-known/openid-configuration"),
+            issuers: vec![
+                format!("{ENTRA_HOST}/{tenant}/v2.0"),
+                format!("{ENTRA_V1_ISSUER_HOST}/{tenant}/"),
+            ],
+            cache: Mutex::new(None),
+        });
+        Ok(self)
     }
 
     /// Extend the `serviceUrl` host allowlist with additional hosts.
@@ -173,11 +238,36 @@ impl JwtVerifier {
         let kid = header.kid.ok_or(VerifyError::Header(
             "missing `kid` header — Bot Framework JWTs MUST carry one".into(),
         ))?;
-        let jwks = self.jwks().await?;
-        let jwk = jwks
-            .find(&kid)
-            .ok_or_else(|| VerifyError::UnknownKid(kid.clone()))?;
-        let key = DecodingKey::from_jwk(jwk).map_err(|e| VerifyError::Jwks(e.to_string()))?;
+        // Pick the anchor by KID, not by the token's own `iss`. The
+        // issuer claim is attacker-controlled until the signature is
+        // checked, so routing on it would mean choosing a trust anchor
+        // from untrusted input; a kid is matched against keysets we
+        // fetched ourselves. The first anchor publishing this kid is the
+        // one that signed it — and the token must then also carry an
+        // issuer THAT anchor accepts, checked below.
+        let mut anchor_and_key = None;
+        let mut last_err = None;
+        for anchor in &self.anchors {
+            match self.jwks_for(anchor).await {
+                Ok(jwks) => {
+                    if let Some(jwk) = jwks.find(&kid) {
+                        let key = DecodingKey::from_jwk(jwk)
+                            .map_err(|e| VerifyError::Jwks(e.to_string()))?;
+                        anchor_and_key = Some((anchor, key));
+                        break;
+                    }
+                }
+                // A single unreachable anchor must not veto the other:
+                // remember the failure and only surface it if NO anchor
+                // ends up matching, so an Entra outage cannot take down
+                // a multi-tenant bot (or vice versa).
+                Err(e) => last_err = Some(e),
+            }
+        }
+        let (anchor, key) = match anchor_and_key {
+            Some(v) => v,
+            None => return Err(last_err.unwrap_or(VerifyError::UnknownKid(kid.clone()))),
+        };
 
         // RS256 is what Microsoft signs Bot Framework tokens with.
         // We accept that algorithm specifically rather than the
@@ -200,10 +290,10 @@ impl JwtVerifier {
 
         let data = decode::<BotFrameworkClaims>(token, &key, &validation)
             .map_err(|e| VerifyError::Decode(e.to_string()))?;
-        if data.claims.iss != EXPECTED_ISSUER {
+        if !anchor.issuers.iter().any(|i| i == &data.claims.iss) {
             return Err(VerifyError::BadIssuer {
                 actual: data.claims.iss,
-                expected: EXPECTED_ISSUER,
+                expected: anchor.issuers.join(" or "),
             });
         }
         if data.claims.service_url.is_empty() {
@@ -231,8 +321,8 @@ impl JwtVerifier {
     /// callers serialise behind the mutex; the fetch itself runs
     /// while holding the lock so a thundering herd at expiry only
     /// hits Microsoft once.
-    async fn jwks(&self) -> Result<Arc<JwkSet>, VerifyError> {
-        let mut guard = self.cache.lock().await;
+    async fn jwks_for(&self, anchor: &TrustAnchor) -> Result<Arc<JwkSet>, VerifyError> {
+        let mut guard = anchor.cache.lock().await;
         if let Some(c) = guard.as_ref()
             && c.fetched_at.elapsed() < JWKS_CACHE_TTL
         {
@@ -240,7 +330,7 @@ impl JwtVerifier {
         }
         let discovery: OpenIdDiscovery = self
             .http
-            .get(&self.openid_url)
+            .get(&anchor.openid_url)
             .send()
             .await
             .map_err(|e| VerifyError::Discovery(e.to_string()))?
@@ -353,5 +443,119 @@ mod tests {
         assert!(!service_url_host_allowed(
             "https://smba.trafficmanager.net@evil.example/"
         ));
+    }
+}
+
+/// A tenant id is interpolated into a discovery URL, so it is checked
+/// as an opaque segment before use: a GUID or a verified domain, and
+/// nothing that could escape the path or swap the host. Same rule, and
+/// the same reasoning, as `token_client`'s.
+fn validate_tenant_id(tenant_id: &str) -> Result<&str, VerifyError> {
+    let t = tenant_id.trim();
+    if t.is_empty()
+        || !t
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+    {
+        return Err(VerifyError::InvalidTenant(tenant_id.to_string()));
+    }
+    Ok(t)
+}
+
+#[cfg(test)]
+mod single_tenant_tests {
+    use super::*;
+
+    const TENANT: &str = "28c0071d-815c-4ace-a3b5-9a28bde005fd";
+
+    #[test]
+    fn multi_tenant_only_by_default() {
+        // The pre-existing shape must be untouched: one anchor, Bot
+        // Framework's, accepting exactly the connector's issuer.
+        let v = JwtVerifier::new(DEFAULT_OPENID_URL, "app-id");
+        assert_eq!(v.anchors.len(), 1);
+        assert_eq!(v.anchors[0].issuers, vec![EXPECTED_ISSUER.to_string()]);
+        assert_eq!(v.anchors[0].openid_url, DEFAULT_OPENID_URL);
+    }
+
+    #[test]
+    fn single_tenant_is_additive_not_a_replacement() {
+        // Both must be live at once: an adapter may serve a
+        // multi-tenant AND a single-tenant bot, and enabling one must
+        // not silently stop accepting the other.
+        let v = JwtVerifier::new(DEFAULT_OPENID_URL, "app-id")
+            .with_single_tenant(TENANT)
+            .expect("valid tenant");
+        assert_eq!(v.anchors.len(), 2);
+        assert_eq!(v.anchors[0].issuers, vec![EXPECTED_ISSUER.to_string()]);
+
+        // Entra signs single-tenant tokens, so the keyset is tenant-
+        // scoped rather than Bot Framework's.
+        assert_eq!(
+            v.anchors[1].openid_url,
+            format!(
+                "https://login.microsoftonline.com/{TENANT}/v2.0/.well-known/openid-configuration"
+            )
+        );
+        // BOTH issuer forms, because which one appears depends on the
+        // endpoint that minted the token, not on anything we control.
+        assert!(
+            v.anchors[1]
+                .issuers
+                .contains(&format!("https://login.microsoftonline.com/{TENANT}/v2.0"))
+        );
+        assert!(
+            v.anchors[1]
+                .issuers
+                .contains(&format!("https://sts.windows.net/{TENANT}/"))
+        );
+    }
+
+    #[test]
+    fn the_anchors_do_not_share_an_issuer_list() {
+        // The bug worth engineering against: if the tenant anchor's
+        // issuers leaked into the Bot Framework anchor (or vice versa),
+        // a token signed by ONE keyset could claim the OTHER's issuer
+        // and pass. Each anchor must accept only its own.
+        let v = JwtVerifier::new(DEFAULT_OPENID_URL, "app-id")
+            .with_single_tenant(TENANT)
+            .expect("valid tenant");
+        assert!(!v.anchors[0].issuers.iter().any(|i| i.contains(TENANT)));
+        assert!(!v.anchors[1].issuers.iter().any(|i| i == EXPECTED_ISSUER));
+    }
+
+    #[test]
+    fn a_hostile_tenant_id_is_refused_before_it_reaches_a_url() {
+        // NFR-S-4: the tenant is interpolated into a discovery URL, so
+        // none of these may build a verifier — each would move key
+        // discovery to a host we do not control.
+        for bad in [
+            "",
+            "   ",
+            "../../evil",
+            "tenant/../../x",
+            "evil.com/path",
+            "user@evil.com",
+            "tenant?x=1",
+            "https://evil.com",
+            "tenant id",
+        ] {
+            let r = JwtVerifier::new(DEFAULT_OPENID_URL, "app-id").with_single_tenant(bad);
+            assert!(
+                matches!(r, Err(VerifyError::InvalidTenant(_))),
+                "tenant id {bad:?} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_tenant_is_trimmed_not_rejected() {
+        // Trailing whitespace from a values file is an operator typo,
+        // not an attack.
+        let v = JwtVerifier::new(DEFAULT_OPENID_URL, "app-id")
+            .with_single_tenant(&format!("  {TENANT}  "))
+            .expect("whitespace is trimmed");
+        assert!(v.anchors[1].openid_url.contains(TENANT));
+        assert!(!v.anchors[1].openid_url.contains(' '));
     }
 }
