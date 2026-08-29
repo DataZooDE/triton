@@ -90,6 +90,25 @@ pub struct AuditRecord<'a> {
     /// closed set; for dashboards/diagnosis only. Omitted when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<&'static str>,
+    /// WHY a request was refused, in the error's own words.
+    ///
+    /// `result` carries only the error CLASS (`error:auth`), which makes
+    /// every rejection look alike: a wrong issuer, an unknown signing
+    /// key, an untrusted reply URL and a missing header are one string.
+    /// That cost two live debugging cycles — a silent Google Chat 401 on
+    /// 2026-08-23 and a silent Teams 401 on 2026-08-29 — where the only
+    /// way to tell them apart was reading adapter source.
+    ///
+    /// `String`, not `&'static str` like `status_detail` above, precisely
+    /// because the useful part is dynamic: the issuer that was presented,
+    /// the kid that did not match.
+    ///
+    /// Omitted when absent, so existing audit consumers see an unchanged
+    /// payload. Rejections only — a successful dispatch has nothing to
+    /// explain, and this must never become a place where request content
+    /// leaks into the audit log.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
     /// Time-to-first-event in milliseconds, for streamed (SSE) dispatches
     /// only (issue #132). `latency_ms` measures the *whole* stream to
     /// termination; this captures how quickly the first byte reached the
@@ -232,4 +251,73 @@ impl AuditBuffer {
 /// precision — what the substrate audit collector expects.
 pub fn now_rfc3339() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+}
+
+#[cfg(test)]
+mod rejection_reason_tests {
+    use super::*;
+
+    /// A refusal must say WHY in the audit line itself.
+    ///
+    /// `result` carries only the class (`error:auth`), which makes a
+    /// wrong issuer, an unknown signing key, an untrusted reply URL and a
+    /// missing header indistinguishable. Two live incidents were slow to
+    /// diagnose for exactly that reason.
+    #[test]
+    fn a_rejection_serialises_its_reason() {
+        let rec = AuditRecord {
+            kind: "audit",
+            phase: AuditPhase::Rejected,
+            when: "2026-08-29T14:04:39Z".to_string(),
+            who: "-",
+            what: "msteams",
+            env: "test",
+            result: "error:auth".to_string(),
+            protocol: "messenger:msteams",
+            tool: "msteams",
+            subject: "-",
+            tenant: "-",
+            latency_ms: 0,
+            status: 401,
+            status_label: None,
+            status_detail: None,
+            error_detail: Some("bot framework jwt: jwt issuer does not match".into()),
+            ttfb_ms: None,
+            trace_id: "t-1",
+        };
+        let v = serde_json::to_value(&rec).expect("serialises");
+        assert_eq!(v["result"], "error:auth");
+        assert!(
+            v["error_detail"].as_str().unwrap().contains("issuer"),
+            "the reason must survive into the audit line: {v}"
+        );
+    }
+
+    /// Absent, the field is omitted entirely — an existing audit consumer
+    /// sees the payload it already saw.
+    #[test]
+    fn no_reason_means_no_field() {
+        let rec = AuditRecord {
+            kind: "audit",
+            phase: AuditPhase::Dispatch,
+            when: "2026-08-29T14:04:39Z".to_string(),
+            who: "alice",
+            what: "echo",
+            env: "test",
+            result: "ok".to_string(),
+            protocol: "rest",
+            tool: "echo",
+            subject: "alice",
+            tenant: "-",
+            latency_ms: 3,
+            status: 200,
+            status_label: None,
+            status_detail: None,
+            error_detail: None,
+            ttfb_ms: None,
+            trace_id: "t-2",
+        };
+        let v = serde_json::to_value(&rec).expect("serialises");
+        assert!(v.get("error_detail").is_none(), "must be omitted: {v}");
+    }
 }

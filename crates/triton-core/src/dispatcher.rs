@@ -508,6 +508,9 @@ impl Dispatcher {
             status,
             status_label: None,
             status_detail: None,
+            // The error's own words, so a refusal is diagnosable from the
+            // audit line alone rather than from adapter source.
+            error_detail: Some(error.to_string()),
             ttfb_ms: None,
             trace_id,
         });
@@ -565,6 +568,7 @@ impl Dispatcher {
             status,
             status_label,
             status_detail: detail,
+            error_detail: None,
             ttfb_ms: None,
             trace_id: &principal.trace_id,
         });
@@ -636,6 +640,7 @@ impl Dispatcher {
             status: status_for(error),
             status_label: None,
             status_detail: None,
+            error_detail: None,
             ttfb_ms: None,
             trace_id: &principal.trace_id,
         });
@@ -680,6 +685,7 @@ impl Dispatcher {
             status,
             status_label: None,
             status_detail: None,
+            error_detail: None,
             ttfb_ms: None,
             trace_id: &principal.trace_id,
         });
@@ -775,6 +781,7 @@ fn emit_stream_audit(a: StreamAudit<'_>) {
         status,
         status_label: None,
         status_detail,
+        error_detail: None,
         ttfb_ms: a.ttfb_ms,
         trace_id: a.trace_id,
     });
