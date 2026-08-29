@@ -807,6 +807,86 @@ struct GoogleChatSender {
     name: Option<String>,
 }
 
+/// Google delivers a Chat app's interaction events in one of **two**
+/// request shapes, and which one an app gets is decided permanently when
+/// the app is created — the "build this as a Google Workspace add-on"
+/// checkbox in the Chat API configuration locks on save.
+///
+///   * **Classic Chat app** — a flat event with a top-level `type`
+///     (`MESSAGE`, `CARD_CLICKED`, `ADDED_TO_SPACE`), delivered by
+///     `Google-Dynamite`.
+///   * **Workspace Add-on** — the add-on `EventObject`: no `type` at all,
+///     the event kind implied by *which* `chat.<kind>Payload` is present,
+///     delivered by `Google-gsuiteaddons`.
+///
+/// This normalises the second into the first so the dispatch match below
+/// stays single-shape. The reply envelope is the mirror of this and was
+/// already handled (`surface_mapper::wrap_message`, selected by the
+/// verified token's actor) — which is exactly what made the gap hard to
+/// see: the app answered in add-on shape while refusing to *read* it.
+///
+/// This cost `dz-agent-template` six days of silent Google Chat. Every
+/// delivery was authenticated, parsed, and answered `200 {}` in ~30ms
+/// with no audit record, because a missing `type` defaults to `""` and
+/// `""` falls into the catch-all "ack and ignore" arm. A 200 is the one
+/// response Google never retries and no alert ever fires on.
+fn normalize_addon_event(raw: Value) -> Value {
+    let Some(chat) = raw.get("chat").and_then(Value::as_object) else {
+        return raw;
+    };
+
+    // `appCommandPayload` (a slash command) carries the same message a
+    // plain MESSAGE does; `route_command` reads the leading `/word`
+    // either way, so it needs no arm of its own.
+    let found = [
+        ("messagePayload", "MESSAGE"),
+        ("appCommandPayload", "MESSAGE"),
+        ("buttonClickedPayload", "CARD_CLICKED"),
+        ("addedToSpacePayload", "ADDED_TO_SPACE"),
+    ]
+    .into_iter()
+    .find_map(|(key, kind)| chat.get(key).map(|payload| (payload, kind)));
+
+    // An add-on envelope carrying a payload we don't act on
+    // (`removedFromSpacePayload`, a widget update, anything Google adds
+    // later) becomes a typeless legacy event — which the match below acks
+    // 200 exactly as it acks its classic twin. Unhandled stays unhandled;
+    // it does not become malformed.
+    let Some((payload, kind)) = found else {
+        return Value::Object(serde_json::Map::new());
+    };
+
+    let user = chat.get("user").cloned();
+    let mut message = payload.get("message").cloned();
+    // The actor rides on `chat.user` in this shape. The legacy MESSAGE
+    // arm reads it from `message.sender`, so graft it on rather than
+    // teaching that arm a second place to look.
+    if let (Some(Value::Object(m)), Some(u)) = (message.as_mut(), user.as_ref())
+        && !m.contains_key("sender")
+    {
+        m.insert("sender".to_string(), u.clone());
+    }
+
+    let mut out = serde_json::Map::new();
+    out.insert("type".to_string(), Value::String(kind.to_string()));
+    if let Some(m) = message {
+        out.insert("message".to_string(), m);
+    }
+    if let Some(u) = user {
+        out.insert("user".to_string(), u);
+    }
+    if let Some(space) = payload.get("space").or_else(|| chat.get("space")) {
+        out.insert("space".to_string(), space.clone());
+    }
+    // `commonEventObject.parameters` / `.formInputs` use exactly the
+    // field names the classic `common` object uses, so the button-click
+    // path (correlation token, form merge) needs no change at all.
+    if let Some(common) = raw.get("commonEventObject") {
+        out.insert("common".to_string(), common.clone());
+    }
+    Value::Object(out)
+}
+
 async fn handle_webhook(
     State(adapter): State<Arc<GoogleChatAdapter>>,
     headers: HeaderMap,
@@ -879,7 +959,10 @@ async fn handle_webhook(
             .into_response();
     }
 
-    let event: GoogleChatEvent = match serde_json::from_slice(&body) {
+    let event: GoogleChatEvent = match serde_json::from_slice::<Value>(&body)
+        .map(normalize_addon_event)
+        .and_then(serde_json::from_value)
+    {
         Ok(v) => v,
         Err(e) => {
             record_rejection(
@@ -1017,7 +1100,18 @@ async fn handle_webhook(
                     None,
                 )
             }
-            _ => {
+            other => {
+                // Ack-and-ignore, but SAY SO. This arm silently absorbed
+                // every Workspace Add-on delivery for six days: a 200 is
+                // the one answer Google never retries, so an unhandled
+                // event kind that logs nothing is indistinguishable from a
+                // working app. One line here is the difference between a
+                // grep and an archaeology session.
+                println!(
+                    r#"{{"kind":"log","level":"warn","msg":"unhandled google chat event kind","channel":"{}","event_kind":"{}"}}"#,
+                    adapter.name.escape_default(),
+                    other.escape_default(),
+                );
                 return (
                     StatusCode::OK,
                     axum::Json(Value::Object(Default::default())),
@@ -1785,5 +1879,104 @@ mod tests {
         let (tool, args) = route_command("what's the weather", "assistant");
         assert_eq!(tool, "assistant");
         assert_eq!(args, serde_json::json!({ "message": "what's the weather" }));
+    }
+
+    // ── Workspace Add-on request shape ───────────────────────────────────
+    //
+    // The payload `Google-gsuiteaddons` actually POSTs. These assert on the
+    // NORMALISED legacy event rather than on the handler, because the whole
+    // defect was that the handler could not see this shape at all: every
+    // field the dispatch match reads has to survive the translation.
+
+    fn addon_message_event() -> Value {
+        serde_json::json!({
+            "chat": {
+                "user": { "name": "users/77", "displayName": "Ada" },
+                "messagePayload": {
+                    "space": { "name": "spaces/AAQA" },
+                    "message": {
+                        "name": "spaces/AAQA/messages/1",
+                        "text": "what can you do?"
+                    }
+                }
+            },
+            "commonEventObject": { "hostApp": "CHAT" }
+        })
+    }
+
+    #[test]
+    fn an_addon_message_becomes_a_legacy_message_event() {
+        let event: GoogleChatEvent =
+            serde_json::from_value(normalize_addon_event(addon_message_event())).expect("parses");
+        assert_eq!(event.kind, "MESSAGE");
+        let message = event.message.expect("message survives");
+        assert_eq!(message.text.as_deref(), Some("what can you do?"));
+        // `chat.user` grafted onto `message.sender`: without this the
+        // MESSAGE arm resolves an empty sender and identity refuses.
+        assert_eq!(
+            message.sender.and_then(|s| s.name).as_deref(),
+            Some("users/77")
+        );
+        assert_eq!(
+            event.space.and_then(|s| s.name).as_deref(),
+            Some("spaces/AAQA")
+        );
+    }
+
+    #[test]
+    fn a_classic_event_is_passed_through_untouched() {
+        let classic = serde_json::json!({
+            "type": "MESSAGE",
+            "space": { "name": "spaces/AAQA" },
+            "message": { "text": "hi", "sender": { "name": "users/77" } }
+        });
+        assert_eq!(normalize_addon_event(classic.clone()), classic);
+    }
+
+    #[test]
+    fn an_addon_button_click_keeps_its_correlation_token() {
+        let raw = serde_json::json!({
+            "chat": {
+                "user": { "name": "users/77" },
+                "buttonClickedPayload": {
+                    "space": { "name": "spaces/AAQA" },
+                    "message": { "text": "" }
+                }
+            },
+            "commonEventObject": {
+                "parameters": { surface_mapper::BUTTON_TOKEN_PARAM: "tok-abc" }
+            }
+        });
+        let event: GoogleChatEvent =
+            serde_json::from_value(normalize_addon_event(raw)).expect("parses");
+        assert_eq!(event.kind, "CARD_CLICKED");
+        // Read through `common`, so the HMAC check downstream is reached.
+        assert_eq!(event.card_token(), Some("tok-abc"));
+    }
+
+    #[test]
+    fn an_addon_install_routes_to_help() {
+        let raw = serde_json::json!({
+            "chat": {
+                "user": { "name": "users/77" },
+                "addedToSpacePayload": { "space": { "name": "spaces/AAQA" } }
+            }
+        });
+        let event: GoogleChatEvent =
+            serde_json::from_value(normalize_addon_event(raw)).expect("parses");
+        assert_eq!(event.kind, "ADDED_TO_SPACE");
+        assert_eq!(event.user.and_then(|u| u.name).as_deref(), Some("users/77"));
+    }
+
+    #[test]
+    fn an_unhandled_addon_payload_stays_unhandled_not_malformed() {
+        // Must still PARSE (so the handler acks 200 and Google stops
+        // retrying) rather than 400 — the classic arm's behaviour.
+        let raw = serde_json::json!({
+            "chat": { "removedFromSpacePayload": { "space": { "name": "spaces/AAQA" } } }
+        });
+        let event: GoogleChatEvent =
+            serde_json::from_value(normalize_addon_event(raw)).expect("parses");
+        assert_eq!(event.kind, "");
     }
 }
