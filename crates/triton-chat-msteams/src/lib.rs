@@ -303,8 +303,32 @@ impl MsTeamsAdapter {
         let openid_url = overrides
             .openid_url
             .unwrap_or_else(|| jwt_verifier::DEFAULT_OPENID_URL.to_string());
-        let verifier = JwtVerifier::new(openid_url, audience.clone())
+        let mut verifier = JwtVerifier::new(openid_url, audience.clone())
             .with_extra_service_url_hosts(overrides.extra_service_url_hosts);
+
+        // OPTIONAL `inbound.credentials.tenant_id`: the bot's HOME tenant,
+        // present only for a SINGLE-TENANT registration
+        // (`MsaAppType: SingleTenant`). Those inbound tokens are signed by
+        // Entra with that tenant's keys, not by Bot Framework, so without
+        // this the verifier rejects every request with a 401 that looks
+        // exactly like a misconfigured bot. Adding it is additive — the
+        // Bot Framework anchor stays, so one adapter serves both kinds.
+        //
+        // Deliberately NOT derived from `identity.azure_identity`'s
+        // `allowed_tenants`: those are the tenants a SENDER may belong to,
+        // which is a different question from which tenant SIGNED the
+        // token, and conflating them would silently widen one of the two.
+        if let Some(field) = adapter.inbound.credentials.get("tenant_id") {
+            let tenant = resolver
+                .resolve(field)
+                .await
+                .map_err(|e| BuildError::Resolve("inbound.tenant_id", e))?;
+            if !tenant.trim().is_empty() {
+                verifier = verifier
+                    .with_single_tenant(&tenant)
+                    .map_err(|e| BuildError::Unsupported(e.to_string()))?;
+            }
+        }
         let token_client = match (outbound_credential, overrides.token_url) {
             (OutboundCredential::Secret(secret), Some(url)) => {
                 TokenClient::with_token_url(client_id, secret, url)
@@ -459,6 +483,13 @@ async fn handle_webhook(
     let verified = match adapter.verifier.verify(bearer).await {
         Ok(v) => v,
         Err(e) => {
+            // Log the REASON as well as auditing the rejection. The audit
+            // record renders `result: error:auth` and drops the message,
+            // so a wrong issuer, an unknown kid and an untrusted
+            // serviceUrl were indistinguishable in production — on
+            // 2026-08-29 that turned a one-line config bug into a
+            // log-reading expedition.
+            tracing::warn!(error = %e, "msteams inbound jwt rejected");
             record_rejection(
                 &adapter,
                 "-",
