@@ -68,7 +68,23 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(5);
 /// inside a JWT we just verified).
 #[derive(Debug, Clone)]
 pub struct VerifiedClaims {
-    pub service_url: String,
+    /// The signed reply target, when the token carried one. `None` for a
+    /// single-tenant bot, whose Entra token has no such claim — the
+    /// caller must then take it from the Activity body and put it through
+    /// [`JwtVerifier::service_url_allowed`].
+    pub service_url: Option<String>,
+}
+
+impl VerifiedClaims {
+    /// The reply target, after the handler has resolved it.
+    ///
+    /// Empty is unreachable in practice: `handle_webhook` refuses the
+    /// request when neither the token nor the body yields an allowlisted
+    /// serviceUrl, so anything that gets here is either signed or
+    /// body-supplied AND allowlisted.
+    pub fn reply_base(&self) -> &str {
+        self.service_url.as_deref().unwrap_or_default()
+    }
 }
 
 /// Bot Framework JWT verifier. One instance per adapter; the JWKS
@@ -90,6 +106,15 @@ pub struct VerifiedClaims {
 ///     multi-tenant shape rejects every single-tenant request, which is
 ///     a silent 401 that looks exactly like a misconfigured bot.
 struct TrustAnchor {
+    /// Whether tokens from this anchor carry a `serviceUrl` claim.
+    ///
+    /// Bot Framework's do — signed, and therefore trustworthy as a reply
+    /// target. Entra's (single-tenant) do NOT: they are ordinary AAD
+    /// access tokens, and `serviceUrl` is a Bot-Framework-specific claim.
+    /// For those the reply target arrives in the Activity BODY instead,
+    /// unsigned, so the host allowlist becomes the only thing standing
+    /// between us and POSTing a reply wherever a caller asks.
+    carries_service_url: bool,
     openid_url: String,
     /// Accepted `iss` values for tokens signed by this anchor's keys.
     issuers: Vec<String>,
@@ -173,6 +198,7 @@ impl JwtVerifier {
             .expect("reqwest client builds with valid options");
         Self {
             anchors: vec![TrustAnchor {
+                carries_service_url: true,
                 openid_url: openid_url.into(),
                 issuers: vec![EXPECTED_ISSUER.to_string()],
                 cache: Mutex::new(None),
@@ -203,6 +229,8 @@ impl JwtVerifier {
     pub fn with_single_tenant(mut self, tenant_id: &str) -> Result<Self, VerifyError> {
         let tenant = validate_tenant_id(tenant_id)?;
         self.anchors.push(TrustAnchor {
+            // Entra tokens have no serviceUrl claim — see TrustAnchor.
+            carries_service_url: false,
             openid_url: format!("{ENTRA_HOST}/{tenant}/v2.0/.well-known/openid-configuration"),
             issuers: vec![
                 format!("{ENTRA_HOST}/{tenant}/v2.0"),
@@ -296,7 +324,7 @@ impl JwtVerifier {
                 expected: anchor.issuers.join(" or "),
             });
         }
-        if data.claims.service_url.is_empty() {
+        if anchor.carries_service_url && data.claims.service_url.is_empty() {
             return Err(VerifyError::MissingClaim("serviceUrl"));
         }
         // PR 37: NFR-S-4 host allowlist. A correctly-signed JWT can
@@ -306,6 +334,12 @@ impl JwtVerifier {
         // test fixture's extra hosts, when configured) so the
         // outbound reply Activity never POSTs to a non-Microsoft
         // endpoint.
+        if data.claims.service_url.is_empty() {
+            // Single-tenant: nothing signed to check here. The caller
+            // validates the body's serviceUrl instead — it must, and
+            // `service_url_allowed` is the same check.
+            return Ok(VerifiedClaims { service_url: None });
+        }
         if !service_url_host_allowed_with_extras(
             &data.claims.service_url,
             &self.extra_service_url_hosts,
@@ -313,8 +347,19 @@ impl JwtVerifier {
             return Err(VerifyError::UntrustedServiceUrl(data.claims.service_url));
         }
         Ok(VerifiedClaims {
-            service_url: data.claims.service_url,
+            service_url: Some(data.claims.service_url),
         })
+    }
+
+    /// Is `url` an acceptable reply target?
+    ///
+    /// For a single-tenant bot the `serviceUrl` comes from the request
+    /// BODY, which is not signed — so this allowlist is the whole of the
+    /// protection against being told to POST a reply to an attacker's
+    /// host. Same rule the signed path applies, exposed so the adapter
+    /// cannot accidentally apply a weaker one.
+    pub fn service_url_allowed(&self, url: &str) -> bool {
+        service_url_host_allowed_with_extras(url, &self.extra_service_url_hosts)
     }
 
     /// Return a JWKS, fetching + caching on miss / expiry. Concurrent
@@ -557,5 +602,64 @@ mod single_tenant_tests {
             .expect("whitespace is trimmed");
         assert!(v.anchors[1].openid_url.contains(TENANT));
         assert!(!v.anchors[1].openid_url.contains(' '));
+    }
+}
+
+#[cfg(test)]
+mod service_url_source_tests {
+    use super::*;
+
+    const TENANT: &str = "28c0071d-815c-4ace-a3b5-9a28bde005fd";
+
+    #[test]
+    fn only_the_bot_framework_anchor_expects_a_signed_service_url() {
+        // This is the bug that made Teams silently 401 on 2026-08-29:
+        // the verifier demanded a `serviceUrl` claim that a single-tenant
+        // Entra token never carries, so signature and issuer passed and
+        // the request died on a missing claim.
+        let v = JwtVerifier::new(DEFAULT_OPENID_URL, "app-id")
+            .with_single_tenant(TENANT)
+            .expect("valid tenant");
+        assert!(v.anchors[0].carries_service_url, "Bot Framework signs it");
+        assert!(
+            !v.anchors[1].carries_service_url,
+            "Entra does not — it is a Bot-Framework-specific claim"
+        );
+    }
+
+    #[test]
+    fn the_body_supplied_reply_target_is_held_to_the_same_allowlist() {
+        // A single-tenant serviceUrl arrives UNSIGNED in the request
+        // body, so this allowlist is the only thing stopping a caller
+        // from aiming our reply — which carries a real Bot Connector
+        // token — at a host they control.
+        let v = JwtVerifier::new(DEFAULT_OPENID_URL, "app-id");
+        assert!(v.service_url_allowed("https://smba.trafficmanager.net/emea/"));
+        assert!(v.service_url_allowed("https://europe.botframework.com/"));
+
+        for hostile in [
+            "https://evil.example/",
+            "http://smba.trafficmanager.net/emea/", // not https
+            "https://smba.trafficmanager.net.evil.example/", // suffix trick
+            "https://botframework.com.attacker.test/",
+            "",
+        ] {
+            assert!(
+                !v.service_url_allowed(hostile),
+                "must refuse reply target {hostile:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn reply_base_is_empty_only_when_unresolved() {
+        assert_eq!(VerifiedClaims { service_url: None }.reply_base(), "");
+        assert_eq!(
+            VerifiedClaims {
+                service_url: Some("https://smba.trafficmanager.net/emea/".into())
+            }
+            .reply_base(),
+            "https://smba.trafficmanager.net/emea/"
+        );
     }
 }
