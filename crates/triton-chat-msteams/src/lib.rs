@@ -109,19 +109,13 @@ pub struct AdapterOverrides {
 /// Async-courier switch (mirrors googlechat's; #635 P4). No `api_base`:
 /// Teams replies go to the JWT-asserted `serviceUrl`, never a
 /// configurable host.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct CourierConfig {
     /// `true` ⇒ the webhook acks 200 immediately and a spawned task
     /// dispatches + delivers out-of-band (streaming in 1:1 chats,
-    /// typing loop + proactive message elsewhere). `false` ⇒ the
-    /// historical inline path, unchanged.
+    /// typing loop + proactive message elsewhere). `false` (the
+    /// derived default) ⇒ the historical inline path, unchanged.
     pub enabled: bool,
-}
-
-impl Default for CourierConfig {
-    fn default() -> Self {
-        Self { enabled: false }
-    }
 }
 
 pub struct MsTeamsAdapter {
@@ -940,32 +934,30 @@ async fn handle_callback(
             // the invoke immediately (the Universal Action contract
             // requires a response body) and deliver the real answer
             // out-of-band as a new message.
-            if adapter.courier.enabled {
-                match convo_and_recipient(adapter, activity, &sender) {
-                    Ok((conversation_id, recipient_id)) => {
-                        spawn_courier(
-                            adapter,
-                            verified,
-                            tool_name,
-                            args,
-                            sender,
-                            conversation_id,
-                            recipient_id,
-                            conversation_type,
-                        );
-                        return (
-                            StatusCode::OK,
-                            axum::Json(surface_mapper::invoke_message_response(
-                                "⏳ Working on it — the answer will follow here.",
-                            )),
-                        )
-                            .into_response();
-                    }
-                    // No conversation to deliver into (defensive; a real
-                    // Teams invoke always carries one): the inline
-                    // refresh still works, fall through.
-                    Err(_) => {}
-                }
+            // (When convo_and_recipient fails — defensive; a real Teams
+            // invoke always carries a conversation — fall through to the
+            // inline refresh, which still works.)
+            if adapter.courier.enabled
+                && let Ok((conversation_id, recipient_id)) =
+                    convo_and_recipient(adapter, activity, &sender)
+            {
+                spawn_courier(
+                    adapter,
+                    verified,
+                    tool_name,
+                    args,
+                    sender,
+                    conversation_id,
+                    recipient_id,
+                    conversation_type,
+                );
+                return (
+                    StatusCode::OK,
+                    axum::Json(surface_mapper::invoke_message_response(
+                        "⏳ Working on it — the answer will follow here.",
+                    )),
+                )
+                    .into_response();
             }
             dispatch_and_refresh_card(adapter, &tool_name, args, &sender).await
         }
