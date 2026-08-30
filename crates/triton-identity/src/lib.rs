@@ -284,6 +284,26 @@ struct DiscoveryDoc {
     jwks_uri: String,
 }
 
+/// Accept a claim that is either a single (space-delimited) string or a
+/// JSON array of strings, normalizing to `Option<Vec<String>>`. The
+/// space-split is the OAuth2 `scope` convention and is exactly how Entra
+/// packs `scp`. See [`TokenClaims::scp`] for why tolerating both matters.
+fn de_string_or_seq<'de, D>(de: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrSeq {
+        String(String),
+        Seq(Vec<String>),
+    }
+    Ok(Option::<StringOrSeq>::deserialize(de)?.map(|v| match v {
+        StringOrSeq::String(s) => s.split_whitespace().map(str::to_string).collect(),
+        StringOrSeq::Seq(s) => s,
+    }))
+}
+
 #[derive(Debug, Deserialize)]
 struct TokenClaims {
     sub: String,
@@ -293,7 +313,14 @@ struct TokenClaims {
     /// scopes. Some issuers use the `scp` array form instead.
     #[serde(default)]
     scope: Option<String>,
-    #[serde(default)]
+    /// The `scp` (delegated-scope) claim. Its shape is issuer-dependent
+    /// and we accept BOTH: Microsoft Entra sends a **space-delimited
+    /// string** (`"access_as_user"`), while some other issuers send a
+    /// JSON array. Deserializing only the array form made every Entra
+    /// delegated token fail verification with `invalid type: string …,
+    /// expected a sequence` → a bare 401, which surfaced in Copilot
+    /// Studio as an opaque `SystemError` (2026-08-30).
+    #[serde(default, deserialize_with = "de_string_or_seq")]
     scp: Option<Vec<String>>,
     /// Group/role memberships. Read from `roles` (the common OIDC/Keycloak
     /// convention, and escurel's default groups claim), falling back to
@@ -433,5 +460,42 @@ mod multi_issuer_tests {
             "https://issuer.test/x"
         ));
         assert!(!issuer_matches("https://issuer.test", ""));
+    }
+
+    #[test]
+    fn scp_claim_accepts_both_entra_string_and_array_forms() {
+        // Entra (delegated) packs scp as a space-delimited STRING.
+        // Deserializing this used to fail with `invalid type: string …,
+        // expected a sequence`, i.e. a bare 401 → Copilot "SystemError".
+        let entra: TokenClaims = serde_json::from_value(serde_json::json!({
+            "sub": "u1",
+            "scp": "access_as_user User.Read"
+        }))
+        .expect("Entra string-form scp must deserialize");
+        assert_eq!(
+            entra.scopes(),
+            vec!["access_as_user".to_string(), "User.Read".to_string()]
+        );
+
+        // The array form (some OIDC issuers) still works.
+        let arr: TokenClaims = serde_json::from_value(serde_json::json!({
+            "sub": "u2",
+            "scp": ["a", "b"]
+        }))
+        .expect("array-form scp must deserialize");
+        assert_eq!(arr.scopes(), vec!["a".to_string(), "b".to_string()]);
+
+        // Absent scp falls back to the OAuth `scope` string.
+        let scope_only: TokenClaims = serde_json::from_value(serde_json::json!({
+            "sub": "u3",
+            "scope": "x y"
+        }))
+        .expect("scope-only must deserialize");
+        assert_eq!(scope_only.scopes(), vec!["x".to_string(), "y".to_string()]);
+
+        // Neither present ⇒ empty, no error.
+        let none: TokenClaims = serde_json::from_value(serde_json::json!({ "sub": "u4" }))
+            .expect("bare claims must deserialize");
+        assert!(none.scopes().is_empty());
     }
 }
