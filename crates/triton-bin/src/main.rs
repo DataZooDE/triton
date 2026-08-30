@@ -1855,3 +1855,7 @@ mod url_host_check_tests {
         assert!(!is_unix_socket_addr(""));
     }
 }
+
+// CI: confirms the Docker cargo cache-mount path on a crates/** change.
+// See doc/realizations.md §8 — the unchanged-source case measured 243s -> 42s;
+// this commit exercises the case that actually invalidates the COPY layer.
