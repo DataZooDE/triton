@@ -136,9 +136,6 @@ pub struct MsTeamsAdapter {
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
     courier: CourierConfig,
-    /// Rendered chart PNGs awaiting Teams' fetch on the signed
-    /// `/{name}/img/{token}` route (#635; googlechat's mechanism).
-    image_cache: std::sync::Arc<std::sync::Mutex<ImageCache>>,
 }
 
 impl MsTeamsAdapter {
@@ -381,7 +378,6 @@ impl MsTeamsAdapter {
             rate_limit,
             per_tenant_limit,
             courier,
-            image_cache: std::sync::Arc::new(std::sync::Mutex::new(ImageCache::default())),
         })
     }
 
@@ -1057,6 +1053,11 @@ async fn dispatch_and_post_reply(
     }
     let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
+    // Direct render_report (the "Open report:" Execute): the chart URL
+    // is minted from the INVOKED args — the result carries only a PNG.
+    let image_hint = (tool_name == "render_report")
+        .then(|| report_image_url(adapter, &args))
+        .flatten();
     let started = std::time::Instant::now();
     let result = adapter
         .dispatcher
@@ -1074,9 +1075,8 @@ async fn dispatch_and_post_reply(
                 conversation_id,
                 &sender.from_id,
                 &dispatch.result,
-                &principal_for_post,
-            )
-            .await;
+                image_hint,
+            );
             post_reply(
                 adapter,
                 verified,
@@ -1110,6 +1110,9 @@ async fn dispatch_and_refresh_card(
 ) -> Response {
     let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
+    let image_hint = (tool_name == "render_report")
+        .then(|| report_image_url(adapter, &args))
+        .flatten();
     let started = std::time::Instant::now();
     let result = adapter
         .dispatcher
@@ -1121,7 +1124,7 @@ async fn dispatch_and_refresh_card(
         Ok(dispatch) => {
             // The refresh path renders the chart too — the invoke card
             // may carry the image URL like any other reply card.
-            let image_url = reply_image_url(adapter, &dispatch.result, &principal_for_post).await;
+            let image_url = image_hint.or_else(|| reply_image_url(adapter, &dispatch.result));
             let response_body =
                 match render_card_content(adapter, &dispatch.result, image_url.as_deref()) {
                     Some(card) => surface_mapper::invoke_card_response(card),
@@ -1153,41 +1156,17 @@ async fn dispatch_and_refresh_card(
     }
 }
 
-/// Marker `tool` slot of the signed image tokens minted for
-/// upstream-rendered chart PNGs (peacock `render_report`) — namespaced
-/// away from card-action tokens even under one key. Port of the
-/// googlechat mechanism (#635).
+/// Marker `tool` slot of the signed chart-image tokens — namespaced
+/// away from card-action tokens even under one key.
 const RENDER_REPORT_IMG_MARKER: &str = "__msteams_report_img";
-/// Image tokens carry a 64-hex content hash — far under this; the cap
-/// bounds hostile inputs before any HMAC work.
-const IMG_TOKEN_CAP: usize = 512;
-/// Bounded FIFO of rendered chart PNGs, keyed by content hash. Served on
-/// demand at `GET /{name}/img/{token}`; an entry scrolling off before
-/// Teams fetches it is a broken image, not an error — 64 in-flight
-/// charts of headroom.
-const IMAGE_CACHE_CAP: usize = 64;
-
-#[derive(Default)]
-struct ImageCache {
-    map: std::collections::HashMap<String, Vec<u8>>,
-    order: std::collections::VecDeque<String>,
-}
-
-impl ImageCache {
-    fn insert(&mut self, id: String, png: Vec<u8>) {
-        if self.map.insert(id.clone(), png).is_none() {
-            self.order.push_back(id);
-            while self.order.len() > IMAGE_CACHE_CAP {
-                if let Some(old) = self.order.pop_front() {
-                    self.map.remove(&old);
-                }
-            }
-        }
-    }
-    fn get(&self, id: &str) -> Option<Vec<u8>> {
-        self.map.get(id).cloned()
-    }
-}
+/// Image tokens carry the render_report args (report id + params) and an
+/// expiry; the cap bounds hostile inputs before any HMAC work.
+const IMG_TOKEN_CAP: usize = 1024;
+/// Signed image URLs stay fetchable this long. Teams fetches within
+/// seconds of the card landing, but a user scrolling old history days
+/// later still gets the chart — while an ancient link eventually dies
+/// instead of being a forever-capability.
+const IMG_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;
 
 /// The public HTTPS base chart-image URLs are minted under. Env-only
 /// (`TRITON_MSTEAMS_PUBLIC_BASE`): the courier task owns no request
@@ -1198,9 +1177,9 @@ fn public_base() -> Option<String> {
     (!base.is_empty()).then_some(base)
 }
 
-/// Extract a fully-rendered chart PNG an upstream returned inline
-/// (peacock `render_report` carries it as `png_base64`; searched
-/// anywhere in the result for nesting robustness).
+/// Extract a rendered chart PNG from a `render_report` result
+/// (peacock carries it as `png_base64`, searched anywhere for nesting
+/// robustness).
 fn upstream_png_bytes(result: &Value) -> Option<Vec<u8>> {
     fn find(v: &Value) -> Option<&str> {
         match v {
@@ -1219,33 +1198,36 @@ fn upstream_png_bytes(result: &Value) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// Cache a rendered PNG and mint the signed URL Teams fetches it from.
-fn cache_image_url(adapter: &MsTeamsAdapter, png: Vec<u8>) -> Option<String> {
-    use sha2::Digest as _;
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Mint the signed chart-image URL for one report spec. STATELESS by
+/// design: the token carries the `render_report` args themselves (plus
+/// an expiry), and the route re-renders on fetch — so any replica can
+/// serve it. The first cut cached PNG bytes in process memory, and with
+/// `replicaCount: 2` the fetch landed on the other pod's empty cache:
+/// a 404 that looked exactly like a broken chart (#635, live).
+fn report_image_url(adapter: &MsTeamsAdapter, rargs: &Value) -> Option<String> {
     let base = public_base()?;
-    let id = format!("{:x}", sha2::Sha256::digest(&png));
+    let payload = serde_json::json!({ "a": rargs, "exp": now_secs() + IMG_TOKEN_TTL_SECS });
     let token = triton_correlation::encode_with_cap(
         RENDER_REPORT_IMG_MARKER,
-        &serde_json::json!({ "id": id }),
+        &payload,
         &adapter.correlation_key,
         IMG_TOKEN_CAP,
     )
     .ok()?;
-    adapter.image_cache.lock().unwrap().insert(id, png);
     Some(format!("{base}/{}/img/{token}", adapter.name))
 }
 
-/// The chart image for this reply, when there is one: an upstream PNG
-/// already in the result, else the inline `Report` component expanded by
-/// dispatching `render_report` (the googlechat expansion, ported).
-async fn reply_image_url(
-    adapter: &MsTeamsAdapter,
-    result: &Value,
-    principal: &Principal,
-) -> Option<String> {
-    if let Some(png) = upstream_png_bytes(result) {
-        return cache_image_url(adapter, png);
-    }
+/// The chart-image URL for this reply, when its surface carries an
+/// inline `Report` component. No render happens at reply time — the
+/// URL is a signed promise the img route fulfils on fetch.
+fn reply_image_url(adapter: &MsTeamsAdapter, result: &Value) -> Option<String> {
     let (report_id, args) = surface_mapper::report_from_result(result)?;
     let mut rargs = if args.is_object() {
         args
@@ -1253,24 +1235,14 @@ async fn reply_image_url(
         serde_json::json!({})
     };
     rargs["report_id"] = serde_json::json!(report_id);
-    match adapter
-        .dispatcher
-        .invoke("render_report", rargs, principal.clone(), PROTOCOL)
-        .await
-    {
-        Ok(rep) => upstream_png_bytes(&rep.result).and_then(|png| cache_image_url(adapter, png)),
-        Err(e) => {
-            tracing::warn!(report = %report_id, error = %e, "msteams: inline render_report failed; sending answer without the chart");
-            None
-        }
-    }
+    report_image_url(adapter, &rargs)
 }
 
 async fn serve_report_png(
     State(adapter): State<Arc<MsTeamsAdapter>>,
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Response {
-    let Ok((marker, args)) =
+    let Ok((marker, payload)) =
         triton_correlation::decode_with_cap(&token, &adapter.correlation_key, IMG_TOKEN_CAP)
     else {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
@@ -1278,32 +1250,57 @@ async fn serve_report_png(
     if marker != RENDER_REPORT_IMG_MARKER {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     }
-    let Some(id) = args.get("id").and_then(Value::as_str) else {
+    if payload
+        .get("exp")
+        .and_then(Value::as_u64)
+        .is_none_or(|exp| exp < now_secs())
+    {
+        return (StatusCode::GONE, "image link expired").into_response();
+    }
+    let Some(rargs) = payload.get("a").cloned() else {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     };
-    match adapter.image_cache.lock().unwrap().get(id) {
-        Some(png) => (
-            StatusCode::OK,
-            [(axum::http::header::CONTENT_TYPE, "image/png")],
-            png,
-        )
-            .into_response(),
-        None => (StatusCode::NOT_FOUND, "image expired").into_response(),
+    // Render on fetch. The principal is for audit only — the render is a
+    // read through peacock's own standing escurel identity; the SIGNED
+    // token (args fixed at mint time) is the authorization.
+    let principal = make_principal("msteams-img", &["chat".to_string()], "-");
+    match adapter
+        .dispatcher
+        .invoke("render_report", rargs, principal, PROTOCOL)
+        .await
+    {
+        Ok(rep) => match upstream_png_bytes(&rep.result) {
+            Some(png) => (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "image/png")],
+                png,
+            )
+                .into_response(),
+            None => (StatusCode::BAD_GATEWAY, "render produced no image").into_response(),
+        },
+        Err(e) => {
+            tracing::warn!(error = %e, "msteams img route: render_report failed");
+            (StatusCode::BAD_GATEWAY, "render failed").into_response()
+        }
     }
 }
 
 /// Turn a dispatch result into an outbound reply Activity body: an
 /// Adaptive Card when the surface carries interactive controls or a
 /// dashboard, otherwise the plain-text Activity.
-async fn build_reply_body(
+fn build_reply_body(
     adapter: &MsTeamsAdapter,
     bot_id: &str,
     conversation_id: &str,
     recipient_id: &str,
     result: &Value,
-    principal: &Principal,
+    image_hint: Option<String>,
 ) -> Value {
-    let image_url = reply_image_url(adapter, result, principal).await;
+    // `image_hint` covers the direct render_report invocation (the
+    // "Open report:" Execute), whose RESULT carries a PNG but no Report
+    // component to lift a spec from — the caller minted the URL from
+    // the invoked args instead.
+    let image_url = image_hint.or_else(|| reply_image_url(adapter, result));
     if let Some(card) = render_card_content(adapter, result, image_url.as_deref()) {
         surface_mapper::build_card_activity_body(bot_id, conversation_id, recipient_id, card)
     } else {
@@ -1530,6 +1527,11 @@ async fn courier_deliver(
 ) {
     let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
+    // See dispatch_and_post_reply: direct render_report invocations get
+    // their chart URL minted from the invoked args, pre-dispatch.
+    let image_hint = (tool_name == "render_report")
+        .then(|| report_image_url(&adapter, &args))
+        .flatten();
     let personal = conversation_type.as_deref() == Some("personal");
 
     // Progress. Personal: open a stream with an informative update.
@@ -1649,17 +1651,14 @@ async fn courier_deliver(
     }
 
     let mut body = match result {
-        Ok(result_value) => {
-            build_reply_body(
-                &adapter,
-                &recipient_id,
-                &conversation_id,
-                &sender.from_id,
-                &result_value,
-                &principal_for_post,
-            )
-            .await
-        }
+        Ok(result_value) => build_reply_body(
+            &adapter,
+            &recipient_id,
+            &conversation_id,
+            &sender.from_id,
+            &result_value,
+            image_hint,
+        ),
         Err(e) => {
             tracing::warn!(error = %e, class = %e.class(), "msteams courier dispatch failed");
             // One audited post line (Dropped + error_response), then a
