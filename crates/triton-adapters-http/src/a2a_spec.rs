@@ -90,18 +90,47 @@ pub struct CardState {
     pub oidc_providers: Vec<(String, String)>,
 }
 
-/// The two well-known card paths, mounted at the HOST ROOT (not under
-/// the A2A base) because that is where discovery looks.
+/// Every card filename spelling a discovery client is known to probe.
 ///
-/// Both spellings are served on purpose: `agent-card.json` is the
-/// spec's, and `agent.json` is what Microsoft Copilot Studio's own
-/// documentation tells operators to expect. Serving one and guessing
-/// right is not better than serving both.
+/// `agent-card.json` is the A2A spec's; `agent.json` is what Microsoft
+/// Copilot Studio's own documentation tells operators to expect. The
+/// remaining three (`agentcard.json`, `agentCard.json`,
+/// `agent_card.json`) are Copilot Studio's live fallback probes —
+/// observed 2026-08-30 in ingress logs, each returning 404 and adding
+/// registration friction. Serving all five costs nothing and removes
+/// every guess.
+const CARD_FILENAMES: &[&str] = &[
+    "agent-card.json",
+    "agent.json",
+    "agentcard.json",
+    "agentCard.json",
+    "agent_card.json",
+];
+
+/// The well-known card paths.
+///
+/// Mounted at the HOST ROOT (`<origin>/.well-known/...`) because that is
+/// where browser-time discovery looks, AND — via [`card_router_nested`]
+/// — under the A2A base (`<origin>/a2a/.well-known/...`) because Copilot
+/// Studio's *runtime* orchestrator resolves the card RELATIVE TO THE
+/// REGISTERED ENDPOINT (`.../a2a`), not the origin. Browser registration
+/// succeeds off the root copy; the runtime call 404s without the nested
+/// copy and fails Microsoft-side with a bare `SystemError` before any
+/// request reaches us (confirmed 2026-08-30: zero POST /a2a during the
+/// failing window).
 pub fn card_router(state: CardState) -> Router {
-    Router::new()
-        .route("/.well-known/agent-card.json", get(agent_card))
-        .route("/.well-known/agent.json", get(agent_card))
-        .with_state(state)
+    let mut r = Router::new();
+    for name in CARD_FILENAMES {
+        r = r.route(&format!("/.well-known/{name}"), get(agent_card));
+    }
+    r.with_state(state)
+}
+
+/// The same card routes, intended to be merged INTO the router that is
+/// nested under `/a2a`, so they answer at `/a2a/.well-known/<name>`.
+/// See [`card_router`] for why the endpoint-relative copy is required.
+pub fn card_router_nested(state: CardState) -> Router {
+    card_router(state)
 }
 
 /// The JSON-RPC route, to be merged into the nested A2A router so it
