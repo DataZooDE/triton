@@ -2543,6 +2543,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "futures",
  "jsonwebtoken",
  "regex",
  "reqwest",
@@ -2566,6 +2567,7 @@ version = "0.0.1"
 dependencies = [
  "axum",
  "chrono",
+ "futures",
  "jsonwebtoken",
  "reqwest",
  "serde",

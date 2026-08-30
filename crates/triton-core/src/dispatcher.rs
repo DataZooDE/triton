@@ -305,6 +305,58 @@ impl Dispatcher {
     ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
         let started = Instant::now();
 
+        // In-process tools that OPT IN to streaming (#635 P5) ride the
+        // same deferred-audit path as upstream streams: incremental
+        // frames now, one audit line at termination. Everything else
+        // keeps the historical buffered branch below.
+        if let Some(tool) = self.registry.get(tool_name)
+            && tool.supports_streaming()
+        {
+            let returns_a2ui = tool.returns_a2ui();
+            let tp = principal.to_tool_principal();
+            return match tool.invoke_streaming(args, &tp).await {
+                Err(e) => Err(self.fail(
+                    tool_name,
+                    protocol,
+                    &principal,
+                    &e,
+                    started.elapsed().as_millis() as u64,
+                )),
+                Ok(inner) => {
+                    let inner = match (a2ui, returns_a2ui) {
+                        (Some(version), true) => wrap_stream_a2ui(inner, version),
+                        _ => inner,
+                    };
+                    let metrics = self.metrics.clone();
+                    let env = self.env.clone();
+                    let protocol = protocol.to_string();
+                    let tool = tool_name.to_string();
+                    let sub = principal.sub.clone();
+                    let tenant = principal.tenant.clone();
+                    let trace_id = principal.trace_id.clone();
+                    let open_offset = started.elapsed();
+                    let finalized =
+                        Finalized::new(inner, move |term: Termination, timing: Timing| {
+                            let total_ms = (open_offset + timing.total).as_millis() as u64;
+                            let ttfb_ms = timing.ttfb.map(|t| (open_offset + t).as_millis() as u64);
+                            emit_stream_audit(StreamAudit {
+                                metrics: &metrics,
+                                env: &env,
+                                protocol: &protocol,
+                                tool: &tool,
+                                sub: &sub,
+                                tenant: &tenant,
+                                trace_id: &trace_id,
+                                term,
+                                total_ms,
+                                ttfb_ms,
+                            });
+                        });
+                    Ok(finalized.boxed())
+                }
+            };
+        }
+
         // In-process tools (and the no-upstream fallback) are not
         // streaming sources: run them buffered, audit now, and emit a
         // single terminal `Done`. A pre-first-byte error audits inline.
@@ -862,5 +914,98 @@ mod tests {
             .invoke("nope", json!({}), test_principal(), "rest")
             .await;
         assert!(result.is_err(), "unknown tool with no upstream must error");
+    }
+
+    /// #635 P5 — the in-process streaming seam. A tool that opts in
+    /// must have its incremental frames pass through
+    /// `invoke_streaming` untouched, terminal Done included (the full
+    /// result value, so card renderers downstream lose nothing).
+    struct StreamingTool;
+
+    #[async_trait]
+    impl crate::tool::Tool for StreamingTool {
+        fn name(&self) -> &'static str {
+            "streamer"
+        }
+        fn supports_streaming(&self) -> bool {
+            true
+        }
+        async fn invoke(
+            &self,
+            _args: Value,
+            _principal: &crate::principal::ToolPrincipal,
+        ) -> Result<Value, TritonError> {
+            unreachable!("streaming path must not fall back to buffered invoke")
+        }
+        async fn invoke_streaming(
+            &self,
+            _args: Value,
+            _principal: &crate::principal::ToolPrincipal,
+        ) -> Result<futures::stream::BoxStream<'static, crate::stream::StreamEvent>, TritonError>
+        {
+            use futures::StreamExt as _;
+            Ok(futures::stream::iter(vec![
+                crate::stream::StreamEvent::Token("hel".into()),
+                crate::stream::StreamEvent::Token("lo".into()),
+                crate::stream::StreamEvent::Done(json!({ "answer": "hello" })),
+            ])
+            .boxed())
+        }
+    }
+
+    /// A tool that does NOT opt in: `invoke_streaming` on the
+    /// dispatcher must keep the historical buffered contract — exactly
+    /// one terminal Done, no fabricated deltas.
+    struct BufferedTool;
+
+    #[async_trait]
+    impl crate::tool::Tool for BufferedTool {
+        fn name(&self) -> &'static str {
+            "buffered"
+        }
+        async fn invoke(
+            &self,
+            _args: Value,
+            _principal: &crate::principal::ToolPrincipal,
+        ) -> Result<Value, TritonError> {
+            Ok(json!({ "answer": "buffered" }))
+        }
+    }
+
+    #[tokio::test]
+    async fn opted_in_tool_streams_tokens_then_done() {
+        use futures::StreamExt as _;
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(StreamingTool));
+        let dispatcher = Dispatcher::new(Arc::new(registry), "test");
+        let stream = dispatcher
+            .invoke_streaming("streamer", json!({}), test_principal(), "rest", None)
+            .await
+            .expect("stream opens");
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(events.len(), 3, "two deltas + terminal Done");
+        assert!(matches!(&events[0], crate::stream::StreamEvent::Token(t) if t == "hel"));
+        assert!(matches!(&events[1], crate::stream::StreamEvent::Token(t) if t == "lo"));
+        match &events[2] {
+            crate::stream::StreamEvent::Done(v) => assert_eq!(v["answer"], "hello"),
+            other => panic!("terminal must be Done with the FULL result; got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn non_opted_tool_keeps_the_buffered_single_done() {
+        use futures::StreamExt as _;
+        let mut registry = ToolRegistry::new();
+        registry.register(Arc::new(BufferedTool));
+        let dispatcher = Dispatcher::new(Arc::new(registry), "test");
+        let stream = dispatcher
+            .invoke_streaming("buffered", json!({}), test_principal(), "rest", None)
+            .await
+            .expect("stream opens");
+        let events: Vec<_> = stream.collect().await;
+        assert_eq!(events.len(), 1, "buffered tools emit exactly one frame");
+        assert!(
+            matches!(&events[0], crate::stream::StreamEvent::Done(v) if v["answer"] == "buffered")
+        );
     }
 }
