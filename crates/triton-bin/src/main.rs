@@ -1140,12 +1140,16 @@ async fn main() -> std::io::Result<()> {
                         token_url: settings.msteams_token_url.clone(),
                         extra_service_url_hosts: settings.msteams_extra_service_url_hosts.clone(),
                     };
+                    let msteams_courier = triton_chat_msteams::CourierConfig {
+                        enabled: settings.msteams_async,
+                    };
                     match triton_chat_msteams::MsTeamsAdapter::from_manifest(
                         name,
                         adapter,
                         resolver.as_ref(),
                         dispatcher.clone(),
                         overrides,
+                        msteams_courier,
                     )
                     .await
                     {

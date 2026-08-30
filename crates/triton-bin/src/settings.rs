@@ -115,6 +115,8 @@ pub struct Settings {
     /// `local` env (NFR-S-4 egress allowlist for the outbound reply
     /// Activity).
     pub msteams_extra_service_url_hosts: Vec<String>,
+    /// #635 P4: async reply courier for msteams.
+    pub msteams_async: bool,
     pub courier_timeout: Duration,
     /// Comma-separated allow-list of origins that may make
     /// cross-origin requests to the HTTP trio. Empty by default —
@@ -495,6 +497,14 @@ struct Cli {
     )]
     msteams_extra_service_url_hosts: String,
 
+    /// #635 P4: async reply courier for msteams — ack the webhook 200
+    /// immediately and deliver out-of-band (streaming in 1:1 chats).
+    /// Bot Framework abandons the inbound connection at ~15s, which on
+    /// the inline path cancels the dispatch mid-turn. Accepts
+    /// `true`/`1` (case-insensitive) as on, like the googlechat twin.
+    #[arg(long, env = "TRITON_MSTEAMS_ASYNC", default_value = "false")]
+    msteams_async: String,
+
     /// Comma-separated CORS allow-list (e.g.
     /// `https://explorer-nonprod.tailnet.ts.net`). Default empty:
     /// no CORS layer mounted, response headers identical to v0.1.
@@ -690,6 +700,10 @@ impl From<Cli> for Settings {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            msteams_async: matches!(
+                c.msteams_async.trim().to_ascii_lowercase().as_str(),
+                "true" | "1"
+            ),
             courier_timeout: Duration::from_millis(c.courier_timeout_ms),
             cors_allowed_origins: triton_adapters_http::cors::parse_origins(
                 &c.cors_allowed_origins,
