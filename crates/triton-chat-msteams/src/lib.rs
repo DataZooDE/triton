@@ -106,6 +106,24 @@ pub struct AdapterOverrides {
     pub extra_service_url_hosts: Vec<String>,
 }
 
+/// Async-courier switch (mirrors googlechat's; #635 P4). No `api_base`:
+/// Teams replies go to the JWT-asserted `serviceUrl`, never a
+/// configurable host.
+#[derive(Debug, Clone)]
+pub struct CourierConfig {
+    /// `true` ⇒ the webhook acks 200 immediately and a spawned task
+    /// dispatches + delivers out-of-band (streaming in 1:1 chats,
+    /// typing loop + proactive message elsewhere). `false` ⇒ the
+    /// historical inline path, unchanged.
+    pub enabled: bool,
+}
+
+impl Default for CourierConfig {
+    fn default() -> Self {
+        Self { enabled: false }
+    }
+}
+
 pub struct MsTeamsAdapter {
     name: String,
     #[allow(dead_code)]
@@ -123,6 +141,7 @@ pub struct MsTeamsAdapter {
     http: reqwest::Client,
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
+    courier: CourierConfig,
 }
 
 impl MsTeamsAdapter {
@@ -132,6 +151,7 @@ impl MsTeamsAdapter {
         resolver: &dyn SecretResolver,
         dispatcher: Arc<Dispatcher>,
         overrides: AdapterOverrides,
+        courier: CourierConfig,
     ) -> Result<Self, BuildError> {
         if adapter.kind != AdapterKind::MsTeams {
             return Err(BuildError::WrongKind);
@@ -363,6 +383,7 @@ impl MsTeamsAdapter {
             http,
             rate_limit,
             per_tenant_limit,
+            courier,
         })
     }
 
@@ -457,6 +478,12 @@ struct ChannelTenant {
 #[derive(Debug, Deserialize)]
 struct ActivityConversation {
     id: String,
+    /// `"personal"` / `"groupChat"` / `"channel"` on Teams. Streaming
+    /// is legal ONLY in personal (1:1) chats, so absent/unknown is
+    /// treated as a group — the conservative branch (typing loop +
+    /// plain proactive message), which every conversation kind accepts.
+    #[serde(default, rename = "conversationType")]
+    conversation_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -643,6 +670,7 @@ enum CallbackKind {
 /// Identity resolved off an inbound Activity: the channel-scoped
 /// `from.id` (always the reply target) plus the `(sub, scopes, tenant)`
 /// the sender maps to. Shared by the text-message and callback paths.
+#[derive(Clone)]
 struct ResolvedSender {
     from_id: String,
     sub: String,
@@ -821,6 +849,10 @@ async fn dispatch_message(
     let stripped = strip_mention_prefix(text);
     let (tool_name, args) = route_command(stripped, &adapter.inbound_tool);
 
+    let conversation_type = activity
+        .conversation
+        .as_ref()
+        .and_then(|c| c.conversation_type.clone());
     dispatch_and_post_reply(
         adapter,
         verified,
@@ -829,6 +861,7 @@ async fn dispatch_message(
         &sender,
         &conversation_id,
         &recipient_id,
+        conversation_type,
     )
     .await
 }
@@ -893,8 +926,47 @@ async fn handle_callback(
     // merge would clobber the button's own preset args.
     merge_inputs(&mut args, inputs);
 
+    let conversation_type = activity
+        .conversation
+        .as_ref()
+        .and_then(|c| c.conversation_type.clone());
     match kind {
         CallbackKind::Execute => {
+            // A data-question button click runs the same 20-25s dispatch
+            // a typed question does, and the in-place card refresh MUST
+            // ride the invoke's own HTTP response — which Bot Framework
+            // abandons at ~15s, killing the refresh AND the dispatch
+            // with it (the future is dropped). With the courier on, ack
+            // the invoke immediately (the Universal Action contract
+            // requires a response body) and deliver the real answer
+            // out-of-band as a new message.
+            if adapter.courier.enabled {
+                match convo_and_recipient(adapter, activity, &sender) {
+                    Ok((conversation_id, recipient_id)) => {
+                        spawn_courier(
+                            adapter,
+                            verified,
+                            tool_name,
+                            args,
+                            sender,
+                            conversation_id,
+                            recipient_id,
+                            conversation_type,
+                        );
+                        return (
+                            StatusCode::OK,
+                            axum::Json(surface_mapper::invoke_message_response(
+                                "⏳ Working on it — the answer will follow here.",
+                            )),
+                        )
+                            .into_response();
+                    }
+                    // No conversation to deliver into (defensive; a real
+                    // Teams invoke always carries one): the inline
+                    // refresh still works, fall through.
+                    Err(_) => {}
+                }
+            }
             dispatch_and_refresh_card(adapter, &tool_name, args, &sender).await
         }
         CallbackKind::Submit => {
@@ -911,6 +983,7 @@ async fn handle_callback(
                 &sender,
                 &conversation_id,
                 &recipient_id,
+                conversation_type,
             )
             .await
         }
@@ -948,6 +1021,7 @@ fn convo_and_recipient(
 
 /// Dispatch `(tool, args)` and POST the rendered reply back through the
 /// bot connector. Used by the message and `Action.Submit` paths.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_and_post_reply(
     adapter: &Arc<MsTeamsAdapter>,
     verified: &VerifiedClaims,
@@ -956,7 +1030,29 @@ async fn dispatch_and_post_reply(
     sender: &ResolvedSender,
     conversation_id: &str,
     recipient_id: &str,
+    conversation_type: Option<String>,
 ) -> Response {
+    // The courier seam: everything security-relevant (JWT verify, rate
+    // limits, sender resolution, correlation-token check on Submit)
+    // already happened in the caller. Ack 200 NOW — Bot Framework
+    // abandons the connection at ~15s and hyper then DROPS this future,
+    // which on the inline path killed the reply after the dispatch had
+    // already succeeded (observed live: `dispatch ok 23.4s`, no post
+    // record, ingress 499). A spawned task cannot be cancelled by the
+    // client hanging up.
+    if adapter.courier.enabled {
+        spawn_courier(
+            adapter,
+            verified,
+            tool_name.to_string(),
+            args,
+            sender.clone(),
+            conversation_id.to_string(),
+            recipient_id.to_string(),
+            conversation_type,
+        );
+        return StatusCode::OK.into_response();
+    }
     let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
     let started = std::time::Instant::now();
@@ -1211,6 +1307,269 @@ fn route_command(text: &str, default_tool: &str) -> (String, Value) {
         default_tool.to_string(),
         serde_json::json!({ "message": text }),
     )
+}
+
+/// Spawn the out-of-band delivery task. Everything the task needs is
+/// cloned out of the request now — `verified` (the allowlisted
+/// serviceUrl) in particular is per-request state that must not be
+/// borrowed across the spawn.
+#[allow(clippy::too_many_arguments)]
+fn spawn_courier(
+    adapter: &Arc<MsTeamsAdapter>,
+    verified: &VerifiedClaims,
+    tool_name: String,
+    args: Value,
+    sender: ResolvedSender,
+    conversation_id: String,
+    recipient_id: String,
+    conversation_type: Option<String>,
+) {
+    let adapter = adapter.clone();
+    let verified = verified.clone();
+    tokio::spawn(async move {
+        courier_deliver(
+            adapter,
+            verified,
+            tool_name,
+            args,
+            sender,
+            conversation_id,
+            recipient_id,
+            conversation_type,
+        )
+        .await;
+    });
+}
+
+/// Teams' typing indicator persists ~3s; the spec says senders MAY
+/// re-send every 2s to prevent gaps. 2.5s splits the difference.
+const TYPING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(2500);
+
+/// One courier turn (#635 P4): show progress immediately, dispatch
+/// disconnect-safe, deliver the reply through the Connector.
+///
+/// * **1:1 chats** (`conversationType == "personal"`): the Teams
+///   streaming shell — an informative `typing` activity ("Working on
+///   it…") opens a stream (its returned activity id is the streamId),
+///   and the final `message` closes it (`streamType: "final"`, no
+///   sequence) carrying the full reply, Adaptive Card attachments
+///   included (legal only on the final). A refused stream falls back
+///   to a plain proactive message — the answer always lands.
+/// * **Everything else** (group chats, channels, unknown): streaming
+///   is rejected by the Connector, so a plain `typing` activity every
+///   [`TYPING_INTERVAL`] keeps the indicator alive during the
+///   dispatch, then one ordinary reply activity.
+///
+/// Audit: exactly one `phase: post` line per turn, carrying the real
+/// HTTP status + latency of the call that delivered (or finally
+/// failed). Progress activities are best-effort and unaudited.
+#[allow(clippy::too_many_arguments)]
+async fn courier_deliver(
+    adapter: Arc<MsTeamsAdapter>,
+    verified: VerifiedClaims,
+    tool_name: String,
+    args: Value,
+    sender: ResolvedSender,
+    conversation_id: String,
+    recipient_id: String,
+    conversation_type: Option<String>,
+) {
+    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let principal_for_post = principal.clone();
+    let personal = conversation_type.as_deref() == Some("personal");
+
+    // Progress. Personal: open a stream with an informative update.
+    // Group: keep a typing ticker alive while the dispatch runs.
+    let mut stream_id: Option<String> = None;
+    let mut typing_ticker: Option<tokio::task::JoinHandle<()>> = None;
+    if personal {
+        let body = serde_json::json!({
+            "type": "typing",
+            "text": "Working on it…",
+            "from": { "id": recipient_id },
+            "conversation": { "id": conversation_id },
+            "recipient": { "id": sender.from_id },
+            "entities": [ {
+                "type": "streaminfo",
+                "streamType": "informative",
+                "streamSequence": 1,
+            } ],
+        });
+        match post_activity(&adapter, &verified, &conversation_id, &body).await {
+            Ok((status, id)) if (200..300).contains(&status) => stream_id = id,
+            Ok((status, _)) => {
+                tracing::debug!(
+                    status,
+                    "msteams courier: stream open refused; plain delivery"
+                );
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "msteams courier: stream open failed; plain delivery");
+            }
+        }
+    } else {
+        let adapter2 = adapter.clone();
+        let verified2 = verified.clone();
+        let conversation2 = conversation_id.clone();
+        let body = serde_json::json!({
+            "type": "typing",
+            "from": { "id": recipient_id },
+            "conversation": { "id": conversation_id },
+            "recipient": { "id": sender.from_id },
+        });
+        typing_ticker = Some(tokio::spawn(async move {
+            loop {
+                if let Err(e) = post_activity(&adapter2, &verified2, &conversation2, &body).await {
+                    tracing::debug!(error = %e, "msteams courier: typing activity failed");
+                }
+                tokio::time::sleep(TYPING_INTERVAL).await;
+            }
+        }));
+    }
+
+    let started = std::time::Instant::now();
+    let result = adapter
+        .dispatcher
+        .invoke(&tool_name, args, principal, PROTOCOL)
+        .await;
+    let dispatch_latency_ms = started.elapsed().as_millis() as u64;
+    if let Some(t) = typing_ticker {
+        t.abort();
+    }
+
+    let mut body = match result {
+        Ok(dispatch) => build_reply_body(
+            &adapter,
+            &recipient_id,
+            &conversation_id,
+            &sender.from_id,
+            &dispatch.result,
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, class = %e.class(), "msteams courier dispatch failed");
+            // One audited post line (Dropped + error_response), then a
+            // best-effort visible notice so the user isn't staring at a
+            // dead typing indicator.
+            adapter.dispatcher.record_post(
+                &tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                dispatch_latency_ms,
+                Err((&e, 0, PostOutcome::Dropped, Some("error_response"))),
+            );
+            let notice = serde_json::json!({
+                "type": "message",
+                "from": { "id": recipient_id },
+                "conversation": { "id": conversation_id },
+                "recipient": { "id": sender.from_id },
+                "text": format!("(error: {})", e.class()),
+                "textFormat": "plain",
+            });
+            if let Err(err) = post_activity(&adapter, &verified, &conversation_id, &notice).await {
+                tracing::warn!(error = %err, "msteams courier: error notice not delivered");
+            }
+            return;
+        }
+    };
+
+    // Close the stream when one is open: the final message carries the
+    // streaminfo terminator (no streamSequence on a final, per the
+    // streaming contract). Attachments are legal here — only here.
+    if let Some(sid) = &stream_id
+        && let Some(obj) = body.as_object_mut()
+    {
+        obj.insert(
+            "entities".to_string(),
+            serde_json::json!([ { "type": "streaminfo", "streamId": sid, "streamType": "final" } ]),
+        );
+    }
+
+    let post_started = std::time::Instant::now();
+    let mut outcome = post_activity(&adapter, &verified, &conversation_id, &body).await;
+    if stream_id.is_some() && !matches!(&outcome, Ok((status, _)) if (200..300).contains(status)) {
+        // A refused stream close (expired stream, ContentStreamNotAllowed)
+        // must not cost the answer: retry once as a plain message and
+        // audit THAT attempt.
+        tracing::warn!("msteams courier: streamed final refused; retrying as a plain message");
+        if let Some(obj) = body.as_object_mut() {
+            obj.remove("entities");
+        }
+        outcome = post_activity(&adapter, &verified, &conversation_id, &body).await;
+    }
+    let latency_ms = post_started.elapsed().as_millis() as u64;
+    match outcome {
+        Ok((status, _)) if (200..300).contains(&status) => {
+            adapter.dispatcher.record_post(
+                &tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                latency_ms,
+                Ok((status, PostOutcome::Posted, None)),
+            );
+        }
+        Ok((status, _)) => {
+            let label = if status >= 500 || status == 429 {
+                PostOutcome::Retry
+            } else {
+                PostOutcome::Dropped
+            };
+            let provider =
+                TritonError::Provider(format!("msteams activities POST status {status}"));
+            adapter.dispatcher.record_post(
+                &tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                latency_ms,
+                Err((&provider, status, label, None)),
+            );
+        }
+        Err(e) => {
+            tracing::warn!("msteams courier activities POST failed: {e}");
+            let provider = TritonError::Provider(format!("msteams transport: {e}"));
+            adapter.dispatcher.record_post(
+                &tool_name,
+                PROTOCOL,
+                &principal_for_post,
+                latency_ms,
+                Err((&provider, 0, PostOutcome::Retry, None)),
+            );
+        }
+    }
+}
+
+/// POST one Activity to the conversation, un-audited: the primitive
+/// under both the progress activities and the courier's final
+/// delivery. Returns the HTTP status plus the created activity's `id`
+/// from the response body — the streamId when the activity opened a
+/// stream (the inline `post_reply` used to discard the body entirely).
+async fn post_activity(
+    adapter: &MsTeamsAdapter,
+    verified: &VerifiedClaims,
+    conversation_id: &str,
+    body: &Value,
+) -> Result<(u16, Option<String>), String> {
+    let base = verified.reply_base().trim_end_matches('/');
+    let url = format!("{}/v3/conversations/{}/activities", base, conversation_id);
+    let access_token = adapter
+        .token_client
+        .access_token()
+        .await
+        .map_err(|e| format!("msteams token: {e}"))?;
+    let resp = adapter
+        .http
+        .post(&url)
+        .bearer_auth(&access_token)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    let id = resp
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_owned));
+    Ok((status, id))
 }
 
 async fn post_reply(
