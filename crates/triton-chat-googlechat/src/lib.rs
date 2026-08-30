@@ -1196,8 +1196,20 @@ async fn handle_webhook(
         match space_name {
             Some(space) if !space.is_empty() => {
                 let adapter = adapter.clone();
+                // The public image base derives from request headers, which
+                // the spawned task no longer has — capture it now.
+                let base = public_base(&headers);
                 tokio::spawn(async move {
-                    courier_reply(adapter, space, tool_name, args, principal, action_echo).await;
+                    courier_reply(
+                        adapter,
+                        space,
+                        base,
+                        tool_name,
+                        args,
+                        principal,
+                        action_echo,
+                    )
+                    .await;
                 });
                 return (
                     StatusCode::OK,
@@ -1466,72 +1478,100 @@ async fn build_reply_message(
     Ok(body)
 }
 
-/// #164 T1a: one async courier turn — dispatch the tool, render the
-/// reply, POST it as a plain Chat Message to
-/// `{api_base}/v1/{space}/messages`, and audit the delivery as
-/// `phase: post` carrying the REAL HTTP status + latency (unlike the
-/// inline path's fixed 0/200).
+/// #164 T1a/T2: one async courier turn — post a placeholder inside the
+/// webhook deadline, dispatch the tool, build the SAME reply body the
+/// sync path sends (cards, dashboards, chart images — `build_reply_message`
+/// with `workspace_addon = false` yields a bare `{text, cardsV2}` Message,
+/// which is exactly the create/patch request body), then PATCH the
+/// placeholder into the final answer. Audited as `phase: post` carrying
+/// the REAL HTTP status + latency (unlike the inline path's fixed 0/200).
 ///
-/// The courier reply is a *create-message* REST call, not a webhook
-/// response body, so it never wears the Workspace Add-on
-/// `hostAppDataAction` envelope — T1a sends a plain `{text}` Message
-/// (interactive Cards over the courier are follow-up scope).
+/// The placeholder is the progress UX: Google Chat has no typing
+/// indicator for apps, so an immediate "Working on it…" that later
+/// becomes the answer is the platform's documented pattern. One create +
+/// one patch per turn sits inside the 1-write/s per-space quota with no
+/// limiter. A failed placeholder create degrades to a plain create of
+/// the final answer — never a dropped turn.
 async fn courier_reply(
     adapter: Arc<GoogleChatAdapter>,
     space: String,
+    base: Option<String>,
     tool_name: String,
     args: Value,
     principal: Principal,
     action_echo: Option<String>,
 ) {
     let principal_for_post = principal.clone();
+
+    // Placeholder FIRST — visible before the (17–60s) dispatch starts.
+    // Best-effort: on failure we still dispatch and create the final
+    // answer directly, which is exactly the pre-placeholder behaviour.
+    let placeholder_body = surface_mapper::text_reply_body("⏳ Working on it…", false);
+    let placeholder = match send_chat_message(&adapter, &space, &placeholder_body).await {
+        Ok((status, name)) if (200..300).contains(&status) => name,
+        Ok((status, _)) => {
+            tracing::warn!(status, "google_chat courier: placeholder create refused");
+            None
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "google_chat courier: placeholder create failed");
+            None
+        }
+    };
+
     let result = adapter
         .dispatcher
         .invoke(&tool_name, args, principal, PROTOCOL)
         .await;
-    let text = match result {
-        Ok(dispatch) => match render_dispatch_result(&dispatch.result) {
-            Ok(rendered) => {
-                if rendered.truncated {
+    let body = match result {
+        Ok(dispatch) => {
+            match build_reply_message(
+                &adapter,
+                base.as_deref(),
+                &tool_name,
+                &dispatch.result,
+                &action_echo,
+                &principal_for_post,
+                false,
+            )
+            .await
+            {
+                Ok(body) => body,
+                Err(surface_mapper::RenderError::EmptyAfterRender) => {
+                    // Mirror the inline path's audit (Dropped) — but a
+                    // placeholder is already on screen, so patch it into a
+                    // neutral notice instead of leaving "Working on it…"
+                    // forever. The patch itself is best-effort/un-audited:
+                    // one post line per turn.
                     tracing::warn!(
                         tool = tool_name,
-                        cap_bytes = surface_mapper::GOOGLE_CHAT_TEXT_MAX_BYTES,
-                        "google_chat surface mapper: rendered text exceeded cap; truncated",
+                        "google_chat surface mapper: empty surface; no courier answer",
                     );
-                }
-                // Same CARD_CLICKED echo discipline as the inline path.
-                match &action_echo {
-                    Some(echo) if !echo.is_empty() => {
-                        format!("*↳ {}*\n\n{}", echo.replace('*', "\\*"), rendered.text)
+                    let provider =
+                        TritonError::Provider("google_chat surface mapper: empty surface".into());
+                    adapter.dispatcher.record_post(
+                        &tool_name,
+                        PROTOCOL,
+                        &principal_for_post,
+                        0,
+                        Err((&provider, 0, PostOutcome::Dropped, None)),
+                    );
+                    if let Some(name) = &placeholder {
+                        let notice = surface_mapper::text_reply_body("(no answer produced)", false);
+                        if let Err(e) = patch_chat_message(&adapter, name, &notice).await {
+                            tracing::warn!(error = %e, "google_chat courier: empty-surface notice not delivered");
+                        }
                     }
-                    _ => rendered.text,
+                    return;
                 }
             }
-            Err(surface_mapper::RenderError::EmptyAfterRender) => {
-                // Mirror the inline path: nothing to send, audit the drop.
-                tracing::warn!(
-                    tool = tool_name,
-                    "google_chat surface mapper: empty surface; skipping courier post",
-                );
-                let provider =
-                    TritonError::Provider("google_chat surface mapper: empty surface".into());
-                adapter.dispatcher.record_post(
-                    &tool_name,
-                    PROTOCOL,
-                    &principal_for_post,
-                    0,
-                    Err((&provider, 0, PostOutcome::Dropped, None)),
-                );
-                return;
-            }
-        },
+        }
         Err(e) => {
             tracing::warn!(error = %e, class = %e.class(), "google_chat courier dispatch failed");
-            // Mirror the inline error path's audit shape (one `phase:
-            // post` line, Dropped + `error_response`), then still
-            // deliver the short error notice best-effort so the user
-            // isn't left staring at silence — the delivery itself is
-            // deliberately un-audited to keep one post line per turn.
+            // One audited post line (Dropped + error_response), then a
+            // best-effort visible notice — into the placeholder when we
+            // have one, else a fresh message — so the user isn't left
+            // staring at silence (or worse, at a perpetual spinner).
             adapter.dispatcher.record_post(
                 &tool_name,
                 PROTOCOL,
@@ -1539,16 +1579,50 @@ async fn courier_reply(
                 0,
                 Err((&e, 0, PostOutcome::Dropped, Some("error_response"))),
             );
-            let notice = format!("(error: {})", e.class());
-            if let Err(err) = send_chat_message(&adapter, &space, &notice).await {
+            let notice = surface_mapper::text_reply_body(&format!("(error: {})", e.class()), false);
+            let delivered = match &placeholder {
+                Some(name) => patch_chat_message(&adapter, name, &notice)
+                    .await
+                    .map(|_| ()),
+                None => send_chat_message(&adapter, &space, &notice)
+                    .await
+                    .map(|_| ()),
+            };
+            if let Err(err) = delivered {
                 tracing::warn!(error = %err, "google_chat courier: error notice not delivered");
             }
             return;
         }
     };
 
+    // Deliver: patch the placeholder into the answer; if the patch is
+    // refused (deleted message, revoked scope) fall back to a fresh
+    // create so the answer still lands. Audit the operation that
+    // actually delivered.
     let started = std::time::Instant::now();
-    let outcome = send_chat_message(&adapter, &space, &text).await;
+    let outcome = match &placeholder {
+        Some(name) => match patch_chat_message(&adapter, name, &body).await {
+            Ok(status) if (200..300).contains(&status) => Ok(status),
+            Ok(status) => {
+                tracing::warn!(
+                    status,
+                    "google_chat courier: final patch refused; falling back to create"
+                );
+                send_chat_message(&adapter, &space, &body)
+                    .await
+                    .map(|(s, _)| s)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "google_chat courier: final patch failed; falling back to create");
+                send_chat_message(&adapter, &space, &body)
+                    .await
+                    .map(|(s, _)| s)
+            }
+        },
+        None => send_chat_message(&adapter, &space, &body)
+            .await
+            .map(|(s, _)| s),
+    };
     let latency_ms = started.elapsed().as_millis() as u64;
     match outcome {
         Ok(status) if (200..300).contains(&status) => {
@@ -1598,8 +1672,8 @@ async fn courier_reply(
 async fn send_chat_message(
     adapter: &GoogleChatAdapter,
     space: &str,
-    text: &str,
-) -> Result<u16, String> {
+    body: &Value,
+) -> Result<(u16, Option<String>), String> {
     // #164 bearer acquisition: static token verbatim (T1a escape
     // hatch), or a cached/auto-refreshed SA-minted OAuth token (T1b).
     // A failed mint returns Err so the caller audits the turn as a
@@ -1619,12 +1693,55 @@ async fn send_chat_message(
         adapter.courier.api_base.trim_end_matches('/'),
         space
     );
-    let body = surface_mapper::text_reply_body(text, false);
     let resp = adapter
         .http
         .post(&url)
         .bearer_auth(token)
-        .json(&body)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status().as_u16();
+    // The created message's resource name (`spaces/…/messages/…`) is what
+    // `patch_chat_message` addresses — the placeholder→final edit needs it.
+    let name = resp
+        .json::<Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("name").and_then(Value::as_str).map(str::to_owned));
+    Ok((status, name))
+}
+
+/// Update an existing Chat message in place:
+/// `PATCH {api_base}/v1/{name}?updateMask=text,cardsV2`. This is the
+/// progress pattern Google documents for async apps — create a
+/// placeholder inside the webhook deadline, then edit it into the real
+/// answer. Both fields are always in the mask: a text-only final body
+/// must CLEAR a card the placeholder never had, and vice versa —
+/// masking only the populated field would merge, not replace.
+async fn patch_chat_message(
+    adapter: &GoogleChatAdapter,
+    name: &str,
+    body: &Value,
+) -> Result<u16, String> {
+    let token = match &adapter.outbound {
+        OutboundAuth::Static(t) => t.clone(),
+        OutboundAuth::ServiceAccount(minter) => minter
+            .access_token()
+            .await
+            .map_err(|e| format!("service-account token mint: {e}"))?,
+        OutboundAuth::None => return Err("no outbound token resolved".to_string()),
+    };
+    let url = format!(
+        "{}/v1/{}?updateMask=text,cardsV2",
+        adapter.courier.api_base.trim_end_matches('/'),
+        name
+    );
+    let resp = adapter
+        .http
+        .patch(&url)
+        .bearer_auth(token)
+        .json(body)
         .send()
         .await
         .map_err(|e| e.to_string())?;

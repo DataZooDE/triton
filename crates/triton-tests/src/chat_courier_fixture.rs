@@ -681,6 +681,12 @@ pub struct GoogleChatSentMessage {
     pub space: String,
     pub bearer: String,
     pub body: Value,
+    /// `"POST"` (create) or `"PATCH"` (in-place update) — the courier's
+    /// placeholder→final flow is distinguishable only by verb.
+    pub method: String,
+    /// On a PATCH: the message resource name being updated
+    /// (`spaces/{space}/messages/{id}`).
+    pub message: Option<String>,
 }
 
 struct GoogleChatApiState {
@@ -688,6 +694,10 @@ struct GoogleChatApiState {
     /// HTTP status every POST answers with — 200 for the happy path,
     /// 500 to exercise the courier's Retry audit branch.
     status: u16,
+    /// Monotonic id so each created message gets a UNIQUE resource name
+    /// — the placeholder→patch flow addresses a specific message, and a
+    /// shared "stub" name would hide a patch aimed at the wrong one.
+    next_id: std::sync::atomic::AtomicU64,
 }
 
 /// Fake `chat.googleapis.com` for the #164 T1a async reply courier.
@@ -714,13 +724,19 @@ impl FakeGoogleChatApi {
         let state = Arc::new(GoogleChatApiState {
             captured: Mutex::new(Vec::new()),
             status,
+            next_id: std::sync::atomic::AtomicU64::new(1),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
         let addr = listener.local_addr().unwrap();
-        let router = Router::new().route(
-            "/v1/spaces/{space}/messages",
-            post(handle_chat_message_post).with_state(state.clone()),
-        );
+        let router = Router::new()
+            .route(
+                "/v1/spaces/{space}/messages",
+                post(handle_chat_message_post).with_state(state.clone()),
+            )
+            .route(
+                "/v1/spaces/{space}/messages/{msg}",
+                axum::routing::patch(handle_chat_message_patch).with_state(state.clone()),
+            );
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
@@ -753,14 +769,44 @@ async fn handle_chat_message_post(
         space: format!("spaces/{space}"),
         bearer,
         body,
+        method: "POST".to_string(),
+        message: None,
     });
     let status =
         axum::http::StatusCode::from_u16(state.status).unwrap_or(axum::http::StatusCode::OK);
+    let id = state
+        .next_id
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     (
         status,
-        Json(json!({ "name": format!("spaces/{space}/messages/stub") })),
+        Json(json!({ "name": format!("spaces/{space}/messages/stub-{id}") })),
     )
         .into_response()
+}
+
+async fn handle_chat_message_patch(
+    State(state): State<Arc<GoogleChatApiState>>,
+    Path((space, msg)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let name = format!("spaces/{space}/messages/{msg}");
+    state.captured.lock().unwrap().push(GoogleChatSentMessage {
+        space: format!("spaces/{space}"),
+        bearer,
+        body,
+        method: "PATCH".to_string(),
+        message: Some(name.clone()),
+    });
+    let status =
+        axum::http::StatusCode::from_u16(state.status).unwrap_or(axum::http::StatusCode::OK);
+    (status, Json(json!({ "name": name }))).into_response()
 }
 
 // ---------- Google OAuth2 token endpoint fake (#164 T1b) ----------

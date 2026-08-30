@@ -1422,24 +1422,46 @@ async fn async_courier_acks_immediately_and_posts_reply() {
     let body: Value = resp.json().await.expect("ack body");
     assert_eq!(body, json!({}), "async ack must be an empty no-op body");
 
-    // The spawned courier delivers the reply to the Chat REST API.
-    let captured = wait_for_chat_post(&chat_api, Duration::from_secs(5));
-    assert_eq!(captured.len(), 1, "exactly one Message POST");
-    let msg = &captured[0];
+    // The spawned courier delivers a PLACEHOLDER create first (inside
+    // the webhook deadline, before the 2s dispatch resolves), then
+    // PATCHes that same message into the real answer — the documented
+    // async-progress pattern (Chat has no typing indicator for apps).
+    let captured = wait_for_chat_posts(&chat_api, 2, Duration::from_secs(5));
+    assert_eq!(captured.len(), 2, "placeholder create + final patch");
+    let placeholder = &captured[0];
+    assert_eq!(placeholder.method, "POST");
     assert_eq!(
-        msg.space, "spaces/AAA",
-        "reply must target the inbound event's space"
+        placeholder.space, "spaces/AAA",
+        "placeholder must target the inbound event's space"
+    );
+    assert!(
+        placeholder.body["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Working on it"),
+        "placeholder is the progress notice; got: {}",
+        placeholder.body
+    );
+    let final_msg = &captured[1];
+    assert_eq!(
+        final_msg.method, "PATCH",
+        "final answer edits the placeholder in place"
     );
     assert_eq!(
-        msg.bearer,
+        final_msg.message.as_deref(),
+        Some("spaces/AAA/messages/stub-1"),
+        "the patch must address the placeholder the create returned"
+    );
+    assert_eq!(
+        final_msg.bearer,
         format!("Bearer {COURIER_STATIC_TOKEN}"),
         "T1a: the resolved outbound.token rides as a static bearer"
     );
-    let text = msg.body["text"].as_str().unwrap_or_default();
+    let text = final_msg.body["text"].as_str().unwrap_or_default();
     assert!(
         text.contains("42, after a long think"),
-        "posted Message must carry the agent's answer; got: {}",
-        msg.body
+        "patched Message must carry the agent's answer; got: {}",
+        final_msg.body
     );
 
     // Delivery audited as `phase: post` with a REAL HTTP roundtrip
@@ -1450,6 +1472,67 @@ async fn async_courier_acks_immediately_and_posts_reply() {
     assert_eq!(post["status_label"], "posted");
     assert_eq!(post["result"], "ok");
     assert_eq!(post["status"], 200);
+}
+
+/// The point of the P1 extraction: the courier delivers the SAME
+/// Cards v2 body the sync path renders — buttons and all — where it
+/// used to degrade to plain text ("interactive Cards over the courier
+/// are follow-up scope", now closed). The final PATCH body must carry
+/// `cardsV2` with the signed correlation-token button, bare (no
+/// Workspace-Add-on `hostAppDataAction` envelope — this is a REST
+/// create/patch, not a webhook response).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn async_courier_delivers_cards() {
+    let jwks = FakeGoogleJwks::start().await;
+    let chat_api = FakeGoogleChatApi::start().await;
+    let upstream = FakeAgent::start_returning(json!({
+        "surface": { "components": [
+            { "kind": "narration", "text": "top risks" },
+            { "kind": "button", "label": "Details", "tool": "answer", "args": {} }
+        ] }
+    }))
+    .await;
+    let env = courier_env(&jwks, &chat_api, &upstream, true);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let jwt = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&message_event("users/99", "which suppliers are risky?"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let captured = wait_for_chat_posts(&chat_api, 2, Duration::from_secs(5));
+    let final_msg = &captured[1];
+    assert_eq!(final_msg.method, "PATCH");
+    assert!(
+        final_msg.body.get("hostAppDataAction").is_none(),
+        "REST create/patch bodies are BARE Messages, never add-on envelopes"
+    );
+    let widgets = &final_msg.body["cardsV2"][0]["card"]["sections"][0]["widgets"];
+    assert!(
+        widgets.is_array(),
+        "final patch must carry the Cards v2 card; got: {}",
+        final_msg.body
+    );
+    let button = widgets
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|w| w["buttonList"]["buttons"][0].as_object())
+        .expect("a rendered button");
+    assert_eq!(button["text"], json!("Details"));
+    let token = button["onClick"]["action"]["parameters"][0]["value"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        !token.is_empty(),
+        "the button must carry a signed correlation token"
+    );
 }
 
 /// Backward compatibility: without `TRITON_GOOGLE_CHAT_ASYNC` the same
@@ -1519,10 +1602,17 @@ async fn async_courier_api_500_audits_retry_and_stays_up() {
         resp.status()
     );
 
-    // The courier tried (the fake captured the POST) and audited the
-    // 500 as a retryable delivery failure.
-    let captured = wait_for_chat_post(&chat_api, Duration::from_secs(5));
-    assert_eq!(captured.len(), 1);
+    // Every call answers 500: the placeholder create is refused (and
+    // deliberately un-audited — one post line per turn), then the final
+    // answer falls back to a direct create, whose 500 IS the audited
+    // retryable failure.
+    let captured = wait_for_chat_posts(&chat_api, 2, Duration::from_secs(5));
+    assert_eq!(
+        captured.len(),
+        2,
+        "refused placeholder + audited final create"
+    );
+    assert!(captured.iter().all(|m| m.method == "POST"));
     let post = wait_for_audit(&proc, Duration::from_secs(2), |v| {
         v["kind"] == "audit" && v["phase"] == "post" && v["protocol"] == "messenger:google_chat"
     });
@@ -1636,24 +1726,28 @@ async fn sa_key_outbound_token_mints_oauth_bearer_for_courier_post() {
         .expect("POST webhook");
     assert!(resp.status().is_success(), "{}", resp.status());
 
-    // The reply lands with the fake-issued access token, never the raw key.
-    let captured = wait_for_chat_posts(&chat_api, 1, Duration::from_secs(5));
-    assert_eq!(captured.len(), 1, "exactly one Message POST");
-    assert_eq!(
-        captured[0].bearer, "Bearer minted-access-token-1",
-        "courier must present the MINTED OAuth token, not the SA key"
-    );
+    // Both legs (placeholder create + final patch) land with the
+    // fake-issued access token, never the raw key.
+    let captured = wait_for_chat_posts(&chat_api, 2, Duration::from_secs(5));
+    assert_eq!(captured.len(), 2, "placeholder create + final patch");
+    for msg in &captured {
+        assert_eq!(
+            msg.bearer, "Bearer minted-access-token-1",
+            "courier must present the MINTED OAuth token, not the SA key"
+        );
+        assert!(
+            !msg.bearer.contains("service_account"),
+            "the raw SA key JSON must never ride as a bearer"
+        );
+    }
+    assert_eq!(captured[1].method, "PATCH");
     assert!(
-        !captured[0].bearer.contains("service_account"),
-        "the raw SA key JSON must never ride as a bearer"
-    );
-    assert!(
-        captured[0].body["text"]
+        captured[1].body["text"]
             .as_str()
             .unwrap_or_default()
             .contains("minted-path answer"),
-        "posted Message must carry the agent's answer; got: {}",
-        captured[0].body
+        "patched Message must carry the agent's answer; got: {}",
+        captured[1].body
     );
 
     // The grant is the JWT-bearer shape, and the assertion verifies
@@ -1707,12 +1801,14 @@ async fn sa_minter_caches_token_across_turns() {
         assert!(resp.status().is_success(), "{}", resp.status());
     }
 
-    let captured = wait_for_chat_posts(&chat_api, 2, Duration::from_secs(5));
-    assert_eq!(captured.len(), 2, "one Message POST per turn");
+    // Two calls per turn now (placeholder create + final patch) — the
+    // cache property under test is unchanged: four HTTP calls, ONE grant.
+    let captured = wait_for_chat_posts(&chat_api, 4, Duration::from_secs(5));
+    assert_eq!(captured.len(), 4, "placeholder + patch, per turn");
     for msg in &captured {
         assert_eq!(
             msg.bearer, "Bearer minted-access-token-cached",
-            "every courier POST bears the minted token"
+            "every courier call bears the minted token"
         );
     }
     assert_eq!(
