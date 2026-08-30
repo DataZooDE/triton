@@ -521,14 +521,14 @@ fn logo_banner_section(theme: &CardChrome) -> Option<Value> {
 /// One Cards v2 action button carrying the signed correlation `token` and its
 /// display `label` (echoed back on click). A `brand_color` in the theme makes
 /// it a `FILLED` button in that colour; otherwise the neutral `FILLED_TONAL`.
-fn action_button(label: &str, token: &str, theme: &CardChrome) -> Value {
+fn action_button(label: &str, token: &str, theme: &CardChrome, click_function: &str) -> Value {
     let color = theme.brand_color.as_deref().and_then(hex_to_color);
     let mut btn = serde_json::json!({
         "text": label,
         "type": if color.is_some() { "FILLED" } else { "FILLED_TONAL" },
         "onClick": {
             "action": {
-                "function": BUTTON_ACTION_FUNCTION,
+                "function": click_function,
                 "parameters": [
                     { "key": BUTTON_TOKEN_PARAM, "value": token },
                     { "key": BUTTON_LABEL_PARAM, "value": label }
@@ -614,14 +614,30 @@ pub fn build_interactive_card(
     signed: &[(InteractiveSpec, String)],
     workspace_addon: bool,
     theme: &CardChrome,
+    click_endpoint: Option<&str>,
 ) -> Value {
+    // What `onClick.action.function` must BE depends on the app's
+    // deployment flavor (found via Google's own Chat error log, #635):
+    //   * classic Chat app — an opaque function NAME, echoed back on the
+    //     CARD_CLICKED event ([`BUTTON_ACTION_FUNCTION`]);
+    //   * HTTP Workspace Add-on — the HTTPS **URL** Google POSTs the
+    //     click to. With a bare name, Google looks up a deployment
+    //     function called `agent_action`, finds nothing, and renders
+    //     "<app> is unable to process your request" WITHOUT ever calling
+    //     the webhook — nothing to see in any log of ours.
+    // The URL is used whenever one is known — NOT keyed on
+    // `workspace_addon`, which here selects the reply ENVELOPE and is
+    // deliberately false on the courier's REST bodies even for an
+    // add-on app. Safe for classic apps too: our inbound path reads only
+    // the signed `ct` parameter and never the function value.
+    let click_function: &str = click_endpoint.unwrap_or(BUTTON_ACTION_FUNCTION);
     let mut widgets: Vec<Value> = Vec::new();
     // Consecutive plain buttons group into one buttonList row.
     let mut pending: Vec<Value> = Vec::new();
     for (spec, token) in signed {
         match spec {
             InteractiveSpec::Button { label, .. } => {
-                pending.push(action_button(label, token, theme));
+                pending.push(action_button(label, token, theme, click_function));
             }
             InteractiveSpec::Selection {
                 prompt,
@@ -646,7 +662,7 @@ pub fn build_interactive_card(
                     }
                 }));
                 widgets.push(serde_json::json!({
-                    "buttonList": { "buttons": [ action_button("Submit", token, theme) ] }
+                    "buttonList": { "buttons": [ action_button("Submit", token, theme, click_function) ] }
                 }));
             }
             InteractiveSpec::Form {
@@ -686,7 +702,7 @@ pub fn build_interactive_card(
                     submit_label
                 };
                 widgets.push(serde_json::json!({
-                    "buttonList": { "buttons": [ action_button(submit, token, theme) ] }
+                    "buttonList": { "buttons": [ action_button(submit, token, theme, click_function) ] }
                 }));
             }
         }
@@ -1112,6 +1128,7 @@ mod tests {
             &signed,
             false,
             &CardChrome::default(),
+            None,
         );
         assert_eq!(body["text"], serde_json::json!("the answer"));
         let widgets = body["cardsV2"][0]["card"]["sections"][0]["widgets"]
@@ -1160,7 +1177,15 @@ mod tests {
             },
             "T".to_string(),
         )];
-        let body = build_interactive_card("hi", None, None, &signed, true, &CardChrome::default());
+        let body = build_interactive_card(
+            "hi",
+            None,
+            None,
+            &signed,
+            true,
+            &CardChrome::default(),
+            None,
+        );
         assert!(body.get("cardsV2").is_none());
         assert!(body.get("text").is_none());
         let msg = &body["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"];
@@ -1209,6 +1234,7 @@ mod tests {
             &[],
             false,
             &CardChrome::default(),
+            None,
         );
         let sections = body["cardsV2"][0]["card"]["sections"]
             .as_array()
@@ -1244,6 +1270,7 @@ mod tests {
             &[],
             false,
             &CardChrome::default(),
+            None,
         );
         let section = &body["cardsV2"][0]["card"]["sections"][0];
         assert_eq!(section["header"], serde_json::json!("Stock at risk (€)"));
@@ -1270,7 +1297,7 @@ mod tests {
             },
             "T".to_string(),
         )];
-        let body = build_interactive_card("hi", None, None, &signed, false, &theme);
+        let body = build_interactive_card("hi", None, None, &signed, false, &theme, None);
         // Card header = logo + title.
         let header = &body["cardsV2"][0]["card"]["header"];
         assert_eq!(header["title"], serde_json::json!("DataZoo Supplier Risk"));
@@ -1297,7 +1324,15 @@ mod tests {
             },
             "T".to_string(),
         )];
-        let body = build_interactive_card("hi", None, None, &signed, false, &CardChrome::default());
+        let body = build_interactive_card(
+            "hi",
+            None,
+            None,
+            &signed,
+            false,
+            &CardChrome::default(),
+            None,
+        );
         assert!(body["cardsV2"][0]["card"].get("header").is_none());
         let btn =
             &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
@@ -1323,7 +1358,7 @@ mod tests {
             },
             "T".to_string(),
         )];
-        let body = build_interactive_card("hi", None, None, &signed, false, &theme);
+        let body = build_interactive_card("hi", None, None, &signed, false, &theme, None);
         let card = &body["cardsV2"][0]["card"];
         // First section is the full-width logo image.
         assert_eq!(
@@ -1363,5 +1398,50 @@ mod tests {
         );
         assert!(out.text.contains("internal-page"), "{}", out.text);
         assert!(!out.text.contains("ui://"), "{}", out.text);
+    }
+
+    /// #635, found via Google's own Chat error log: on an HTTP
+    /// Workspace Add-on, `onClick.action.function` must be the URL
+    /// Google POSTs the click to — a bare name makes Google look up a
+    /// nonexistent deployment function and render "unable to process
+    /// your request" without ever calling the webhook.
+    #[test]
+    fn click_endpoint_becomes_the_onclick_function() {
+        let signed = vec![(
+            InteractiveSpec::Button {
+                label: "Details".into(),
+                tool: "assistant".into(),
+                args: serde_json::json!({}),
+            },
+            "T".to_string(),
+        )];
+        let body = build_interactive_card(
+            "hi",
+            None,
+            None,
+            &signed,
+            false,
+            &CardChrome::default(),
+            Some("https://agent.example/google_chat/webhook"),
+        );
+        let btn =
+            &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
+        assert_eq!(
+            btn["onClick"]["action"]["function"],
+            "https://agent.example/google_chat/webhook"
+        );
+        // Without an endpoint the historical name stays.
+        let body = build_interactive_card(
+            "hi",
+            None,
+            None,
+            &signed,
+            false,
+            &CardChrome::default(),
+            None,
+        );
+        let btn =
+            &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
+        assert_eq!(btn["onClick"]["action"]["function"], BUTTON_ACTION_FUNCTION);
     }
 }

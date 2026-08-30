@@ -1367,6 +1367,18 @@ async fn build_reply_message(
     workspace_addon: bool,
 ) -> Result<Value, surface_mapper::RenderError> {
     let rendered = render_dispatch_result(dispatch_result)?;
+    // For an HTTP Workspace Add-on, a card button's `function` must be
+    // the URL Google POSTs the click to — our own webhook (see
+    // `build_interactive_card`). Derivable only when the public base is
+    // known; without it the name fallback leaves add-on clicks broken,
+    // so say so once.
+    let click_endpoint =
+        base.map(|b| format!("{}/{}/webhook", b.trim_end_matches('/'), adapter.name));
+    if click_endpoint.is_none() {
+        tracing::debug!(
+            "google_chat: no public base — card clicks will not work on an add-on-flavored app"
+        );
+    }
     // Text/Narration render inline; Button/Selection/Form render
     // as Cards v2 actions and Dashboard as a grid — nothing
     // defers any more.
@@ -1509,6 +1521,7 @@ async fn build_reply_message(
             &signed,
             workspace_addon,
             &chrome,
+            click_endpoint.as_deref(),
         )
     };
     Ok(body)
