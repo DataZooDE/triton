@@ -252,9 +252,18 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
     // The spec-A2A JSON-RPC route answers at the A2A BASE path itself
     // (`POST /a2a`), which is what an Agent Card's `url` points at,
     // while the Triton-shaped `/a2a/message:send` keeps its own path.
+    // The card is ALSO served endpoint-relative here (→ merged under the
+    // `/a2a` nest below as `/a2a/.well-known/<name>`) because Copilot
+    // Studio's runtime resolves the card relative to the registered
+    // endpoint URL, not the origin (see a2a_spec::card_router).
     let a2a_router = match &opts.spec_a2a {
         Some(cfg) => a2a::router(a2a_state.clone())
-            .merge(a2a_spec::jsonrpc_router(a2a_state, Arc::new(cfg.clone()))),
+            .merge(a2a_spec::jsonrpc_router(a2a_state, Arc::new(cfg.clone())))
+            .merge(a2a_spec::card_router_nested(a2a_spec::card_state(
+                cfg.clone(),
+                dispatcher_for_card.clone(),
+                opts.oidc_providers.clone(),
+            ))),
         None => a2a::router(a2a_state),
     };
 
@@ -262,7 +271,7 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         .nest("/mcp", mcp::router(mcp_state))
         .nest("/a2a", a2a_router);
 
-    // The card is mounted at the HOST ROOT, not under /a2a: discovery
+    // The card is also mounted at the HOST ROOT: browser-time discovery
     // looks at `<origin>/.well-known/...`.
     if let Some(cfg) = &opts.spec_a2a {
         app = app.merge(a2a_spec::card_router(a2a_spec::card_state(

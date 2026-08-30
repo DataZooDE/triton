@@ -110,7 +110,28 @@ fn send(text: &str) -> Value {
 async fn the_agent_card_is_public_and_describes_the_endpoint() {
     let (iss, base) = spec_host().await;
 
-    for path in ["/.well-known/agent-card.json", "/.well-known/agent.json"] {
+    // Every filename spelling, at BOTH the origin root (browser-time
+    // discovery) and endpoint-relative under `/a2a` (Copilot Studio's
+    // runtime resolves the card relative to the registered endpoint, not
+    // the origin — 2026-08-30). All must 200: a 404 on the runtime path
+    // surfaces to the operator only as a bare "SystemError".
+    let filenames = [
+        "agent-card.json",
+        "agent.json",
+        "agentcard.json",
+        "agentCard.json",
+        "agent_card.json",
+    ];
+    let paths: Vec<String> = filenames
+        .iter()
+        .flat_map(|f| {
+            [
+                format!("/.well-known/{f}"),
+                format!("/a2a/.well-known/{f}"),
+            ]
+        })
+        .collect();
+    for path in &paths {
         let resp = reqwest::get(format!("{base}{path}")).await.expect("GET");
         assert_eq!(resp.status(), 200, "{path} must be public");
         let card: Value = resp.json().await.expect("json");
