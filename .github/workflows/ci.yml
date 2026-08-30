@@ -85,26 +85,27 @@ jobs:
       # `[workspace]` and pulls `triton-tests` in as a path
       # dependency. This step would catch a refactor that
       # silently moves a fixture into `pub(crate)` visibility.
-      # `CARGO_TARGET_DIR` points at the main workspace's target dir, which is
-      # already cached and already warm by this point in the job.
+      # NOT sharing CARGO_TARGET_DIR with the main workspace, and not caching
+      # this workspace's own target either — both were tried and measured.
       #
-      # `examples/consumer-smoke` is deliberately its own `[workspace]`, so by
-      # default it builds into `examples/consumer-smoke/target` — 1.1 GB that
-      # the cache step never listed, recompiled from scratch every run. That
-      # was 57s, 38% of this job.
+      # `examples/consumer-smoke` is deliberately its own `[workspace]`, so it
+      # builds into its own 1.1 GB target dir and recompiles ~237 crates every
+      # run. That is this job's biggest step at ~55s.
       #
-      # Sharing the target dir rather than adding a second cache entry: it
-      # reuses the dependencies this job has just compiled (57s -> 14s
-      # measured), and it keeps 1.1 GB out of a 10 GB per-repo cache budget.
-      # It does NOT weaken what the test is for — the point is that
-      # `triton-tests` resolves and builds from a SEPARATE workspace, which is
-      # about workspace/feature resolution and `pub` visibility, not about
-      # where the object files land. Cargo still hashes artifacts by feature
-      # set, so a genuine divergence still rebuilds.
+      # Pointing CARGO_TARGET_DIR at the main target dir does NOT fix it: a
+      # separate workspace resolves its own dependency graph, so nothing is
+      # reused, and the artifacts it writes are never persisted anyway —
+      # `actions/cache` does not overwrite an existing key, and the cargo key
+      # here (`hashFiles('**/Cargo.lock')`) does not rotate, so that cache is
+      # effectively write-once per lockfile.
+      #
+      # Fixing this properly means changing the cargo cache key strategy, which
+      # is a bigger change than this step is worth and would trade ~40s for
+      # cache-budget pressure on a 10 GB per-repo limit. Left alone
+      # deliberately; see doc/realizations.md §8.
       - name: cargo test (external consumer smoke)
         env:
           RUST_BACKTRACE: 1
-          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         working-directory: examples/consumer-smoke
         run: cargo test --locked
 

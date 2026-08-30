@@ -1396,24 +1396,29 @@ a trap the next developer should not have to step in.
   (`/out`) inside the same `RUN`. This fails at build time, not silently,
   but the error points at the COPY rather than at the mount.
 
-- **A separate `[workspace]` gets a separate `target/`.**
-  `examples/consumer-smoke` is deliberately its own workspace, so it builds
-  into `examples/consumer-smoke/target` — 1.1 GB the cache step never
-  listed, recompiled from scratch every run (57s, 38% of the Rust job). The
-  fix is `CARGO_TARGET_DIR` pointing at the main workspace's target dir
-  rather than a second cache entry, which keeps 1.1 GB out of a 10 GB
-  per-repo cache budget. It does not weaken the test — what matters there is
-  that `triton-tests` resolves from a separate workspace, not where the
-  object files land.
+- **`actions/cache` never overwrites an existing key, so a non-rotating key
+  makes the cache WRITE-ONCE.** triton's cargo cache is keyed on
+  `hashFiles('**/Cargo.lock')`. The first run for a given lockfile saves it;
+  every run after that restores it and the post-job save is silently skipped.
+  Anything compiled later never enters the cache. The log is the tell — a
+  `Cache restored from key: cargo-…` line with **no** matching `Cache saved
+  with key: cargo-…` at post-job, where a healthy new cache shows
+  `Cache not found` -> `Cache saved` -> (next run) `Cache restored`.
 
-  **The saving only arrives on the second run, and a local measurement will
-  lie to you about that.** A separate workspace resolves its own dependency
-  graph, so sharing the dir does not let it reuse the main build's artifacts
-  — the first CI run still compiled 237 crates from `proc-macro2` up. What
-  it does is put those artifacts inside the dir that gets *cached*, so the
-  next run restores them. Measured locally the step looked like 14s, but
-  that target dir was warm from an earlier build in the same session; the
-  honest cold number is the CI one.
+- **A separate `[workspace]` gets a separate `target/`, and you cannot fix
+  that by sharing `CARGO_TARGET_DIR`.** `examples/consumer-smoke` is
+  deliberately its own workspace and recompiles ~237 crates every run (~55s,
+  the Rust job's biggest step). Pointing `CARGO_TARGET_DIR` at the main
+  workspace's target dir was tried and measured: it changes nothing, because
+  a separate workspace resolves its own dependency graph (so no artifact is
+  reused) and, per the write-once behaviour above, what it writes is never
+  persisted. Fixing it properly means changing the cargo cache key strategy
+  and paying ~1-3 GB against a 10 GB per-repo budget for ~40s — not worth it
+  today, so the step is left alone deliberately.
+
+  A warning about measuring this locally: the same change looked like
+  57s -> 14s on a workstation because that target dir was already warm from
+  an earlier build in the session. The honest cold number came from CI.
 
 - **Run the CI-pinned Flutter locally, or expect tool noise.** CI pins
   3.44.4; a local 3.47.1 rewrites `apps/explorer/analysis_options.yaml`
