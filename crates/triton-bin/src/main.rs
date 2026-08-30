@@ -945,6 +945,7 @@ async fn main() -> std::io::Result<()> {
                         std::process::exit(2);
                     }
                     let courier_config = triton_chat_googlechat::CourierConfig {
+                        tracker: None,
                         enabled: settings.google_chat_async,
                         api_base: settings.google_chat_api_base.clone(),
                         timeout: settings.courier_timeout,
@@ -1141,6 +1142,7 @@ async fn main() -> std::io::Result<()> {
                         extra_service_url_hosts: settings.msteams_extra_service_url_hosts.clone(),
                     };
                     let msteams_courier = triton_chat_msteams::CourierConfig {
+                        tracker: None,
                         enabled: settings.msteams_async,
                     };
                     match triton_chat_msteams::MsTeamsAdapter::from_manifest(
