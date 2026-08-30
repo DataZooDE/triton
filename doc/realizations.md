@@ -1355,3 +1355,58 @@ a trap the next developer should not have to step in.
   on a plain `tracing::warn!` line, matching how every other courier's
   error path already logs before calling `record_post` with a static
   label.
+
+---
+
+## 8. CI/CD build-time traps (2026-08-30)
+
+- **`flutter test` is a compile step, not a test step.** The
+  `apps/explorer` suite reads as 120s of testing in CI; the tests
+  themselves take **6 seconds**. The rest is the Dart/kernel compile of
+  the test bundle, which lands in `.dart_tool/` and which CI discarded
+  every run. Measured locally on the same workspace: cold `.dart_tool`
+  2m48s, warm `.dart_tool` **11s**, same 75 tests. Caching `.dart_tool`
+  (39 MB, keyed on the pinned Flutter version + lockfiles) is the whole
+  fix. The corollary matters more than the fix: **sharding this suite
+  across jobs would have made it slower**, because every shard re-pays
+  the compile to parallelise 6 seconds of execution. Check what a slow
+  test command is actually spending its time on before parallelising it.
+
+- **`RUN --mount=type=cache` contents are not layers, and the GHA cache
+  backend does not save them.** `cache-from`/`cache-to: type=gha` caches
+  layers only, so on an ephemeral runner every build starts with an empty
+  cargo registry and target dir. Measured on `deploy/triton/Dockerfile`,
+  rebuilding after a `crates/**` change — the only change that triggers
+  `build-dz-triton.yml`, so it is the case that matters:
+
+  | | |
+  |---|---|
+  | cold, no cache | 5m35s |
+  | layer cache only, mounts empty | 2m16s |
+  | layer cache + mounts populated | **38s** |
+
+  The layer cache recovers the base image and apt layers; the mounts are
+  what stop cargo recompiling the dependency tree. Persisting them needs
+  `buildkit-cache-dance` (or a cargo-chef-style dependency layer).
+
+- **A cache-mounted target dir is not visible to a later `COPY --from`.**
+  Once `/src/target` is a cache mount, `COPY --from=build
+  /src/target/release/triton` finds nothing — the mount is not part of the
+  image. The binary has to be copied out of the mount to a real path
+  (`/out`) inside the same `RUN`. This fails at build time, not silently,
+  but the error points at the COPY rather than at the mount.
+
+- **A separate `[workspace]` gets a separate `target/`.**
+  `examples/consumer-smoke` is deliberately its own workspace, so it builds
+  into `examples/consumer-smoke/target` — 1.1 GB the cache step never
+  listed, recompiled from scratch every run (57s, 38% of the Rust job). The
+  fix is `CARGO_TARGET_DIR` pointing at the main workspace's already-warm
+  target dir rather than a second cache entry: **57s -> 14s**, and it keeps
+  1.1 GB out of a 10 GB per-repo cache budget. It does not weaken the test —
+  what matters there is that `triton-tests` resolves from a separate
+  workspace, not where the object files land.
+
+- **Run the CI-pinned Flutter locally, or expect tool noise.** CI pins
+  3.44.4; a local 3.47.1 rewrites `apps/explorer/analysis_options.yaml`
+  (adding an `analyzer: exclude:` block) on `pub get`. Harmless, but it
+  shows up as an unrelated modified file in the diff.

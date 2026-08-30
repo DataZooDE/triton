@@ -85,9 +85,26 @@ jobs:
       # `[workspace]` and pulls `triton-tests` in as a path
       # dependency. This step would catch a refactor that
       # silently moves a fixture into `pub(crate)` visibility.
+      # `CARGO_TARGET_DIR` points at the main workspace's target dir, which is
+      # already cached and already warm by this point in the job.
+      #
+      # `examples/consumer-smoke` is deliberately its own `[workspace]`, so by
+      # default it builds into `examples/consumer-smoke/target` — 1.1 GB that
+      # the cache step never listed, recompiled from scratch every run. That
+      # was 57s, 38% of this job.
+      #
+      # Sharing the target dir rather than adding a second cache entry: it
+      # reuses the dependencies this job has just compiled (57s -> 14s
+      # measured), and it keeps 1.1 GB out of a 10 GB per-repo cache budget.
+      # It does NOT weaken what the test is for — the point is that
+      # `triton-tests` resolves and builds from a SEPARATE workspace, which is
+      # about workspace/feature resolution and `pub` visibility, not about
+      # where the object files land. Cargo still hashes artifacts by feature
+      # set, so a genuine divergence still rebuilds.
       - name: cargo test (external consumer smoke)
         env:
           RUST_BACKTRACE: 1
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         working-directory: examples/consumer-smoke
         run: cargo test --locked
 
@@ -127,6 +144,32 @@ jobs:
           flutter-version: 3.44.4
           channel: stable
           cache: true
+
+      # Cache the Dart build artifacts, not just the SDK.
+      #
+      # `flutter test` looks like it costs 120s of *testing*. It does not — the
+      # tests run in about 6 seconds. The rest is the Dart/kernel compile of
+      # the test bundle, which lands in `.dart_tool/` and which CI threw away
+      # on every run. Measured locally on this workspace:
+      #
+      #   cold .dart_tool:  2m48s   (00:06 +75: All tests passed!)
+      #   warm .dart_tool:  0m11s   (same 75 tests)
+      #
+      # This is also why sharding the tests across jobs would have made it
+      # WORSE: each shard pays the compile again to save 6s of execution.
+      #
+      # `.dart_tool` is ~39 MB per package. Keyed on the pinned Flutter version
+      # plus the lockfiles, so an SDK bump or a dependency change starts clean;
+      # within a key, Flutter's own fingerprinting recompiles only what moved.
+      - name: Cache Dart build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            apps/explorer/.dart_tool
+            packages/a2ui_flutter/.dart_tool
+          key: dart-tool-${{ runner.os }}-3.44.4-${{ hashFiles('apps/explorer/pubspec.lock', 'packages/a2ui_flutter/pubspec.lock') }}
+          restore-keys: |
+            dart-tool-${{ runner.os }}-3.44.4-
 
       # The shared renderer is analysed and tested in its own package
       # first, so a failure there is reported as the package's, not as the

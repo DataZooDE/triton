@@ -70,3 +70,12 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           provenance: false
+          # Layer cache across runs. Without this every merge to main rebuilt
+          # the image from scratch — 222s, essentially all of it recompiling
+          # the Rust dependency tree that had not changed.
+          #
+          # `mode=max` caches intermediate stages too, not just the final
+          # image, which is what makes the multi-stage build's `build` layer
+          # reusable at all.
+          cache-from: type=gha,scope=dz-triton-explorer
+          cache-to: type=gha,mode=max,scope=dz-triton-explorer

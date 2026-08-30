@@ -34,12 +34,31 @@ COPY crates ./crates
 # `--build-arg DEV_TOKEN=dev-token`; pair it with a non-guessable
 # `TRITON_DEV_TOKEN` at deploy (see crates/triton-adapters-http/identity).
 ARG DEV_TOKEN=""
-RUN cargo build --release -p triton-bin --no-default-features \
-    ${DEV_TOKEN:+--features "$DEV_TOKEN"}
+
+# BuildKit cache mounts for the cargo registry and the target dir, so a
+# rebuild recompiles only what changed instead of the whole dependency tree.
+#
+# The `cp` at the end is NOT optional. `/src/target` is a cache MOUNT, not a
+# layer: nothing written there exists in the resulting image, so a plain
+# `COPY --from=build /src/target/release/triton` would find nothing. The
+# binary has to be copied out of the mount, inside the same RUN, to somewhere
+# that IS a layer — hence /out.
+#
+# Cross-run persistence of these mounts is the part to watch: the GHA cache
+# backend does not save cache-mount contents on its own (only layers), so the
+# workflow pairs this with buildkit-cache-dance. See the comment on that step
+# in .github/workflows/build-dz-triton.yml.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
+    mkdir -p /out \
+    && cargo build --release -p triton-bin --no-default-features \
+       ${DEV_TOKEN:+--features "$DEV_TOKEN"} \
+    && cp /src/target/release/triton /out/triton
 
 # ----- stage 2: runtime -----
 FROM gcr.io/distroless/cc-debian12:nonroot
-COPY --from=build /src/target/release/triton /usr/local/bin/triton
+COPY --from=build /out/triton /usr/local/bin/triton
 # Secret-free chat manifest (env:// refs only). OPT-IN: loaded only when the
 # deploy sets TRITON_MANIFEST_PATH=/etc/triton/adapter.yaml; a pure-REST
 # deploy leaves it unset and ignores the file (backward compatible).
