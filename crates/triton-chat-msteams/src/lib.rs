@@ -116,6 +116,10 @@ pub struct CourierConfig {
     /// typing loop + proactive message elsewhere). `false` (the
     /// derived default) ⇒ the historical inline path, unchanged.
     pub enabled: bool,
+    /// When set, courier tasks are spawned on this tracker so the host
+    /// can drain in-flight deliveries on shutdown (#635 follow-up).
+    /// `None` keeps the detached-spawn behaviour.
+    pub tracker: Option<tokio_util::task::TaskTracker>,
 }
 
 pub struct MsTeamsAdapter {
@@ -1475,9 +1479,10 @@ fn spawn_courier(
     recipient_id: String,
     conversation_type: Option<String>,
 ) {
+    let tracker = adapter.courier.tracker.clone();
     let adapter = adapter.clone();
     let verified = verified.clone();
-    tokio::spawn(async move {
+    let task = async move {
         courier_deliver(
             adapter,
             verified,
@@ -1489,7 +1494,15 @@ fn spawn_courier(
             conversation_type,
         )
         .await;
-    });
+    };
+    match tracker {
+        Some(t) => {
+            t.spawn(task);
+        }
+        None => {
+            tokio::spawn(task);
+        }
+    }
 }
 
 /// Teams' typing indicator persists ~3s; the spec says senders MAY

@@ -2308,6 +2308,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]
@@ -2552,6 +2553,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "triton-core",
  "triton-correlation",
@@ -2576,6 +2578,7 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
  "triton-core",
  "triton-correlation",

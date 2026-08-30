@@ -7,6 +7,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+tokio-util = { workspace = true, features = ["rt"] }
 # Decode an upstream-rendered chart PNG (peacock render_report `png_base64`)
 # and content-address it for the signed `/{name}/img/{token}` route.
 base64 = "0.22"

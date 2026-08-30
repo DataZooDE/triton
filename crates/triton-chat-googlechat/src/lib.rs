@@ -267,6 +267,11 @@ pub struct CourierConfig {
     pub enabled: bool,
     pub api_base: String,
     pub timeout: std::time::Duration,
+    /// When set, courier tasks are spawned on this tracker so the host
+    /// can drain in-flight deliveries on shutdown (#635 follow-up) —
+    /// `close()` + `wait()` instead of a fixed sleep. `None` keeps the
+    /// detached-spawn behaviour.
+    pub tracker: Option<tokio_util::task::TaskTracker>,
 }
 
 impl Default for CourierConfig {
@@ -274,6 +279,7 @@ impl Default for CourierConfig {
         Self {
             enabled: false,
             api_base: "https://chat.googleapis.com".to_string(),
+            tracker: None,
             timeout: std::time::Duration::from_secs(10),
         }
     }
@@ -1216,11 +1222,12 @@ async fn handle_webhook(
     if adapter.courier.enabled {
         match space_name {
             Some(space) if !space.is_empty() => {
+                let tracker = adapter.courier.tracker.clone();
                 let adapter = adapter.clone();
                 // The public image base derives from request headers, which
                 // the spawned task no longer has — capture it now.
                 let base = public_base(&headers);
-                tokio::spawn(async move {
+                let task = async move {
                     courier_reply(
                         adapter,
                         space,
@@ -1231,7 +1238,15 @@ async fn handle_webhook(
                         action_echo,
                     )
                     .await;
-                });
+                };
+                match &tracker {
+                    Some(t) => {
+                        t.spawn(task);
+                    }
+                    None => {
+                        tokio::spawn(task);
+                    }
+                }
                 // The ack SHAPE depends on what was acked AND the app
                 // flavor (both halves found live, #635):
                 //   * add-on MESSAGE and add-on CARD_CLICKED — an empty
