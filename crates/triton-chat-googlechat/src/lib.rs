@@ -201,10 +201,10 @@ fn public_base(headers: &HeaderMap) -> Option<String> {
 /// token cap (caller then renders the tile-grid fallback).
 fn dashboard_image_url(
     adapter: &GoogleChatAdapter,
-    headers: &HeaderMap,
+    base: Option<&str>,
     dashboard: &surface_mapper::DashboardData,
 ) -> Option<String> {
-    let base = public_base(headers)?;
+    let base = base?;
     let (title, tiles) = dashboard;
     let spec = serde_json::json!({
         "title": title,
@@ -248,10 +248,10 @@ fn upstream_png_bytes(result: &Value) -> Option<Vec<u8>> {
 /// fetch a loopback URL, so the caller falls back to text).
 fn upstream_image_url(
     adapter: &GoogleChatAdapter,
-    headers: &HeaderMap,
+    base: Option<&str>,
     png: Vec<u8>,
 ) -> Option<String> {
-    let base = public_base(headers)?;
+    let base = base?;
     let id = format!("{:x}", Sha256::digest(&png));
     let token = triton_correlation::encode_with_cap(
         RENDER_REPORT_IMG_MARKER,
@@ -1221,154 +1221,20 @@ async fn handle_webhook(
         .dispatcher
         .invoke(&tool_name, args, principal, PROTOCOL)
         .await;
+    let base = public_base(&headers);
     match result {
-        Ok(dispatch) => match render_dispatch_result(&dispatch.result) {
-            Ok(rendered) => {
-                // Text/Narration render inline; Button/Selection/Form render
-                // as Cards v2 actions and Dashboard as a grid — nothing
-                // defers any more.
-                if rendered.truncated {
-                    tracing::warn!(
-                        tool = tool_name,
-                        cap_bytes = surface_mapper::GOOGLE_CHAT_TEXT_MAX_BYTES,
-                        "google_chat surface mapper: rendered text exceeded cap; truncated",
-                    );
-                }
-                // Sign each interactive component's (tool, base_args) into a
-                // correlation token and render it as a Cards v2 widget
-                // (button / dropdown / form); on submit Google echoes the
-                // token (plus any typed/selected formInputs) on CARD_CLICKED,
-                // where we HMAC-verify and re-dispatch. A component whose
-                // token would exceed the cap is dropped (logged), never sent.
-                let signed: Vec<(surface_mapper::InteractiveSpec, String)> =
-                    surface_mapper::interactive_from_result(&dispatch.result)
-                        .into_iter()
-                        .filter_map(|spec| {
-                            match triton_correlation::encode_with_cap(
-                                spec.tool(),
-                                &spec.base_args(),
-                                &adapter.correlation_key,
-                                CARD_CORRELATION_CAP,
-                            ) {
-                                Ok(token) => Some((spec, token)),
-                                Err(e) => {
-                                    tracing::warn!(tool = spec.tool(), error = %e, "google_chat: dropping interactive component (correlation token too large)");
-                                    None
-                                }
-                            }
-                        })
-                        .collect();
-                // On a CARD_CLICKED, lead the reply with what the user
-                // tapped/submitted (Google renders no user message for a
-                // click), so the chat history stays legible across several
-                // buttons. Italic, on its own line, above the answer.
-                let reply_text = match &action_echo {
-                    Some(echo) if !echo.is_empty() => {
-                        format!("*↳ {}*\n\n{}", echo.replace('*', "\\*"), rendered.text)
-                    }
-                    _ => rendered.text.clone(),
-                };
-                // Render the Dashboard (if any): a rasterised chart PNG when
-                // we can mint a reachable image URL (Triton serves it on
-                // demand at `…/img/{token}`), else a self-contained Cards v2
-                // tile grid.
-                let dashboard = surface_mapper::dashboard_from_result(&dispatch.result);
-                let dash_img = dashboard
-                    .as_ref()
-                    .and_then(|d| dashboard_image_url(&adapter, &headers, d));
-                // Inline Report: the agent asked to embed a rendered report in
-                // its answer (no button click). Dispatch `render_report` to the
-                // report upstream and show the chart PNG in THIS reply, as the
-                // card's image. Only when there's no native Dashboard (that path
-                // already owns the image slot).
-                let (dashboard, dash_img) = match (
-                    &dashboard,
-                    surface_mapper::report_from_result(&dispatch.result),
-                ) {
-                    (None, Some((report_id, args))) => {
-                        let mut rargs = if args.is_object() {
-                            args
-                        } else {
-                            serde_json::json!({})
-                        };
-                        rargs["report_id"] = serde_json::json!(report_id);
-                        match adapter
-                            .dispatcher
-                            .invoke("render_report", rargs, principal_for_post.clone(), PROTOCOL)
-                            .await
-                        {
-                            Ok(rep) => match upstream_png_bytes(&rep.result)
-                                .and_then(|png| upstream_image_url(&adapter, &headers, png))
-                            {
-                                // Synthetic title-less Dashboard so the shared
-                                // card builder renders the image as its section.
-                                Some(url) => (Some((String::new(), Vec::new())), Some(url)),
-                                None => (dashboard, dash_img),
-                            },
-                            Err(e) => {
-                                tracing::warn!(report = %report_id, error = %e, "google_chat: inline render_report failed; sending answer without the chart");
-                                (dashboard, dash_img)
-                            }
-                        }
-                    }
-                    _ => (dashboard, dash_img),
-                };
-                // An upstream that renders its OWN chart PNG (peacock
-                // `render_report`) carries it as base64 in the result — it uses
-                // components (kpi/vega/table) this adapter can't map to Cards
-                // v2, so without this it would render an empty card. Serve the
-                // PNG as an image widget instead. Only when there's no native
-                // Dashboard (that path already owns the image slot).
-                let upstream_img = if dashboard.is_none() {
-                    upstream_png_bytes(&dispatch.result)
-                        .and_then(|png| upstream_image_url(&adapter, &headers, png))
-                } else {
-                    None
-                };
-                // The card chrome (header/logo/brand colour) comes from the
-                // report upstream's `get_theme` — peacock owns ALL theming;
-                // this adapter only consumes the resolved values. No
-                // `get_theme` upstream registered ⇒ unbranded (debug-logged).
-                let chrome = match adapter
-                    .dispatcher
-                    .invoke(
-                        "get_theme",
-                        serde_json::json!({}),
-                        principal_for_post.clone(),
-                        PROTOCOL,
-                    )
-                    .await
-                {
-                    Ok(t) => surface_mapper::CardChrome::from_get_theme(&t.result),
-                    Err(e) => {
-                        tracing::debug!(error = %e, "google_chat: no get_theme upstream; unbranded card");
-                        surface_mapper::CardChrome::default()
-                    }
-                };
-                let body = if let Some(url) = &upstream_img {
-                    // The chart image IS the payload; a render_report result's
-                    // rendered text can be large (structured rows / the inline
-                    // PNG base64), which blows past Google Chat's message-size
-                    // limit. Caption with just what was tapped, not the text.
-                    let caption = match &action_echo {
-                        Some(echo) if !echo.is_empty() => {
-                            format!("*↳ {}*", echo.replace('*', "\\*"))
-                        }
-                        _ => String::new(),
-                    };
-                    surface_mapper::image_reply_card(&caption, url, workspace_addon, &chrome)
-                } else if signed.is_empty() && dashboard.is_none() {
-                    surface_mapper::text_reply_body(&reply_text, workspace_addon)
-                } else {
-                    surface_mapper::build_interactive_card(
-                        &reply_text,
-                        dashboard.as_ref(),
-                        dash_img.as_deref(),
-                        &signed,
-                        workspace_addon,
-                        &chrome,
-                    )
-                };
+        Ok(dispatch) => match build_reply_message(
+            &adapter,
+            base.as_deref(),
+            &tool_name,
+            &dispatch.result,
+            &action_echo,
+            &principal_for_post,
+            workspace_addon,
+        )
+        .await
+        {
+            Ok(body) => {
                 adapter.dispatcher.record_post(
                     &tool_name,
                     PROTOCOL,
@@ -1430,6 +1296,174 @@ async fn handle_webhook(
                 .into_response()
         }
     }
+}
+
+/// Build the reply `Message` body for a successful dispatch: rendered
+/// text (with the CARD_CLICKED echo), signed interactive components,
+/// dashboard/inline-report/upstream chart images, and `get_theme` chrome —
+/// the three-way body choice the sync path has always made.
+///
+/// Extracted from `handle_webhook` so the COURIER can build the identical
+/// body: with `workspace_addon = false` the result is a bare
+/// `{text, cardsV2}` Chat `Message` object, which is exactly the
+/// `spaces.messages.create` request body. `base` is the public HTTPS base
+/// for chart-image URLs (`public_base(&headers)` on the sync path; captured
+/// before the spawn on the courier path) — `None` degrades to tile grids.
+async fn build_reply_message(
+    adapter: &GoogleChatAdapter,
+    base: Option<&str>,
+    tool_name: &str,
+    dispatch_result: &Value,
+    action_echo: &Option<String>,
+    principal: &Principal,
+    workspace_addon: bool,
+) -> Result<Value, surface_mapper::RenderError> {
+    let rendered = render_dispatch_result(dispatch_result)?;
+    // Text/Narration render inline; Button/Selection/Form render
+    // as Cards v2 actions and Dashboard as a grid — nothing
+    // defers any more.
+    if rendered.truncated {
+        tracing::warn!(
+            tool = tool_name,
+            cap_bytes = surface_mapper::GOOGLE_CHAT_TEXT_MAX_BYTES,
+            "google_chat surface mapper: rendered text exceeded cap; truncated",
+        );
+    }
+    // Sign each interactive component's (tool, base_args) into a
+    // correlation token and render it as a Cards v2 widget
+    // (button / dropdown / form); on submit Google echoes the
+    // token (plus any typed/selected formInputs) on CARD_CLICKED,
+    // where we HMAC-verify and re-dispatch. A component whose
+    // token would exceed the cap is dropped (logged), never sent.
+    let signed: Vec<(surface_mapper::InteractiveSpec, String)> =
+                    surface_mapper::interactive_from_result(dispatch_result)
+                        .into_iter()
+                        .filter_map(|spec| {
+                            match triton_correlation::encode_with_cap(
+                                spec.tool(),
+                                &spec.base_args(),
+                                &adapter.correlation_key,
+                                CARD_CORRELATION_CAP,
+                            ) {
+                                Ok(token) => Some((spec, token)),
+                                Err(e) => {
+                                    tracing::warn!(tool = spec.tool(), error = %e, "google_chat: dropping interactive component (correlation token too large)");
+                                    None
+                                }
+                            }
+                        })
+                        .collect();
+    // On a CARD_CLICKED, lead the reply with what the user
+    // tapped/submitted (Google renders no user message for a
+    // click), so the chat history stays legible across several
+    // buttons. Italic, on its own line, above the answer.
+    let reply_text = match &action_echo {
+        Some(echo) if !echo.is_empty() => {
+            format!("*↳ {}*\n\n{}", echo.replace('*', "\\*"), rendered.text)
+        }
+        _ => rendered.text.clone(),
+    };
+    // Render the Dashboard (if any): a rasterised chart PNG when
+    // we can mint a reachable image URL (Triton serves it on
+    // demand at `…/img/{token}`), else a self-contained Cards v2
+    // tile grid.
+    let dashboard = surface_mapper::dashboard_from_result(dispatch_result);
+    let dash_img = dashboard
+        .as_ref()
+        .and_then(|d| dashboard_image_url(adapter, base, d));
+    // Inline Report: the agent asked to embed a rendered report in
+    // its answer (no button click). Dispatch `render_report` to the
+    // report upstream and show the chart PNG in THIS reply, as the
+    // card's image. Only when there's no native Dashboard (that path
+    // already owns the image slot).
+    let (dashboard, dash_img) = match (
+        &dashboard,
+        surface_mapper::report_from_result(dispatch_result),
+    ) {
+        (None, Some((report_id, args))) => {
+            let mut rargs = if args.is_object() {
+                args
+            } else {
+                serde_json::json!({})
+            };
+            rargs["report_id"] = serde_json::json!(report_id);
+            match adapter
+                .dispatcher
+                .invoke("render_report", rargs, principal.clone(), PROTOCOL)
+                .await
+            {
+                Ok(rep) => match upstream_png_bytes(&rep.result)
+                    .and_then(|png| upstream_image_url(adapter, base, png))
+                {
+                    // Synthetic title-less Dashboard so the shared
+                    // card builder renders the image as its section.
+                    Some(url) => (Some((String::new(), Vec::new())), Some(url)),
+                    None => (dashboard, dash_img),
+                },
+                Err(e) => {
+                    tracing::warn!(report = %report_id, error = %e, "google_chat: inline render_report failed; sending answer without the chart");
+                    (dashboard, dash_img)
+                }
+            }
+        }
+        _ => (dashboard, dash_img),
+    };
+    // An upstream that renders its OWN chart PNG (peacock
+    // `render_report`) carries it as base64 in the result — it uses
+    // components (kpi/vega/table) this adapter can't map to Cards
+    // v2, so without this it would render an empty card. Serve the
+    // PNG as an image widget instead. Only when there's no native
+    // Dashboard (that path already owns the image slot).
+    let upstream_img = if dashboard.is_none() {
+        upstream_png_bytes(dispatch_result).and_then(|png| upstream_image_url(adapter, base, png))
+    } else {
+        None
+    };
+    // The card chrome (header/logo/brand colour) comes from the
+    // report upstream's `get_theme` — peacock owns ALL theming;
+    // this adapter only consumes the resolved values. No
+    // `get_theme` upstream registered ⇒ unbranded (debug-logged).
+    let chrome = match adapter
+        .dispatcher
+        .invoke(
+            "get_theme",
+            serde_json::json!({}),
+            principal.clone(),
+            PROTOCOL,
+        )
+        .await
+    {
+        Ok(t) => surface_mapper::CardChrome::from_get_theme(&t.result),
+        Err(e) => {
+            tracing::debug!(error = %e, "google_chat: no get_theme upstream; unbranded card");
+            surface_mapper::CardChrome::default()
+        }
+    };
+    let body = if let Some(url) = &upstream_img {
+        // The chart image IS the payload; a render_report result's
+        // rendered text can be large (structured rows / the inline
+        // PNG base64), which blows past Google Chat's message-size
+        // limit. Caption with just what was tapped, not the text.
+        let caption = match &action_echo {
+            Some(echo) if !echo.is_empty() => {
+                format!("*↳ {}*", echo.replace('*', "\\*"))
+            }
+            _ => String::new(),
+        };
+        surface_mapper::image_reply_card(&caption, url, workspace_addon, &chrome)
+    } else if signed.is_empty() && dashboard.is_none() {
+        surface_mapper::text_reply_body(&reply_text, workspace_addon)
+    } else {
+        surface_mapper::build_interactive_card(
+            &reply_text,
+            dashboard.as_ref(),
+            dash_img.as_deref(),
+            &signed,
+            workspace_addon,
+            &chrome,
+        )
+    };
+    Ok(body)
 }
 
 /// #164 T1a: one async courier turn — dispatch the tool, render the
