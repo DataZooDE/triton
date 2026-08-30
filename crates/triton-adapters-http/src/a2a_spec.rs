@@ -153,11 +153,11 @@ async fn agent_card(State(state): State<CardState>) -> Response {
         "preferredTransport": "JSONRPC",
         "version": cfg.version,
         "capabilities": {
-            // Streaming is the Triton-shaped route's `Accept:
-            // text/event-stream` mode, which is NOT the spec's
-            // `message/stream` method — claiming it here would make a
-            // conformant client call a method that does not exist.
-            "streaming": false,
+            // `message/stream` is implemented (#635 P6) — SSE of JSON-RPC
+            // responses: Task(working) → artifact-updates → final
+            // status-update. Flipped in the same commit that added the
+            // method, never before.
+            "streaming": true,
             "pushNotifications": false,
         },
         "defaultInputModes": ["text/plain"],
@@ -257,15 +257,31 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
 
     match req.method.as_str() {
         "message/send" => message_send(state, principal, req).await,
+        "message/stream" => message_stream(state, principal, req).await,
         "tasks/get" => tasks_get(state, req),
         // Named explicitly so a caller learns which methods exist rather
         // than only that this one does not.
         other => rpc_error(
             &req.id,
             METHOD_NOT_FOUND,
-            format!("unsupported method `{other}`; this agent implements message/send, tasks/get"),
+            format!(
+                "unsupported method `{other}`; this agent implements message/send, message/stream, tasks/get"
+            ),
         ),
     }
+}
+
+/// Does the client want the Task back immediately instead of blocking
+/// to a terminal state? The spec's `MessageSendConfiguration` has
+/// carried this under two names across revisions (`blocking: false` in
+/// v0.3, `returnImmediately: true` later); accept both — a consumer
+/// pinned to either revision gets the behavior it asked for.
+fn wants_immediate_task(params: &Value) -> bool {
+    let Some(cfg) = params.get("configuration") else {
+        return false;
+    };
+    cfg.get("blocking").and_then(Value::as_bool) == Some(false)
+        || cfg.get("returnImmediately").and_then(Value::as_bool) == Some(true)
 }
 
 /// Concatenate every text part, which is how a multi-part user turn is
@@ -305,14 +321,52 @@ async fn message_send(
     let trace_id = principal.trace_id.clone();
     let tool = state.config.default_tool.clone();
 
-    match state
-        .a2a
-        .dispatcher
-        .invoke(&tool, json!({ "message": text }), principal, "a2a")
-        .await
-    {
-        Ok(d) => {
-            state.a2a.tasks.record(&trace_id, TaskState::Completed);
+    // #635 P6 — disconnect-safe by construction: the dispatch runs in a
+    // SPAWNED task that records its terminal state (and the clamped
+    // reply) into the store from inside itself. The handler merely
+    // awaits the JoinHandle, so a client hanging up mid-turn drops the
+    // await, never the dispatch — the answer completes and `tasks/get`
+    // returns it. This is the same bug class as the Teams webhook 499
+    // (a 23s answer computed and lost to a cancelled future), fixed the
+    // same way.
+    state.a2a.tasks.record(&trace_id, TaskState::Working);
+    let dispatcher = state.a2a.dispatcher.clone();
+    let tasks = state.a2a.tasks.clone();
+    let task_trace = trace_id.clone();
+    let handle = tokio::spawn(async move {
+        let out = dispatcher
+            .invoke(&tool, json!({ "message": text }), principal, "a2a")
+            .await;
+        match &out {
+            Ok(d) => tasks.record_entry(
+                &task_trace,
+                TaskState::Completed,
+                Some(&reply_text(&d.result)),
+                None,
+            ),
+            Err(e) => {
+                tasks.record_entry(&task_trace, TaskState::Failed, None, Some(&e.to_string()));
+            }
+        }
+        out
+    });
+
+    if wants_immediate_task(&req.params) {
+        // The spec: return the Task right away; the client polls
+        // `tasks/get`. The spawned dispatch keeps running.
+        let mut task = json!({
+            "kind": "task",
+            "id": trace_id,
+            "status": { "state": "working" },
+        });
+        if let Some(ctx) = context_id {
+            task["contextId"] = json!(ctx);
+        }
+        return rpc_ok(&req.id, task);
+    }
+
+    match handle.await {
+        Ok(Ok(d)) => {
             let reply = reply_text(&d.result);
             let mut msg = json!({
                 "kind": "message",
@@ -327,11 +381,136 @@ async fn message_send(
             }
             rpc_ok(&req.id, msg)
         }
-        Err(e) => {
-            state.a2a.tasks.record(&trace_id, TaskState::Failed);
-            rpc_error(&req.id, INTERNAL_ERROR, e.to_string())
-        }
+        Ok(Err(e)) => rpc_error(&req.id, INTERNAL_ERROR, e.to_string()),
+        Err(join_err) => rpc_error(
+            &req.id,
+            INTERNAL_ERROR,
+            format!("dispatch task join error: {join_err}"),
+        ),
     }
+}
+
+/// Spec `message/stream` (#635 P6): SSE of JSON-RPC responses — the
+/// initial Task (`working`), a `TaskArtifactUpdateEvent` per token
+/// delta (append: true; from the in-process streaming seam when the
+/// tool opts in, else nothing until the end), the full reply as a
+/// last-chunk artifact, and a terminal `TaskStatusUpdateEvent`
+/// (`final: true`, closing the stream per spec). Task state is
+/// recorded exactly as message/send records it, so `tasks/get` works
+/// on streamed turns too.
+async fn message_stream(
+    state: SpecState,
+    principal: triton_core::Principal,
+    req: RpcRequest,
+) -> Response {
+    use futures::StreamExt as _;
+
+    let Some(text) = text_from_params(&req.params) else {
+        return rpc_error(
+            &req.id,
+            INVALID_PARAMS,
+            "params.message.parts must contain at least one non-empty text part",
+        );
+    };
+    let trace_id = principal.trace_id.clone();
+    let tool = state.config.default_tool.clone();
+    let rpc_id = req.id.clone();
+
+    state.a2a.tasks.record(&trace_id, TaskState::Working);
+    let events = match state
+        .a2a
+        .dispatcher
+        .invoke_streaming(&tool, json!({ "message": text }), principal, "a2a", None)
+        .await
+    {
+        Ok(ev) => ev,
+        Err(e) => {
+            state
+                .a2a
+                .tasks
+                .record_entry(&trace_id, TaskState::Failed, None, Some(&e.to_string()));
+            return rpc_error(&req.id, INTERNAL_ERROR, e.to_string());
+        }
+    };
+
+    let tasks = state.a2a.tasks.clone();
+    let task_id = trace_id.clone();
+    let rpc = move |result: Value| serde_json::json!({ "jsonrpc": "2.0", "id": rpc_id.clone(), "result": result });
+    let initial = rpc(json!({
+        "kind": "task",
+        "id": task_id,
+        "status": { "state": "working" },
+    }));
+
+    let artifact_id = uuid::Uuid::new_v4().to_string();
+    let task_for_frames = trace_id.clone();
+    let rpc_frames = rpc.clone();
+    let frames = events.flat_map(move |ev| {
+        let out: Vec<Value> = match ev {
+            triton_core::stream::StreamEvent::Token(t) => vec![rpc_frames(json!({
+                "kind": "artifact-update",
+                "taskId": task_for_frames,
+                "append": true,
+                "artifact": {
+                    "artifactId": artifact_id,
+                    "parts": [{ "kind": "text", "text": t }],
+                },
+            }))],
+            triton_core::stream::StreamEvent::Tool(_) => Vec::new(),
+            triton_core::stream::StreamEvent::Done(v) => {
+                let reply = reply_text(&v);
+                tasks.record_entry(&task_for_frames, TaskState::Completed, Some(&reply), None);
+                vec![
+                    rpc_frames(json!({
+                        "kind": "artifact-update",
+                        "taskId": task_for_frames,
+                        "lastChunk": true,
+                        "artifact": {
+                            "artifactId": artifact_id,
+                            "parts": [{ "kind": "text", "text": reply }],
+                        },
+                    })),
+                    rpc_frames(json!({
+                        "kind": "status-update",
+                        "taskId": task_for_frames,
+                        "status": { "state": "completed" },
+                        "final": true,
+                    })),
+                ]
+            }
+            triton_core::stream::StreamEvent::Error { error, .. } => {
+                tasks.record_entry(
+                    &task_for_frames,
+                    TaskState::Failed,
+                    None,
+                    Some(&error.to_string()),
+                );
+                vec![rpc_frames(json!({
+                    "kind": "status-update",
+                    "taskId": task_for_frames,
+                    "status": { "state": "failed", "message": {
+                        "kind": "message", "role": "agent",
+                        "messageId": uuid::Uuid::new_v4().to_string(),
+                        "parts": [{ "kind": "text", "text": error.to_string() }],
+                    } },
+                    "final": true,
+                }))]
+            }
+        };
+        futures::stream::iter(out)
+    });
+
+    let all = futures::stream::once(async move { initial }).chain(frames);
+    let sse = all.map(|v| {
+        Ok::<axum::response::sse::Event, std::convert::Infallible>(
+            axum::response::sse::Event::default().data(v.to_string()),
+        )
+    });
+    axum::response::Sse::new(sse)
+        .keep_alive(
+            axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
+        )
+        .into_response()
 }
 
 /// Pull human-readable text out of whatever the tool returned. Triton
@@ -366,18 +545,41 @@ fn tasks_get(state: SpecState, req: RpcRequest) -> Response {
     let Some(id) = req.params.get("id").and_then(Value::as_str) else {
         return rpc_error(&req.id, INVALID_PARAMS, "params.id is required");
     };
-    match state.a2a.tasks.get(id) {
-        Some(st) => rpc_ok(
-            &req.id,
-            json!({
+    match state.a2a.tasks.entry(id) {
+        Some(entry) => {
+            let st = entry.state.unwrap_or(TaskState::Submitted);
+            let mut task = json!({
                 "kind": "task",
                 "id": id,
                 "status": { "state": match st {
+                    TaskState::Submitted => "submitted",
+                    TaskState::Working => "working",
                     TaskState::Completed => "completed",
                     TaskState::Failed => "failed",
                 } },
-            }),
-        ),
+            });
+            // Completed: the stored (clamped) reply rides as an
+            // artifact — this is what makes a disconnected
+            // `message/send` recoverable by polling.
+            if st == TaskState::Completed
+                && let Some(result) = &entry.result
+            {
+                task["artifacts"] = json!([{
+                    "artifactId": uuid::Uuid::new_v4().to_string(),
+                    "parts": [{ "kind": "text", "text": result }],
+                }]);
+            }
+            if st == TaskState::Failed
+                && let Some(error) = &entry.error
+            {
+                task["status"]["message"] = json!({
+                    "kind": "message", "role": "agent",
+                    "messageId": uuid::Uuid::new_v4().to_string(),
+                    "parts": [{ "kind": "text", "text": error }],
+                });
+            }
+            rpc_ok(&req.id, task)
+        }
         // The store is bounded and restart-clean, so "not found" also
         // covers "evicted" and "from a previous process". A caller
         // cannot distinguish those, and the spec has one code for it.

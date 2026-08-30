@@ -48,16 +48,49 @@ pub struct InMemoryTaskStore {
 
 #[derive(Default)]
 struct TaskStoreInner {
-    states: HashMap<String, TaskState>,
+    states: HashMap<String, TaskEntry>,
     /// Insertion order of the keys in `states`, for FIFO eviction.
     order: VecDeque<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskState {
+    /// #635 P6: recorded before the dispatch is spawned, so a client
+    /// polling immediately after `returnImmediately` sees the task.
+    Submitted,
+    /// The spawned dispatch is running.
+    Working,
     Completed,
     Failed,
+}
+
+/// One retained task: its lifecycle state plus — for `Completed` — the
+/// reply text, CLAMPED so a bounded store cannot become an unbounded
+/// result cache, and for `Failed` the error string. This is what makes
+/// `message/send` disconnect-safe: the answer survives the client
+/// hanging up and `tasks/get` returns it.
+#[derive(Debug, Clone, Default)]
+pub struct TaskEntry {
+    pub state: Option<TaskState>,
+    pub result: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Cap on the stored reply text per task — mirrors the chat adapters'
+/// text ceilings; the full result was already delivered to any client
+/// that stayed connected.
+const TASK_RESULT_MAX_BYTES: usize = 32 * 1024;
+
+fn clamp_result(s: &str) -> String {
+    if s.len() <= TASK_RESULT_MAX_BYTES {
+        return s.to_string();
+    }
+    let mut cut = TASK_RESULT_MAX_BYTES;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &s[..cut])
 }
 
 impl InMemoryTaskStore {
@@ -66,7 +99,17 @@ impl InMemoryTaskStore {
     }
 
     pub fn get(&self, trace_id: &str) -> Option<TaskState> {
-        self.inner.lock().unwrap().states.get(trace_id).copied()
+        self.inner
+            .lock()
+            .unwrap()
+            .states
+            .get(trace_id)
+            .and_then(|e| e.state)
+    }
+
+    /// The full entry (state + stored result/error), for `tasks/get`.
+    pub fn entry(&self, trace_id: &str) -> Option<TaskEntry> {
+        self.inner.lock().unwrap().states.get(trace_id).cloned()
     }
 
     /// `pub(crate)` rather than private: the spec-A2A facade in
@@ -74,10 +117,29 @@ impl InMemoryTaskStore {
     /// for a task created by either face of the adapter. Still not part
     /// of the public API — nothing outside this crate writes task state.
     pub(crate) fn record(&self, trace_id: &str, state: TaskState) {
+        self.record_entry(trace_id, state, None, None);
+    }
+
+    /// Record a terminal state WITH its payload (clamped result text on
+    /// Completed, error string on Failed).
+    pub(crate) fn record_entry(
+        &self,
+        trace_id: &str,
+        state: TaskState,
+        result: Option<&str>,
+        error: Option<&str>,
+    ) {
         let mut g = self.inner.lock().unwrap();
-        // Only a brand-new key extends the store; an update keeps the
-        // existing position so the FIFO order tracks first-seen.
-        if g.states.insert(trace_id.to_string(), state).is_none() {
+        let is_new = !g.states.contains_key(trace_id);
+        let entry = g.states.entry(trace_id.to_string()).or_default();
+        entry.state = Some(state);
+        if let Some(r) = result {
+            entry.result = Some(clamp_result(r));
+        }
+        if let Some(e) = error {
+            entry.error = Some(clamp_result(e));
+        }
+        if is_new {
             g.order.push_back(trace_id.to_string());
             while g.order.len() > TASK_STORE_CAPACITY {
                 if let Some(old) = g.order.pop_front() {
