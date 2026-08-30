@@ -38,11 +38,10 @@ pub mod token_minter;
 pub mod wif_minter;
 pub use surface_mapper::RenderedMessage;
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use base64::Engine as _;
-use sha2::{Digest, Sha256};
 
 use axum::Router;
 use axum::body::Bytes;
@@ -136,41 +135,6 @@ const RENDER_REPORT_IMG_MARKER: &str = "__render_report_png";
 /// PNG canvas width (matches the standalone `triton-rasterizer` bin).
 const DASHBOARD_PNG_WIDTH: u32 = 1200;
 
-/// A tiny FIFO-bounded byte cache for upstream-rendered chart images.
-///
-/// An upstream (peacock `render_report`) hands us a fully-rendered PNG inline
-/// in its result. Google Chat can only show an image by URL, so we stash the
-/// bytes here — already authorised at dispatch time — and serve them at a
-/// signed `…/img/{token}` URL. Ephemeral by design: bounded, in-memory, lost
-/// on restart (cards are short-lived, and a stale image just 404s).
-#[derive(Default)]
-struct ImageCache {
-    map: HashMap<String, Vec<u8>>,
-    order: VecDeque<String>,
-}
-
-impl ImageCache {
-    /// Keep at most this many images (a handful of concurrent chats' worth).
-    const CAP: usize = 64;
-
-    fn insert(&mut self, id: String, bytes: Vec<u8>) {
-        if self.map.contains_key(&id) {
-            return;
-        }
-        self.map.insert(id.clone(), bytes);
-        self.order.push_back(id);
-        while self.order.len() > Self::CAP {
-            if let Some(old) = self.order.pop_front() {
-                self.map.remove(&old);
-            }
-        }
-    }
-
-    fn get(&self, id: &str) -> Option<Vec<u8>> {
-        self.map.get(id).cloned()
-    }
-}
-
 /// Public base URL for the chart-image route Google fetches. Prefer an
 /// explicit `TRITON_GOOGLE_CHAT_PUBLIC_BASE`; else derive it from the
 /// inbound request's forwarded host (a tunnel/proxy sets it to the public
@@ -243,25 +207,38 @@ fn upstream_png_bytes(result: &Value) -> Option<Vec<u8>> {
         .ok()
 }
 
-/// Cache an upstream-rendered chart PNG and sign a `…/img/{token}` URL Google
-/// can fetch it from. The token carries the content-hash id into the ephemeral
-/// [`ImageCache`]. `None` when there's no reachable public base (Google can't
-/// fetch a loopback URL, so the caller falls back to text).
-fn upstream_image_url(
+/// Signed image URLs stay fetchable this long — a scrolled-back card
+/// from last week keeps its chart; an ancient link eventually dies
+/// instead of being a forever-capability.
+const IMG_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Sign a `render_report` spec into a chart-image URL. STATELESS by
+/// design (port of the msteams shape, triton#237): the token carries
+/// the args + an expiry and the route re-renders on fetch, so ANY
+/// replica serves any URL. The first cut cached PNG bytes in process
+/// memory — with `replicaCount: 2`, Google's fetch landed on the other
+/// pod's empty cache and the card showed a broken image.
+fn report_image_url(
     adapter: &GoogleChatAdapter,
     base: Option<&str>,
-    png: Vec<u8>,
+    rargs: &Value,
 ) -> Option<String> {
     let base = base?;
-    let id = format!("{:x}", Sha256::digest(&png));
+    let payload = serde_json::json!({ "a": rargs, "exp": unix_now() + IMG_TOKEN_TTL_SECS });
     let token = triton_correlation::encode_with_cap(
         RENDER_REPORT_IMG_MARKER,
-        &serde_json::json!({ "id": id }),
+        &payload,
         &adapter.correlation_key,
         DASHBOARD_TOKEN_CAP,
     )
     .ok()?;
-    adapter.image_cache.lock().unwrap().insert(id, png);
     Some(format!("{base}/{}/img/{token}", adapter.name))
 }
 
@@ -337,7 +314,6 @@ pub struct GoogleChatAdapter {
     correlation_key: Vec<u8>,
     /// Ephemeral cache of upstream-rendered chart PNGs, served on demand at
     /// the signed `…/img/{token}` route (peacock `render_report`).
-    image_cache: Arc<Mutex<ImageCache>>,
     /// #164 T1a: async reply courier switch + Chat REST API base.
     courier: CourierConfig,
     /// Courier bearer source, decided at boot from the resolved
@@ -554,7 +530,6 @@ impl GoogleChatAdapter {
             rate_limit,
             per_tenant_limit,
             correlation_key,
-            image_cache: Arc::new(Mutex::new(ImageCache::default())),
             courier,
             outbound,
             http,
@@ -595,21 +570,50 @@ async fn serve_dashboard_png(
         Ok(p) => p,
         Err(_) => return (StatusCode::NOT_FOUND, "not found").into_response(),
     };
-    // Upstream-rendered chart PNG (peacock render_report): the token carries an
-    // id into the ephemeral image cache. Serve the bytes verbatim.
+    // Report chart: the token carries the render_report spec + expiry;
+    // re-render on fetch — stateless, so ANY replica serves any URL
+    // (triton#237's shape; the ephemeral cache 404'd across replicas).
     if marker == RENDER_REPORT_IMG_MARKER {
-        let id = spec.get("id").and_then(Value::as_str).unwrap_or_default();
-        return match adapter.image_cache.lock().unwrap().get(id) {
-            Some(png) => (
-                StatusCode::OK,
-                [
-                    (axum::http::header::CONTENT_TYPE, "image/png"),
-                    (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
-                ],
-                png,
-            )
-                .into_response(),
-            None => (StatusCode::NOT_FOUND, "not found").into_response(),
+        if spec
+            .get("exp")
+            .and_then(Value::as_u64)
+            .is_none_or(|exp| exp < unix_now())
+        {
+            return (StatusCode::GONE, "image link expired").into_response();
+        }
+        let Some(rargs) = spec.get("a").cloned() else {
+            return (StatusCode::NOT_FOUND, "not found").into_response();
+        };
+        // Audit-only principal: the SIGNED args are the authorization.
+        let principal = Principal {
+            sub: "googlechat-img".to_string(),
+            scopes: vec!["chat".to_string()],
+            groups: Vec::new(),
+            tenant: "-".to_string(),
+            raw_token: String::new(),
+            trace_id: uuid::Uuid::new_v4().to_string(),
+        };
+        return match adapter
+            .dispatcher
+            .invoke("render_report", rargs, principal, PROTOCOL)
+            .await
+        {
+            Ok(rep) => match upstream_png_bytes(&rep.result) {
+                Some(png) => (
+                    StatusCode::OK,
+                    [
+                        (axum::http::header::CONTENT_TYPE, "image/png"),
+                        (axum::http::header::CACHE_CONTROL, "public, max-age=3600"),
+                    ],
+                    png,
+                )
+                    .into_response(),
+                None => (StatusCode::BAD_GATEWAY, "render produced no image").into_response(),
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "google_chat img route: render_report failed");
+                (StatusCode::BAD_GATEWAY, "render failed").into_response()
+            }
         };
     }
     if marker != DASHBOARD_MARKER {
@@ -1261,11 +1265,16 @@ async fn handle_webhook(
         }
     }
 
+    let base = public_base(&headers);
+    // Direct render_report (the "Open report:" click): the chart URL is
+    // minted from the INVOKED args — the result carries only a PNG.
+    let image_hint = (tool_name == "render_report")
+        .then(|| report_image_url(&adapter, base.as_deref(), &args))
+        .flatten();
     let result = adapter
         .dispatcher
         .invoke(&tool_name, args, principal, PROTOCOL)
         .await;
-    let base = public_base(&headers);
     match result {
         Ok(dispatch) => match build_reply_message(
             &adapter,
@@ -1275,6 +1284,7 @@ async fn handle_webhook(
             &action_echo,
             &principal_for_post,
             workspace_addon,
+            image_hint,
         )
         .await
         {
@@ -1353,6 +1363,7 @@ async fn handle_webhook(
 /// `spaces.messages.create` request body. `base` is the public HTTPS base
 /// for chart-image URLs (`public_base(&headers)` on the sync path; captured
 /// before the spawn on the courier path) — `None` degrades to tile grids.
+#[allow(clippy::too_many_arguments)]
 async fn build_reply_message(
     adapter: &GoogleChatAdapter,
     base: Option<&str>,
@@ -1361,6 +1372,7 @@ async fn build_reply_message(
     action_echo: &Option<String>,
     principal: &Principal,
     workspace_addon: bool,
+    image_hint: Option<String>,
 ) -> Result<Value, surface_mapper::RenderError> {
     let rendered = render_dispatch_result(dispatch_result)?;
     // For an HTTP Workspace Add-on, a card button's `function` must be
@@ -1443,23 +1455,14 @@ async fn build_reply_message(
                 serde_json::json!({})
             };
             rargs["report_id"] = serde_json::json!(report_id);
-            match adapter
-                .dispatcher
-                .invoke("render_report", rargs, principal.clone(), PROTOCOL)
-                .await
-            {
-                Ok(rep) => match upstream_png_bytes(&rep.result)
-                    .and_then(|png| upstream_image_url(adapter, base, png))
-                {
-                    // Synthetic title-less Dashboard so the shared
-                    // card builder renders the image as its section.
-                    Some(url) => (Some((String::new(), Vec::new())), Some(url)),
-                    None => (dashboard, dash_img),
-                },
-                Err(e) => {
-                    tracing::warn!(report = %report_id, error = %e, "google_chat: inline render_report failed; sending answer without the chart");
-                    (dashboard, dash_img)
-                }
+            // No render at reply time — the URL is a signed promise the
+            // img route fulfils on fetch (stateless, replica-proof; see
+            // `report_image_url`).
+            match report_image_url(adapter, base, &rargs) {
+                // Synthetic title-less Dashboard so the shared
+                // card builder renders the image as its section.
+                Some(url) => (Some((String::new(), Vec::new())), Some(url)),
+                None => (dashboard, dash_img),
             }
         }
         _ => (dashboard, dash_img),
@@ -1470,8 +1473,11 @@ async fn build_reply_message(
     // v2, so without this it would render an empty card. Serve the
     // PNG as an image widget instead. Only when there's no native
     // Dashboard (that path already owns the image slot).
+    // A result that carries its own PNG but no Report component (a
+    // direct render_report dispatch — the "Open report:" click): the
+    // caller minted the URL from the INVOKED args.
     let upstream_img = if dashboard.is_none() {
-        upstream_png_bytes(dispatch_result).and_then(|png| upstream_image_url(adapter, base, png))
+        image_hint.clone()
     } else {
         None
     };
@@ -1547,6 +1553,11 @@ async fn courier_reply(
     action_echo: Option<String>,
 ) {
     let principal_for_post = principal.clone();
+    // See the sync path: direct render_report invocations mint their
+    // chart URL from the invoked args, pre-dispatch.
+    let image_hint = (tool_name == "render_report")
+        .then(|| report_image_url(&adapter, base.as_deref(), &args))
+        .flatten();
 
     // Placeholder FIRST — visible before the (17–60s) dispatch starts.
     // Best-effort: on failure we still dispatch and create the final
@@ -1618,6 +1629,7 @@ async fn courier_reply(
                 &action_echo,
                 &principal_for_post,
                 false,
+                image_hint,
             )
             .await
             {
