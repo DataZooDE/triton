@@ -1533,17 +1533,57 @@ async fn courier_reply(
         }
     };
 
-    let result = adapter
+    // Streaming dispatch (#635 P5): a tool that opts in emits Token
+    // deltas we PATCH into the placeholder as growing text (≤1/s — the
+    // per-space write quota); a buffered tool yields one terminal Done
+    // and this degenerates to exactly the placeholder→final flow.
+    let result: Result<Value, TritonError> = match adapter
         .dispatcher
-        .invoke(&tool_name, args, principal, PROTOCOL)
-        .await;
+        .invoke_streaming(&tool_name, args, principal, PROTOCOL, None)
+        .await
+    {
+        Err(e) => Err(e),
+        Ok(mut stream) => {
+            use futures::StreamExt as _;
+            let mut acc = String::new();
+            let mut last_patch = std::time::Instant::now();
+            let mut terminal: Option<Result<Value, TritonError>> = None;
+            while let Some(ev) = stream.next().await {
+                match ev {
+                    triton_core::stream::StreamEvent::Token(t) => {
+                        acc.push_str(&t);
+                        if let Some(name) = &placeholder
+                            && last_patch.elapsed() >= std::time::Duration::from_millis(1100)
+                            && !acc.trim().is_empty()
+                        {
+                            let progress = surface_mapper::text_reply_body(&acc, false);
+                            if let Err(e) = patch_chat_message(&adapter, name, &progress).await {
+                                tracing::debug!(error = %e, "google_chat courier: progress patch failed");
+                            }
+                            last_patch = std::time::Instant::now();
+                        }
+                    }
+                    triton_core::stream::StreamEvent::Tool(_) => {}
+                    triton_core::stream::StreamEvent::Done(v) => terminal = Some(Ok(v)),
+                    triton_core::stream::StreamEvent::Error { error, .. } => {
+                        terminal = Some(Err(error));
+                    }
+                }
+            }
+            terminal.unwrap_or_else(|| {
+                Err(TritonError::Provider(
+                    "stream ended without a terminal frame".into(),
+                ))
+            })
+        }
+    };
     let body = match result {
-        Ok(dispatch) => {
+        Ok(result_value) => {
             match build_reply_message(
                 &adapter,
                 base.as_deref(),
                 &tool_name,
-                &dispatch.result,
+                &result_value,
                 &action_echo,
                 &principal_for_post,
                 false,

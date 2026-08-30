@@ -1419,23 +1419,80 @@ async fn courier_deliver(
         }));
     }
 
+    // Streaming dispatch (#635 P5): a tool that opts in emits Token
+    // deltas we forward as CUMULATIVE `streaming` chunks (≤1/s, the
+    // platform throttle) between the opener and the final; a buffered
+    // tool yields one terminal Done and this degenerates to exactly
+    // the old flow. `a2ui: None` — the courier renders the raw result.
     let started = std::time::Instant::now();
-    let result = adapter
+    let result: Result<Value, TritonError> = match adapter
         .dispatcher
-        .invoke(&tool_name, args, principal, PROTOCOL)
-        .await;
+        .invoke_streaming(&tool_name, args, principal, PROTOCOL, None)
+        .await
+    {
+        Err(e) => Err(e),
+        Ok(mut stream) => {
+            use futures::StreamExt as _;
+            let mut acc = String::new();
+            let mut seq: u64 = 1; // the informative opener was 1
+            let mut last_chunk = std::time::Instant::now();
+            let mut terminal: Option<Result<Value, TritonError>> = None;
+            while let Some(ev) = stream.next().await {
+                match ev {
+                    triton_core::stream::StreamEvent::Token(t) => {
+                        acc.push_str(&t);
+                        if let Some(sid) = &stream_id
+                            && last_chunk.elapsed() >= std::time::Duration::from_millis(1000)
+                            && !acc.trim().is_empty()
+                        {
+                            seq += 1;
+                            let chunk = serde_json::json!({
+                                "type": "typing",
+                                "text": surface_mapper::clamp_plain_text(&acc),
+                                "from": { "id": recipient_id },
+                                "conversation": { "id": conversation_id },
+                                "recipient": { "id": sender.from_id },
+                                "entities": [ {
+                                    "type": "streaminfo",
+                                    "streamId": sid,
+                                    "streamType": "streaming",
+                                    "streamSequence": seq,
+                                } ],
+                            });
+                            if let Err(e) =
+                                post_activity(&adapter, &verified, &conversation_id, &chunk).await
+                            {
+                                tracing::debug!(error = %e, "msteams courier: streaming chunk failed");
+                            }
+                            last_chunk = std::time::Instant::now();
+                        }
+                    }
+                    triton_core::stream::StreamEvent::Tool(_) => {}
+                    triton_core::stream::StreamEvent::Done(v) => terminal = Some(Ok(v)),
+                    triton_core::stream::StreamEvent::Error { error, .. } => {
+                        terminal = Some(Err(error));
+                    }
+                }
+            }
+            terminal.unwrap_or_else(|| {
+                Err(TritonError::Provider(
+                    "stream ended without a terminal frame".into(),
+                ))
+            })
+        }
+    };
     let dispatch_latency_ms = started.elapsed().as_millis() as u64;
     if let Some(t) = typing_ticker {
         t.abort();
     }
 
     let mut body = match result {
-        Ok(dispatch) => build_reply_body(
+        Ok(result_value) => build_reply_body(
             &adapter,
             &recipient_id,
             &conversation_id,
             &sender.from_id,
-            &dispatch.result,
+            &result_value,
         ),
         Err(e) => {
             tracing::warn!(error = %e, class = %e.class(), "msteams courier dispatch failed");

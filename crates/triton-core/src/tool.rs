@@ -52,6 +52,36 @@ pub trait Tool: Send + Sync {
     /// upstream-router crate (PR 9) gets `raw_token` access through
     /// the dispatcher's full `Principal`, not via this trait.
     async fn invoke(&self, args: Value, principal: &ToolPrincipal) -> Result<Value, TritonError>;
+
+    /// Whether [`Tool::invoke_streaming`] emits real incremental
+    /// frames. Default `false`: the dispatcher keeps the historical
+    /// buffered path (immediate audit, single terminal `Done`).
+    /// A tool that overrides this to `true` gets the streaming
+    /// dispatch path — the same deferred-audit `Finalized` wrapper
+    /// upstream streams ride (#635 P5).
+    fn supports_streaming(&self) -> bool {
+        false
+    }
+
+    /// Streaming execute: incremental [`StreamEvent`]s (typically
+    /// `Token` deltas) ending in a terminal `Done` that carries the
+    /// FULL result value — surface components included, so card
+    /// renderers downstream lose nothing to streaming. The default
+    /// buffers `invoke` into a single `Done`; only meaningful to
+    /// override together with [`Tool::supports_streaming`].
+    ///
+    /// Note: streaming tools run inside the dispatcher's future, not
+    /// behind the panic-isolating `tokio::spawn` the buffered path
+    /// uses — same trade upstream streams already make.
+    async fn invoke_streaming(
+        &self,
+        args: Value,
+        principal: &ToolPrincipal,
+    ) -> Result<futures::stream::BoxStream<'static, crate::stream::StreamEvent>, TritonError> {
+        use futures::StreamExt as _;
+        let value = self.invoke(args, principal).await?;
+        Ok(futures::stream::once(async move { crate::stream::StreamEvent::Done(value) }).boxed())
+    }
 }
 
 /// Public view of a registered tool, surfaced by `GET /v1/tools`
