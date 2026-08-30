@@ -124,12 +124,7 @@ async fn the_agent_card_is_public_and_describes_the_endpoint() {
     ];
     let paths: Vec<String> = filenames
         .iter()
-        .flat_map(|f| {
-            [
-                format!("/.well-known/{f}"),
-                format!("/a2a/.well-known/{f}"),
-            ]
-        })
+        .flat_map(|f| [format!("/.well-known/{f}"), format!("/a2a/.well-known/{f}")])
         .collect();
     for path in &paths {
         let resp = reqwest::get(format!("{base}{path}")).await.expect("GET");
