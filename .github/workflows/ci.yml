@@ -33,10 +33,16 @@ jobs:
       - uses: actions/checkout@v4
 
       # Pinned to the workspace's rust-version (Cargo.toml).
+      # rust-toolchain.toml drives the channel + components; rustup honours it
+      # automatically on the first invocation. `rustup default` makes the pin
+      # apply in every directory, not just this one — `examples/consumer-smoke`
+      # is a separate workspace and would otherwise resolve to the runner
+      # image's default toolchain.
       - name: Install Rust toolchain
         run: |
-          rustup toolchain install 1.95 --profile minimal --component rustfmt,clippy
-          rustup default 1.95
+          rustup show active-toolchain || rustup toolchain install
+          rustup component add rustfmt clippy
+          rustup default "$(rustup show active-toolchain | awk '{print $1}')"
 
       - name: Cache cargo registry + target
         uses: actions/cache@v4
