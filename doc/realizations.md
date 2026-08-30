@@ -1400,11 +1400,20 @@ a trap the next developer should not have to step in.
   `examples/consumer-smoke` is deliberately its own workspace, so it builds
   into `examples/consumer-smoke/target` — 1.1 GB the cache step never
   listed, recompiled from scratch every run (57s, 38% of the Rust job). The
-  fix is `CARGO_TARGET_DIR` pointing at the main workspace's already-warm
-  target dir rather than a second cache entry: **57s -> 14s**, and it keeps
-  1.1 GB out of a 10 GB per-repo cache budget. It does not weaken the test —
-  what matters there is that `triton-tests` resolves from a separate
-  workspace, not where the object files land.
+  fix is `CARGO_TARGET_DIR` pointing at the main workspace's target dir
+  rather than a second cache entry, which keeps 1.1 GB out of a 10 GB
+  per-repo cache budget. It does not weaken the test — what matters there is
+  that `triton-tests` resolves from a separate workspace, not where the
+  object files land.
+
+  **The saving only arrives on the second run, and a local measurement will
+  lie to you about that.** A separate workspace resolves its own dependency
+  graph, so sharing the dir does not let it reuse the main build's artifacts
+  — the first CI run still compiled 237 crates from `proc-macro2` up. What
+  it does is put those artifacts inside the dir that gets *cached*, so the
+  next run restores them. Measured locally the step looked like 14s, but
+  that target dir was warm from an earlier build in the same session; the
+  honest cold number is the CI one.
 
 - **Run the CI-pinned Flutter locally, or expect tool noise.** CI pins
   3.44.4; a local 3.47.1 rewrites `apps/explorer/analysis_options.yaml`
