@@ -66,6 +66,48 @@ jobs:
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "Pushing: ${TAGS}"
 
+      # Persist the Dockerfile's BuildKit cache mounts across runs.
+      #
+      # The layer cache above only caches LAYERS. `RUN --mount=type=cache`
+      # contents are not layers, so the GHA backend drops them and every run
+      # gets an empty cargo registry + target dir. Measured on this workspace,
+      # rebuilding after a `crates/**` change (the only change that triggers
+      # this workflow, so it is the case that matters):
+      #
+      #   cold, no cache at all .................. 5m35s
+      #   layer cache only, mounts empty ......... 2m16s
+      #   layer cache + mounts populated ........... 38s
+      #
+      # The layer cache alone recovers the base image and apt layers; the
+      # mounts are what stop cargo recompiling the dependency tree. Hence the
+      # dance: it extracts the mounts to disk after the build and injects them
+      # back before the next one, with actions/cache carrying them between.
+      #
+      # If this ever misbehaves, deleting these two steps is safe and leaves
+      # the 2m16s layer-cache behaviour intact.
+      - name: Cache the cargo mounts used inside the build
+        uses: actions/cache@v4
+        id: cargo_mounts
+        with:
+          path: |
+            docker-cargo-registry
+            docker-cargo-git
+            docker-cargo-target
+          key: docker-cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            docker-cargo-${{ runner.os }}-
+
+      - name: Inject the cargo mounts into BuildKit
+        uses: reproducible-containers/buildkit-cache-dance@v3.1.2
+        with:
+          cache-map: |
+            {
+              "docker-cargo-registry": "/usr/local/cargo/registry",
+              "docker-cargo-git": "/usr/local/cargo/git",
+              "docker-cargo-target": "/src/target"
+            }
+          skip-extraction: ${{ steps.cargo_mounts.outputs.cache-hit }}
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -74,3 +116,12 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           provenance: false
+          # Layer cache across runs. Without this every merge to main rebuilt
+          # the image from scratch — 222s, essentially all of it recompiling
+          # the Rust dependency tree that had not changed.
+          #
+          # `mode=max` caches intermediate stages too, not just the final
+          # image, which is what makes the multi-stage build's `build` layer
+          # reusable at all.
+          cache-from: type=gha,scope=dz-triton
+          cache-to: type=gha,mode=max,scope=dz-triton

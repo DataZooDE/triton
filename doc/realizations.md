@@ -1355,3 +1355,72 @@ a trap the next developer should not have to step in.
   on a plain `tracing::warn!` line, matching how every other courier's
   error path already logs before calling `record_post` with a static
   label.
+
+---
+
+## 8. CI/CD build-time traps (2026-08-30)
+
+- **`flutter test` is a compile step, not a test step.** The
+  `apps/explorer` suite reads as 120s of testing in CI; the tests
+  themselves take **6 seconds**. The rest is the Dart/kernel compile of
+  the test bundle, which lands in `.dart_tool/` and which CI discarded
+  every run. Measured locally on the same workspace: cold `.dart_tool`
+  2m48s, warm `.dart_tool` **11s**, same 75 tests. Caching `.dart_tool`
+  (39 MB, keyed on the pinned Flutter version + lockfiles) is the whole
+  fix. The corollary matters more than the fix: **sharding this suite
+  across jobs would have made it slower**, because every shard re-pays
+  the compile to parallelise 6 seconds of execution. Check what a slow
+  test command is actually spending its time on before parallelising it.
+
+- **`RUN --mount=type=cache` contents are not layers, and the GHA cache
+  backend does not save them.** `cache-from`/`cache-to: type=gha` caches
+  layers only, so on an ephemeral runner every build starts with an empty
+  cargo registry and target dir. Measured on `deploy/triton/Dockerfile`,
+  rebuilding after a `crates/**` change — the only change that triggers
+  `build-dz-triton.yml`, so it is the case that matters:
+
+  | | |
+  |---|---|
+  | cold, no cache | 5m35s |
+  | layer cache only, mounts empty | 2m16s |
+  | layer cache + mounts populated | **38s** |
+
+  The layer cache recovers the base image and apt layers; the mounts are
+  what stop cargo recompiling the dependency tree. Persisting them needs
+  `buildkit-cache-dance` (or a cargo-chef-style dependency layer).
+
+- **A cache-mounted target dir is not visible to a later `COPY --from`.**
+  Once `/src/target` is a cache mount, `COPY --from=build
+  /src/target/release/triton` finds nothing — the mount is not part of the
+  image. The binary has to be copied out of the mount to a real path
+  (`/out`) inside the same `RUN`. This fails at build time, not silently,
+  but the error points at the COPY rather than at the mount.
+
+- **`actions/cache` never overwrites an existing key, so a non-rotating key
+  makes the cache WRITE-ONCE.** triton's cargo cache is keyed on
+  `hashFiles('**/Cargo.lock')`. The first run for a given lockfile saves it;
+  every run after that restores it and the post-job save is silently skipped.
+  Anything compiled later never enters the cache. The log is the tell — a
+  `Cache restored from key: cargo-…` line with **no** matching `Cache saved
+  with key: cargo-…` at post-job, where a healthy new cache shows
+  `Cache not found` -> `Cache saved` -> (next run) `Cache restored`.
+
+- **A separate `[workspace]` gets a separate `target/`, and you cannot fix
+  that by sharing `CARGO_TARGET_DIR`.** `examples/consumer-smoke` is
+  deliberately its own workspace and recompiles ~237 crates every run (~55s,
+  the Rust job's biggest step). Pointing `CARGO_TARGET_DIR` at the main
+  workspace's target dir was tried and measured: it changes nothing, because
+  a separate workspace resolves its own dependency graph (so no artifact is
+  reused) and, per the write-once behaviour above, what it writes is never
+  persisted. Fixing it properly means changing the cargo cache key strategy
+  and paying ~1-3 GB against a 10 GB per-repo budget for ~40s — not worth it
+  today, so the step is left alone deliberately.
+
+  A warning about measuring this locally: the same change looked like
+  57s -> 14s on a workstation because that target dir was already warm from
+  an earlier build in the session. The honest cold number came from CI.
+
+- **Run the CI-pinned Flutter locally, or expect tool noise.** CI pins
+  3.44.4; a local 3.47.1 rewrites `apps/explorer/analysis_options.yaml`
+  (adding an `analyzer: exclude:` block) on `pub get`. Harmless, but it
+  shows up as an unrelated modified file in the diff.
