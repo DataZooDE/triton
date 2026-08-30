@@ -1009,6 +1009,9 @@ async fn handle_webhook(
     // Captured before the match below partially consumes `event`: the
     // #164 async courier needs the space to address its reply POST.
     let space_name: Option<String> = event.space.as_ref().and_then(|s| s.name.clone());
+    // Captured for the courier ack below: a button click must be answered
+    // with a click-shaped body, not a message-shaped one.
+    let is_card_click = event.kind == "CARD_CLICKED";
     let (sender_name, tool_name, args, action_echo): (String, String, Value, Option<String>) =
         match event.kind.as_str() {
             "MESSAGE" => {
@@ -1225,11 +1228,30 @@ async fn handle_webhook(
                     )
                     .await;
                 });
-                return (
-                    StatusCode::OK,
-                    axum::Json(Value::Object(Default::default())),
-                )
-                    .into_response();
+                // The ack SHAPE depends on what was acked (found live,
+                // #635): a MESSAGE tolerates an empty `{}`, but a
+                // CARD_CLICKED answered with `{}` renders as "<app> is
+                // unable to process your request" in the client — even
+                // though the courier's real answer lands right after. A
+                // Workspace Add-on click wants a `renderActions`
+                // notification; a classic app an `actionResponse`.
+                let ack = if is_card_click {
+                    if workspace_addon {
+                        serde_json::json!({
+                            "renderActions": {
+                                "action": { "notification": { "text": "⏳ Working on it…" } }
+                            }
+                        })
+                    } else {
+                        serde_json::json!({
+                            "actionResponse": { "type": "NEW_MESSAGE" },
+                            "text": "⏳ Working on it…",
+                        })
+                    }
+                } else {
+                    Value::Object(Default::default())
+                };
+                return (StatusCode::OK, axum::Json(ack)).into_response();
             }
             _ => {
                 // No space to address the reply to — deliver inline
