@@ -7,6 +7,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+# Decode an upstream-rendered chart PNG (peacock render_report `png_base64`)
+# and content-address it for the signed `/{name}/img/{token}` route.
+base64 = "0.22"
+sha2 = "0.10"
 futures = { workspace = true }
 triton-core = { path = "../triton-core" }
 triton-correlation = { path = "../triton-correlation" }
