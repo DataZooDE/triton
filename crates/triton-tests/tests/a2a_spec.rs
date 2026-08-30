@@ -207,10 +207,12 @@ async fn protocol_errors_are_jsonrpc_errors_with_the_right_codes() {
     let token = iss.sign_jwt(claims(&iss.issuer_url()));
 
     // Unknown method → -32601, and the message names what IS supported.
+    // (`message/stream` stopped being a valid example the day it was
+    // implemented — #635 P6.)
     let (status, body) = rpc(
         &base,
         &token,
-        json!({"jsonrpc":"2.0","id":9,"method":"message/stream","params":{}}),
+        json!({"jsonrpc":"2.0","id":9,"method":"tasks/cancel","params":{}}),
     )
     .await;
     assert_eq!(status, 200, "a JSON-RPC error is still HTTP 200");
@@ -311,4 +313,222 @@ async fn without_config_neither_the_card_nor_the_jsonrpc_route_exists() {
     // rejecting the method.
     let (status, _) = rpc(&base, &token, send("hi")).await;
     assert_eq!(status, 404, "POST /a2a is not a route when unconfigured");
+}
+
+/// A deliberately slow tool, for the disconnect-safety and polling
+/// tests: the answer takes ~1.5s, far longer than the client waits.
+struct SlowTool;
+
+#[async_trait]
+impl Tool for SlowTool {
+    fn name(&self) -> &'static str {
+        "assistant"
+    }
+    async fn invoke(&self, args: Value, _p: &ToolPrincipal) -> Result<Value, TritonError> {
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let msg = args.get("message").and_then(Value::as_str).unwrap_or("");
+        Ok(json!({ "surface": { "text": format!("slow answer to: {msg}") } }))
+    }
+}
+
+async fn slow_spec_host() -> (TestIssuer, String) {
+    let iss = TestIssuer::start().await;
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(SlowTool));
+    let dispatcher = Arc::new(Dispatcher::new(Arc::new(reg), "test".to_string()));
+    let opts = EmbedOpts::dev().oidc(iss.issuer_url(), AUD, None).spec_a2a(
+        "DataZoo Agent",
+        "Answers questions.",
+        PUBLIC_URL,
+        "assistant",
+    );
+    let app = router(dispatcher, &opts);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (iss, format!("http://{addr}"))
+}
+
+fn send_immediate(text: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "message/send",
+        "params": {
+            "configuration": { "blocking": false },
+            "message": {
+                "kind": "message",
+                "role": "user",
+                "messageId": "m-1",
+                "parts": [{ "kind": "text", "text": text }],
+            },
+        },
+    })
+}
+
+/// `configuration.blocking: false` (the spec's returnImmediately) —
+/// the call answers with a `working` Task at once, and `tasks/get`
+/// polling reaches `completed` WITH the stored reply as an artifact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn return_immediately_yields_working_task_then_poll_completes() {
+    let (iss, base) = slow_spec_host().await;
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+
+    let started = std::time::Instant::now();
+    let (status, body) = rpc(&base, &token, send_immediate("poll me")).await;
+    assert_eq!(status, 200);
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(700),
+        "returnImmediately must not wait for the 1.5s dispatch"
+    );
+    assert_eq!(body["result"]["kind"], "task", "{body}");
+    assert_eq!(body["result"]["status"]["state"], "working", "{body}");
+    let task_id = body["result"]["id"].as_str().expect("task id").to_string();
+
+    // Poll to completion.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let (_, task) = rpc(
+            &base,
+            &token,
+            json!({"jsonrpc":"2.0","id":2,"method":"tasks/get","params":{"id":task_id}}),
+        )
+        .await;
+        let state = task["result"]["status"]["state"].as_str().unwrap_or("");
+        if state == "completed" {
+            let text = task["result"]["artifacts"][0]["parts"][0]["text"]
+                .as_str()
+                .unwrap_or("");
+            assert!(
+                text.contains("slow answer to: poll me"),
+                "completed task must carry the stored reply; got: {task}"
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "task never completed; last: {task}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// Disconnect-safety — the Teams-499 bug class, pinned on A2A: a
+/// client that fires `message/send` (blocking) and HANGS UP mid-turn
+/// must not cancel the dispatch. The answer completes in the spawned
+/// task and `tasks/get` recovers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_disconnect_does_not_cancel_the_dispatch() {
+    let (iss, base) = slow_spec_host().await;
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+
+    // Fire a BLOCKING send with a client timeout far below the 1.5s
+    // dispatch: the connection drops while the turn is running.
+    let short = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(300))
+        .build()
+        .unwrap();
+    let err = short
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .json(&send("survive me"))
+        .send()
+        .await;
+    assert!(
+        err.is_err(),
+        "the client must have timed out (that's the point)"
+    );
+
+    // The dispatch survived the hangup. We don't know the trace id (the
+    // response died with the connection), so poll... we CAN'T address the
+    // task without an id — which is exactly why a disconnect-prone client
+    // should use blocking:false. What we CAN pin: the process keeps
+    // serving, and a follow-up blocking call still answers.
+    tokio::time::sleep(std::time::Duration::from_millis(1600)).await;
+    let (status, body) = rpc(&base, &token, send("after the hangup")).await;
+    assert_eq!(status, 200);
+    assert!(
+        body["result"]["parts"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("slow answer to: after the hangup"),
+        "{body}"
+    );
+}
+
+/// `message/stream`: SSE of JSON-RPC responses — initial working Task,
+/// a last-chunk artifact carrying the reply, and a `final: true`
+/// status-update closing the stream. The card advertises it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn message_stream_emits_task_artifact_final() {
+    let (iss, base) = spec_host().await;
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+
+    // Card first: streaming must be advertised in the same build that
+    // serves the method.
+    let card: Value = reqwest::Client::new()
+        .get(format!("{base}/.well-known/agent-card.json"))
+        .send()
+        .await
+        .expect("GET card")
+        .json()
+        .await
+        .expect("card json");
+    assert_eq!(card["capabilities"]["streaming"], json!(true), "{card}");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "message/stream",
+            "params": { "message": {
+                "kind": "message", "role": "user", "messageId": "m-s",
+                "parts": [{ "kind": "text", "text": "stream me" }],
+            } },
+        }))
+        .send()
+        .await
+        .expect("POST stream");
+    assert_eq!(resp.status(), 200);
+    assert!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .starts_with("text/event-stream"),
+        "message/stream must answer SSE"
+    );
+    let body = resp.text().await.expect("stream body");
+    let frames: Vec<Value> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|d| serde_json::from_str(d).ok())
+        .collect();
+    assert!(frames.len() >= 3, "task + artifact + final; got: {body}");
+    assert_eq!(frames[0]["result"]["kind"], "task");
+    assert_eq!(frames[0]["result"]["status"]["state"], "working");
+    let last = frames.last().unwrap();
+    assert_eq!(last["result"]["kind"], "status-update");
+    assert_eq!(last["result"]["status"]["state"], "completed");
+    assert_eq!(last["result"]["final"], json!(true));
+    let artifact = frames
+        .iter()
+        .find(|f| f["result"]["kind"] == "artifact-update")
+        .expect("an artifact frame");
+    assert!(
+        artifact["result"]["artifact"]["parts"][0]["text"]
+            .as_str()
+            .unwrap_or("")
+            .contains("you said: stream me"),
+        "{artifact}"
+    );
+    // Every frame is a JSON-RPC response echoing the request id.
+    for f in &frames {
+        assert_eq!(f["jsonrpc"], "2.0");
+        assert_eq!(f["id"], 7);
+    }
 }
