@@ -94,12 +94,24 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             // `Report` is an optional inline chart rendered out-of-band by
             // adapters that support it (Google Chat); ignored by the text mapper.
             Component::Report { .. } => {}
-            // Click-to-open document references degrade to a plain label
-            // list on a surface with no embeddable resource host.
+            // Document references: an item whose `resource` is a real
+            // https URL (the agent's signed /docs/{token} links, #635 P7)
+            // renders as a markdown link — Teams renders markdown in both
+            // bot messages and card TextBlocks. Anything else (ui://
+            // internal refs) stays a plain label rather than a dead link.
             Component::Sources { items } => {
                 if !items.is_empty() {
-                    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-                    chunks.push(format!("Sources: {}", labels.join(" \u{b7} ")));
+                    let rendered: Vec<String> = items
+                        .iter()
+                        .map(|i| {
+                            if i.resource.starts_with("https://") {
+                                format!("[{}]({})", i.label, i.resource)
+                            } else {
+                                i.label.clone()
+                            }
+                        })
+                        .collect();
+                    chunks.push(format!("Sources: {}", rendered.join(" \u{b7} ")));
                 }
             }
             Component::Narration { text } => chunks.push(format!("_{}_", text)),
@@ -804,5 +816,39 @@ mod tests {
         assert_eq!(inv["statusCode"], 200);
         assert_eq!(inv["type"], ADAPTIVE_CARD_CONTENT_TYPE);
         assert_eq!(inv["value"]["type"], "AdaptiveCard");
+    }
+
+    /// #635 P7: a Sources item with a real https resource renders as a
+    /// markdown link; a ui:// internal ref stays a plain label — never
+    /// a dead link.
+    #[test]
+    fn sources_render_https_resources_as_links() {
+        let s = Surface {
+            components: vec![Component::Sources {
+                items: vec![
+                    triton_core::a2ui::SourceItem {
+                        label: "verify-567-memo".into(),
+                        resource: "https://agent.example/docs/tok123".into(),
+                    },
+                    triton_core::a2ui::SourceItem {
+                        label: "internal-page".into(),
+                        resource: "ui://peacock/document?id=x".into(),
+                    },
+                ],
+            }],
+        };
+        let out = render(&s).expect("renders");
+        assert!(
+            out.text
+                .contains("[verify-567-memo](https://agent.example/docs/tok123)"),
+            "{}",
+            out.text
+        );
+        assert!(out.text.contains("internal-page"), "{}", out.text);
+        assert!(
+            !out.text.contains("ui://"),
+            "internal refs must not leak as fake links: {}",
+            out.text
+        );
     }
 }

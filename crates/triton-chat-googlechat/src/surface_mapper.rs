@@ -123,12 +123,24 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             // `Report` is an optional inline chart rendered out-of-band by
             // adapters that support it (Google Chat); ignored by the text mapper.
             Component::Report { .. } => {}
-            // Click-to-open document references degrade to a plain label
-            // list on a surface with no embeddable resource host.
+            // Document references: an item whose `resource` is a real
+            // https URL (the agent's signed /docs/{token} links, #635 P7)
+            // renders as Google Chat's `<url|label>` hyperlink syntax.
+            // Anything else (ui:// internal refs) stays a plain label
+            // rather than a dead link.
             Component::Sources { items } => {
                 if !items.is_empty() {
-                    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-                    chunks.push(format!("Sources: {}", labels.join(" \u{b7} ")));
+                    let rendered: Vec<String> = items
+                        .iter()
+                        .map(|i| {
+                            if i.resource.starts_with("https://") {
+                                format!("<{}|{}>", i.resource, i.label)
+                            } else {
+                                i.label.clone()
+                            }
+                        })
+                        .collect();
+                    chunks.push(format!("Sources: {}", rendered.join(" \u{b7} ")));
                 }
             }
             Component::Narration { text } => {
@@ -1321,5 +1333,35 @@ mod tests {
         // Header carries the title but NOT an avatar image.
         assert_eq!(card["header"]["title"], serde_json::json!("DataZoo"));
         assert!(card["header"].get("imageUrl").is_none());
+    }
+
+    /// #635 P7: a Sources item with a real https resource renders in
+    /// Google Chat's `<url|label>` hyperlink syntax; a ui:// internal
+    /// ref stays a plain label — never a dead link.
+    #[test]
+    fn sources_render_https_resources_as_links() {
+        let s = Surface {
+            components: vec![Component::Sources {
+                items: vec![
+                    triton_core::a2ui::SourceItem {
+                        label: "verify-567-memo".into(),
+                        resource: "https://agent.example/docs/tok123".into(),
+                    },
+                    triton_core::a2ui::SourceItem {
+                        label: "internal-page".into(),
+                        resource: "ui://peacock/document?id=x".into(),
+                    },
+                ],
+            }],
+        };
+        let out = render(&s).expect("renders");
+        assert!(
+            out.text
+                .contains("<https://agent.example/docs/tok123|verify-567-memo>"),
+            "{}",
+            out.text
+        );
+        assert!(out.text.contains("internal-page"), "{}", out.text);
+        assert!(!out.text.contains("ui://"), "{}", out.text);
     }
 }
