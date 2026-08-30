@@ -1536,6 +1536,62 @@ async fn async_courier_delivers_cards() {
     );
 }
 
+/// Found live (#635): a CARD_CLICKED acked with `{}` renders as
+/// "<app> is unable to process your request" in the Chat client even
+/// though the courier's out-of-band answer lands fine. The courier ack
+/// for a click must be click-shaped — an actionResponse (classic app;
+/// the add-on flavor gets a renderActions notification, selected off
+/// the verified token's actor, which this fixture signs as classic).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn async_courier_click_ack_is_click_shaped() {
+    let jwks = FakeGoogleJwks::start().await;
+    let chat_api = FakeGoogleChatApi::start().await;
+    let upstream = FakeAgent::start_returning(json!({ "answer": "clicked answer" })).await;
+    let env = courier_env(&jwks, &chat_api, &upstream, true);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    // A real signed correlation token for the click, minted with the
+    // manifest's key.
+    let token = triton_correlation::encode_with_cap(
+        "answer",
+        &json!({ "question": "top customers" }),
+        b"correlation-key-for-test",
+        512,
+    )
+    .expect("token");
+    let jwt = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&json!({
+            "type": "CARD_CLICKED",
+            "space": { "name": "spaces/AAA" },
+            "user": { "name": "users/99" },
+            "common": { "parameters": { "ct": token } },
+        }))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let body: Value = resp.json().await.expect("ack body");
+    assert!(
+        body.get("actionResponse").is_some() || body.get("renderActions").is_some(),
+        "a click ack must be click-shaped, never a bare {{}}: {body}"
+    );
+
+    // And the real answer still arrives out-of-band.
+    let captured = wait_for_chat_posts(&chat_api, 2, Duration::from_secs(5));
+    assert!(
+        captured[1].body["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("clicked answer"),
+        "{}",
+        captured[1].body
+    );
+}
+
 /// Backward compatibility: without `TRITON_GOOGLE_CHAT_ASYNC` the same
 /// setup answers inline in the webhook's 200 body (today's behaviour,
 /// byte-for-byte) and NOTHING reaches the Chat REST API.
