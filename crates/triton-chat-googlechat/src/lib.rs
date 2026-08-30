@@ -1228,26 +1228,22 @@ async fn handle_webhook(
                     )
                     .await;
                 });
-                // The ack SHAPE depends on what was acked (found live,
-                // #635): a MESSAGE tolerates an empty `{}`, but a
-                // CARD_CLICKED answered with `{}` renders as "<app> is
-                // unable to process your request" in the client — even
-                // though the courier's real answer lands right after. A
-                // Workspace Add-on click wants a `renderActions`
-                // notification; a classic app an `actionResponse`.
-                let ack = if is_card_click {
-                    if workspace_addon {
-                        serde_json::json!({
-                            "renderActions": {
-                                "action": { "notification": { "text": "⏳ Working on it…" } }
-                            }
-                        })
-                    } else {
-                        serde_json::json!({
-                            "actionResponse": { "type": "NEW_MESSAGE" },
-                            "text": "⏳ Working on it…",
-                        })
-                    }
+                // The ack SHAPE depends on what was acked AND the app
+                // flavor (both halves found live, #635):
+                //   * add-on MESSAGE and add-on CARD_CLICKED — an empty
+                //     `{}`: the documented add-on "do nothing" response.
+                //     A `renderActions` notification, tried first, is
+                //     silently refused by the Chat client (red "unable
+                //     to process your request" under the card, no
+                //     server-side error logged) — Chat's host doesn't
+                //     accept that response family for clicks.
+                //   * classic CARD_CLICKED — an `actionResponse`
+                //     NEW_MESSAGE with the progress text.
+                let ack = if is_card_click && !workspace_addon {
+                    serde_json::json!({
+                        "actionResponse": { "type": "NEW_MESSAGE" },
+                        "text": "⏳ Working on it…",
+                    })
                 } else {
                     Value::Object(Default::default())
                 };
