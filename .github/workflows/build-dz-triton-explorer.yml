@@ -10,12 +10,24 @@ name: build-dz-triton-explorer
 on:
   push:
     branches: [main]
-    paths:
-      - "apps/explorer/**"
-      # The SPA path-depends on the shared renderer; a package-only change
-      # still changes the image.
-      - "packages/a2ui_flutter/**"
-      - ".github/workflows/build-dz-triton-explorer.yml"
+  # NO `paths:` filter, deliberately.
+  #
+  # GitHub applies `paths:` to every push in the same block, tag pushes
+  # included — so with a filter here a `v*` release image only got built when
+  # the tagged commit happened to touch one of the filtered paths. Release
+  # builds were a coin flip on what the last commit changed.
+  #
+  # It cannot be fixed by splitting the tag trigger into a second `push:` key:
+  # YAML keeps only the last duplicate key, which silently drops the branch
+  # trigger entirely. The choices are a second workflow file (duplicating the
+  # whole build block) or no filter. datazoo-agent-template hit this and chose
+  # no filter.
+  #
+  # No filter is now cheap: with the layer cache + BuildKit cache mounts, a
+  # main push whose sources did not change rebuilds in ~42s (measured, run
+  # 33302437693), against 92s when crates/ did change and 222s before any
+  # caching. Paying ~42s on an unrelated push buys a release trigger that
+  # always fires.
     tags: ["v*"]
   workflow_dispatch:
 

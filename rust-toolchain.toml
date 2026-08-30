@@ -1,0 +1,19 @@
+# The workspace's Rust pin, in one place.
+#
+# It used to live in two: `.github/workflows/ci.yml` hard-coded
+# `rustup toolchain install 1.95` and `deploy/triton/Dockerfile` pinned
+# `FROM rust:1.95-slim`. Nothing kept them in step, and a bump to one would
+# have gone green in CI while shipping a differently-compiled binary (or the
+# reverse). rustup honours this file automatically on the first invocation in
+# the directory, so CI now installs whatever this says.
+#
+# The Dockerfile's `FROM rust:<version>-slim` still has to be bumped by hand —
+# a base image cannot read this file — but there is now a single source of
+# truth to bump it *to*, and the two sit next to each other in review.
+#
+# Matches the sibling repos' model (escurel, peacock, datazoo-agent-template
+# all pin here).
+[toolchain]
+channel = "1.95"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

@@ -1420,6 +1420,25 @@ a trap the next developer should not have to step in.
   57s -> 14s on a workstation because that target dir was already warm from
   an earlier build in the session. The honest cold number came from CI.
 
+- **`paths:` applies to tag pushes too, and you cannot fix it with a second
+  `push:` key.** A `push:` block carrying both `paths:` and `tags: ["v*"]`
+  only builds a release image when the tagged commit happens to touch one of
+  those paths — release builds are a coin flip on what the last commit
+  changed. The obvious fix, giving `tags:` its own `push:` block, is worse
+  than the bug: YAML keeps only the last duplicate key, so the branch trigger
+  is silently dropped and `on` parses to `{'push': {'tags': [...]}}` alone.
+  Check with `yaml.safe_load` before trusting a workflow edit; a duplicate
+  key does not error. The real choices are a second workflow file or no path
+  filter — and once the image build is cached, no filter is cheap (~42s for
+  an unrelated push).
+
+- **Pin the toolchain in `rust-toolchain.toml`, not in the workflow.** The
+  version used to be hard-coded in `ci.yml` *and* in
+  `deploy/triton/Dockerfile`, with nothing keeping them in step: a bump to
+  one would go green in CI while shipping a differently-compiled binary. The
+  base image still needs a manual bump (it cannot read the file), but there
+  is now one source of truth to bump it to.
+
 - **Run the CI-pinned Flutter locally, or expect tool noise.** CI pins
   3.44.4; a local 3.47.1 rewrites `apps/explorer/analysis_options.yaml`
   (adding an `analyzer: exclude:` block) on `pub get`. Harmless, but it
