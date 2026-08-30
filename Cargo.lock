@@ -2566,12 +2566,14 @@ name = "triton-chat-msteams"
 version = "0.0.1"
 dependencies = [
  "axum",
+ "base64",
  "chrono",
  "futures",
  "jsonwebtoken",
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

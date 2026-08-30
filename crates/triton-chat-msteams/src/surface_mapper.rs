@@ -383,6 +383,20 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
 /// title and `(label, value)` metric tiles.
 pub type DashboardData = (String, Vec<(String, String)>);
 
+/// The inline `Report` component the agent asked to embed, when the
+/// surface carries one — `(report_id, args)`. The msteams reply path
+/// dispatches `render_report` and shows the chart PNG in the card via
+/// the signed image route (#635; port of the googlechat expansion).
+pub fn report_from_result(result: &Value) -> Option<(String, Value)> {
+    let surface = extract_surface(result).ok()?;
+    surface.components.iter().find_map(|c| match c {
+        Component::Report {
+            report_id, args, ..
+        } => Some((report_id.clone(), args.clone())),
+        _ => None,
+    })
+}
+
 /// Extract the first `Dashboard` component from a dispatch result's
 /// surface (title + tiles). `None` when there's no surface or no
 /// dashboard.
@@ -449,10 +463,16 @@ pub fn build_adaptive_card(
     text: &str,
     dashboard: Option<&DashboardData>,
     signed: &[(InteractiveSpec, String)],
+    image_url: Option<&str>,
 ) -> Value {
     let mut body: Vec<Value> = Vec::new();
     if !text.is_empty() {
         body.push(json!({ "type": "TextBlock", "text": text, "wrap": true }));
+    }
+    // The rendered chart (inline report / upstream PNG), served from the
+    // adapter's signed image route — Teams fetches it by URL (#635).
+    if let Some(url) = image_url {
+        body.push(json!({ "type": "Image", "url": url, "altText": "chart" }));
     }
     if let Some((title, tiles)) = dashboard {
         if !title.is_empty() {
@@ -692,7 +712,7 @@ mod tests {
             },
             "TOKEN.MAC".to_string(),
         )];
-        let card = build_adaptive_card("Hello, alice.", None, &signed);
+        let card = build_adaptive_card("Hello, alice.", None, &signed, None);
         assert_eq!(card["type"], "AdaptiveCard");
         // Text lands in a body TextBlock.
         assert_eq!(card["body"][0]["type"], "TextBlock");
@@ -740,7 +760,7 @@ mod tests {
                 "FORM.MAC".to_string(),
             ),
         ];
-        let card = build_adaptive_card("", None, &signed);
+        let card = build_adaptive_card("", None, &signed, None);
         let body = card["body"].as_array().expect("body array");
         // Dropdown named after args_key.
         let choiceset = body
@@ -784,7 +804,7 @@ mod tests {
         let dash = dashboard_from_result(&result).expect("dashboard lifted");
         assert_eq!(dash.0, "Stock at risk (€)");
         assert_eq!(dash.1.len(), 2);
-        let card = build_adaptive_card("top risk", Some(&dash), &[]);
+        let card = build_adaptive_card("top risk", Some(&dash), &[], None);
         let body = card["body"].as_array().expect("body");
         let factset = body
             .iter()
@@ -798,7 +818,7 @@ mod tests {
 
     #[test]
     fn card_activity_and_invoke_response_shapes() {
-        let card = build_adaptive_card("hi", None, &[]);
+        let card = build_adaptive_card("hi", None, &[], None);
         let activity = build_card_activity_body("28:bot", "a:conv", "29:user", card.clone());
         assert_eq!(activity["type"], "message");
         assert_eq!(
@@ -850,5 +870,32 @@ mod tests {
             "internal refs must not leak as fake links: {}",
             out.text
         );
+    }
+
+    /// #635: an image URL renders as a card Image element; absent, the
+    /// card body is unchanged.
+    #[test]
+    fn card_includes_image_when_url_present() {
+        let card = build_adaptive_card("with chart", None, &[], Some("https://x/img/t"));
+        let imgs: Vec<_> = card["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["type"] == "Image")
+            .collect();
+        assert_eq!(imgs.len(), 1);
+        assert_eq!(imgs[0]["url"], "https://x/img/t");
+    }
+
+    /// The inline Report component lifts to `(report_id, args)` for the
+    /// render_report expansion — port of the googlechat behaviour.
+    #[test]
+    fn report_lifts_from_surface() {
+        let result = json!({ "surface": { "components": [
+            { "kind": "report", "report_id": "top-categories", "args": { "params": {} } }
+        ] } });
+        let (id, args) = report_from_result(&result).expect("report lifted");
+        assert_eq!(id, "top-categories");
+        assert!(args.is_object());
     }
 }

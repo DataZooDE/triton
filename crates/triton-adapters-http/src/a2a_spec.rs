@@ -527,6 +527,26 @@ fn reply_text(result: &Value) -> String {
         if let Some(s) = surface.get("text").and_then(Value::as_str) {
             return s.to_string();
         }
+        // The embedded agent's real shape: `surface.components`, where
+        // prose rides as `text`/`narration` components (`value`/`text`
+        // fields). Without this, live A2A callers got the whole result
+        // JSON — tool_trace and all — as their "answer" (#635 E2E).
+        if let Some(components) = surface.get("components").and_then(Value::as_array) {
+            let joined = components
+                .iter()
+                .filter_map(
+                    |c| match c.get("kind").and_then(Value::as_str).unwrap_or_default() {
+                        "text" => c.get("value").and_then(Value::as_str),
+                        "narration" => c.get("text").and_then(Value::as_str),
+                        _ => None,
+                    },
+                )
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !joined.is_empty() {
+                return joined;
+            }
+        }
         if let Some(items) = surface.get("items").and_then(Value::as_array) {
             let joined = items
                 .iter()
@@ -598,5 +618,31 @@ pub fn card_state(
         config: Arc::new(config),
         dispatcher,
         oidc_providers,
+    }
+}
+
+#[cfg(test)]
+mod reply_text_tests {
+    use super::*;
+
+    /// #635 E2E finding: the embedded agent's result is
+    /// `surface.components`; without component extraction, A2A callers
+    /// received the whole result JSON (tool_trace included) as prose.
+    #[test]
+    fn reply_text_reads_surface_components() {
+        let result = serde_json::json!({
+            "_meta": { "tool_trace": [ { "tool": "run_query" } ] },
+            "surface": { "components": [
+                { "kind": "text", "value": "Initech leads at $2,500.75." },
+                { "kind": "button", "label": "Details" },
+                { "kind": "narration", "text": "figures from top_customers" }
+            ] }
+        });
+        let text = reply_text(&result);
+        assert_eq!(
+            text,
+            "Initech leads at $2,500.75.\nfigures from top_customers"
+        );
+        assert!(!text.contains("tool_trace"));
     }
 }
