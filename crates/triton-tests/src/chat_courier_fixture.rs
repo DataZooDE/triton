@@ -809,6 +809,174 @@ async fn handle_chat_message_patch(
     (status, Json(json!({ "name": name }))).into_response()
 }
 
+// ---------- GCP WIF fakes (external-account courier credential) ----------
+
+/// One captured STS token-exchange request (hop 1 of the WIF flow).
+#[derive(Debug, Clone)]
+pub struct CapturedStsExchange {
+    pub grant_type: String,
+    pub audience: String,
+    pub scope: String,
+    pub subject_token: String,
+    pub subject_token_type: String,
+}
+
+struct GcpStsState {
+    captured: Mutex<Vec<CapturedStsExchange>>,
+    federated_token: String,
+}
+
+/// Fake `sts.googleapis.com/v1/token`: captures the RFC 8693 exchange
+/// form and answers a fixed federated access token.
+pub struct FakeGcpSts {
+    addr: SocketAddr,
+    state: Arc<GcpStsState>,
+}
+
+impl FakeGcpSts {
+    pub async fn start(federated_token: &str) -> Self {
+        let state = Arc::new(GcpStsState {
+            captured: Mutex::new(Vec::new()),
+            federated_token: federated_token.to_string(),
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/v1/token",
+            post(handle_sts_exchange).with_state(state.clone()),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        Self { addr, state }
+    }
+
+    pub fn token_url(&self) -> String {
+        format!("http://{}/v1/token", self.addr)
+    }
+
+    pub fn captured(&self) -> Vec<CapturedStsExchange> {
+        self.state.captured.lock().unwrap().clone()
+    }
+}
+
+async fn handle_sts_exchange(
+    State(state): State<Arc<GcpStsState>>,
+    axum::extract::Form(form): axum::extract::Form<std::collections::HashMap<String, String>>,
+) -> Json<Value> {
+    let get = |k: &str| form.get(k).cloned().unwrap_or_default();
+    state.captured.lock().unwrap().push(CapturedStsExchange {
+        grant_type: get("grant_type"),
+        audience: get("audience"),
+        scope: get("scope"),
+        subject_token: get("subject_token"),
+        subject_token_type: get("subject_token_type"),
+    });
+    Json(json!({
+        "access_token": state.federated_token,
+        "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+        "token_type": "Bearer",
+        "expires_in": 3600,
+    }))
+}
+
+/// One captured `generateAccessToken` call (hop 2).
+#[derive(Debug, Clone)]
+pub struct CapturedImpersonation {
+    /// The bearer the caller presented — must be the FEDERATED token.
+    pub bearer: String,
+    pub scopes: Vec<String>,
+}
+
+struct IamCredentialsState {
+    captured: Mutex<Vec<CapturedImpersonation>>,
+    sa_token: String,
+}
+
+/// Fake `iamcredentials …:generateAccessToken`: captures bearer +
+/// requested scopes, answers a fixed SA access token.
+pub struct FakeIamCredentials {
+    addr: SocketAddr,
+    state: Arc<IamCredentialsState>,
+}
+
+impl FakeIamCredentials {
+    pub async fn start(sa_token: &str) -> Self {
+        let state = Arc::new(IamCredentialsState {
+            captured: Mutex::new(Vec::new()),
+            sa_token: sa_token.to_string(),
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
+        let addr = listener.local_addr().unwrap();
+        let router = Router::new().route(
+            "/v1/impersonate",
+            post(handle_generate_access_token).with_state(state.clone()),
+        );
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, router).await;
+        });
+        Self { addr, state }
+    }
+
+    pub fn impersonation_url(&self) -> String {
+        format!("http://{}/v1/impersonate", self.addr)
+    }
+
+    pub fn captured(&self) -> Vec<CapturedImpersonation> {
+        self.state.captured.lock().unwrap().clone()
+    }
+}
+
+async fn handle_generate_access_token(
+    State(state): State<Arc<IamCredentialsState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> Json<Value> {
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let scopes = body["scope"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    state
+        .captured
+        .lock()
+        .unwrap()
+        .push(CapturedImpersonation { bearer, scopes });
+    let expire = chrono::Utc::now() + chrono::Duration::seconds(3600);
+    Json(json!({
+        "accessToken": state.sa_token,
+        "expireTime": expire.to_rfc3339(),
+    }))
+}
+
+/// An external-account credential JSON aimed at the two fakes, with
+/// `credential_source.file` = `subject_token_path` (the test writes a
+/// fake projected k8s token there).
+pub fn external_account_key_json(
+    sts: &FakeGcpSts,
+    iam: &FakeIamCredentials,
+    subject_token_path: &str,
+) -> String {
+    json!({
+        "type": "external_account",
+        "audience": "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/lab/providers/k8s",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "token_url": sts.token_url(),
+        "service_account_impersonation_url": iam.impersonation_url(),
+        "credential_source": { "file": subject_token_path },
+    })
+    .to_string()
+}
+
 // ---------- Google OAuth2 token endpoint fake (#164 T1b) ----------
 
 /// A Google service-account key JSON (the standard downloaded key-file

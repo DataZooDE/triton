@@ -22,8 +22,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::{
-    FakeGoogleChatApi, FakeGoogleJwks, FakeGoogleOAuth, GoogleChatSentMessage,
-    attacker_signing_key, service_account_decoding_key, service_account_key_json,
+    FakeGcpSts, FakeGoogleChatApi, FakeGoogleJwks, FakeGoogleOAuth, FakeIamCredentials,
+    GoogleChatSentMessage, attacker_signing_key, external_account_key_json,
+    service_account_decoding_key, service_account_key_json,
 };
 use triton_tests::upstream_fixture::FakeAgent;
 
@@ -1629,6 +1630,112 @@ async fn async_courier_api_500_audits_retry_and_stays_up() {
         .await
         .expect("second POST webhook");
     assert!(resp2.status().is_success(), "{}", resp2.status());
+}
+
+// ---------- keyless WIF outbound (external-account credential) ----------
+
+/// The keyless courier credential: `outbound.token` is an
+/// external-account JSON (configuration, not secret material). The
+/// minter must run the documented two-hop exchange — k8s projected
+/// token → STS (scope cloud-platform, per AIP-4117) → SA impersonation
+/// (scope chat.bot) — and the Chat API call must bear the IMPERSONATED
+/// SA token. The k8s token rides to STS only; the federated token to
+/// iamcredentials only. Proven against real Google 2026-08-30
+/// (substrate#635 P0); this pins the same wire shape forever.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn wif_outbound_token_runs_the_two_hop_exchange() {
+    let jwks = FakeGoogleJwks::start().await;
+    let chat_api = FakeGoogleChatApi::start().await;
+    let sts = FakeGcpSts::start("federated-token-1").await;
+    let iam = FakeIamCredentials::start("sa-access-token-1").await;
+    let upstream = FakeAgent::start_returning(json!({ "answer": "wif answer" })).await;
+
+    // The "projected k8s ServiceAccount token" the credential file
+    // points at — re-read per mint in prod because the kubelet
+    // rotates it.
+    let token_path = std::env::temp_dir().join(format!(
+        "triton-wif-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::write(&token_path, "fake-k8s-oidc-jwt").expect("write token");
+
+    let mut env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        ("TRITON_MANIFEST_PATH".to_string(), sa_manifest_path()),
+        ("TRITON_GOOGLE_CHAT_JWKS_URI".to_string(), jwks.jwks_uri()),
+        (
+            "TRITON_STATIC_UPSTREAMS".to_string(),
+            format!("answer={}", upstream.host_port()),
+        ),
+        (
+            "TRITON_GOOGLE_CHAT_API_BASE".to_string(),
+            chat_api.base_url(),
+        ),
+        ("TRITON_GOOGLE_CHAT_ASYNC".to_string(), "1".to_string()),
+    ]);
+    env.insert(
+        SA_KEY_ENV.to_string(),
+        external_account_key_json(&sts, &iam, token_path.to_str().unwrap()),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let jwt = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&message_event("users/99", "keyless please"))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    // Chat API calls (placeholder + patch) bear the IMPERSONATED token.
+    let captured = wait_for_chat_posts(&chat_api, 2, Duration::from_secs(5));
+    for msg in &captured {
+        assert_eq!(
+            msg.bearer, "Bearer sa-access-token-1",
+            "Chat must see the impersonated SA token — never the k8s or federated one"
+        );
+    }
+    assert!(
+        captured[1].body["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("wif answer"),
+        "got: {}",
+        captured[1].body
+    );
+
+    // Hop 1: RFC 8693 exchange with the k8s token, platform scope.
+    let exchanges = sts.captured();
+    assert_eq!(exchanges.len(), 1, "cached: one exchange for both calls");
+    assert_eq!(
+        exchanges[0].grant_type,
+        "urn:ietf:params:oauth:grant-type:token-exchange"
+    );
+    assert_eq!(exchanges[0].subject_token, "fake-k8s-oidc-jwt");
+    assert_eq!(
+        exchanges[0].subject_token_type,
+        "urn:ietf:params:oauth:token-type:jwt"
+    );
+    assert_eq!(
+        exchanges[0].scope, "https://www.googleapis.com/auth/cloud-platform",
+        "AIP-4117: platform scope to STS; the customer scope goes to generateAccessToken"
+    );
+
+    // Hop 2: impersonation with the FEDERATED bearer + chat.bot scope.
+    let impersonations = iam.captured();
+    assert_eq!(impersonations.len(), 1);
+    assert_eq!(impersonations[0].bearer, "Bearer federated-token-1");
+    assert_eq!(
+        impersonations[0].scopes,
+        vec!["https://www.googleapis.com/auth/chat.bot".to_string()]
+    );
 }
 
 // ---------- #164 T1b: SA JWT-bearer OAuth minter ----------

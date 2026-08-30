@@ -35,6 +35,7 @@
 pub mod jwt_verifier;
 pub mod surface_mapper;
 pub mod token_minter;
+pub mod wif_minter;
 pub use surface_mapper::RenderedMessage;
 
 use std::collections::{HashMap, VecDeque};
@@ -307,6 +308,9 @@ impl Default for CourierConfig {
 enum OutboundAuth {
     /// No `outbound.token` in the manifest. The courier refuses to
     /// enable at boot; the inline sync path never POSTs.
+    /// Keyless: external-account credential → STS → SA impersonation
+    /// (`wif_minter`). Detected by `"type": "external_account"`.
+    WorkloadIdentity(wif_minter::WifMinter),
     None,
     /// T1a: the resolved value rides verbatim as a static bearer —
     /// the deliberate operator escape hatch (and every pre-T1b
@@ -423,6 +427,16 @@ impl GoogleChatAdapter {
         // courier flag so a bad prod secret surfaces immediately.
         let outbound = match outbound_token {
             None => OutboundAuth::None,
+            // Keyless WIF first: an external-account credential is also
+            // JSON, so order matters — it must never fall through to the
+            // static-bearer escape hatch (a config file riding as a
+            // bearer would fail confusingly at the Chat API instead of
+            // loudly at boot).
+            Some(raw) if wif_minter::looks_like_external_account_key(&raw) => {
+                let minter = wif_minter::WifMinter::from_credential_json(&raw)
+                    .map_err(BuildError::ServiceAccountKey)?;
+                OutboundAuth::WorkloadIdentity(minter)
+            }
             Some(raw) if token_minter::looks_like_service_account_key(&raw) => {
                 let minter =
                     TokenMinter::from_key_json(&raw).map_err(BuildError::ServiceAccountKey)?;
@@ -1686,6 +1700,10 @@ async fn send_chat_message(
             .access_token()
             .await
             .map_err(|e| format!("service-account token mint: {e}"))?,
+        OutboundAuth::WorkloadIdentity(minter) => minter
+            .access_token()
+            .await
+            .map_err(|e| format!("workload-identity token mint: {e}"))?,
         OutboundAuth::None => return Err("no outbound token resolved".to_string()),
     };
     let url = format!(
@@ -1730,6 +1748,10 @@ async fn patch_chat_message(
             .access_token()
             .await
             .map_err(|e| format!("service-account token mint: {e}"))?,
+        OutboundAuth::WorkloadIdentity(minter) => minter
+            .access_token()
+            .await
+            .map_err(|e| format!("workload-identity token mint: {e}"))?,
         OutboundAuth::None => return Err("no outbound token resolved".to_string()),
     };
     let url = format!(
