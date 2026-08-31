@@ -561,7 +561,7 @@ fn reply_text(result: &Value) -> String {
         // fields). Without this, live A2A callers got the whole result
         // JSON — tool_trace and all — as their "answer" (#635 E2E).
         if let Some(components) = surface.get("components").and_then(Value::as_array) {
-            let joined = components
+            let mut joined = components
                 .iter()
                 .filter_map(
                     |c| match c.get("kind").and_then(Value::as_str).unwrap_or_default() {
@@ -572,6 +572,26 @@ fn reply_text(result: &Value) -> String {
                 )
                 .collect::<Vec<_>>()
                 .join("\n");
+            // Charts: image-hosting chat surfaces expand a `report`
+            // component into a card image; a text/Markdown surface (A2A →
+            // Copilot Studio, Gemini) can't, so without this the caller
+            // got prose only and the model drew ASCII "charts". When the
+            // producer stamped a public `image_url` on the report (the
+            // embedded agent's signed /report/img route), render it as a
+            // Markdown image — Copilot Studio and Gemini display it inline.
+            let images = components
+                .iter()
+                .filter(|c| c.get("kind").and_then(Value::as_str) == Some("report"))
+                .filter_map(|c| c.get("image_url").and_then(Value::as_str))
+                .map(|u| format!("![chart]({u})"))
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if !images.is_empty() {
+                if !joined.is_empty() {
+                    joined.push_str("\n\n");
+                }
+                joined.push_str(&images);
+            }
             if !joined.is_empty() {
                 return joined;
             }
@@ -673,5 +693,33 @@ mod reply_text_tests {
             "Initech leads at $2,500.75.\nfigures from top_customers"
         );
         assert!(!text.contains("tool_trace"));
+    }
+
+    /// A `report` component carrying a producer-stamped `image_url` is
+    /// rendered as a trailing Markdown image so A2A/Copilot show the real
+    /// chart instead of the model's ASCII fallback. A report WITHOUT a
+    /// url (unconfigured producer) adds nothing.
+    #[test]
+    fn reply_text_appends_report_image_as_markdown() {
+        let result = serde_json::json!({
+            "surface": { "components": [
+                { "kind": "text", "value": "US leads at $4,000.75." },
+                { "kind": "report", "report_id": "sales_by_region",
+                  "image_url": "https://agent.example/report/img/TOKEN" },
+                { "kind": "button", "label": "Open report" }
+            ] }
+        });
+        assert_eq!(
+            reply_text(&result),
+            "US leads at $4,000.75.\n\n![chart](https://agent.example/report/img/TOKEN)"
+        );
+
+        let no_url = serde_json::json!({
+            "surface": { "components": [
+                { "kind": "text", "value": "US leads at $4,000.75." },
+                { "kind": "report", "report_id": "sales_by_region" }
+            ] }
+        });
+        assert_eq!(reply_text(&no_url), "US leads at $4,000.75.");
     }
 }
