@@ -151,6 +151,28 @@ impl EmbedOpts {
         self
     }
 
+    /// Add an **Entra multi-tenant** verifier (ADR-0021, #675): accepts any
+    /// allow-listed Entra tenant for `audience` (issuer
+    /// `https://login.microsoftonline.com/{tid}/v2.0`), mapping each `tid` to
+    /// its data tenant. Never the human-login (pair-1) verifier — it is a
+    /// machine-caller pair, so it does not touch the `oidc_issuer` scalars.
+    /// The Agent Card / `/v1/runtime` advertise the sentinel issuer so the
+    /// surface is visible without leaking the per-customer tenant list.
+    pub fn oidc_entra_multitenant(
+        mut self,
+        audience: impl Into<String>,
+        tenant_map: std::collections::HashMap<String, String>,
+    ) -> Self {
+        let audience = audience.into();
+        let cfg = OidcConfig::entra_multi_tenant(audience.clone(), tenant_map);
+        self.oidc_providers.push((
+            triton_identity::ENTRA_MULTI_TENANT_ISSUER.to_string(),
+            audience,
+        ));
+        self.oidc.push(Arc::new(OidcVerifier::new(cfg)));
+        self
+    }
+
     /// Turn on the spec-conformant A2A face: JSON-RPC `message/send` +
     /// `tasks/get` at the A2A base path, and the Agent Card at
     /// `/.well-known/agent-card.json` (and `/.well-known/agent.json`).
