@@ -29,6 +29,34 @@ const ALLOWED_ALGS: &[Algorithm] = &[
     Algorithm::EdDSA,
 ];
 
+/// The literal sentinel an [`OidcConfig::issuer`] carries in **Entra
+/// multi-tenant** mode. It is never compared to a token `iss` directly —
+/// [`issuer_matches`] recognises it and matches any concrete
+/// `https://login.microsoftonline.com/<tid>/v2.0`, and [`OidcVerifier::verify`]
+/// pins the token's OWN concrete issuer instead.
+pub const ENTRA_MULTI_TENANT_ISSUER: &str = "https://login.microsoftonline.com/{tenantid}/v2.0";
+
+/// Entra's global (multi-tenant) signing keys. Every tenant's tokens are
+/// signed by the SAME key set, so the multi-tenant verifier pins this one
+/// JWKS instead of discovering per-tenant.
+const ENTRA_COMMON_JWKS_URL: &str =
+    "https://login.microsoftonline.com/organizations/discovery/v2.0/keys";
+
+/// Multi-tenant Entra (Azure AD) acceptance policy (ADR-0021, #673/#675).
+///
+/// A shared, multi-tenant Entra app issues a token per **customer tenant**
+/// whose `iss` is `https://login.microsoftonline.com/<tid>/v2.0` — a
+/// different issuer per customer. Exact `(issuer, audience)` pinning cannot
+/// express that, so this mode instead accepts any Entra tenant issuer whose
+/// `tid` is **allow-listed** here, and maps it to the customer's data tenant.
+/// The `tenant_map` is the single entitlement/isolation gate: only listed
+/// `tid`s are accepted, and `Principal::tenant` becomes the mapped value.
+#[derive(Clone, Debug)]
+pub struct EntraMultiTenant {
+    /// `tid` (lowercased Entra tenant GUID) → data-tenant name.
+    pub tenant_map: HashMap<String, String>,
+}
+
 /// Configuration to build an [`OidcVerifier`].
 pub struct OidcConfig {
     pub issuer: String,
@@ -44,6 +72,12 @@ pub struct OidcConfig {
     /// Minimum interval between JWKS refreshes for the same `kid`
     /// (FR-I-2 anti-DoS guard). Default 30 s.
     pub refresh_interval: Duration,
+    /// When `Some`, this verifier runs in **Entra multi-tenant** mode
+    /// (ADR-0021): the token's own tenant-scoped issuer is verified (not
+    /// `issuer`, which is the [`ENTRA_MULTI_TENANT_ISSUER`] sentinel), the
+    /// `tid` must be allow-listed, and `Principal::tenant` is the mapped
+    /// tenant. `None` = ordinary single-issuer verification.
+    pub multi_tenant_entra: Option<EntraMultiTenant>,
 }
 
 impl OidcConfig {
@@ -53,6 +87,7 @@ impl OidcConfig {
             audience: audience.into(),
             jwks_url: None,
             refresh_interval: Duration::from_secs(30),
+            multi_tenant_entra: None,
         }
     }
 
@@ -60,6 +95,23 @@ impl OidcConfig {
     pub fn with_jwks_url(mut self, jwks_url: impl Into<String>) -> Self {
         self.jwks_url = Some(jwks_url.into());
         self
+    }
+
+    /// Build an **Entra multi-tenant** verifier (ADR-0021): accepts any
+    /// allow-listed Entra tenant for `audience`, pinning Entra's global JWKS.
+    /// The `issuer` is the sentinel template; the real per-token issuer is
+    /// validated in [`OidcVerifier::verify`].
+    pub fn entra_multi_tenant(
+        audience: impl Into<String>,
+        tenant_map: HashMap<String, String>,
+    ) -> Self {
+        Self {
+            issuer: ENTRA_MULTI_TENANT_ISSUER.to_string(),
+            audience: audience.into(),
+            jwks_url: Some(ENTRA_COMMON_JWKS_URL.to_string()),
+            refresh_interval: Duration::from_secs(30),
+            multi_tenant_entra: Some(EntraMultiTenant { tenant_map }),
+        }
     }
 }
 
@@ -116,6 +168,30 @@ impl OidcVerifier {
                 header.alg
             )));
         }
+
+        // Entra multi-tenant (ADR-0021): the accepted issuer is the token's
+        // OWN tenant-scoped issuer — `self.config.issuer` here is the
+        // `{tenantid}` sentinel, never compared to a real token. Resolve and
+        // ALLOW-LIST the tid BEFORE any key/network work, so an unknown tenant
+        // is rejected cheaply and never triggers a JWKS fetch.
+        let mt_ctx = match &self.config.multi_tenant_entra {
+            Some(mt) => {
+                let iss = unverified_issuer(raw_token)
+                    .ok_or_else(|| TritonError::Auth("token has no readable iss".into()))?;
+                let tid = entra_tid_from_issuer(&iss).ok_or_else(|| {
+                    TritonError::Auth(format!(
+                        "issuer {iss} is not a tenant-scoped Entra v2 issuer"
+                    ))
+                })?;
+                let tenant =
+                    mt.tenant_map.get(&tid).cloned().ok_or_else(|| {
+                        TritonError::Auth(format!("tid {tid} is not allow-listed"))
+                    })?;
+                Some((iss, tid, tenant))
+            }
+            None => None,
+        };
+
         let Some(kid) = header.kid.as_ref() else {
             return Err(TritonError::Auth("JWT header missing kid".into()));
         };
@@ -132,7 +208,12 @@ impl OidcVerifier {
         // single-alg form is the only one that works. See
         // `doc/realizations.md` §7.
         let mut validation = Validation::new(header.alg);
-        validation.set_issuer(&[&self.config.issuer]);
+        // Multi-tenant: pin the token's CONCRETE issuer (already allow-listed
+        // above); single-tenant: pin the configured literal issuer.
+        match &mt_ctx {
+            Some((iss, _, _)) => validation.set_issuer(&[iss.as_str()]),
+            None => validation.set_issuer(&[self.config.issuer.as_str()]),
+        }
         validation.set_audience(&[&self.config.audience]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
 
@@ -141,11 +222,25 @@ impl OidcVerifier {
         let claims = token.claims;
         let scopes = claims.scopes();
         let groups = claims.groups();
+        // Tenant: multi-tenant mode derives it from the allow-listed tid (and
+        // enforces the anti-mix-up `tid`-claim == issuer-tenant check on the
+        // now signature-verified token); single-tenant uses the `tenant` claim.
+        let tenant = match &mt_ctx {
+            Some((_, tid, tenant)) => {
+                if claims.tid.as_deref() != Some(tid.as_str()) {
+                    return Err(TritonError::Auth(
+                        "tid claim does not match the token issuer's tenant".into(),
+                    ));
+                }
+                tenant.clone()
+            }
+            None => claims.tenant.clone().unwrap_or_else(|| "-".to_string()),
+        };
         Ok(Principal {
             sub: claims.sub,
             scopes,
             groups,
-            tenant: claims.tenant.unwrap_or_else(|| "-".to_string()),
+            tenant,
             raw_token: raw_token.to_string(),
             trace_id: uuid::Uuid::new_v4().to_string(),
         })
@@ -309,6 +404,11 @@ struct TokenClaims {
     sub: String,
     #[serde(default)]
     tenant: Option<String>,
+    /// Microsoft Entra **tenant id** (`tid`). In multi-tenant mode it is
+    /// cross-checked against the tid embedded in the verified issuer
+    /// (anti-mix-up), and the allow-list maps it to the data tenant.
+    #[serde(default)]
+    tid: Option<String>,
     /// OAuth2 RFC 6749 single-string form; whitespace-split into
     /// scopes. Some issuers use the `scp` array form instead.
     #[serde(default)]
@@ -380,8 +480,44 @@ pub fn unverified_issuer(token: &str) -> Option<String> {
 /// a trailing slash is not a different issuer. Everything else is an
 /// exact, case-sensitive match — issuers are URLs, and being lax here
 /// would widen the trust boundary rather than merely tidy it.
+///
+/// The ONE controlled exception is the Entra multi-tenant sentinel
+/// [`ENTRA_MULTI_TENANT_ISSUER`] (ADR-0021): a verifier configured with it
+/// is *selected* for any concrete `https://login.microsoftonline.com/<tid>/v2.0`
+/// issuer whose `<tid>` is a well-formed Entra tenant GUID. This only
+/// **routes** the token to that verifier — the verifier then still pins the
+/// concrete issuer, checks the signature/audience/exp, and allow-lists the
+/// tid, so selection never grants trust (same contract as [`unverified_issuer`]).
 pub fn issuer_matches(configured: &str, from_token: &str) -> bool {
+    if configured == ENTRA_MULTI_TENANT_ISSUER {
+        return entra_tid_from_issuer(from_token.trim_end_matches('/')).is_some();
+    }
     configured.trim_end_matches('/') == from_token.trim_end_matches('/')
+}
+
+/// Extract the lowercased Entra tenant id (`tid`) from a concrete v2 issuer
+/// `https://login.microsoftonline.com/<tid>/v2.0`, or `None` if `iss` is not
+/// exactly that shape with a well-formed tenant GUID. Strict by construction:
+/// the host must be exactly `login.microsoftonline.com` (a look-alike like
+/// `login.microsoftonline.com.evil` fails), and `<tid>` must be an
+/// `8-4-4-4-12` lowercase-hex GUID.
+pub(crate) fn entra_tid_from_issuer(iss: &str) -> Option<String> {
+    let mid = iss
+        .strip_prefix("https://login.microsoftonline.com/")?
+        .strip_suffix("/v2.0")?;
+    is_entra_guid(mid).then(|| mid.to_ascii_lowercase())
+}
+
+/// A canonical Entra tenant GUID: `8-4-4-4-12` hex, hyphen-separated. We
+/// accept either case for robustness but the caller lowercases for the map.
+fn is_entra_guid(s: &str) -> bool {
+    let groups = [8usize, 4, 4, 4, 12];
+    let parts: Vec<&str> = s.split('-').collect();
+    parts.len() == groups.len()
+        && parts
+            .iter()
+            .zip(groups)
+            .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
 #[cfg(test)]
@@ -497,5 +633,173 @@ mod multi_issuer_tests {
         let none: TokenClaims = serde_json::from_value(serde_json::json!({ "sub": "u4" }))
             .expect("bare claims must deserialize");
         assert!(none.scopes().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod entra_multitenant_tests {
+    use super::*;
+    use base64::Engine as _;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use jsonwebtoken::jwk::JwkSet;
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+    use rsa::pkcs8::{EncodePrivateKey, LineEnding};
+    use rsa::traits::PublicKeyParts;
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    const KID: &str = "mt-test-key";
+    const TID_A: &str = "28c0071d-815c-4ace-a3b5-9a28bde005fd";
+    const TID_B: &str = "11112222-3333-4444-5555-666677778888";
+
+    fn iss(tid: &str) -> String {
+        format!("https://login.microsoftonline.com/{tid}/v2.0")
+    }
+
+    /// Throwaway RSA keypair + its public JWKS (one `kid`).
+    fn keypair() -> (String, serde_json::Value) {
+        let mut rng = rand::thread_rng();
+        let private = RsaPrivateKey::new(&mut rng, 2048).expect("keygen");
+        let pem = private
+            .to_pkcs8_pem(LineEnding::LF)
+            .expect("pem")
+            .to_string();
+        let public = RsaPublicKey::from(&private);
+        let b64 = |b: &[u8]| URL_SAFE_NO_PAD.encode(b);
+        let jwks = serde_json::json!({ "keys": [{
+            "kty": "RSA", "use": "sig", "alg": "RS256", "kid": KID,
+            "n": b64(&public.n().to_bytes_be()),
+            "e": b64(&public.e().to_bytes_be()),
+        }] });
+        (pem, jwks)
+    }
+
+    fn sign(pem: &str, iss: &str, aud: &str, tid: Option<&str>) -> String {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut claims = serde_json::json!({
+            "sub": "user-1", "iss": iss, "aud": aud, "exp": now + 300, "iat": now,
+        });
+        if let Some(t) = tid {
+            claims["tid"] = serde_json::json!(t);
+        }
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(KID.to_string());
+        let key = EncodingKey::from_rsa_pem(pem.as_bytes()).expect("enc key");
+        encode(&header, &claims, &key).expect("sign")
+    }
+
+    /// A multi-tenant verifier with the JWKS pre-installed (so `verify` never
+    /// makes a network fetch — the pinned Entra JWKS is stubbed by the cache).
+    async fn verifier(map: &[(&str, &str)], jwks: &serde_json::Value) -> OidcVerifier {
+        let tenant_map: HashMap<String, String> = map
+            .iter()
+            .map(|(t, n)| (t.to_string(), n.to_string()))
+            .collect();
+        let v = OidcVerifier::new(OidcConfig::entra_multi_tenant("api://our-app", tenant_map));
+        let set: JwkSet = serde_json::from_value(jwks.clone()).unwrap();
+        v.install_keys(&set).await;
+        v
+    }
+
+    #[tokio::test]
+    async fn two_allow_listed_tenants_verify_and_map_to_their_data_tenant() {
+        let (pem, jwks) = keypair();
+        let v = verifier(&[(TID_A, "acme"), (TID_B, "globex")], &jwks).await;
+
+        let a = v
+            .verify(&sign(&pem, &iss(TID_A), "api://our-app", Some(TID_A)))
+            .await
+            .expect("tenant A verifies");
+        assert_eq!(a.tenant, "acme");
+        assert_eq!(a.sub, "user-1");
+
+        let b = v
+            .verify(&sign(&pem, &iss(TID_B), "api://our-app", Some(TID_B)))
+            .await
+            .expect("tenant B verifies");
+        assert_eq!(b.tenant, "globex");
+    }
+
+    #[tokio::test]
+    async fn unlisted_tid_is_rejected() {
+        let (pem, jwks) = keypair();
+        let v = verifier(&[(TID_A, "acme")], &jwks).await;
+        let err = v
+            .verify(&sign(&pem, &iss(TID_B), "api://our-app", Some(TID_B)))
+            .await
+            .expect_err("un-allow-listed tenant must be rejected");
+        assert!(format!("{err}").contains("not allow-listed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn wrong_audience_is_rejected() {
+        let (pem, jwks) = keypair();
+        let v = verifier(&[(TID_A, "acme")], &jwks).await;
+        let err = v
+            .verify(&sign(&pem, &iss(TID_A), "api://someone-else", Some(TID_A)))
+            .await
+            .expect_err("wrong audience must be rejected");
+        assert!(matches!(err, TritonError::Auth(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn tid_claim_must_match_issuer_tenant() {
+        let (pem, jwks) = keypair();
+        let v = verifier(&[(TID_A, "acme"), (TID_B, "globex")], &jwks).await;
+        // Issuer says tenant A (allow-listed) but the `tid` CLAIM says B → mix-up.
+        let err = v
+            .verify(&sign(&pem, &iss(TID_A), "api://our-app", Some(TID_B)))
+            .await
+            .expect_err("tid/issuer mismatch must be rejected");
+        assert!(format!("{err}").contains("does not match"), "{err}");
+        // Missing `tid` claim entirely → also rejected.
+        let err = v
+            .verify(&sign(&pem, &iss(TID_A), "api://our-app", None))
+            .await
+            .expect_err("missing tid claim must be rejected");
+        assert!(format!("{err}").contains("does not match"), "{err}");
+    }
+
+    #[test]
+    fn issuer_template_matching_and_guid_parsing() {
+        // The sentinel routes any well-formed concrete Entra issuer...
+        assert!(issuer_matches(ENTRA_MULTI_TENANT_ISSUER, &iss(TID_A)));
+        // ...but not a look-alike host, a non-GUID segment, or a foreign issuer.
+        assert!(!issuer_matches(
+            ENTRA_MULTI_TENANT_ISSUER,
+            "https://login.microsoftonline.com.evil/28c0071d-815c-4ace-a3b5-9a28bde005fd/v2.0"
+        ));
+        assert!(!issuer_matches(
+            ENTRA_MULTI_TENANT_ISSUER,
+            "https://login.microsoftonline.com/not-a-guid/v2.0"
+        ));
+        assert!(!issuer_matches(
+            ENTRA_MULTI_TENANT_ISSUER,
+            "https://accounts.google.com"
+        ));
+        // A non-template issuer keeps exact (trailing-slash-tolerant) matching.
+        assert!(issuer_matches(
+            "https://issuer.test",
+            "https://issuer.test/"
+        ));
+        assert!(!issuer_matches("https://issuer.test", &iss(TID_A)));
+
+        assert_eq!(entra_tid_from_issuer(&iss(TID_A)).as_deref(), Some(TID_A));
+        assert_eq!(
+            entra_tid_from_issuer(
+                "https://login.microsoftonline.com.evil/28c0071d-815c-4ace-a3b5-9a28bde005fd/v2.0"
+            ),
+            None
+        );
+        assert_eq!(
+            entra_tid_from_issuer("https://login.microsoftonline.com/28c0071d/v2.0"),
+            None
+        );
+        // An upper-case GUID is accepted but normalised to lowercase.
+        let upper = "28C0071D-815C-4ACE-A3B5-9A28BDE005FD";
+        assert_eq!(entra_tid_from_issuer(&iss(upper)).as_deref(), Some(TID_A));
     }
 }
