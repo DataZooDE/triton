@@ -255,6 +255,11 @@ pub const ADAPTIVE_CARD_CONTENT_TYPE: &str = "application/vnd.microsoft.card.ada
 const ADAPTIVE_CARD_SCHEMA: &str = "http://adaptivecards.io/schemas/adaptive-card.json";
 /// Adaptive Card schema version. 1.4 is the floor that ships
 /// `Action.Execute` (universal actions) across the Teams clients.
+/// Not bumped past 1.4: the transpiler emits no property above AC 1.3
+/// (`input_widget` uses only `label`/`isRequired`), and a host capped
+/// below the declared version renders `fallbackText` instead of the
+/// card — a downgrade on exactly the non-Teams surfaces this ingress
+/// serves (triton#247 crew review F2).
 const ADAPTIVE_CARD_VERSION: &str = "1.4";
 
 /// One form field to render as an Adaptive Card `Input.*` widget.
@@ -898,4 +903,5 @@ mod tests {
         assert_eq!(id, "top-categories");
         assert!(args.is_object());
     }
+
 }

@@ -55,3 +55,4 @@ deploy/local-e2e/.rodney-out/
 
 # Antigravity delegate session artifacts (model responses)
 .antigravity-delegate/
+.crew/
