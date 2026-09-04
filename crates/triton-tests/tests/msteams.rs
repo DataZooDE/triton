@@ -234,7 +234,11 @@ async fn api_messages_absent_unless_opted_in() {
         .send()
         .await
         .expect("POST");
-    assert_eq!(resp.status(), 404, "/api/messages must not be mounted by default");
+    assert_eq!(
+        resp.status(),
+        404,
+        "/api/messages must not be mounted by default"
+    );
 
     // Legacy path still dispatches on the same process.
     let ok = reqwest::Client::new()

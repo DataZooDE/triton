@@ -903,5 +903,4 @@ mod tests {
         assert_eq!(id, "top-categories");
         assert!(args.is_object());
     }
-
 }
