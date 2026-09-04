@@ -140,6 +140,13 @@ pub struct MsTeamsAdapter {
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
     courier: CourierConfig,
+    /// triton#247: when true, this adapter also serves the canonical
+    /// `POST /api/messages` Bot Framework path (in addition to
+    /// `/{name}/webhook`), making it the host-agnostic Activity ingress
+    /// an Azure Bot points at. Opt-in via `inbound.canonical_path` and
+    /// single-claimant — the path is fixed and `Router::merge` panics on
+    /// an overlap, so triton-bin refuses a second claimant.
+    canonical_path: bool,
 }
 
 impl MsTeamsAdapter {
@@ -369,6 +376,20 @@ impl MsTeamsAdapter {
             .build()
             .map_err(|e| BuildError::Unsupported(format!("courier http client: {e}")))?;
 
+        // triton#247: opt-in canonical Bot Framework messaging path.
+        // A plain config toggle (not a secret) that happens to ride the
+        // flattened inbound-credentials map alongside `audience`.
+        let canonical_path = match adapter.inbound.credentials.get("canonical_path") {
+            Some(field) => {
+                let raw = resolver
+                    .resolve(field)
+                    .await
+                    .map_err(|e| BuildError::Resolve("inbound.canonical_path", e))?;
+                matches!(raw.trim(), "true" | "1" | "yes")
+            }
+            None => false,
+        };
+
         Ok(Self {
             name: name.to_string(),
             audience,
@@ -382,15 +403,35 @@ impl MsTeamsAdapter {
             rate_limit,
             per_tenant_limit,
             courier,
+            canonical_path,
         })
+    }
+
+    /// Whether this adapter claims the canonical `/api/messages` path
+    /// (triton#247). The host merges adapter routers, and the path is
+    /// fixed, so the host must ensure at most one claimant.
+    pub fn canonical_path(&self) -> bool {
+        self.canonical_path
     }
 
     pub fn router(self: Arc<Self>) -> Router {
         let name = self.name.clone();
         let path = format!("/{name}/webhook");
         let img_path = format!("/{name}/img/{{token}}");
-        Router::new()
-            .route(&path, post(handle_webhook))
+        let mut router = Router::new().route(&path, post(handle_webhook));
+        // triton#247: opt-in canonical Bot Framework messaging path. The
+        // adapter is the host-agnostic Activity ingress, so an Azure Bot
+        // (Teams, M365 Copilot Chat, WebChat, Copilot Studio channels)
+        // POSTs to /api/messages; `handle_webhook` is transport-generic
+        // (reads the Authorization header + raw body, not the route name).
+        // Mounted only when opted in: the path is fixed and axum's
+        // `Router::merge` panics on an overlapping route, so at most one
+        // adapter may claim it (triton-bin enforces this with a named
+        // error rather than the panic).
+        if self.canonical_path {
+            router = router.route("/api/messages", post(handle_webhook));
+        }
+        router
             // Signed chart-image route: Teams fetches card images by URL,
             // so the rendered PNG must be publicly addressable — the HMAC
             // token (content hash under the correlation key) is the whole

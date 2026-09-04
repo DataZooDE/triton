@@ -436,6 +436,13 @@ async fn main() -> std::io::Result<()> {
     let resolver: Arc<dyn SecretResolver> = Arc::new(LiteralResolver);
 
     let mut chat_router: Option<axum::Router> = None;
+    // triton#247: the canonical `/api/messages` Bot Framework path is a
+    // FIXED route, and adapter routers are folded with `Router::merge`,
+    // which panics on an overlap. At most one adapter may opt in
+    // (`inbound.canonical_path`); a second claimant is refused here with
+    // a named error rather than crashing the whole process (and its
+    // REST/MCP/A2A listeners) at startup.
+    let mut canonical_claimed = false;
     // #95: adapters that support agent-initiated proactive sends are
     // also inserted here, keyed by manifest adapter name, so the
     // `/v1/outbound` endpoint can resolve a courier without going
@@ -1156,6 +1163,16 @@ async fn main() -> std::io::Result<()> {
                     .await
                     {
                         Ok(built) => {
+                            if built.canonical_path() {
+                                if canonical_claimed {
+                                    tracing::error!(
+                                        adapter = %name,
+                                        "at most one adapter may set `inbound.canonical_path`                                          (triton#247): the canonical /api/messages route is fixed                                          and a second claimant would panic Router::merge, taking                                          REST/MCP/A2A down with it",
+                                    );
+                                    std::process::exit(2);
+                                }
+                                canonical_claimed = true;
+                            }
                             tracing::info!(adapter = %name, "msteams webhook adapter wired");
                             let r = Arc::new(built).router();
                             chat_router = Some(match chat_router.take() {

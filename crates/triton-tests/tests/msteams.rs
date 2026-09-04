@@ -55,6 +55,21 @@ fn env_with(fake: &FakeBotFramework) -> HashMap<String, String> {
     ])
 }
 
+/// triton#247: env pointed at the canonical-opt-in fixture, which adds
+/// `inbound.canonical_path: true` so the adapter also serves the fixed
+/// `POST /api/messages` path in addition to `/msteams/webhook`.
+fn env_with_canonical(fake: &FakeBotFramework) -> HashMap<String, String> {
+    let mut env = env_with(fake);
+    env.insert(
+        "TRITON_MANIFEST_PATH".to_string(),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/manifest-msteams-canonical.yaml")
+            .display()
+            .to_string(),
+    );
+    env
+}
+
 fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -138,6 +153,102 @@ async fn valid_jwt_message_dispatches_and_couriers() {
     });
     assert_eq!(post_audit["result"], "ok");
     assert_eq!(post_audit["status_label"], "posted");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn canonical_api_messages_path_dispatches() {
+    // triton#247: with `inbound.canonical_path` opted in, an Azure Bot
+    // pointed at the canonical /api/messages path (Teams, M365 Copilot
+    // Chat, WebChat channels all POST there) dispatches identically to the
+    // legacy /msteams/webhook route.
+    let fake = FakeBotFramework::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with_canonical(&fake)).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+    let jwt = fake.sign_jwt(good_claims(&fake));
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/api/messages"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&message_activity("hello via api messages"))
+        .send()
+        .await
+        .expect("POST");
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let dispatch = wait_for_audit(&proc, Duration::from_secs(3), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["protocol"] == "messenger:msteams"
+    });
+    assert_eq!(dispatch["result"], "ok");
+
+    let captured = wait_for(Duration::from_secs(3), || {
+        let v = fake.captured();
+        (!v.is_empty()).then_some(v)
+    });
+    assert_eq!(captured.len(), 1, "expected exactly one reply activity");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_messages_enforces_auth() {
+    // triton#247: the canonical path reuses handle_webhook unchanged, so
+    // JWT verification runs before the body is parsed. A forged bearer is
+    // rejected with 401 and never dispatches — same fail-closed contract
+    // as /msteams/webhook.
+    let fake = FakeBotFramework::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_with_canonical(&fake)).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    let header = json!({"alg":"RS256","typ":"JWT","kid":"definitely-not-a-real-key"});
+    let token = unsigned_jwt(&header, &good_claims(&fake));
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/api/messages"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&message_activity("forged via api messages"))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(resp.status(), 401);
+    assert!(
+        fake.captured().is_empty(),
+        "forged JWT on /api/messages must not trigger an outbound reply"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn api_messages_absent_unless_opted_in() {
+    // triton#247: the canonical path is OPT-IN. The default fixture does
+    // not set `inbound.canonical_path`, so /api/messages is not mounted
+    // (404) while the legacy /msteams/webhook path keeps working. This is
+    // what keeps the fixed path single-claimant across merged adapters.
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&fake)).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+    let jwt = fake.sign_jwt(good_claims(&fake));
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/api/messages"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&message_activity("should 404"))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(
+        resp.status(),
+        404,
+        "/api/messages must not be mounted by default"
+    );
+
+    // Legacy path still dispatches on the same process.
+    let ok = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&message_activity("legacy path"))
+        .send()
+        .await
+        .expect("POST");
+    assert!(ok.status().is_success(), "{}", ok.status());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
