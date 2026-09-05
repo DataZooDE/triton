@@ -17,6 +17,7 @@
 //! is ~50 ns, well below the per-request budget.
 
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 
 /// A token bucket bound to a single adapter. Hand it the manifest
@@ -121,6 +122,12 @@ pub struct PerTenantBuckets {
     rate: u32,
     burst: u32,
     buckets: std::sync::Mutex<std::collections::HashMap<String, Tracked>>,
+    /// How many admissions were refused because the map was saturated
+    /// and no bucket was safe to evict — as opposed to the tenant's own
+    /// bucket being empty. Distinguishing the two matters: one says a
+    /// caller is too fast, the other says the deployment has outgrown
+    /// [`MAX_TENANT_BUCKETS`] or is under a key-space flood.
+    map_full_refusals: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug)]
@@ -136,7 +143,17 @@ impl PerTenantBuckets {
             rate: messages_per_sec,
             burst,
             buckets: std::sync::Mutex::new(std::collections::HashMap::new()),
+            map_full_refusals: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Admissions refused because the bucket map was saturated rather
+    /// than because the caller's own bucket was empty. Non-zero means
+    /// the deployment has outgrown [`MAX_TENANT_BUCKETS`] or is being
+    /// flooded with distinct tenant keys — a different operator response
+    /// from an ordinary throttle.
+    pub fn map_full_refusals(&self) -> u64 {
+        self.map_full_refusals.load(Ordering::Relaxed)
     }
 
     /// Try to consume one token from the bucket dedicated to
@@ -180,8 +197,14 @@ impl PerTenantBuckets {
                 }
                 // Every tracked tenant is still owed tokens. Admitting
                 // this one would mean evicting throttle state, which is
-                // the bypass. Refuse instead.
-                None => return Err(1.0),
+                // the bypass. Refuse — but say WHY somewhere an operator
+                // can see it, because an ordinary throttle and "the map
+                // is saturated" want completely different responses and
+                // both otherwise render as a bare 429.
+                None => {
+                    self.map_full_refusals.fetch_add(1, Ordering::Relaxed);
+                    return Err(1.0);
+                }
             }
         }
         let tracked = buckets
@@ -396,9 +419,60 @@ mod tests {
         );
     }
 
+    /// The other half of the property: eviction must actually HAPPEN
+    /// when there is a safe victim, or the cap becomes a denial of
+    /// service for every new tenant once the map fills.
+    ///
+    /// A crew review caught that neither of the first two tests reached
+    /// `buckets.remove` — one used `new(100, 100)` so no bucket was ever
+    /// back at full capacity, the other `rate = 0` so none could
+    /// replenish. Both were exercising the refusal arm and asserting the
+    /// safety property while the liveness property went untested.
+    #[test]
+    fn a_replenished_bucket_is_evicted_so_a_newcomer_can_still_be_admitted() {
+        // Fast refill: one request each, then a moment to refill.
+        let b = PerTenantBuckets::new(1000, 1);
+        for i in 0..MAX_TENANT_BUCKETS {
+            assert!(b.try_take(&format!("tenant-{i}")).is_ok());
+        }
+        assert_eq!(b.tracked_tenants(), MAX_TENANT_BUCKETS, "map is full");
+        // Let the existing buckets refill to capacity so they hold no
+        // throttle state and are safe to evict.
+        thread::sleep(Duration::from_millis(50));
+
+        assert!(
+            b.try_take("newcomer").is_ok(),
+            "a full map must not become a denial of service for new \
+             tenants when there are safe victims to evict"
+        );
+        assert!(
+            b.tracked_tenants() <= MAX_TENANT_BUCKETS,
+            "and the cap still holds afterwards"
+        );
+    }
+
     /// Eviction must not become a bypass: a tenant that has just been
     /// refused must not get a fresh, full bucket by pushing itself out
     /// of the map and back in.
+    /// A saturated map and an ordinary throttle both refuse, so the
+    /// counter is the only way to tell them apart from outside.
+    #[test]
+    fn a_map_full_refusal_is_counted_separately_from_a_throttle() {
+        let b = PerTenantBuckets::new(0, 1);
+        assert!(b.try_take("a").is_ok());
+        assert!(b.try_take("a").is_err(), "ordinary throttle");
+        assert_eq!(b.map_full_refusals(), 0, "a throttle is not a map-full");
+
+        for i in 0..MAX_TENANT_BUCKETS {
+            let _ = b.try_take(&format!("t-{i}"));
+        }
+        let _ = b.try_take("one-too-many");
+        assert!(
+            b.map_full_refusals() > 0,
+            "a saturated map must be distinguishable from a throttle"
+        );
+    }
+
     #[test]
     fn eviction_does_not_hand_out_a_fresh_bucket_to_a_throttled_tenant() {
         let b = PerTenantBuckets::new(0, 1);
