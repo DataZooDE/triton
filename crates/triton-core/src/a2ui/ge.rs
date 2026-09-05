@@ -166,9 +166,19 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     ])
 }
 
-/// Wrap the message array as an A2A `DataPart`.
-pub fn data_part(messages: Vec<Value>) -> Value {
-    json!({ "kind": "data", "data": messages, "metadata": { "mimeType": MIME } })
+/// Wrap each A2UI message as its OWN A2A `DataPart`.
+///
+/// A2A 0.3.0 types `DataPart.data` as a JSON **object**, so the A2UI message
+/// stream (an array) cannot ride in a single part's `data` — a strict client
+/// (Gemini Enterprise's a2a-python SDK) rejects `data: [...]` with
+/// `dict_type`. One message per DataPart keeps every `data` a dict and matches
+/// ADK's `create_a2ui_part` (one payload dict → one part); the receiver
+/// processes the parts in order to rebuild the stream.
+pub fn data_parts(messages: Vec<Value>) -> Vec<Value> {
+    messages
+        .into_iter()
+        .map(|m| json!({ "kind": "data", "data": m, "metadata": { "mimeType": MIME } }))
+        .collect()
 }
 
 #[cfg(test)]
@@ -259,10 +269,17 @@ mod tests {
     }
 
     #[test]
-    fn data_part_has_the_ge_mime() {
-        let p = data_part(vec![json!({"version":"v0.9"})]);
-        assert_eq!(p["kind"], "data");
-        assert_eq!(p["metadata"]["mimeType"], "application/a2ui+json");
-        assert!(p["data"].is_array());
+    fn data_parts_are_one_dict_each_with_the_ge_mime() {
+        let ps = data_parts(vec![
+            json!({"version":"v0.9","a":1}),
+            json!({"version":"v0.9","b":2}),
+        ]);
+        assert_eq!(ps.len(), 2, "one DataPart per A2UI message");
+        for p in &ps {
+            assert_eq!(p["kind"], "data");
+            assert_eq!(p["metadata"]["mimeType"], "application/a2ui+json");
+            // A2A DataPart.data MUST be an object, never an array.
+            assert!(p["data"].is_object(), "DataPart.data must be a dict: {p}");
+        }
     }
 }

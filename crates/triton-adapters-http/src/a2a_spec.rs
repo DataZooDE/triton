@@ -414,7 +414,7 @@ async fn message_send(
             let reply = reply_text(&d.result);
             let mut parts = vec![json!({ "kind": "text", "text": reply })];
             if let Some(msgs) = triton_core::a2ui::ge::build_messages(&d.result) {
-                parts.push(triton_core::a2ui::ge::data_part(msgs));
+                parts.extend(triton_core::a2ui::ge::data_parts(msgs));
             }
             let msg = json!({
                 "kind": "message",
@@ -528,7 +528,7 @@ async fn message_stream(
                 // buttons; text-only clients ignore the data part).
                 let mut parts = vec![json!({ "kind": "text", "text": reply })];
                 if let Some(msgs) = triton_core::a2ui::ge::build_messages(&v) {
-                    parts.push(triton_core::a2ui::ge::data_part(msgs));
+                    parts.extend(triton_core::a2ui::ge::data_parts(msgs));
                 }
                 vec![
                     rpc_frames(json!({

@@ -607,18 +607,27 @@ async fn message_stream_emits_task_artifact_final() {
         .filter_map(|l| l.strip_prefix("data: "))
         .filter_map(|d| serde_json::from_str(d).ok())
         .collect();
-    let data_part = rframes
+    let data_parts: Vec<&Value> = rframes
         .iter()
         .filter_map(|f| f["result"]["artifact"]["parts"].as_array())
         .flatten()
-        .find(|p| p["kind"] == "data")
-        .expect("an A2UI DataPart in the final artifact");
-    assert_eq!(data_part["metadata"]["mimeType"], "application/a2ui+json");
-    let msgs = data_part["data"].as_array().expect("a2ui messages");
-    assert_eq!(msgs[0]["version"], "v0.9");
-    let comps = msgs[1]["updateComponents"]["components"]
-        .as_array()
-        .expect("components");
+        .filter(|p| p["kind"] == "data")
+        .collect();
+    // One DataPart per A2UI message, each `data` a DICT (A2A forbids a list) —
+    // this is exactly what Gemini Enterprise's strict client requires.
+    assert!(
+        data_parts.len() >= 2,
+        "createSurface + updateComponents parts"
+    );
+    for p in &data_parts {
+        assert_eq!(p["metadata"]["mimeType"], "application/a2ui+json");
+        assert!(p["data"].is_object(), "DataPart.data must be a dict: {p}");
+        assert_eq!(p["data"]["version"], "v0.9");
+    }
+    let comps = data_parts
+        .iter()
+        .find_map(|p| p["data"]["updateComponents"]["components"].as_array())
+        .expect("an updateComponents message");
     assert!(comps.iter().any(|c| c["component"] == "Card"));
     assert!(comps.iter().any(|c| c["component"] == "Image"));
     assert!(comps.iter().any(|c| c["component"] == "Button"));
