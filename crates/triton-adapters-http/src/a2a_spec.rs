@@ -189,7 +189,7 @@ async fn agent_card(State(state): State<CardState>) -> Response {
             "streaming": true,
             "pushNotifications": false,
             // A2UI v0.9 (a2ui.org): the agent can return interactive UI
-            // (cards, charts-as-images, buttons) as an `application/a2ui+json`
+            // (cards, charts-as-images, buttons) as an `application/json+a2ui`
             // DataPart. Gemini Enterprise activates it via the
             // `X-A2A-Extensions` header and renders it from the basic catalog.
             "extensions": [{

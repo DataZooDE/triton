@@ -620,7 +620,7 @@ async fn message_stream_emits_task_artifact_final() {
         "createSurface + updateComponents parts"
     );
     for p in &data_parts {
-        assert_eq!(p["metadata"]["mimeType"], "application/a2ui+json");
+        assert_eq!(p["metadata"]["mimeType"], "application/json+a2ui");
         assert!(p["data"].is_object(), "DataPart.data must be a dict: {p}");
         assert_eq!(p["data"]["version"], "v0.9");
     }

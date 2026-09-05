@@ -1,5 +1,5 @@
 //! Gemini-Enterprise-compatible **A2UI v0.9** builder (a2ui.org, the
-//! `application/a2ui+json` wire form that Vertex AI Search / Agentspace
+//! `application/json+a2ui` wire form that Vertex AI Search / Agentspace
 //! actually renders).
 //!
 //! This is deliberately SEPARATE from the historical `v08`/`v09` builders in
@@ -29,8 +29,17 @@ use serde_json::{Value, json};
 
 /// The A2UI v0.9 A2A-extension URI (agent-card advertisement + activation).
 pub const EXTENSION_URI: &str = "https://a2ui.org/a2a-extension/a2ui/v0.9";
-/// The DataPart MIME type Gemini Enterprise's v0.9 renderer expects.
-pub const MIME: &str = "application/a2ui+json";
+/// The DataPart MIME type Gemini Enterprise's renderer actually reads.
+///
+/// The a2ui.org SDK names the two spellings BACKWARDS: the constant it calls
+/// `A2UI_MIME_TYPE` (`application/a2ui+json`) is the unshipped *future*
+/// spelling that no client reads yet, while `DEPRECATED_A2UI_MIME_TYPE`
+/// (`application/json+a2ui`) is what every shipping renderer — Gemini
+/// Enterprise included — matches. Emitting the "+a2ui" form makes GE treat the
+/// DataPart as opaque and fall back to rendering the TextPart only (a
+/// perfectly-formed card shows as text). Verified against the a2ui SDK
+/// (`create_a2ui_part`) and Google's own GE integration notes.
+pub const MIME: &str = "application/json+a2ui";
 /// The basic component catalog id (declared in the card and in `createSurface`).
 pub const BASIC_CATALOG: &str = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json";
 
@@ -277,7 +286,7 @@ mod tests {
         assert_eq!(ps.len(), 2, "one DataPart per A2UI message");
         for p in &ps {
             assert_eq!(p["kind"], "data");
-            assert_eq!(p["metadata"]["mimeType"], "application/a2ui+json");
+            assert_eq!(p["metadata"]["mimeType"], "application/json+a2ui");
             // A2A DataPart.data MUST be an object, never an array.
             assert!(p["data"].is_object(), "DataPart.data must be a dict: {p}");
         }
