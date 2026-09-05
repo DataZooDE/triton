@@ -110,16 +110,22 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
             "button" => {
                 let label = c.get("label").and_then(Value::as_str).unwrap_or("Open");
                 let tool = c.get("tool").and_then(Value::as_str).unwrap_or_default();
-                let args = c.get("args").cloned().unwrap_or_else(|| json!({}));
                 let text_id = id("btn-text", &mut n);
                 let btn_id = id("btn", &mut n);
                 flat.push(json!({ "id": text_id, "component": "Text", "text": label }));
+                // A2UI v0.9 action: `{event:{name, context}}`. GE's renderer
+                // rejects a bare-string context value ("Validation failed for
+                // component 'Button': action") — the canonical examples use an
+                // EMPTY context or `{path}` data-bindings, never a raw literal.
+                // We carry no data model, so emit an empty context; the tool to
+                // re-invoke rides as the event `name`. (Wiring the click
+                // round-trip to re-dispatch that tool is separate follow-up.)
                 flat.push(json!({
                     "id": btn_id,
                     "component": "Button",
                     "child": text_id,
                     "variant": if c.get("primary").and_then(Value::as_bool) == Some(true) { "primary" } else { "default" },
-                    "action": { "event": { "name": tool, "context": args } },
+                    "action": { "event": { "name": tool, "context": {} } },
                 }));
                 root_children.push(btn_id);
             }
@@ -239,9 +245,13 @@ mod tests {
             .find(|c| c["component"] == "Button" && c["action"]["event"].is_object())
             .expect("event button");
         assert_eq!(btn["action"]["event"]["name"], "assistant");
-        assert_eq!(
-            btn["action"]["event"]["context"]["message"],
-            "What does Initech buy?"
+        // Context is empty: GE rejects bare-string literals in an action
+        // context, and we carry no data model to bind a path to.
+        assert!(
+            btn["action"]["event"]["context"]
+                .as_object()
+                .unwrap()
+                .is_empty()
         );
         let btn_text = find(comps, btn["child"].as_str().unwrap());
         assert_eq!(btn_text["text"], "What does Initech buy?");
