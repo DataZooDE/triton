@@ -1698,3 +1698,22 @@ a trap the next developer should not have to step in.
   Chat's pairing table). They genuinely differ per adapter today, and
   CLAUDE.md §4 says extract a trait when the fourth concrete case appears,
   not in anticipation of it.
+- **A trust check outlives the network it was written for, and the
+  traceability table keeps saying PASS.** The Signal signald gate and the
+  WhatsApp Web bridge gate both required a `.ts.net` host outside `local`.
+  That was sound while every host was a Tailscale node authenticated by the
+  tailnet. The tailnet was decommissioned in the move to Kamal — and the
+  check kept compiling, kept passing its tests, and kept meaning something
+  entirely different: "any host under a domain we no longer control". What
+  it should have meant, and what FR-I-9 / NFR-S-6 said all along, is
+  loopback. The M-LOCALITY-1 row read `IMPL — PASS` throughout.
+
+  Two lessons. First, when a piece of infrastructure is retired, grep for
+  what *named* it — a hostname suffix in a security predicate is a
+  dependency on that infrastructure just as much as a client library is.
+  Second, prefer a check whose premise cannot silently expire: `.ts.net`
+  needs the tailnet to still exist, while `IpAddr::is_loopback` needs
+  nothing. #288 tightened both gates to a loopback IP **literal** — a DNS
+  name, `localhost` included, is refused, because the property these gates
+  need is "the plaintext never leaves this host" and a name only has that
+  property until someone changes what it resolves to.

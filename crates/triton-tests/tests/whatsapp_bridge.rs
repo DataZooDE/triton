@@ -176,3 +176,89 @@ fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
         std::thread::sleep(Duration::from_millis(30));
     }
 }
+
+// ---------------------------------------------------------------
+// #288 — bridge locality gate (NFR-S-4 / C-11)
+//
+// The WhatsApp Web bridge carries DECRYPTED message plaintext: the
+// bridge daemon terminates the WhatsApp Web session, so everything on
+// this socket is already outside WhatsApp's end-to-end envelope. The
+// locality rule is what keeps that plaintext on one host.
+//
+// The gate used to accept any `tcp://*.ts.net` host, mirroring Signal.
+// That trust argument was borrowed from a Tailscale tailnet that has
+// since been decommissioned, so it now admits any host that happens to
+// sit under a `.ts.net` name. Same fix as Signal: loopback or unix.
+// ---------------------------------------------------------------
+
+fn locality_manifest_path() -> String {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures/manifest-whatsapp-bridge-locality.yaml")
+        .display()
+        .to_string()
+}
+
+/// Boot with the given bridge addr in `nonprod` and return everything
+/// the process wrote. The locality fixture leaves its `env://` refs
+/// unset, so a bridge addr that PASSES the gate still fails one step
+/// later at credential resolution — which is exactly the signal we
+/// want: the process exits either way, and the log says which of the
+/// two reasons it was.
+fn boot_with_bridge_addr(addr: &str) -> String {
+    let bin = locate_triton_binary();
+    let out = std::process::Command::new(&bin)
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_ENV", "nonprod")
+        .env("TRITON_MANIFEST_PATH", locality_manifest_path())
+        .env("TRITON_WHATSAPP_BRIDGE_ADDR", addr)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .expect("spawn triton");
+    assert_eq!(out.status.code(), Some(2), "boot must fail either way");
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_refuses_a_non_loopback_addr_outside_local() {
+    for addr in [
+        "tcp://attacker.example:9090",
+        // Passed the OLD suffix rule. The tailnet is gone.
+        "tcp://wa-bridge.example.ts.net:9090",
+        // A DNS name is refused even when it looks local: what it
+        // resolves to is not decided here.
+        "tcp://localhost:9090",
+    ] {
+        let combined = boot_with_bridge_addr(addr);
+        assert!(
+            combined.contains("C-11"),
+            "`{addr}` must be refused by the bridge locality gate; got:\n{combined}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn bridge_accepts_loopback_and_unix_addrs() {
+    for addr in [
+        "tcp://127.0.0.1:9090",
+        "tcp://[::1]:9090",
+        "unix:///var/run/whatsapp-bridge.sock",
+    ] {
+        let combined = boot_with_bridge_addr(addr);
+        // Positive evidence that the gate let it through: boot got as
+        // far as building the adapter.
+        assert!(
+            combined.contains("whatsapp bridge adapter build failed"),
+            "`{addr}` is local and must reach adapter construction; got:\n{combined}"
+        );
+    }
+}
