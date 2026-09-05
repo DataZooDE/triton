@@ -680,7 +680,7 @@ impl Dispatcher {
             status_detail: detail,
             error_detail: None,
             ttfb_ms: None,
-            sender_ref: None,
+            sender_ref: principal.sender_ref.as_deref(),
             suppressed: None,
             trace_id: &principal.trace_id,
         });

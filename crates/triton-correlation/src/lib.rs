@@ -465,3 +465,65 @@ mod tests {
         assert!(matches!(decode(&bad, KEY), Err(DecodeError::BadSignature)));
     }
 }
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+    use serde_json::json;
+
+    const KEY: &[u8] = b"k";
+    const CAP: usize = 4096;
+
+    #[test]
+    fn a_bound_token_round_trips_for_its_own_tenant() {
+        let t = encode_bound("narrate", &json!({"s": "a"}), KEY, CAP, "acme", 3600).unwrap();
+        let (tool, args) = decode_bound(&t, KEY, CAP, "acme").unwrap();
+        assert_eq!(tool, "narrate");
+        assert_eq!(args["s"], "a");
+    }
+
+    #[test]
+    fn another_tenant_cannot_use_it() {
+        let t = encode_bound("narrate", &json!({}), KEY, CAP, "acme", 3600).unwrap();
+        assert!(decode_bound(&t, KEY, CAP, "globex").is_err());
+    }
+
+    #[test]
+    fn an_unbound_legacy_token_is_refused() {
+        // The compatibility decision, pinned: accepting these would keep
+        // the replay open for every card minted before the binding
+        // shipped, and unbound tokens never expire.
+        let legacy = encode_with_cap("narrate", &json!({}), KEY, CAP).unwrap();
+        assert!(decode_bound(&legacy, KEY, CAP, "acme").is_err());
+        // ...but it still decodes on the unbound path, so nothing else breaks.
+        assert!(decode_with_cap(&legacy, KEY, CAP).is_ok());
+    }
+
+    #[test]
+    fn an_expired_token_is_refused() {
+        let t = encode_bound("narrate", &json!({}), KEY, CAP, "acme", 0).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        assert!(decode_bound(&t, KEY, CAP, "acme").is_err());
+    }
+
+    #[test]
+    fn a_bound_token_still_fails_a_wrong_key() {
+        let t = encode_bound("narrate", &json!({}), KEY, CAP, "acme", 3600).unwrap();
+        assert!(decode_bound(&t, b"other", CAP, "acme").is_err());
+    }
+
+    #[test]
+    fn the_binding_costs_bytes_and_the_cap_still_applies() {
+        // The tenant + expiry make the token longer; a cap that fitted
+        // the unbound form may not fit the bound one, and that must
+        // surface as OversizedToken rather than a silently dropped
+        // binding.
+        let unbound = encode_with_cap("narrate", &json!({}), KEY, CAP).unwrap();
+        let bound = encode_bound("narrate", &json!({}), KEY, CAP, "acme", 3600).unwrap();
+        assert!(bound.len() > unbound.len());
+        assert!(matches!(
+            encode_bound("narrate", &json!({}), KEY, unbound.len(), "acme", 3600),
+            Err(EncodeError::OversizedToken { .. })
+        ));
+    }
+}

@@ -452,18 +452,22 @@ async fn an_over_cap_tenant_is_refused_not_blanked() {
     );
 }
 
-/// Found by live verification of the fail-closed path: the refusal is
-/// correct, but the audit line it emits echoes the attacker-controlled
-/// tenant **in full**. A hostile resolver can therefore write unbounded
-/// data into the audit log and the 1024-entry ring buffer on every
-/// request — the same class of harm #249 addressed, arriving through a
-/// different door. Rejected values must be truncated before they are
-/// recorded.
+/// The clamp must bite on a value that genuinely reaches an audit sink.
+///
+/// An earlier version of this test drove a hostile resolver TENANT, but
+/// once resolver validation moved to the boundary that value stops short
+/// of the audit path and the assertion became vacuous — it passed with
+/// `clamp_audited` deleted (crew review, verified by mutation). The
+/// honest path is `sender_ref`: the RAW platform sender id, recorded for
+/// impersonation detection, which by construction is unvalidated
+/// attacker-supplied input and is supposed to reach the line.
+///
+/// Unit tests for `clamp_audited` itself live in `triton-core::audit`;
+/// this proves the emitter actually applies it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_rejected_field_is_truncated_in_the_audit_line() {
-    let hostile = "t".repeat(5000);
+async fn an_oversized_platform_sender_is_clamped_in_the_audit_line() {
     let resolver = FakeAgent::start_returning(json!({
-        "sub": "resolved-ada", "scopes": ["chat"], "tenant": hostile
+        "sub": "resolved-ada", "scopes": ["chat"], "tenant": "globex"
     }))
     .await;
     let agent = FakeAgent::start_echoing().await;
@@ -474,30 +478,53 @@ async fn a_rejected_field_is_truncated_in_the_audit_line() {
     )
     .await;
 
-    let _ = post_inbound(&proc, "hi").await;
+    // A 5000-digit `wa_id`: platform input, no validation between the
+    // wire and the audit line.
+    let huge_sender = "9".repeat(5000);
+    let body = serde_json::to_vec(&inbound_envelope(&huge_sender, "hi")).unwrap();
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener bound");
+    let sig = sign(&body, APP_SECRET);
+    let _ = reqwest::Client::new()
+        .post(format!("http://{webhook}/whatsapp/webhook"))
+        .header("X-Hub-Signature-256", &sig)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST inbound");
 
     let line = wait_for_audit(&proc, Duration::from_secs(5), |v| {
-        // Recorded against the ADAPTER, not the command tool: since the
-        // resolver-boundary check landed, a hostile reply is refused
-        // before any dispatch to `assistant` happens at all.
-        v["kind"] == "audit"
-            && v["result"]
-                .as_str()
-                .is_some_and(|r| r.starts_with("error:auth"))
+        v["kind"] == "audit" && v["sender_ref"].is_string()
     });
-    let recorded = line["tenant"].as_str().unwrap_or_default();
+    let recorded = line["sender_ref"].as_str().expect("sender_ref");
     assert!(
-        recorded.len() <= 160,
-        "a rejected attacker-controlled field must be truncated before it \
-         reaches the audit log; got {} bytes",
-        recorded.len()
+        recorded.ends_with("…[5000 bytes]"),
+        "the clamp must truncate AND name the true length; got {} bytes: {}",
+        recorded.len(),
+        &recorded[..recorded.len().min(80)]
     );
-    // Whatever survives must still be diagnosable.
-    assert!(
-        !recorded.is_empty(),
-        "truncation must not erase the field entirely — an operator needs \
-         to see what was refused"
-    );
+    assert!(recorded.len() < 200, "got {} bytes", recorded.len());
+
+    // The same bound must hold on the /v1/audit ring buffer, which is
+    // what an operator actually tails.
+    let audit: Value = reqwest::Client::new()
+        .get(proc.rest_url("/v1/audit"))
+        .bearer_auth("dev-token")
+        .send()
+        .await
+        .expect("GET /v1/audit")
+        .json()
+        .await
+        .expect("decode audit");
+    for e in audit["entries"].as_array().expect("entries") {
+        if let Some(sr) = e["sender_ref"].as_str() {
+            assert!(
+                sr.len() < 200,
+                "ring buffer entry unclamped: {} bytes",
+                sr.len()
+            );
+        }
+    }
 }
 
 /// `sub` is signed OUTSIDE the `forward_principal` gate

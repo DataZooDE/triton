@@ -1042,7 +1042,8 @@ async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
-        sender_ref: None,
+        // #250: see Principal::sender_ref.
+        sender_ref: Some(sender_key.to_string()),
     };
 
     let chat_id = message.chat.id;
@@ -1294,7 +1295,8 @@ async fn handle_form_outcome(
                 tenant,
                 raw_token: String::new(),
                 trace_id: uuid::Uuid::new_v4().to_string(),
-                sender_ref: None,
+                // #250: see Principal::sender_ref.
+                sender_ref: Some(sender_key.to_string()),
             };
             let principal_for_post = principal.clone();
             dispatch_and_render(
@@ -1539,7 +1541,8 @@ async fn handle_callback_query(
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
-        sender_ref: None,
+        // #250: see Principal::sender_ref.
+        sender_ref: Some(sender_key.to_string()),
     };
 
     // For private chats the post-back chat_id equals `from.id`;

@@ -1713,7 +1713,12 @@ async fn courier_deliver(
     recipient_id: String,
     conversation_type: Option<String>,
 ) {
-    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let principal = make_principal_with_sender(
+        &sender.sub,
+        &sender.scopes,
+        &sender.tenant,
+        Some(&sender.from_id),
+    );
     let principal_for_post = principal.clone();
     // See dispatch_and_post_reply: direct render_report invocations get
     // their chart URL minted from the invoked args, pre-dispatch.
