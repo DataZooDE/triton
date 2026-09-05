@@ -182,6 +182,98 @@ async fn the_default_is_still_teams_only() {
     );
 }
 
+/// #250: the unresolved Direct Line question, made moot.
+///
+/// On Direct Line-family channels (WebChat, and Copilot Studio's canvas)
+/// Microsoft's connector may mint a valid bot token for an ANONYMOUS
+/// user whose `from.id` the client chooses. Nobody in this repo can
+/// settle that without an Azure probe — but under `identity.kind: azure`
+/// the entire principal is read from those very fields, so if it is
+/// true, listing such a channel turns sender-id-into-principal with a
+/// caller-chosen id.
+///
+/// Rather than wait for the probe, refuse the combination at boot. The
+/// operator gets a named error instead of a silent trust assumption, and
+/// the probe's outcome stops being load-bearing for safety: `azure`
+/// simply is not available on a channel whose ids are client-chosen.
+/// Serving those channels needs an identity mode that does not read the
+/// principal off the body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn azure_identity_refuses_to_boot_on_a_client_id_channel() {
+    let bin = locate_triton_binary();
+    let mut child = std::process::Command::new(&bin)
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_ENV", "local")
+        .env(
+            "TRITON_MANIFEST_PATH",
+            manifest_path("manifest-msteams-directline.yaml"),
+        )
+        .env(
+            "TRITON_MSTEAMS_OPENID_URL",
+            "https://login.botframework.com",
+        )
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn triton");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(s) => break s,
+            None if Instant::now() > deadline => {
+                let _ = child.kill();
+                panic!(
+                    "azure identity on a client-id channel MUST refuse boot, \
+                     but the binary kept running"
+                );
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    assert!(!status.success(), "must exit non-zero; got {status:?}");
+    // The reason is on stdout (structured JSON logs) or stderr,
+    // depending on how the boot error surfaces; read both.
+    use std::io::Read;
+    let mut out = String::new();
+    let mut err = String::new();
+    let _ = child
+        .stdout
+        .take()
+        .expect("stdout")
+        .read_to_string(&mut out);
+    let _ = child
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut err);
+    let combined = format!("{out}{err}");
+    assert!(
+        combined.contains("directline") && combined.contains("client-chosen"),
+        "the refusal must name the offending channel AND say why, or an \
+         operator cannot act on it; got: {combined}"
+    );
+}
+
+fn locate_triton_binary() -> PathBuf {
+    if let Some(p) = std::env::var_os("CARGO_BIN_EXE_triton") {
+        return PathBuf::from(p);
+    }
+    let mut here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    while here.parent().is_some() {
+        let cand = here.join("target/debug/triton");
+        if cand.exists() {
+            return cand;
+        }
+        here.pop();
+    }
+    panic!("triton binary not found");
+}
+
 fn wait_for_audit(proc: &TritonProcess, deadline: Duration, m: impl Fn(&Value) -> bool) -> Value {
     let start = Instant::now();
     loop {

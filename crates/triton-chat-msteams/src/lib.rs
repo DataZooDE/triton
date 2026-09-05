@@ -101,6 +101,16 @@ pub struct AzureConfig {
     pub allowed_channel_ids: Vec<String>,
 }
 
+/// Bot Framework channels where the caller, not the platform, chooses
+/// `from.id` — so a body-derived principal is meaningless there.
+///
+/// Direct Line issues tokens to a web page; unless the embedding site
+/// mints them server-side under enhanced authentication (a `dl_` prefix
+/// on the user id), the id in the Activity is whatever the client sent.
+/// `webchat` and `emulator` sit on the same machinery, and Copilot
+/// Studio's test canvas is Direct Line underneath.
+const CLIENT_CHOSEN_ID_CHANNELS: &[&str] = &["directline", "webchat", "emulator"];
+
 fn default_allowed_channel_ids() -> Vec<String> {
     vec!["msteams".to_string()]
 }
@@ -311,6 +321,29 @@ impl MsTeamsAdapter {
                 // Fail closed: an empty allowlist is not cross-tenant
                 // isolation. A single-tenant deployment lists its one
                 // tenant explicitly.
+                // #250: channels whose `from.id` is chosen by the CLIENT
+                // cannot carry an Entra-shaped principal, because that
+                // principal is read entirely from the Activity body. On
+                // Direct Line-family channels Microsoft's connector will
+                // mint a valid bot token for an anonymous user with a
+                // self-chosen id, so `azure` there is sender-id-as-
+                // password with a public password. Refuse the
+                // combination at boot rather than trust an assumption
+                // nobody has verified — serving those channels needs an
+                // identity mode that does not read the principal off the
+                // body (`sender_table` or `upstream`).
+                if let Some(bad) = cfg
+                    .allowed_channel_ids
+                    .iter()
+                    .find(|c| CLIENT_CHOSEN_ID_CHANNELS.contains(&c.as_str()))
+                {
+                    return Err(BuildError::Unsupported(format!(
+                        "identity.kind `azure` cannot serve channel `{bad}`: its \
+                         `from.id` is client-chosen, so the Entra fields this \
+                         strategy reads from the Activity body prove nothing. \
+                         Use `sender_table` or `upstream` for that channel."
+                    )));
+                }
                 if cfg.allowed_tenants.is_empty() {
                     return Err(BuildError::Unsupported(
                         "azure identity requires a non-empty `allowed_tenants` list \
