@@ -1675,3 +1675,26 @@ a trap the next developer should not have to step in.
   qualifier is DROPPED with a warning rather than read as a bare subject —
   `alice` exists in every tenant, and the person typing it is by definition
   in a hurry.
+
+- **Duplication does not cost you the lines, it costs you the invariants.**
+  FR-I-7 identity resolution was copied into eight adapters. The lines were
+  never the problem — the problem is that a rule added to a copied seam has
+  to be added eight times, and the eighth is skipped by *omission* rather
+  than by decision. `validate_resolved` is the worked example: it guarded
+  the `upstream` path in three adapters and no path at all in the rest,
+  including the `sender_table` path in every one of them — where the same
+  values reach the same places (`PerTenantBuckets` makes `tenant` a
+  process-lifetime map key; `static_upstream::bearer` signs it into a
+  token). A sender table declaring `tenant: "ac me"` booted happily.
+
+  The extraction is only worth it if the rules become unskippable, not
+  merely available. Two things make that true here: `Resolved` is
+  constructible only inside `triton-chat-identity`, so an adapter cannot
+  hold one that skipped validation; and `SenderTable::parse` validates at
+  BOOT, turning a class of silent misconfiguration into a failed deploy —
+  the one moment an operator is actually looking.
+
+  What stayed out: `azure` (Teams' Entra config) and `self_enrol` (Google
+  Chat's pairing table). They genuinely differ per adapter today, and
+  CLAUDE.md §4 says extract a trait when the fourth concrete case appears,
+  not in anticipation of it.

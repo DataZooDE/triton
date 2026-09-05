@@ -2564,6 +2564,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "triton-chat-identity"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "triton-core",
+ "triton-manifest",
+ "triton-secrets",
+ "uuid",
+]
+
+[[package]]
 name = "triton-chat-msteams"
 version = "0.0.1"
 dependencies = [
@@ -2618,6 +2632,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "triton-chat-identity",
  "triton-core",
  "triton-correlation",
  "triton-manifest",
