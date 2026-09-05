@@ -350,6 +350,40 @@ on implementation details not pinned below.
   A2UI envelope when the inbound caller requested A2UI; pre-shaped
   A2UI returned by an upstream MUST be passed through unchanged.
   *(G-12.)*
+- **FR-U-6 (#286)** **The upstream-agent auth contract.** Triton
+  authenticates callers and propagates their identity; it does not
+  authorize tool calls (the one exception is FR-U-7). Authorization is
+  therefore the upstream agent's responsibility, and that delegation is
+  only sound if the agent honours all of the following. An upstream that
+  does not is not a supported Triton upstream.
+  1. **Verify `iss`** against Triton's configured issuer, and fetch keys
+     from that issuer's JWKS. Never accept an unverified token.
+  2. **Pin `aud` to itself.** The claim is an array so one token can name
+     several intended recipients (the agent, and a downstream the agent
+     forwards to). An agent MUST match its own audience and MUST NOT
+     accept a token minted for another agent — this is what keeps every
+     hop a *named* audience rather than a replay.
+  3. **RS256 only.** No algorithm negotiation, and never `none`.
+  4. **Authorize on `sub` and `tenant`.** Both are always present
+     (#283): `sub` is the resolved caller, `tenant` the organisation the
+     call belongs to. An agent that ignores `tenant` has no tenant
+     isolation, and Triton cannot supply it on the agent's behalf.
+  5. **Treat `triton_sender_scopes` and `triton_sender_groups` as
+     ADVERTISED, NOT AUTHORITATIVE.** They describe the sender as some
+     resolver reported them; they grant nothing. They are deliberately
+     not the standard `scope` claim, and groups are deliberately not
+     `roles` — a downstream that derives admin from `roles` would
+     otherwise be handed a privilege-escalation vector. They are opt-in
+     (`TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL`) and may be absent.
+  6. **Log `trace_id`** so one communication can be followed across the
+     boundary; Triton's audit lines carry the same value.
+- **FR-U-7 (#284)** Triton MAY refuse a dispatch when the caller holds
+  only a scope an operator has declared restricted (`identity.
+  pairing_tool`). This is the sole authorization decision the gateway
+  makes, it is default-allow, and it exists because Triton would
+  otherwise make a distinction — admitting an un-enrolled sender under a
+  pairing scope — and then discard it. It does not relieve an upstream
+  of FR-U-6.
 
 ### 5.5 Audit (FR-AU)
 
