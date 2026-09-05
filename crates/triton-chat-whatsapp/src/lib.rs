@@ -942,6 +942,9 @@ async fn process_message(
             .into_response());
     }
 
+    // #250: the raw sender only earns a place in the audit line
+    // when the resolver replaced the asserted identity.
+    let identity_was_resolved_upstream = matches!(adapter.identity, IdentityMode::Upstream { .. });
     let principal = Principal {
         sub,
         scopes,
@@ -949,10 +952,13 @@ async fn process_message(
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
-        // #250: the ASSERTED platform id, recorded beside the resolved
-        // subject so an impersonation is not forensically identical to
-        // the victim's own session.
-        sender_ref: Some(sender_key.to_string()),
+        // #250: recorded ONLY under `identity.kind: upstream`, the one
+        // mode where the resolver REPLACES the asserted identity — there
+        // it is the difference between detecting an impersonation and
+        // not. Under `sender_table` / `self_enrol` the subject is
+        // already derived from this same id, so a second copy would just
+        // put more personal data (a phone number, here) in the log.
+        sender_ref: identity_was_resolved_upstream.then(|| sender_key.to_string()),
     };
 
     // Command parser mirrors Telegram's `route_command`: `/<tool>

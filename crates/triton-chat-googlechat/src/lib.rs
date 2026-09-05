@@ -1210,6 +1210,9 @@ async fn handle_webhook(
             .into_response();
     }
 
+    // #250: the raw sender only earns a place in the audit line
+    // when the resolver replaced the asserted identity.
+    let identity_was_resolved_upstream = matches!(adapter.identity, IdentityMode::Upstream { .. });
     let principal = Principal {
         sub: sub.clone(),
         scopes: scopes.clone(),
@@ -1217,8 +1220,8 @@ async fn handle_webhook(
         tenant: tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
-        // #250: see Principal::sender_ref.
-        sender_ref: Some(sender_name.to_string()),
+        // #250: only under `upstream` — see Principal::sender_ref.
+        sender_ref: identity_was_resolved_upstream.then(|| sender_name.to_string()),
     };
     let principal_for_post = principal.clone();
 

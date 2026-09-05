@@ -946,9 +946,10 @@ async fn resolve_via_upstream(
         tenant: "system".to_string(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
-        // #250: the ASSERTED platform id, recorded beside the resolved
-        // subject so an impersonation is not forensically identical to
-        // the victim's own session.
+        // #250: this principal exists only on the `upstream` path, and
+        // the sender it names is the whole subject of the call — so the
+        // resolver dispatch is auditable against the id it was asked
+        // about, not only against the answer it gave.
         sender_ref: Some(sender_key.to_string()),
     };
     let args = json!({ "platform": "telegram", "sender": sender_key });
@@ -1035,6 +1036,9 @@ async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -
     // OIDC-derived one (`raw_token` is empty here — chat platforms
     // don't carry a JWT we forward; the upstream router won't
     // touch this field for messenger-routed calls).
+    // #250: the raw sender only earns a place in the audit line
+    // when the resolver replaced the asserted identity.
+    let identity_was_resolved_upstream = matches!(adapter.identity, IdentityMode::Upstream { .. });
     let principal = Principal {
         sub,
         scopes,
@@ -1042,8 +1046,8 @@ async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
-        // #250: see Principal::sender_ref.
-        sender_ref: Some(sender_key.to_string()),
+        // #250: only under `upstream` — see Principal::sender_ref.
+        sender_ref: identity_was_resolved_upstream.then(|| sender_key.to_string()),
     };
 
     let chat_id = message.chat.id;
@@ -1534,6 +1538,9 @@ async fn handle_callback_query(
         }
     };
 
+    // #250: the raw sender only earns a place in the audit line
+    // when the resolver replaced the asserted identity.
+    let identity_was_resolved_upstream = matches!(adapter.identity, IdentityMode::Upstream { .. });
     let principal = Principal {
         sub,
         scopes,
@@ -1541,8 +1548,8 @@ async fn handle_callback_query(
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
-        // #250: see Principal::sender_ref.
-        sender_ref: Some(sender_key.to_string()),
+        // #250: only under `upstream` — see Principal::sender_ref.
+        sender_ref: identity_was_resolved_upstream.then(|| sender_key.to_string()),
     };
 
     // For private chats the post-back chat_id equals `from.id`;

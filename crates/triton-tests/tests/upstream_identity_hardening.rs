@@ -333,6 +333,57 @@ async fn the_audit_line_records_the_raw_sender_not_only_the_resolved_one() {
     );
 }
 
+/// `sender_ref` is raw platform input — a phone number on WhatsApp —
+/// and it now lands on every audit line. Under `sender_table` and
+/// `azure` the resolved subject is already derived from that same id, so
+/// recording it a second time adds no forensic value and only extends
+/// how much personal data sits in logs and the ring buffer.
+///
+/// It earns its place only where the resolver REPLACES the asserted
+/// identity, i.e. `identity.kind: upstream`. Everywhere else it must be
+/// omitted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sender_ref_is_recorded_only_where_the_identity_was_replaced() {
+    // `sender_table`: subject is derived from the sender id, so no
+    // second copy.
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let mut env = env_for(&whatsapp, &agent, &agent);
+    env.insert(
+        "TRITON_MANIFEST_PATH".to_string(),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/manifest-whatsapp-test.yaml")
+            .display()
+            .to_string(),
+    );
+    env.insert(
+        "TRITON_STATIC_UPSTREAMS".to_string(),
+        format!("assistant={}", agent.host_port()),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    // The sender the `sender_table` fixture actually enumerates.
+    let body = serde_json::to_vec(&inbound_envelope("491701234567", "hi")).unwrap();
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener bound");
+    let sig = sign(&body, APP_SECRET);
+    let _ = reqwest::Client::new()
+        .post(format!("http://{webhook}/whatsapp/webhook"))
+        .header("X-Hub-Signature-256", &sig)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST inbound");
+
+    let line = wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch"
+    });
+    assert!(
+        line.get("sender_ref").is_none(),
+        "sender_table already derives the subject from the sender id; a \
+         second copy is only extra personal data in the log. got: {line}"
+    );
+}
+
 fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {

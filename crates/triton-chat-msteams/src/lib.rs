@@ -887,21 +887,6 @@ fn check_tenant_limit(adapter: &Arc<MsTeamsAdapter>, sub: &str, tenant: &str) ->
     None
 }
 
-/// `sender_ref` is the RAW platform id the principal was derived from
-/// (Teams `from.id` / `aadObjectId`), recorded in the audit line beside
-/// the resolved subject — see [`Principal::sender_ref`] (#250).
-fn make_principal_with_sender(
-    sub: &str,
-    scopes: &[String],
-    tenant: &str,
-    sender_ref: Option<&str>,
-) -> Principal {
-    Principal {
-        sender_ref: sender_ref.map(str::to_owned),
-        ..make_principal(sub, scopes, tenant)
-    }
-}
-
 fn make_principal(sub: &str, scopes: &[String], tenant: &str) -> Principal {
     Principal {
         sub: sub.to_string(),
@@ -1144,12 +1129,13 @@ async fn dispatch_and_post_reply(
         );
         return StatusCode::OK.into_response();
     }
-    let principal = make_principal_with_sender(
-        &sender.sub,
-        &sender.scopes,
-        &sender.tenant,
-        Some(&sender.from_id),
-    );
+    // #250: msteams offers `sender_table` and `azure` only, and both
+    // derive the subject FROM `from.id` — so recording it again would
+    // add no forensic value, only more personal data in the log. The
+    // helper is here for when `upstream` lands, where the resolver
+    // replaces the asserted identity and the raw id becomes the only
+    // way to tell an impersonation from the victim's own session.
+    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
     // Direct render_report (the "Open report:" Execute): the chart URL
     // is minted from the INVOKED args — the result carries only a PNG.
@@ -1209,12 +1195,13 @@ async fn dispatch_and_refresh_card(
     args: Value,
     sender: &ResolvedSender,
 ) -> Response {
-    let principal = make_principal_with_sender(
-        &sender.sub,
-        &sender.scopes,
-        &sender.tenant,
-        Some(&sender.from_id),
-    );
+    // #250: msteams offers `sender_table` and `azure` only, and both
+    // derive the subject FROM `from.id` — so recording it again would
+    // add no forensic value, only more personal data in the log. The
+    // helper is here for when `upstream` lands, where the resolver
+    // replaces the asserted identity and the raw id becomes the only
+    // way to tell an impersonation from the victim's own session.
+    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
     let image_hint = (tool_name == "render_report")
         .then(|| report_image_url(adapter, &args, &sender.tenant))
@@ -1713,12 +1700,13 @@ async fn courier_deliver(
     recipient_id: String,
     conversation_type: Option<String>,
 ) {
-    let principal = make_principal_with_sender(
-        &sender.sub,
-        &sender.scopes,
-        &sender.tenant,
-        Some(&sender.from_id),
-    );
+    // #250: msteams offers `sender_table` and `azure` only, and both
+    // derive the subject FROM `from.id` — so recording it again would
+    // add no forensic value, only more personal data in the log. The
+    // helper is here for when `upstream` lands, where the resolver
+    // replaces the asserted identity and the raw id becomes the only
+    // way to tell an impersonation from the victim's own session.
+    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
     // See dispatch_and_post_reply: direct render_report invocations get
     // their chart URL minted from the invoked args, pre-dispatch.
