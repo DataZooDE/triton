@@ -76,7 +76,8 @@ struct CompactBody<'a> {
     /// rationale.
     t: &'a str,
     a: &'a Value,
-    /// `n` is the TENANT this token was minted into (#250). Omitted on
+    /// `n` is a compact keyed DIGEST of the tenant this token was minted
+    /// into (#250), not the tenant string. Omitted on
     /// the unbound path so existing callers keep their wire shape and
     /// their byte budget.
     ///
@@ -89,7 +90,10 @@ struct CompactBody<'a> {
     /// an expiry; the action tokens did not.
     #[serde(skip_serializing_if = "Option::is_none")]
     n: Option<&'a str>,
-    /// `x` is the expiry (unix seconds). Unbound tokens never expire,
+    /// `x` is the expiry in unix HOURS, not seconds — four fewer digits,
+    /// which matters because the whole token has to fit a platform
+    /// budget as small as Telegram's 64 bytes. Hour granularity is ample
+    /// for TTLs measured in days. Unbound tokens never expire,
     /// which with an 8-byte truncated HMAC makes each one a permanent
     /// oracle until the correlation key rotates.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -271,11 +275,14 @@ pub fn encode_bound(
     if tool.is_empty() {
         return Err(EncodeError::EmptyTool);
     }
-    let exp = now_secs().saturating_add(ttl_secs);
+    // Hours, not seconds — see `CompactBody::x`. Rounded UP so a token
+    // never expires earlier than the caller asked for.
+    let exp = now_secs().saturating_add(ttl_secs).div_ceil(3600);
+    let digest = tenant_digest(tenant, key);
     let body = CompactBody {
         t: tool,
         a: args,
-        n: Some(tenant),
+        n: Some(&digest),
         x: Some(exp),
     };
     finish(body, key, cap)
@@ -300,19 +307,53 @@ pub fn decode_bound(
     let Some(bound_tenant) = parsed.n.as_deref() else {
         return Err(DecodeError::Body("token carries no tenant binding".into()));
     };
-    // Not constant-time on purpose: the tenant is not a secret, it is an
-    // identifier both sides already know.
-    if bound_tenant != tenant {
+    // Not constant-time on purpose: the digest is derived from an
+    // identifier both sides already know, and forging one requires
+    // breaking the body HMAC that covers it.
+    if bound_tenant != tenant_digest(tenant, key) {
         return Err(DecodeError::Body(
             "token was minted for another tenant".into(),
         ));
     }
     match parsed.x {
-        Some(exp) if exp >= now_secs() => {}
+        Some(exp_hours) if exp_hours.saturating_mul(3600) >= now_secs() => {}
         Some(_) => return Err(DecodeError::Body("token expired".into())),
         None => return Err(DecodeError::Body("token carries no expiry".into())),
     }
     Ok((parsed.t, parsed.a))
+}
+
+/// Verify only the BINDING of an already-decoded token.
+///
+/// Some adapters decode a callback token before they resolve the sender
+/// — Google Chat routes on the token's tool to decide what to do next —
+/// so the tenant is not known at decode time. They call this once the
+/// principal exists, before dispatching. Same rules as
+/// [`decode_bound`]: unbound and expired are both refused.
+pub fn verify_tenant_binding(
+    token: &str,
+    key: &[u8],
+    cap: usize,
+    tenant: &str,
+) -> Result<(), DecodeError> {
+    decode_bound(token, key, cap, tenant).map(|_| ())
+}
+
+/// A compact, keyed stand-in for the tenant.
+///
+/// The full tenant string does not fit every platform's budget: Discord
+/// caps `custom_id` at 100 characters, and a GUID tenant plus an expiry
+/// pushed real buttons over it, so they were silently deferred rather
+/// than rendered — binding must not cost functionality.
+///
+/// Six base64url characters (36 bits) is ample: this is an equality
+/// check between two values both sides compute, not a secret, and
+/// forging a token that names a different tenant means forging the body
+/// HMAC that covers this field. Keyed so a token cannot be carried
+/// between deployments that happen to share a tenant name.
+fn tenant_digest(tenant: &str, key: &[u8]) -> String {
+    let mac = compute_truncated_hmac(tenant.as_bytes(), key);
+    URL_SAFE_NO_PAD.encode(mac).chars().take(6).collect()
 }
 
 fn now_secs() -> u64 {
@@ -501,9 +542,44 @@ mod bound_tests {
 
     #[test]
     fn an_expired_token_is_refused() {
-        let t = encode_bound("narrate", &json!({}), KEY, CAP, "acme", 0).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        // Built directly with a past expiry: with HOUR granularity a
+        // `ttl_secs = 0` token still runs to the end of the current
+        // hour, so a sleep cannot make one lapse inside a test.
+        let args = json!({});
+        let digest = tenant_digest("acme", KEY);
+        let past = CompactBody {
+            t: "narrate",
+            a: &args,
+            n: Some(&digest),
+            x: Some(now_secs() / 3600 - 1),
+        };
+        let t = finish(past, KEY, CAP).unwrap();
         assert!(decode_bound(&t, KEY, CAP, "acme").is_err());
+    }
+
+    #[test]
+    fn a_ttl_rounds_up_so_a_token_never_dies_early() {
+        // Hour granularity must never shorten the caller's TTL.
+        let t = encode_bound("narrate", &json!({}), KEY, CAP, "acme", 1).unwrap();
+        assert!(decode_bound(&t, KEY, CAP, "acme").is_ok());
+    }
+
+    #[test]
+    fn the_bound_token_fits_the_tightest_platform_budget() {
+        // Telegram's 64-byte callback_data is the smallest budget any
+        // adapter mints into. A binding that does not fit there is a
+        // functional regression, not a hardening — Discord buttons were
+        // silently deferred until the digest and hour-expiry shrank it.
+        let t = encode_bound(
+            "narrate",
+            &json!({ "subject": "alice" }),
+            KEY,
+            DISCORD_MAX_CUSTOM_ID,
+            "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+            7 * 24 * 3600,
+        )
+        .expect("a realistic bound token fits Discord's budget");
+        assert!(t.len() <= DISCORD_MAX_CUSTOM_ID, "got {} bytes", t.len());
     }
 
     #[test]

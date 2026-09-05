@@ -131,6 +131,11 @@ const DASHBOARD_MARKER: &str = "__dashboard_png";
 /// Correlation-token "tool" marker for an upstream-rendered chart-image token
 /// (e.g. peacock `render_report`, which returns its own PNG). Distinguishes it
 /// from a dashboard token on the shared `…/img/` route.
+/// How long a card action token stays clickable (#250). Unbound tokens
+/// never expired, making each one a permanent replay oracle until the
+/// correlation key rotates.
+const CARD_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;
+
 const RENDER_REPORT_IMG_MARKER: &str = "__render_report_png";
 /// PNG canvas width (matches the standalone `triton-rasterizer` bin).
 const DASHBOARD_PNG_WIDTH: u32 = 1200;
@@ -1023,6 +1028,10 @@ async fn handle_webhook(
     // Captured for the courier ack below: a button click must be answered
     // with a click-shaped body, not a message-shaped one.
     let is_card_click = event.kind == "CARD_CLICKED";
+    // #250: captured now, because `event` is partially moved below and
+    // the TENANT binding can only be verified once the sender is
+    // resolved, further down.
+    let card_token: Option<String> = event.card_token().map(str::to_owned);
     let (sender_name, tool_name, args, action_echo): (String, String, Value, Option<String>) =
         match event.kind.as_str() {
             "MESSAGE" => {
@@ -1212,6 +1221,31 @@ async fn handle_webhook(
         sender_ref: Some(sender_name.to_string()),
     };
     let principal_for_post = principal.clone();
+
+    // #250: a card action token is a bearer capability. The token was
+    // HMAC-verified above, but the sender is only resolved HERE, so the
+    // TENANT binding can only be checked now — before the tool it names
+    // is dispatched. Without it a token minted into one tenant's space
+    // (visible to every member of that space and in the client's network
+    // trace) is replayable by a sender in another, yielding their
+    // principal against the original arguments.
+    if let Some(token) = card_token.as_deref()
+        && triton_correlation::verify_tenant_binding(
+            token,
+            &adapter.correlation_key,
+            CARD_CORRELATION_CAP,
+            &principal.tenant,
+        )
+        .is_err()
+    {
+        record_rejection(
+            &adapter,
+            &sub,
+            &tenant,
+            TritonError::Auth("card token was not minted for this tenant".into()),
+        );
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
 
     // #164 T1a: async reply courier. Google Chat's webhook is
     // synchronous with a ~30s deadline while live-LLM dispatches run
@@ -1425,11 +1459,13 @@ async fn build_reply_message(
                     surface_mapper::interactive_from_result(dispatch_result)
                         .into_iter()
                         .filter_map(|spec| {
-                            match triton_correlation::encode_with_cap(
+                            match triton_correlation::encode_bound(
                                 spec.tool(),
                                 &spec.base_args(),
                                 &adapter.correlation_key,
                                 CARD_CORRELATION_CAP,
+                                &principal.tenant,
+                                CARD_TOKEN_TTL_SECS,
                             ) {
                                 Ok(token) => Some((spec, token)),
                                 Err(e) => {

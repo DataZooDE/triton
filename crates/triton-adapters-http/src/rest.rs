@@ -303,6 +303,10 @@ async fn surface_render(
             match triton_chat_discord::surface_mapper::try_render_surface(
                 &surface_input,
                 &PREVIEW_KEY,
+                // Preview only: this endpoint renders a surface for the
+                // explorer and the tokens it mints are never dispatched,
+                // so the tenant is a placeholder like `PREVIEW_KEY`.
+                "preview",
             ) {
                 None => not_a2ui(),
                 Some(Err(_)) => empty("discord"),

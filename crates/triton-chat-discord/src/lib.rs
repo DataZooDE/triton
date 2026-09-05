@@ -466,7 +466,14 @@ async fn handle_message_component(
         return (StatusCode::UNAUTHORIZED, "future-dated callback").into_response();
     }
 
-    let (tool_name, mut args) = match triton_correlation::decode(token, &adapter.correlation_key) {
+    // #250: verified against the CLICKER's tenant, so a component token
+    // minted into another tenant's channel cannot be replayed here.
+    let (tool_name, mut args) = match triton_correlation::decode_bound(
+        token,
+        &adapter.correlation_key,
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        &claims.tenant,
+    ) {
         Ok(v) => v,
         Err(e) => {
             record_rejection(
@@ -638,7 +645,11 @@ async fn handle_message_component(
                     }
                 }
             }
-            match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
+            match surface_mapper::try_render_surface(
+                &dispatch.result,
+                &adapter.correlation_key,
+                &principal_for_post.tenant,
+            ) {
                 Some(Ok(rendered)) => {
                     build_response_with_rasterizer(
                         adapter,
@@ -857,7 +868,11 @@ async fn handle_application_command(
                     }
                 }
             }
-            match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
+            match surface_mapper::try_render_surface(
+                &dispatch.result,
+                &adapter.correlation_key,
+                &principal_for_post.tenant,
+            ) {
                 Some(Ok(rendered)) => {
                     build_response_with_rasterizer(
                         adapter,
@@ -1130,7 +1145,11 @@ async fn handle_modal_submit(
 
     match result {
         Ok(dispatch) => {
-            match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
+            match surface_mapper::try_render_surface(
+                &dispatch.result,
+                &adapter.correlation_key,
+                &principal_for_post.tenant,
+            ) {
                 Some(Ok(rendered)) => {
                     build_response_with_rasterizer(
                         adapter,

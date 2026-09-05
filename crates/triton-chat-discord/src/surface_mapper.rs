@@ -105,6 +105,11 @@ pub struct RasterDashboard {
     pub tiles: Vec<DashboardTile>,
 }
 
+/// How long a component token stays clickable (#250). Unbound tokens
+/// never expired, making each one a permanent replay oracle until the
+/// correlation key rotates.
+const CARD_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum RenderError {
     EmptyAfterRender,
@@ -113,14 +118,16 @@ pub enum RenderError {
 pub fn try_render_surface(
     result: &Value,
     correlation_key: &[u8],
+    tenant: &str,
 ) -> Option<Result<RenderedInteraction, RenderError>> {
     let surface = extract_surface(result).ok()?;
-    Some(render(&surface, correlation_key))
+    Some(render(&surface, correlation_key, tenant))
 }
 
 pub fn render(
     surface: &Surface,
     correlation_key: &[u8],
+    tenant: &str,
 ) -> Result<RenderedInteraction, RenderError> {
     let mut chunks: Vec<String> = Vec::new();
     let mut deferred_buttons = 0usize;
@@ -174,7 +181,14 @@ pub fn render(
                     deferred_buttons += 1;
                     continue;
                 }
-                match triton_correlation::encode(tool, args, correlation_key) {
+                match triton_correlation::encode_bound(
+                    tool,
+                    args,
+                    correlation_key,
+                    triton_correlation::DISCORD_MAX_CUSTOM_ID,
+                    tenant,
+                    CARD_TOKEN_TTL_SECS,
+                ) {
                     Ok(token) => {
                         buttons.push(json!({
                             "type": 2,
@@ -223,7 +237,14 @@ pub fn render(
                 // the `{ <one_key>: null }` shape before
                 // substituting; see `handle_message_component`.
                 let args = json!({ args_key.as_str(): Value::Null });
-                let token = match triton_correlation::encode(tool, &args, correlation_key) {
+                let token = match triton_correlation::encode_bound(
+                    tool,
+                    &args,
+                    correlation_key,
+                    triton_correlation::DISCORD_MAX_CUSTOM_ID,
+                    tenant,
+                    CARD_TOKEN_TTL_SECS,
+                ) {
                     Ok(t) => t,
                     Err(_) => {
                         deferred_selections += 1;
@@ -644,7 +665,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert_eq!(r.content, "hello\n\n*footnote*");
         assert!(r.components.is_none());
     }
@@ -657,7 +678,7 @@ mod tests {
                 value: "a*b_c~d".into(),
             }],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         // Each metacharacter gets a backslash prefix.
         assert!(r.content.contains(r"a\*b\_c\~d"));
     }
@@ -679,7 +700,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         let components = r.components.expect("components present");
         let rows = components.as_array().expect("array");
         assert_eq!(rows.len(), 1);
@@ -691,7 +712,13 @@ mod tests {
         let token = buttons[0]["custom_id"]
             .as_str()
             .expect("custom_id is a string");
-        let (tool, _) = triton_correlation::decode(token, TEST_KEY).expect("token verifies");
+        let (tool, _) = triton_correlation::decode_bound(
+            token,
+            TEST_KEY,
+            triton_correlation::DISCORD_MAX_CUSTOM_ID,
+            "acme",
+        )
+        .expect("token verifies for its tenant");
         assert_eq!(tool, "narrate");
     }
 
@@ -706,7 +733,7 @@ mod tests {
                 resource: None,
             }],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert_eq!(r.content, BUTTON_ONLY_PLACEHOLDER);
         assert!(r.components.is_some());
     }
@@ -715,7 +742,7 @@ mod tests {
     fn empty_surface_is_a_render_error() {
         let s = Surface { components: vec![] };
         assert!(matches!(
-            render(&s, TEST_KEY),
+            render(&s, TEST_KEY, "acme"),
             Err(RenderError::EmptyAfterRender)
         ));
     }
@@ -733,7 +760,7 @@ mod tests {
             })
             .collect();
         let s = Surface { components };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         let rows = r
             .components
             .expect("components")
@@ -760,7 +787,7 @@ mod tests {
             })
             .collect();
         let s = Surface { components };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         let rows = r
             .components
             .expect("components")
@@ -802,7 +829,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         // None of the tile content appears in the content — only
         // the leading Text/Narration components do.
         assert!(!r.content.contains("1234"));
@@ -841,7 +868,7 @@ mod tests {
         let s = Surface {
             components: vec![make_dash("first"), make_dash("second")],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         let dash = r.dashboard.expect("first surfaced");
         assert_eq!(dash.title, "first");
         assert_eq!(r.deferred_dashboards, 1);
@@ -865,7 +892,7 @@ mod tests {
                 }],
             }],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert!(r.content.is_empty());
         assert!(r.dashboard.is_some());
     }
@@ -914,7 +941,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         let rows = r
             .components
             .expect("components")
@@ -932,7 +959,13 @@ mod tests {
         // Token decodes to (narrate, {subject: null}); the inbound
         // handler fills the null with `data.values[0]` at click.
         let token = menu["custom_id"].as_str().expect("custom_id is string");
-        let (tool, args) = triton_correlation::decode(token, TEST_KEY).expect("verifies");
+        let (tool, args) = triton_correlation::decode_bound(
+            token,
+            TEST_KEY,
+            triton_correlation::DISCORD_MAX_CUSTOM_ID,
+            "acme",
+        )
+        .expect("verifies for its tenant");
         assert_eq!(tool, "narrate");
         assert!(
             args["subject"].is_null(),
@@ -964,7 +997,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert_eq!(r.deferred_selections, 1);
         // No select menu shipped — the text chunk still goes out.
         assert!(
@@ -987,7 +1020,7 @@ mod tests {
                 value: big,
             }],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert!(r.truncated);
         assert!(r.content.len() <= DISCORD_CONTENT_MAX_BYTES);
         assert!(r.content.ends_with(TRUNCATION_SENTINEL));

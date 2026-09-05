@@ -147,10 +147,13 @@ async fn button_click_dispatches_via_correlation_token() {
     // Mint a correlation token for narrate(subject=bob) under the
     // same key the manifest declares — that's how Discord buttons
     // come back to us after the user clicks.
-    let token = triton_correlation::encode(
+    let token = triton_correlation::encode_bound(
         "narrate",
         &json!({ "subject": "bob" }),
         CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
+        7 * 24 * 3600,
     )
     .expect("token fits");
 
@@ -195,8 +198,16 @@ async fn button_click_dispatches_via_correlation_token() {
     let nested_token = buttons[0]["custom_id"]
         .as_str()
         .expect("custom_id is a string");
-    let (tool, _) =
-        triton_correlation::decode(nested_token, CORRELATION_KEY.as_bytes()).expect("verifies");
+    // #250: the adapter now mints BOUND tokens under Discord's real
+    // 100-byte custom_id budget (it had been using Telegram's 64), so
+    // the test verifies the same way the adapter does.
+    let (tool, _) = triton_correlation::decode_bound(
+        nested_token,
+        CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
+    )
+    .expect("verifies for its tenant");
     assert_eq!(tool, "narrate");
 
     // Audit: one dispatch + one post for this interaction. Polled, not
@@ -228,10 +239,13 @@ async fn forged_custom_id_token_rejected_at_inbound() {
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
-    let forged = triton_correlation::encode(
+    let forged = triton_correlation::encode_bound(
         "narrate",
         &json!({ "subject": "evil" }),
         b"wrong-correlation-key-32-bytes!!",
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
+        7 * 24 * 3600,
     )
     .expect("forged token fits");
     let interaction = json!({
@@ -272,10 +286,13 @@ async fn stale_message_timestamp_rejects_button_click() {
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
-    let valid_token = triton_correlation::encode(
+    let valid_token = triton_correlation::encode_bound(
         "narrate",
         &json!({ "subject": "bob" }),
         CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
+        7 * 24 * 3600,
     )
     .expect("token fits");
 
@@ -354,10 +371,13 @@ async fn burst_succeeds_then_excess_is_ratelimited() {
     // closure that signs+POSTs and returns the status code +
     // Retry-After (if any). Burst=2: first two pass, next two
     // 429 + Retry-After.
-    let valid_token = triton_correlation::encode(
+    let valid_token = triton_correlation::encode_bound(
         "narrate",
         &json!({ "subject": "bob" }),
         CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
+        7 * 24 * 3600,
     )
     .expect("token fits");
     let send = |i: u32| {
@@ -408,6 +428,53 @@ async fn burst_succeeds_then_excess_is_ratelimited() {
     });
 }
 
+/// #250: a component token minted into one tenant's guild must not work
+/// for a clicker in another — the custom_id travels in the client and is
+/// visible to anyone who can see the message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_component_token_from_another_tenant_is_rejected() {
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    // Correctly signed under the manifest key, but minted for `globex`;
+    // this sender resolves to `acme`.
+    let foreign = triton_correlation::encode_bound(
+        "narrate",
+        &json!({ "subject": "victim" }),
+        CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "globex",
+        7 * 24 * 3600,
+    )
+    .expect("encode");
+
+    let interaction = json!({
+        "type": 3,
+        "id": "i-cross-tenant",
+        "user": { "id": "99" },
+        "data": { "custom_id": foreign, "component_type": 2 },
+        "message": { "timestamp": now_rfc3339() }
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(
+        resp.status(),
+        401,
+        "a component token minted for another tenant must not be honoured"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn button_callback_with_values_is_rejected() {
     // Codex PR 25 blocker: a hostile or future-shaped payload
@@ -419,10 +486,13 @@ async fn button_callback_with_values_is_rejected() {
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
-    let token = triton_correlation::encode(
+    let token = triton_correlation::encode_bound(
         "narrate",
         &json!({ "subject": "bob" }),
         CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
+        7 * 24 * 3600,
     )
     .expect("token fits");
     let interaction = json!({
@@ -464,10 +534,13 @@ async fn selection_callback_substitutes_picked_value_and_dispatches() {
     // Mint a token shaped the way the mapper would: tool=narrate,
     // args = {subject: null}. The handler MUST substitute the
     // null with `data.values[0]` before invoking the tool.
-    let select_token = triton_correlation::encode(
+    let select_token = triton_correlation::encode_bound(
         "narrate",
         &json!({ "subject": serde_json::Value::Null }),
         CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
+        7 * 24 * 3600,
     )
     .expect("token fits");
 
@@ -517,10 +590,13 @@ async fn missing_message_timestamp_fails_closed() {
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
-    let valid_token = triton_correlation::encode(
+    let valid_token = triton_correlation::encode_bound(
         "narrate",
         &json!({ "subject": "bob" }),
         CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
+        7 * 24 * 3600,
     )
     .expect("token fits");
     // Note: no `message` field at all.
@@ -846,10 +922,13 @@ async fn modal_submit_with_extra_field_rejected() {
 
     // Token commits to { subject: null }. Attacker submits both
     // subject AND a surprise `admin: true` field.
-    let token = triton_correlation::encode(
+    let token = triton_correlation::encode_bound(
         "echo",
         &json!({ "subject": Value::Null }),
         CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
+        7 * 24 * 3600,
     )
     .expect("token fits");
 
@@ -900,10 +979,13 @@ async fn modal_submit_with_forged_custom_id_rejected() {
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
-    let forged = triton_correlation::encode(
+    let forged = triton_correlation::encode_bound(
         "echo",
         &json!({ "subject": Value::Null }),
         b"wrong-correlation-key-32-bytes!!",
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
+        7 * 24 * 3600,
     )
     .expect("forged token fits");
 
