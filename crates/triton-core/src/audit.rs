@@ -116,6 +116,18 @@ pub struct AuditRecord<'a> {
     /// byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttfb_ms: Option<u64>,
+    /// How many further rejections this line stands for (#249).
+    ///
+    /// Anonymous rejections on a public path are coalesced into one line
+    /// per window per protocol, because a background scanner would
+    /// otherwise write one line per probe and evict every real entry from
+    /// the ring buffer. The count is what makes the coalesced line
+    /// honest: the number of refusals is never lost, only the per-request
+    /// repetition. `Some(0)` never appears — a line that swallowed
+    /// nothing omits the field, so every pre-#249 line stays
+    /// byte-identical for existing audit consumers.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppressed: Option<u64>,
     pub trace_id: &'a str,
 }
 
@@ -171,6 +183,11 @@ pub struct AuditEntry {
     pub status_detail: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttfb_ms: Option<u64>,
+    /// See [`AuditRecord::suppressed`]. Mirrored into the buffer because
+    /// the operator tailing `/v1/audit` is precisely the person who needs
+    /// to know the entry stands for more than one refusal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppressed: Option<u64>,
     pub trace_id: String,
 }
 
@@ -193,6 +210,7 @@ impl<'a> From<&AuditRecord<'a>> for AuditEntry {
             status_label: r.status_label,
             status_detail: r.status_detail,
             ttfb_ms: r.ttfb_ms,
+            suppressed: r.suppressed,
             trace_id: r.trace_id.to_string(),
         }
     }
@@ -283,6 +301,7 @@ mod rejection_reason_tests {
             status_detail: None,
             error_detail: Some("bot framework jwt: jwt issuer does not match".into()),
             ttfb_ms: None,
+            suppressed: None,
             trace_id: "t-1",
         };
         let v = serde_json::to_value(&rec).expect("serialises");
@@ -315,6 +334,7 @@ mod rejection_reason_tests {
             status_detail: None,
             error_detail: None,
             ttfb_ms: None,
+            suppressed: None,
             trace_id: "t-2",
         };
         let v = serde_json::to_value(&rec).expect("serialises");

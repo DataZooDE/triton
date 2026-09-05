@@ -14,7 +14,7 @@
 //!     dispatcher would normally run; we still own the schema.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -142,7 +142,21 @@ pub struct Dispatcher {
     env: String,
     upstream: Option<Arc<dyn UpstreamDispatch>>,
     metrics: Arc<Metrics>,
+    /// #249: coalescing window for ANONYMOUS rejection audit, so a
+    /// scanner on a public path can't evict the ring buffer.
+    reject_window: crate::ratelimit::RejectionWindow,
 }
+
+/// The synthetic `subject` an adapter passes when it refused an inbound
+/// before any Principal existed (see [`Dispatcher::record_rejection`]).
+/// This is what distinguishes the anonymous flood that gets coalesced
+/// from an identified caller being refused, which never is.
+pub const ANONYMOUS_SUBJECT: &str = "-";
+
+/// Default coalescing window for anonymous rejections (#249). At one
+/// line per protocol per minute a scanner costs the 1024-entry ring
+/// buffer a handful of slots an hour instead of emptying it in minutes.
+pub const DEFAULT_REJECT_WINDOW: Duration = Duration::from_secs(60);
 
 impl Dispatcher {
     pub fn new(registry: Arc<ToolRegistry>, env: impl Into<String>) -> Self {
@@ -151,7 +165,17 @@ impl Dispatcher {
             env: env.into(),
             upstream: None,
             metrics: Arc::new(Metrics::new()),
+            reject_window: crate::ratelimit::RejectionWindow::new(DEFAULT_REJECT_WINDOW),
         }
+    }
+
+    /// Override the anonymous-rejection coalescing window (#249).
+    /// `Duration::ZERO` disables coalescing — every rejection emits.
+    /// `triton-bin` wires this from `TRITON_AUDIT_REJECT_WINDOW_SECS`;
+    /// this crate stays env-free.
+    pub fn with_rejection_window(mut self, window: Duration) -> Self {
+        self.reject_window = crate::ratelimit::RejectionWindow::new(window);
+        self
     }
 
     /// Attach a shared `Metrics` registry. When unset, the
@@ -542,8 +566,31 @@ impl Dispatcher {
     ) {
         let status = status_for(error);
         let result = format!("error:{}", error.class());
+        // Metrics are deliberately unconditional: the COUNTER is where
+        // scanner volume belongs, at full per-tool granularity, so
+        // coalescing the audit line below loses no observability — only
+        // the per-request repetition in the log and the ring buffer.
         self.metrics.record_dispatch(tool_name, protocol, &result);
         self.metrics.record_audit("rejected");
+        // #249: only the ANONYMOUS flood coalesces. An identified subject
+        // being refused is the security signal, not the noise, and must
+        // never be swallowed by a scanner sharing its protocol.
+        //
+        // Keyed on `protocol` — a closed set — and NOT on `tool_name`,
+        // which the REST adapter takes from `Path(name)` and MCP from the
+        // JSON-RPC body: both caller-chosen on this pre-auth path, so
+        // keying on them would let `/v1/tools/<random>` mint unbounded
+        // windows. Coarser than ideal, but bounded by construction.
+        let suppressed = if subject == ANONYMOUS_SUBJECT {
+            match self.reject_window.admit(protocol) {
+                // `Some(0)` = nothing was swallowed; omit the field so the
+                // line stays byte-identical to a pre-#249 one.
+                Some(n) => (n > 0).then_some(n),
+                None => return,
+            }
+        } else {
+            None
+        };
         emit(&AuditRecord {
             kind: "audit",
             phase: AuditPhase::Rejected,
@@ -559,11 +606,15 @@ impl Dispatcher {
             latency_ms: 0,
             status,
             status_label: None,
-            status_detail: None,
+            // Flag a line that stands for a window rather than a single
+            // event: at protocol granularity it names one tool but may
+            // cover refusals across several routes.
+            status_detail: suppressed.map(|_| "rejections_coalesced"),
             // The error's own words, so a refusal is diagnosable from the
             // audit line alone rather than from adapter source.
             error_detail: Some(error.to_string()),
             ttfb_ms: None,
+            suppressed,
             trace_id,
         });
     }
@@ -622,6 +673,7 @@ impl Dispatcher {
             status_detail: detail,
             error_detail: None,
             ttfb_ms: None,
+            suppressed: None,
             trace_id: &principal.trace_id,
         });
     }
@@ -694,6 +746,7 @@ impl Dispatcher {
             status_detail: None,
             error_detail: None,
             ttfb_ms: None,
+            suppressed: None,
             trace_id: &principal.trace_id,
         });
         // Reconstruct a parallel error so we can both audit and return.
@@ -739,6 +792,7 @@ impl Dispatcher {
             status_detail: None,
             error_detail: None,
             ttfb_ms: None,
+            suppressed: None,
             trace_id: &principal.trace_id,
         });
     }
@@ -835,6 +889,7 @@ fn emit_stream_audit(a: StreamAudit<'_>) {
         status_detail,
         error_detail: None,
         ttfb_ms: a.ttfb_ms,
+        suppressed: None,
         trace_id: a.trace_id,
     });
 }

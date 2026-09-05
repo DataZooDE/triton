@@ -122,6 +122,104 @@ impl PerTenantBuckets {
     }
 }
 
+/// Coalescing window for **anonymous** rejection audit (#249).
+///
+/// Not a rate limit: nothing is refused. A public inbound path answers an
+/// unauthenticated probe with 401 and audits it, all before any rate-limit
+/// token is consumed (the bucket is deliberately taken only after auth, so
+/// a sprayer can't burn it). A background scanner therefore writes one
+/// audit line per probe and the ring buffer evicts every real entry —
+/// the history an operator tails is gone exactly when it is needed.
+///
+/// So the first rejection in a window emits **immediately** — an operator
+/// debugging a genuine 401 must not wait out a window to learn why
+/// (FR-AU / #219: a refusal says WHY in the line itself) — and the rest
+/// are counted. The next one after the window closes emits carrying that
+/// count, so the surviving line stays honest about what it stands for.
+///
+/// The count is best-effort by construction: a flood that STOPS inside a
+/// window leaves its tail unreported, because nothing arrives to carry
+/// the number out. Deliberate — no timer, no background task, nothing to
+/// drain on shutdown (G-8). The exact total is never lost anyway: the
+/// caller counts every rejection in metrics BEFORE consulting this, so
+/// coalescing only ever costs per-request repetition in the log and the
+/// ring buffer.
+///
+/// # Keys must be bounded by configuration, never by the request
+///
+/// `key` is hashed into a map that lives for the process, so anything
+/// caller-controlled turns this into a memory-growth DoS. Callers key on
+/// the PROTOCOL — a closed set fixed at compile time or by the manifest.
+/// The obvious finer key, the tool name, is exactly the trap: the REST
+/// adapter audits a rejection under `Path(name)` (the URL segment an
+/// unauthenticated caller chooses) and MCP under a name off the JSON-RPC
+/// body, so keying on it would let `/v1/tools/<random>` mint unbounded
+/// buckets.
+#[derive(Debug)]
+pub struct RejectionWindow {
+    window: std::time::Duration,
+    state: Mutex<std::collections::HashMap<String, WindowState>>,
+}
+
+#[derive(Debug)]
+struct WindowState {
+    /// When the window currently in force opened (i.e. the last emission).
+    opened: Instant,
+    /// Rejections swallowed since that emission.
+    suppressed: u64,
+}
+
+impl RejectionWindow {
+    pub fn new(window: std::time::Duration) -> Self {
+        Self {
+            window,
+            state: Mutex::new(std::collections::HashMap::new()),
+        }
+    }
+
+    /// Decide whether this rejection should be audited.
+    ///
+    /// `Some(n)` — emit, and say the line stands for `n` further
+    /// rejections swallowed since the last one (`0` on the first).
+    /// `None` — suppressed and counted.
+    ///
+    /// A zero-length window disables coalescing entirely (every
+    /// rejection emits, `suppressed` always `0`), which is the escape
+    /// hatch for a deployment that wants the un-coalesced stream.
+    pub fn admit(&self, key: &str) -> Option<u64> {
+        if self.window.is_zero() {
+            return Some(0);
+        }
+        let now = Instant::now();
+        let mut state = self.state.lock().expect("rejection-window mutex poisoned");
+        match state.get_mut(key) {
+            // Window still in force: swallow and count.
+            Some(w) if now.duration_since(w.opened) < self.window => {
+                w.suppressed += 1;
+                None
+            }
+            // Window lapsed: emit, reporting what it swallowed.
+            Some(w) => {
+                let n = w.suppressed;
+                w.opened = now;
+                w.suppressed = 0;
+                Some(n)
+            }
+            // First rejection for this key: emit at once.
+            None => {
+                state.insert(
+                    key.to_string(),
+                    WindowState {
+                        opened: now,
+                        suppressed: 0,
+                    },
+                );
+                Some(0)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +304,52 @@ mod tests {
         assert!(b.try_take("first").is_err());
         assert!(b.try_take("second").is_err());
         assert!(b.try_take("third").is_err());
+    }
+
+    // ---- #249 RejectionWindow ---------------------------------------
+
+    #[test]
+    fn first_rejection_emits_immediately_then_the_rest_are_counted() {
+        let w = RejectionWindow::new(Duration::from_secs(3600));
+        // An operator debugging a real 401 sees it NOW, not after the
+        // window (#219).
+        assert_eq!(w.admit("rest"), Some(0));
+        for _ in 0..5 {
+            assert_eq!(w.admit("rest"), None, "swallowed inside the window");
+        }
+    }
+
+    #[test]
+    fn a_reopened_window_reports_what_it_swallowed_then_resets() {
+        let w = RejectionWindow::new(Duration::from_millis(60));
+        assert_eq!(w.admit("rest"), Some(0));
+        for _ in 0..4 {
+            assert_eq!(w.admit("rest"), None);
+        }
+        thread::sleep(Duration::from_millis(80));
+        assert_eq!(w.admit("rest"), Some(4), "reports the 4 it swallowed");
+        // The counter resets — the next window doesn't re-report them.
+        thread::sleep(Duration::from_millis(80));
+        assert_eq!(w.admit("rest"), Some(0));
+    }
+
+    #[test]
+    fn windows_are_independent_per_key() {
+        let w = RejectionWindow::new(Duration::from_secs(3600));
+        assert_eq!(w.admit("rest"), Some(0));
+        assert_eq!(w.admit("rest"), None);
+        // A different protocol has its own window: one adapter's scanner
+        // must not silence another adapter's first refusal.
+        assert_eq!(w.admit("messenger:msteams"), Some(0));
+        assert_eq!(w.admit("a2a"), Some(0));
+    }
+
+    #[test]
+    fn a_zero_window_disables_coalescing() {
+        // The escape hatch for a deployment that wants every line.
+        let w = RejectionWindow::new(Duration::ZERO);
+        for _ in 0..10 {
+            assert_eq!(w.admit("rest"), Some(0));
+        }
     }
 }

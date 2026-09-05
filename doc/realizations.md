@@ -1392,6 +1392,28 @@ a trap the next developer should not have to step in.
   live 7 days, so a new payload field needs a fallback for the links
   already in the wild.
 
+- **A coalescing key taken from the request is a DoS you built yourself
+  (#249, 2026-09-05).** Coalescing anonymous rejection audit needs a key,
+  and `(protocol, tool)` is the obvious one — it is also unbounded. The
+  REST adapter audits a pre-auth rejection under `Path(name)`, the URL
+  segment the caller chooses (`rest.rs`), and MCP under a name off the
+  JSON-RPC body; both sit on the path an unauthenticated scanner walks.
+  Keying on them lets `/v1/tools/<random>` mint one window per probe —
+  memory growth introduced by the fix meant to blunt the scanner. Key on
+  `protocol` alone: a closed set, bounded at compile/manifest time.
+  General rule for any per-key state on a pre-auth path — the key space
+  must be fixed by configuration, never by the request.
+
+- **Coalescing must not delay the FIRST line (#249).** #219 exists
+  because a refusal that doesn't say why costs a live debugging cycle. A
+  window that emitted at its *end* would reintroduce that for every
+  operator staring at a 401, so the first rejection emits immediately and
+  the count rides out on the next one. Consequence to accept knowingly: a
+  flood that stops mid-window leaves its tail unreported in the log —
+  fine, because the metric counter is incremented unconditionally before
+  the window is consulted, so the exact total is never actually lost.
+  Suppress the LINE, never the COUNTER.
+
 ---
 
 ## 8. CI/CD build-time traps (2026-08-30)
