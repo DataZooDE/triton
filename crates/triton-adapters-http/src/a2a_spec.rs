@@ -455,6 +455,10 @@ async fn message_send(
     // same way.
     state.a2a.tasks.record(&trace_id, TaskState::Working);
     let dispatcher = state.a2a.dispatcher.clone();
+    // Kept for the post-dispatch report→VegaChart expansion (the invoke below
+    // consumes its own clone).
+    let vega_dispatcher = state.a2a.dispatcher.clone();
+    let vega_principal = principal.clone();
     let tasks = state.a2a.tasks.clone();
     let task_trace = trace_id.clone();
     let handle = tokio::spawn(async move {
@@ -489,9 +493,12 @@ async fn message_send(
 
     match handle.await {
         Ok(Ok(d)) => {
-            let reply = reply_text(&d.result);
+            let mut result = d.result;
+            // Expand a report into a native interactive VegaChart for GE.
+            inject_report_vega(&vega_dispatcher, &mut result, &vega_principal).await;
+            let reply = reply_text(&result);
             let mut parts = vec![json!({ "kind": "text", "text": reply })];
-            if let Some(msgs) = triton_core::a2ui::ge::build_messages(&d.result) {
+            if let Some(msgs) = triton_core::a2ui::ge::build_messages(&result) {
                 parts.extend(triton_core::a2ui::ge::data_parts(msgs));
             }
             let msg = json!({
@@ -554,6 +561,10 @@ async fn message_stream(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     state.a2a.tasks.record(&trace_id, TaskState::Working);
+    // Kept for the terminal report→VegaChart expansion (invoke_streaming
+    // consumes `principal`).
+    let vega_dispatcher = state.a2a.dispatcher.clone();
+    let vega_principal = principal.clone();
     let events = match state
         .a2a
         .dispatcher
@@ -590,100 +601,122 @@ async fn message_stream(
     // the trailing `![chart]` markdown in as literal text on hosts that render
     // A2UI, like Gemini Enterprise). When nothing streamed (a buffered tool),
     // the final artifact carries the text once.
-    let mut streamed_text = false;
-    let frames = events.flat_map(move |ev| {
-        let out: Vec<Value> = match ev {
-            triton_core::stream::StreamEvent::Token(t) => {
-                streamed_text = true;
-                vec![rpc_frames(json!({
-                    "kind": "artifact-update",
-                    "taskId": task_for_frames,
-                    "contextId": ctx_for_frames,
-                    "append": true,
-                    "artifact": {
-                        "artifactId": artifact_id,
-                        "parts": [{ "kind": "text", "text": t }],
-                    },
-                }))]
+    // `streamed_text` is shared across per-event futures (async closures can't
+    // hold a `&mut` across the stream), so track it atomically.
+    let streamed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let frames = events
+        .then(move |ev| {
+            use std::sync::atomic::Ordering;
+            let rpc_frames = rpc_frames.clone();
+            let task_for_frames = task_for_frames.clone();
+            let ctx_for_frames = ctx_for_frames.clone();
+            let artifact_id = artifact_id.clone();
+            let tasks = tasks.clone();
+            let streamed = streamed.clone();
+            let vega_dispatcher = vega_dispatcher.clone();
+            let vega_principal = vega_principal.clone();
+            async move {
+                let out: Vec<Value> = match ev {
+                    triton_core::stream::StreamEvent::Token(t) => {
+                        streamed.store(true, Ordering::Relaxed);
+                        vec![rpc_frames(json!({
+                            "kind": "artifact-update",
+                            "taskId": task_for_frames,
+                            "contextId": ctx_for_frames,
+                            "append": true,
+                            "artifact": {
+                                "artifactId": artifact_id,
+                                "parts": [{ "kind": "text", "text": t }],
+                            },
+                        }))]
+                    }
+                    triton_core::stream::StreamEvent::Tool(_) => Vec::new(),
+                    triton_core::stream::StreamEvent::Done(v) => {
+                        let mut v = v;
+                        // Expand a report into a native interactive VegaChart
+                        // (GE); best-effort, falls back to the static image.
+                        inject_report_vega(&vega_dispatcher, &mut v, &vega_principal).await;
+                        let did_stream = streamed.load(Ordering::Relaxed);
+                        let reply = reply_text(&v);
+                        tasks.record_entry(
+                            &task_for_frames,
+                            TaskState::Completed,
+                            Some(&reply),
+                            None,
+                        );
+                        // Final artifact carries the text part (every client) AND,
+                        // when the surface has renderable components, the A2UI
+                        // DataParts (GE renders the card; text-only clients ignore
+                        // them). Skip the full text when we streamed it as deltas
+                        // (else it duplicates).
+                        let mut frames = Vec::new();
+                        // Streamed prose loses the clickable sources line (only in
+                        // the final `reply`, which we skip); emit it as one more
+                        // append delta so GE's bubble still gets the links.
+                        if did_stream && let Some(sources) = sources_markdown(&v) {
+                            frames.push(rpc_frames(json!({
+                                "kind": "artifact-update",
+                                "taskId": task_for_frames,
+                                "contextId": ctx_for_frames,
+                                "append": true,
+                                "artifact": {
+                                    "artifactId": artifact_id,
+                                    "parts": [{ "kind": "text", "text": format!("\n\n{sources}") }],
+                                },
+                            })));
+                        }
+                        let mut parts: Vec<Value> = Vec::new();
+                        if !did_stream {
+                            parts.push(json!({ "kind": "text", "text": reply }));
+                        }
+                        if let Some(msgs) = triton_core::a2ui::ge::build_messages(&v) {
+                            parts.extend(triton_core::a2ui::ge::data_parts(msgs));
+                        }
+                        if !parts.is_empty() {
+                            frames.push(rpc_frames(json!({
+                                "kind": "artifact-update",
+                                "taskId": task_for_frames,
+                                "contextId": ctx_for_frames,
+                                "lastChunk": true,
+                                "artifact": {
+                                    "artifactId": artifact_id,
+                                    "parts": parts,
+                                },
+                            })));
+                        }
+                        frames.push(rpc_frames(json!({
+                            "kind": "status-update",
+                            "taskId": task_for_frames,
+                            "contextId": ctx_for_frames,
+                            "status": { "state": "completed" },
+                            "final": true,
+                        })));
+                        frames
+                    }
+                    triton_core::stream::StreamEvent::Error { error, .. } => {
+                        tasks.record_entry(
+                            &task_for_frames,
+                            TaskState::Failed,
+                            None,
+                            Some(&error.to_string()),
+                        );
+                        vec![rpc_frames(json!({
+                            "kind": "status-update",
+                            "taskId": task_for_frames,
+                            "contextId": ctx_for_frames,
+                            "status": { "state": "failed", "message": {
+                                "kind": "message", "role": "agent",
+                                "messageId": uuid::Uuid::new_v4().to_string(),
+                                "parts": [{ "kind": "text", "text": error.to_string() }],
+                            } },
+                            "final": true,
+                        }))]
+                    }
+                };
+                futures::stream::iter(out)
             }
-            triton_core::stream::StreamEvent::Tool(_) => Vec::new(),
-            triton_core::stream::StreamEvent::Done(v) => {
-                let reply = reply_text(&v);
-                tasks.record_entry(&task_for_frames, TaskState::Completed, Some(&reply), None);
-                // Final answer artifact carries the text part (every client)
-                // AND, when the surface has renderable components, an A2UI
-                // v0.9 DataPart (Gemini Enterprise renders the card/chart/
-                // buttons; text-only clients ignore the data part).
-                // Only include the full text if we did NOT stream it as
-                // deltas (else it duplicates). A2UI DataParts always ride the
-                // final artifact (deltas never carried them).
-                let mut frames = Vec::new();
-                // When the prose streamed as deltas, the clickable sources line
-                // (only in the final `reply`, which we skip to avoid a dupe)
-                // would be lost. Emit it as one more APPEND text delta — same
-                // shape as a token — so it lands in GE's bubble as real links.
-                if streamed_text && let Some(sources) = sources_markdown(&v) {
-                    frames.push(rpc_frames(json!({
-                        "kind": "artifact-update",
-                        "taskId": task_for_frames,
-                        "contextId": ctx_for_frames,
-                        "append": true,
-                        "artifact": {
-                            "artifactId": artifact_id,
-                            "parts": [{ "kind": "text", "text": format!("\n\n{sources}") }],
-                        },
-                    })));
-                }
-                let mut parts: Vec<Value> = Vec::new();
-                if !streamed_text {
-                    parts.push(json!({ "kind": "text", "text": reply }));
-                }
-                if let Some(msgs) = triton_core::a2ui::ge::build_messages(&v) {
-                    parts.extend(triton_core::a2ui::ge::data_parts(msgs));
-                }
-                if !parts.is_empty() {
-                    frames.push(rpc_frames(json!({
-                        "kind": "artifact-update",
-                        "taskId": task_for_frames,
-                        "contextId": ctx_for_frames,
-                        "lastChunk": true,
-                        "artifact": {
-                            "artifactId": artifact_id,
-                            "parts": parts,
-                        },
-                    })));
-                }
-                frames.push(rpc_frames(json!({
-                    "kind": "status-update",
-                    "taskId": task_for_frames,
-                    "contextId": ctx_for_frames,
-                    "status": { "state": "completed" },
-                    "final": true,
-                })));
-                frames
-            }
-            triton_core::stream::StreamEvent::Error { error, .. } => {
-                tasks.record_entry(
-                    &task_for_frames,
-                    TaskState::Failed,
-                    None,
-                    Some(&error.to_string()),
-                );
-                vec![rpc_frames(json!({
-                    "kind": "status-update",
-                    "taskId": task_for_frames,
-                    "contextId": ctx_for_frames,
-                    "status": { "state": "failed", "message": {
-                        "kind": "message", "role": "agent",
-                        "messageId": uuid::Uuid::new_v4().to_string(),
-                        "parts": [{ "kind": "text", "text": error.to_string() }],
-                    } },
-                    "final": true,
-                }))]
-            }
-        };
-        futures::stream::iter(out)
-    });
+        })
+        .flatten();
 
     let all = futures::stream::once(async move { initial }).chain(frames);
     let sse = all.map(|v| {
@@ -696,6 +729,79 @@ async fn message_stream(
             axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
         )
         .into_response()
+}
+
+/// Deep-search a value for a peacock `{"kind":"vega","spec":{…}}` component and
+/// return its Vega-Lite `spec`. `render_report`'s result envelope varies (the
+/// spec can sit under `structuredContent.result.surface.components`), so search
+/// recursively — the same shape as googlechat's `png_base64` finder.
+fn find_vega_spec(v: &Value) -> Option<Value> {
+    match v {
+        Value::Object(m) => {
+            if m.get("kind").and_then(Value::as_str) == Some("vega")
+                && let Some(spec) = m.get("spec").filter(|s| s.is_object())
+            {
+                return Some(spec.clone());
+            }
+            m.values().find_map(find_vega_spec)
+        }
+        Value::Array(a) => a.iter().find_map(find_vega_spec),
+        _ => None,
+    }
+}
+
+/// If `result`'s surface has a `report` component, dispatch `render_report` to
+/// the peacock upstream, extract its native Vega-Lite spec, and stamp it onto
+/// the report component as `vega_spec` — so the A2UI builder emits an
+/// interactive GE `VegaChart` instead of the static PNG. Best-effort: any miss
+/// (no report, peacock unreachable, no vega in the render) leaves `result`
+/// untouched and the card falls back to the image.
+async fn inject_report_vega(
+    dispatcher: &Dispatcher,
+    result: &mut Value,
+    principal: &triton_core::Principal,
+) {
+    let target = result
+        .get("surface")
+        .and_then(|s| s.get("components"))
+        .and_then(Value::as_array)
+        .and_then(|cs| {
+            cs.iter().enumerate().find_map(|(i, c)| {
+                if c.get("kind").and_then(Value::as_str) != Some("report")
+                    || c.get("vega_spec").is_some()
+                {
+                    return None;
+                }
+                let rid = c.get("report_id").and_then(Value::as_str)?.to_string();
+                let params = c
+                    .get("args")
+                    .and_then(|a| a.get("params"))
+                    .cloned()
+                    .unwrap_or_else(|| json!({}));
+                Some((i, rid, params))
+            })
+        });
+    let Some((idx, report_id, params)) = target else {
+        return;
+    };
+    let args = json!({ "report_id": report_id, "params": params });
+    let Ok(rep) = dispatcher
+        .invoke("render_report", args, principal.clone(), "a2a")
+        .await
+    else {
+        return;
+    };
+    let Some(spec) = find_vega_spec(&rep.result) else {
+        return;
+    };
+    if let Some(comp) = result
+        .get_mut("surface")
+        .and_then(|s| s.get_mut("components"))
+        .and_then(Value::as_array_mut)
+        .and_then(|cs| cs.get_mut(idx))
+    {
+        comp["vega_spec"] = spec;
+    }
 }
 
 /// Pull human-readable text out of whatever the tool returned. Triton
