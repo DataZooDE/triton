@@ -43,7 +43,11 @@ pub const MIME: &str = "application/json+a2ui";
 /// The basic component catalog id (declared in the card and in `createSurface`).
 pub const BASIC_CATALOG: &str = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json";
 
-const SURFACE_ID: &str = "triton-answer";
+// Surface id MUST be unique per card: Gemini Enterprise keeps surfaces for
+// the life of a conversation and rejects a second `createSurface` with an id
+// it already has ("Surface <id> already exists"), which would blank every
+// card after the first (follow-up turns, button responses). One fresh id per
+// build.
 
 /// Build the A2UI v0.9 message array from a raw surface value
 /// (`result["surface"]["components"]`). Returns `None` when the value carries
@@ -56,6 +60,7 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
 
     // Flat component list (id-referenced); `root_children` collects the ids
     // that hang under the top Column, in surface order.
+    let surface_id = format!("triton-answer-{}", uuid::Uuid::new_v4());
     let mut flat: Vec<Value> = Vec::new();
     let mut root_children: Vec<String> = Vec::new();
     // Follow-up questions the buttons re-ask, keyed by button id. GE rejects a
@@ -167,17 +172,17 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     let mut msgs = vec![
         json!({
             "version": "v0.9",
-            "createSurface": { "surfaceId": SURFACE_ID, "catalogId": BASIC_CATALOG, "sendDataModel": true },
+            "createSurface": { "surfaceId": surface_id, "catalogId": BASIC_CATALOG, "sendDataModel": true },
         }),
         json!({
             "version": "v0.9",
-            "updateComponents": { "surfaceId": SURFACE_ID, "components": flat },
+            "updateComponents": { "surfaceId": surface_id, "components": flat },
         }),
     ];
     if !data_model.is_empty() {
         msgs.push(json!({
             "version": "v0.9",
-            "updateDataModel": { "surfaceId": SURFACE_ID, "path": "/", "value": Value::Object(data_model) },
+            "updateDataModel": { "surfaceId": surface_id, "path": "/", "value": Value::Object(data_model) },
         }));
     }
     Some(msgs)
