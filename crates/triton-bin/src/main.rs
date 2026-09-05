@@ -180,8 +180,20 @@ async fn main() -> std::io::Result<()> {
             })
             .unwrap_or_default();
     let registry = Arc::new(build_registry(&static_upstream_tools));
-    let mut dispatcher =
-        Dispatcher::new(registry, settings.env.clone()).with_metrics(metrics.clone());
+    // #249: anonymous rejections on a public path (a chat webhook, an
+    // unauthenticated /v1/tools probe) coalesce into one audit line per
+    // window per protocol, so a background scanner can't evict the ring
+    // buffer an operator tails. `0` disables coalescing; a junk value
+    // falls back to the default rather than failing boot — this knob
+    // must never be the reason a gateway won't start.
+    let reject_window = std::env::var("TRITON_AUDIT_REJECT_WINDOW_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(triton_core::dispatcher::DEFAULT_REJECT_WINDOW);
+    let mut dispatcher = Dispatcher::new(registry, settings.env.clone())
+        .with_metrics(metrics.clone())
+        .with_rejection_window(reject_window);
 
     // Static-upstream OIDC signer: when a signing key + issuer + JWKS are all
     // configured, Triton mints a per-call RS256 JWT to agents (workload→workload
