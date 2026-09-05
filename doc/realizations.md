@@ -1501,3 +1501,23 @@ a trap the next developer should not have to step in.
   3.44.4; a local 3.47.1 rewrites `apps/explorer/analysis_options.yaml`
   (adding an `analyzer: exclude:` block) on `pub get`. Harmless, but it
   shows up as an unrelated modified file in the diff.
+
+- **A trust check outlives the network it was written for, and the
+  traceability table keeps saying PASS.** The Signal signald gate and the
+  WhatsApp Web bridge gate both required a `.ts.net` host outside `local`.
+  That was sound while every host was a Tailscale node authenticated by the
+  tailnet. The tailnet was decommissioned in the move to Kamal — and the
+  check kept compiling, kept passing its tests, and kept meaning something
+  entirely different: "any host under a domain we no longer control". What
+  it should have meant, and what FR-I-9 / NFR-S-6 said all along, is
+  loopback. The M-LOCALITY-1 row read `IMPL — PASS` throughout.
+
+  Two lessons. First, when a piece of infrastructure is retired, grep for
+  what *named* it — a hostname suffix in a security predicate is a
+  dependency on that infrastructure just as much as a client library is.
+  Second, prefer a check whose premise cannot silently expire: `.ts.net`
+  needs the tailnet to still exist, while `IpAddr::is_loopback` needs
+  nothing. #288 tightened both gates to a loopback IP **literal** — a DNS
+  name, `localhost` included, is refused, because the property these gates
+  need is "the plaintext never leaves this host" and a name only has that
+  property until someone changes what it resolves to.

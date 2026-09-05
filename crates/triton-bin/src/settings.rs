@@ -90,10 +90,9 @@ pub struct Settings {
     pub google_chat_api_base: String,
     /// signald daemon address override for the Signal adapter
     /// (PR 34). Empty string ⇒ use the address declared in
-    /// `adapter.yaml`. Outside `local` env this MUST be set
-    /// per NFR-S-4 egress allowlist — the binary refuses to wire
-    /// the Signal adapter when the env is non-`local` and this
-    /// override is empty.
+    /// `adapter.yaml`. Outside `local` env this MUST be set to a
+    /// `unix://` path or a loopback IP literal (FR-I-9 / NFR-S-6) —
+    /// the binary refuses to boot otherwise.
     pub signal_signald_addr: String,
     /// OpenID discovery URL for Microsoft Bot Framework JWT
     /// verification. Production stays at the canonical Microsoft
@@ -414,10 +413,11 @@ struct Cli {
     /// Address of the local WhatsApp Web bridge daemon (Baileys-style
     /// sidecar) the socket inbound connects to: `tcp://host:port` or
     /// `unix:///path`. The bridge terminates the WhatsApp Web session
-    /// inside the trust boundary; outside `local` env it MUST be a
-    /// `unix://` path or a `tcp://*.ts.net` tailnet target (NFR-S-4,
-    /// mirrors the Signal signald locality rule — loopback is allowed
-    /// only in `local`). Empty disables the adapter.
+    /// inside the trust boundary, so everything crossing this socket
+    /// is already decrypted; outside `local` env it MUST therefore be
+    /// a `unix://` path or a LOOPBACK IP literal (NFR-S-4 / C-11,
+    /// mirrors the Signal signald locality rule — #288). A DNS name is
+    /// refused, `localhost` included. Empty disables the adapter.
     #[arg(long, env = "TRITON_WHATSAPP_BRIDGE_ADDR", default_value = "")]
     whatsapp_bridge_addr: String,
 
@@ -464,9 +464,10 @@ struct Cli {
     /// signald daemon address for the Signal adapter (PR 34).
     /// Format: `tcp://<host>:<port>` or `unix:///path/to/sock`.
     /// Empty default — `adapter.yaml` carries the manifest value.
-    /// Outside `local` env the operator MUST set this per NFR-S-4
-    /// egress allowlist, otherwise the binary refuses to wire the
-    /// Signal adapter.
+    /// Outside `local` env the operator MUST set this to a `unix://`
+    /// path or a LOOPBACK IP literal (FR-I-9 / NFR-S-6 locality,
+    /// NFR-S-4 egress allowlist); anything else — a DNS name
+    /// included — refuses boot (#288).
     #[arg(long, env = "TRITON_SIGNAL_SIGNALD_ADDR", default_value = "")]
     signal_signald_addr: String,
 

@@ -689,7 +689,7 @@ is the canonical mapping; the messenger paper's
 | M-MANIFEST-1      | FR-L-4 (closed-set boot validation)                    | PAPER — PASS        |
 | M-COVERAGE-1      | FR-L-5 (degrade rule coverage)                         | PAPER — PASS        |
 | M-SECRETS-1       | FR-L-6, NFR-S-5 (Vault credentials)                    | PAPER — PASS        |
-| M-LOCALITY-1      | FR-I-9, NFR-S-6, C-11 (Signal loopback refusal)        | IMPL — PASS         |
+| M-LOCALITY-1      | FR-I-9, NFR-S-6, C-11 (Signal + WhatsApp-bridge loopback refusal) | IMPL — PASS |
 | M-LIFECYCLE-1     | NFR-P-4 (socket recovery bound)                        | IMPL — deferred     |
 | M-PARITY-MULTI-1  | FR-A-13 (pairwise cross-adapter parity)                | IMPL — PASS         |
 | M-ENROL-1         | FR-I-7 (`self_enrol` strategy)                         | IMPL — deferred     |
