@@ -384,6 +384,33 @@ async fn sender_ref_is_recorded_only_where_the_identity_was_replaced() {
     );
 }
 
+/// The residual risk of `identity.kind: upstream` is real and accepted —
+/// the resolver maps an UNSIGNED sender id to a principal, so it is an
+/// authorization table rather than an identity proof. An accepted risk
+/// that lives only in a doc comment is one nobody decided; it should be
+/// visible to whoever starts the process.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_upstream_trust_model_is_stated_at_boot() {
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&whatsapp, &agent, &agent))
+            .await;
+
+    let logs = wait_for(Duration::from_secs(5), || {
+        let joined = proc.stdout_snapshot().join("\n");
+        joined.contains("authorization table").then_some(joined)
+    });
+    assert!(
+        logs.contains("not a cryptographic identity proof"),
+        "the boot warning must say what the mode does NOT give you"
+    );
+    assert!(
+        logs.contains("resolve_identity"),
+        "and name the resolver, so an operator knows which adapter it is about"
+    );
+}
+
 fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {

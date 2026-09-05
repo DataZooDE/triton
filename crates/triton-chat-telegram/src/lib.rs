@@ -273,6 +273,23 @@ impl TelegramAdapter {
                          tool; the upstream resolver must be a distinct upstream agent"
                     )));
                 }
+                // #250: state the trust model out loud, once, at boot.
+                // `upstream` resolution is an authorization-table LOOKUP,
+                // not a verification: the resolver is keyed on the
+                // platform sender id, which arrives in the request body
+                // and is not signed by anything. Whoever can cause the
+                // platform to deliver a message bearing a chosen sender
+                // id inherits that sender's principal. That is acceptable
+                // for the deployments this mode was built for, but it
+                // should be a decision an operator sees rather than one
+                // buried in a doc comment.
+                tracing::warn!(
+                    adapter = %name,
+                    resolver_tool = %resolver_tool,
+                    "identity.kind `upstream`: the resolver maps an UNSIGNED platform sender id to a principal. \
+                     It is an authorization table, not a cryptographic identity proof — anyone able to present \
+                     a chosen sender id inherits that sender's tenant and scopes. See doc/realizations.md §7."
+                );
                 IdentityMode::Upstream { resolver_tool }
             }
             // Guarded above; unreachable for other kinds.
