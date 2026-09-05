@@ -43,6 +43,37 @@ pub const MIME: &str = "application/json+a2ui";
 /// The basic component catalog id (declared in the card and in `createSurface`).
 pub const BASIC_CATALOG: &str = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json";
 
+/// Lowercase-hex encode a string, for embedding a re-ask question in a button
+/// id (`ask-<hex>`). GE echoes the component id on click but not the event
+/// name/context, so the id is the payload channel. Hex keeps the id in a safe
+/// charset (`0-9a-f`).
+fn hex_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s.as_bytes() {
+        out.push(char::from_digit((b >> 4) as u32, 16).unwrap());
+        out.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+    }
+    out
+}
+
+/// Decode a lowercase-hex string back to UTF-8 (inverse of [`hex_encode`]).
+/// Returns `None` on odd length, a non-hex digit, or invalid UTF-8.
+pub fn hex_decode(s: &str) -> Option<String> {
+    if !s.len().is_multiple_of(2) {
+        return None;
+    }
+    let b = s.as_bytes();
+    let mut bytes = Vec::with_capacity(s.len() / 2);
+    let mut i = 0;
+    while i < b.len() {
+        let hi = (b[i] as char).to_digit(16)?;
+        let lo = (b[i + 1] as char).to_digit(16)?;
+        bytes.push((hi * 16 + lo) as u8);
+        i += 2;
+    }
+    String::from_utf8(bytes).ok()
+}
+
 // Surface id MUST be unique per card: Gemini Enterprise keeps surfaces for
 // the life of a conversation and rejects a second `createSurface` with an id
 // it already has ("Surface <id> already exists"), which would blank every
@@ -102,25 +133,24 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                     .and_then(Value::as_str)
                     .filter(|_| tool != "render_report");
                 let text_id = id("btn-text", &mut n);
-                let btn_id = id("btn", &mut n);
-                flat.push(json!({ "id": text_id, "component": "Text", "text": label }));
-                // Carry the re-ask question in the event NAME. On click Gemini
-                // Enterprise posts the action back with `name` verbatim but
-                // DROPS the context (`context:{}`) and does NOT resolve data
-                // bindings — observed on the wire — so the name is the only
-                // channel that survives. `ask:<question>` is decoded by the
-                // inbound A2UI action handler and re-dispatched as a turn;
-                // other buttons keep the tool name.
-                let event_name = match question {
-                    Some(q) => format!("ask:{q}"),
-                    None => tool.to_string(),
+                // Carry the re-ask question in the BUTTON ID. Observed on the
+                // wire: on a card click Gemini Enterprise echoes
+                // `sourceComponentId` (our id) verbatim, but OVERWRITES
+                // `event.name` (→ the agent name) and DROPS the context (`{}`).
+                // So the component id is the only channel that survives. Encode
+                // the question as `ask-<hex>`; the inbound A2UI action handler
+                // decodes `sourceComponentId` and re-dispatches it as a turn.
+                let btn_id = match question {
+                    Some(q) => format!("ask-{}", hex_encode(q)),
+                    None => id("btn", &mut n),
                 };
+                flat.push(json!({ "id": text_id, "component": "Text", "text": label }));
                 flat.push(json!({
                     "id": btn_id,
                     "component": "Button",
                     "child": text_id,
                     "variant": if c.get("primary").and_then(Value::as_bool) == Some(true) { "primary" } else { "default" },
-                    "action": { "event": { "name": event_name, "context": {} } },
+                    "action": { "event": { "name": tool, "context": {} } },
                 }));
                 root_children.push(btn_id);
             }
@@ -233,27 +263,22 @@ mod tests {
             .expect("image");
         assert_eq!(img["url"], "https://agent-lab.data-zoo.de/report/img/tok");
 
-        // The follow-up button re-invokes its tool via a server event, and its
-        // label rides as a child Text (never inline).
+        // The re-ask button carries the question in its ID as `ask-<hex>` (GE
+        // echoes sourceComponentId on click but overwrites name / drops
+        // context), and its label rides as a child Text.
         let btn = comps
             .iter()
             .find(|c| {
                 c["component"] == "Button"
-                    && c["action"]["event"]["name"]
-                        .as_str()
-                        .map(|n| n.starts_with("ask:"))
-                        == Some(true)
+                    && c["id"].as_str().map(|i| i.starts_with("ask-")) == Some(true)
             })
-            .expect("event button");
-        // The re-ask question rides the event NAME as `ask:<question>` (GE
-        // drops the action context on click but echoes the name verbatim).
-        assert_eq!(btn["action"]["event"]["name"], "ask:What does Initech buy?");
-        assert!(
-            btn["action"]["event"]["context"]
-                .as_object()
-                .unwrap()
-                .is_empty()
+            .expect("re-ask button");
+        let bid = btn["id"].as_str().unwrap();
+        assert_eq!(
+            hex_decode(bid.strip_prefix("ask-").unwrap()).as_deref(),
+            Some("What does Initech buy?"),
         );
+        assert_eq!(btn["action"]["event"]["name"], "assistant");
         let btn_text = find(comps, btn["child"].as_str().unwrap());
         assert_eq!(btn_text["text"], "What does Initech buy?");
 
