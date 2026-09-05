@@ -1437,6 +1437,29 @@ a trap the next developer should not have to step in.
   AuditEntry` and have `emit` serialise that, making the rule an
   invariant of the emitter which new sites inherit for free.
 
+- **An invariant a type documents should hold IN the type (#250,
+  2026-09-05).** `PerTenantBuckets` promised "the cardinality is bounded
+  by the manifest, not by inbound traffic". True for `sender_table`,
+  where tenants are enumerated at boot; false the moment FR-I-7
+  `upstream` let an out-of-process resolver name the tenant per request.
+  Validating at the resolver boundary keeps hostile values out, but a
+  merely buggy resolver or a large tenant estate still grows the map for
+  the process lifetime. When a doc-comment states a bound, enforce it in
+  the type rather than trusting every present and future caller.
+
+- **Eviction can be a reset, and the obvious reasoning about who gets
+  evicted is backwards (#250, 2026-09-05).** Capping that map needs an
+  eviction policy, and least-recently-used looks safe — "an attacker
+  flooding the map evicts themselves first". Exactly wrong: a caller
+  naming a FRESH key each time is never the least recently used, so the
+  flood evicts the throttled victim, who then returns with a full
+  bucket. A rate limiter's state IS the thing being protected, so evict
+  only entries that have refilled to capacity (nothing owed), and when
+  none qualify refuse the newcomer rather than make room. The first
+  version of that doc-comment asserted the false claim confidently; the
+  test caught it, because it was written to assert the property rather
+  than the implementation.
+
 ---
 
 ## 8. CI/CD build-time traps (2026-08-30)
