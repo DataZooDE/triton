@@ -217,8 +217,29 @@ impl OidcVerifier {
         validation.set_audience(&[&self.config.audience]);
         validation.set_required_spec_claims(&["exp", "iss", "aud"]);
 
-        let token = decode::<TokenClaims>(raw_token, &key, &validation)
-            .map_err(|e| TritonError::Auth(format!("JWT verification failed: {e}")))?;
+        let token = decode::<TokenClaims>(raw_token, &key, &validation).map_err(|e| {
+            // DIAGNOSTIC: on failure, decode the (unverified) timing claims so an
+            // ExpiredSignature can be quantified — a static pasted JWT is expired
+            // by hours; a skew/short-lifetime mint by seconds. iss/aud/exp/iat are
+            // not secret. Attacker-controlled, logged only, trusted for nothing.
+            use base64::Engine as _;
+            if let Some(payload) = raw_token.split('.').nth(1)
+                && let Ok(bytes) =
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload)
+                && let Ok(j) = serde_json::from_slice::<serde_json::Value>(&bytes)
+            {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                println!(
+                    "A2A_AUTH_FAIL err={e} now={now} exp={:?} iat={:?} iss={:?} aud={:?} appid={:?} azp={:?}",
+                    j.get("exp"), j.get("iat"), j.get("iss"),
+                    j.get("aud"), j.get("appid"), j.get("azp"),
+                );
+            }
+            TritonError::Auth(format!("JWT verification failed: {e}"))
+        })?;
         let claims = token.claims;
         let scopes = claims.scopes();
         let groups = claims.groups();
