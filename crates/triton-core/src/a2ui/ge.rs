@@ -93,16 +93,11 @@ fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, Str
 pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<String> {
     let n: usize = source_component_id.rsplit('-').next()?.parse().ok()?;
     let store = SURFACE_QUESTIONS.lock().ok()?;
-    let entry = store.iter().rev().find(|(sid, _)| sid == surface_id);
-    // DIAGNOSTIC: show the lookup vs what we stored, to reconcile GE's actual
-    // btn-N against our predicted ids.
-    println!(
-        "A2UI_QLOOKUP surface={surface_id} comp={source_component_id} n={n} found_surface={} keys={:?} stored_surfaces={}",
-        entry.is_some(),
-        entry.map(|(_, m)| m.keys().copied().collect::<Vec<_>>()),
-        store.len()
-    );
-    entry.and_then(|(_, m)| m.get(&n).cloned())
+    store
+        .iter()
+        .rev()
+        .find(|(sid, _)| sid == surface_id)
+        .and_then(|(_, m)| m.get(&n).cloned())
 }
 
 /// Build the A2UI v0.9 message array from a raw surface value
@@ -153,9 +148,12 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                 let tool = c.get("tool").and_then(Value::as_str).unwrap_or_default();
                 // A re-ask follow-up carries `args.message` (the question);
                 // report/other buttons don't (`render_report` opens a report).
+                // Re-ask follow-ups carry the question in `args.question`
+                // (agent-core `AssistantTool`); accept `args.message` too for
+                // other producers. `render_report` opens a report, not a re-ask.
                 let question = c
                     .get("args")
-                    .and_then(|a| a.get("message"))
+                    .and_then(|a| a.get("question").or_else(|| a.get("message")))
                     .and_then(Value::as_str)
                     .filter(|_| tool != "render_report");
                 let text_id = id("btn-text", &mut n);
@@ -266,7 +264,7 @@ mod tests {
         let result = json!({ "surface": { "components": [
             { "kind": "text", "value": "Initech leads at $2,500.75." },
             { "kind": "report", "report_id": "sales", "image_url": "https://agent-lab.data-zoo.de/report/img/tok", "title": "Sales" },
-            { "kind": "button", "label": "What does Initech buy?", "tool": "assistant", "args": { "message": "What does Initech buy?" } },
+            { "kind": "button", "label": "What does Initech buy?", "tool": "assistant", "args": { "question": "What does Initech buy?" } },
             { "kind": "sources", "items": [
                 { "label": "sales-by-customer", "resource": "https://agent-lab.data-zoo.de/docs/tok" },
                 { "label": "ui-only", "resource": "ui://peacock/x" }
