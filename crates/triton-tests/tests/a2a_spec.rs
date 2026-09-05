@@ -36,6 +36,18 @@ impl Tool for AssistantTool {
         if msg == "boom" {
             return Err(TritonError::Validation("tool refused".into()));
         }
+        if msg == "rich" {
+            // A component surface (like the embedded agent's), so the A2UI
+            // v0.9 DataPart path is exercised: prose + a chart image + a
+            // follow-up button.
+            return Ok(json!({ "surface": { "components": [
+                { "kind": "text", "value": "Initech leads at $2,500.75." },
+                { "kind": "report", "report_id": "sales",
+                  "image_url": "https://agent-lab.data-zoo.de/report/img/tok" },
+                { "kind": "button", "label": "What does Initech buy?",
+                  "tool": "assistant", "args": { "message": "detail" } }
+            ] } }));
+        }
         Ok(json!({ "surface": { "text": format!("you said: {msg}") } }))
     }
 }
@@ -146,6 +158,16 @@ async fn the_agent_card_is_public_and_describes_the_endpoint() {
 
         // And it names the credential to bring.
         assert_eq!(card["securitySchemes"]["bearer"]["scheme"], "bearer");
+        // A2UI v0.9 is advertised as an A2A extension so Gemini Enterprise
+        // activates it and renders the card/chart/buttons.
+        let exts = card["capabilities"]["extensions"]
+            .as_array()
+            .expect("extensions");
+        assert!(
+            exts.iter()
+                .any(|e| e["uri"] == "https://a2ui.org/a2a-extension/a2ui/v0.9"),
+            "A2UI extension must be advertised: {card}"
+        );
         let desc = card["securitySchemes"]["bearer"]["description"]
             .as_str()
             .unwrap();
@@ -562,4 +584,42 @@ async fn message_stream_emits_task_artifact_final() {
             "every stream frame must carry the same contextId; got: {f}"
         );
     }
+
+    // A rich (component) surface additionally carries an A2UI v0.9 DataPart in
+    // its final artifact — what makes Gemini Enterprise render card/chart/
+    // buttons instead of plain text.
+    let rich = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 9, "method": "message/stream",
+            "params": { "message": {
+                "kind": "message", "role": "user", "messageId": "m-r",
+                "parts": [{ "kind": "text", "text": "rich" }],
+            } },
+        }))
+        .send()
+        .await
+        .expect("POST rich stream");
+    let rbody = rich.text().await.expect("rich stream body");
+    let rframes: Vec<Value> = rbody
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .filter_map(|d| serde_json::from_str(d).ok())
+        .collect();
+    let data_part = rframes
+        .iter()
+        .filter_map(|f| f["result"]["artifact"]["parts"].as_array())
+        .flatten()
+        .find(|p| p["kind"] == "data")
+        .expect("an A2UI DataPart in the final artifact");
+    assert_eq!(data_part["metadata"]["mimeType"], "application/a2ui+json");
+    let msgs = data_part["data"].as_array().expect("a2ui messages");
+    assert_eq!(msgs[0]["version"], "v0.9");
+    let comps = msgs[1]["updateComponents"]["components"]
+        .as_array()
+        .expect("components");
+    assert!(comps.iter().any(|c| c["component"] == "Card"));
+    assert!(comps.iter().any(|c| c["component"] == "Image"));
+    assert!(comps.iter().any(|c| c["component"] == "Button"));
 }
