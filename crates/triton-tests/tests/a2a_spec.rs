@@ -547,4 +547,19 @@ async fn message_stream_emits_task_artifact_final() {
         assert_eq!(f["jsonrpc"], "2.0");
         assert_eq!(f["id"], 7);
     }
+    // A2A 0.3.0 requires `contextId` on Task / status-update / artifact-update.
+    // Gemini Enterprise's a2a-python SDK rejects the WHOLE stream if any frame
+    // omits it (14 pydantic errors off one contextId-less Task). Assert every
+    // frame carries a non-empty contextId, and it is the SAME across the turn.
+    let ctx = frames[0]["result"]["contextId"]
+        .as_str()
+        .expect("initial task must carry a contextId");
+    assert!(!ctx.is_empty(), "contextId must not be empty");
+    for f in &frames {
+        assert_eq!(
+            f["result"]["contextId"].as_str(),
+            Some(ctx),
+            "every stream frame must carry the same contextId; got: {f}"
+        );
+    }
 }
