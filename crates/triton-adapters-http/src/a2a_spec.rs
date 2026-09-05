@@ -305,24 +305,6 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
         .map(|h| h.contains(triton_core::a2ui::ge::EXTENSION_URI))
         .unwrap_or(false);
 
-    // DIAGNOSTIC (A2UI button round-trip): one stdout line with the raw
-    // inbound body (triton's audit uses stdout too, so this is captured in
-    // `kubectl logs`). Lets us see EXACTLY what Gemini Enterprise posts on a
-    // card Button click, to make follow-up buttons functional.
-    {
-        use std::io::Write as _;
-        let mut out = std::io::stdout().lock();
-        let _ = writeln!(
-            out,
-            "A2A_INBOUND_BODY {}",
-            String::from_utf8_lossy(&body)
-                .chars()
-                .take(4000)
-                .collect::<String>()
-        );
-        let _ = out.flush();
-    }
-
     let req: RpcRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return rpc_error(&Value::Null, PARSE_ERROR, format!("invalid JSON: {e}")),
@@ -407,11 +389,26 @@ fn a2ui_action_question(parts: &[Value]) -> Option<String> {
             obj => vec![obj],
         };
         for m in msgs {
-            if let Some(q) = m
-                .get("action")
-                .and_then(|a| a.get("context"))
+            let Some(action) = m.get("action") else {
+                continue;
+            };
+            // Preferred: a resolved `context.question` (if GE ever forwards
+            // context). Observed reality: GE posts `context:{}` and echoes the
+            // event `name` verbatim, so the re-ask question rides the name as
+            // `ask:<question>` (see triton_core::a2ui::ge). Decode either.
+            if let Some(q) = action
+                .get("context")
                 .and_then(|c| c.get("question"))
                 .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(q.to_string());
+            }
+            if let Some(q) = action
+                .get("name")
+                .and_then(Value::as_str)
+                .and_then(|n| n.strip_prefix("ask:"))
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
