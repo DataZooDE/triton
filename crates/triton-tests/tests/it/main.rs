@@ -162,10 +162,10 @@ mod twilio_whatsapp_button_reply;
 mod twilio_whatsapp_status_callback;
 #[path = "../twilio_whatsapp_template.rs"]
 mod twilio_whatsapp_template;
-#[path = "../upstream_identity_hardening.rs"]
-mod upstream_identity_hardening;
 #[path = "../upstream_contract.rs"]
 mod upstream_contract;
+#[path = "../upstream_identity_hardening.rs"]
+mod upstream_identity_hardening;
 #[path = "../upstream_listing.rs"]
 mod upstream_listing;
 #[path = "../version.rs"]
