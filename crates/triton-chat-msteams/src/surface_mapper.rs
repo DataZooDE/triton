@@ -381,6 +381,11 @@ const ADAPTIVE_CARD_SCHEMA: &str = "http://adaptivecards.io/schemas/adaptive-car
 /// card — a downgrade on exactly the non-Teams surfaces this ingress
 /// serves (triton#247 crew review F2).
 const ADAPTIVE_CARD_VERSION: &str = "1.4";
+/// Bumped floor used ONLY on cards that carry a native `Chart.*` element, which
+/// requires Adaptive Card 1.5. Paired with a `fallbackText` so pre-1.5 hosts
+/// degrade to readable prose, and with the chart element's own `fallback` Image
+/// so 1.5 hosts without chart support show the PNG.
+const CHART_CARD_VERSION: &str = "1.5";
 
 /// One form field to render as an Adaptive Card `Input.*` widget.
 #[derive(Debug, Clone)]
@@ -588,11 +593,95 @@ fn input_widget(field: &FormFieldSpec) -> Value {
 /// `chrome` is peacock's resolved theme (`get_theme`); a branded one
 /// leads the body with a header band. [`CardChrome::default`] renders
 /// byte-identically to the pre-theming card.
+/// Map peacock's Vega-Lite `spec` (inline `data.values` + `encoding`) to a
+/// Teams native Adaptive Card chart element — `Chart.VerticalBar` (single
+/// series) or `Chart.VerticalBar.Grouped` (an `encoding.color` series). Carries
+/// a `fallback` Image (the rasterized PNG) so hosts without chart support still
+/// show the chart. `None` when the spec has no usable rows/encoding.
+pub fn chart_from_vega(spec: &Value, fallback_image_url: Option<&str>) -> Option<Value> {
+    let rows = spec.get("data")?.get("values")?.as_array()?;
+    if rows.is_empty() {
+        return None;
+    }
+    let enc = spec.get("encoding")?;
+    let xf = enc.get("x")?.get("field")?.as_str()?;
+    let yf = enc.get("y")?.get("field")?.as_str()?;
+    let as_label = |v: &Value| match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    };
+    let as_num = |v: &Value| v.as_f64();
+    let title = spec.get("title").and_then(Value::as_str).unwrap_or("");
+    let fallback = fallback_image_url
+        .map(|u| json!({ "type": "Image", "url": u, "altText": "chart" }))
+        .unwrap_or_else(|| json!("drop"));
+    let color_field = enc
+        .get("color")
+        .and_then(|c| c.get("field"))
+        .and_then(Value::as_str);
+
+    if let Some(cf) = color_field {
+        // Grouped: one series per distinct color value, insertion-ordered.
+        let mut series: Vec<(String, Vec<Value>)> = Vec::new();
+        for r in rows {
+            let (Some(leg), Some(x), Some(y)) = (
+                r.get(cf).and_then(&as_label),
+                r.get(xf).and_then(&as_label),
+                r.get(yf).and_then(&as_num),
+            ) else {
+                continue;
+            };
+            let entry = match series.iter_mut().find(|(k, _)| *k == leg) {
+                Some(e) => &mut e.1,
+                None => {
+                    series.push((leg, Vec::new()));
+                    &mut series.last_mut().unwrap().1
+                }
+            };
+            entry.push(json!({ "x": x, "y": y }));
+        }
+        if series.is_empty() {
+            return None;
+        }
+        let data: Vec<Value> = series
+            .into_iter()
+            .map(|(legend, values)| json!({ "legend": legend, "values": values }))
+            .collect();
+        Some(json!({
+            "type": "Chart.VerticalBar.Grouped",
+            "title": title,
+            "colorSet": "categorical",
+            "data": data,
+            "fallback": fallback,
+        }))
+    } else {
+        let data: Vec<Value> = rows
+            .iter()
+            .filter_map(|r| {
+                Some(json!({ "x": r.get(xf).and_then(&as_label)?, "y": r.get(yf).and_then(&as_num)? }))
+            })
+            .collect();
+        if data.is_empty() {
+            return None;
+        }
+        Some(json!({
+            "type": "Chart.VerticalBar",
+            "title": title,
+            "colorSet": "categorical",
+            "data": data,
+            "fallback": fallback,
+        }))
+    }
+}
+
 pub fn build_adaptive_card(
     text: &str,
     dashboard: Option<&DashboardData>,
     signed: &[(InteractiveSpec, String)],
     image_url: Option<&str>,
+    chart: Option<&Value>,
     chrome: &CardChrome,
 ) -> Value {
     let mut body: Vec<Value> = Vec::new();
@@ -600,9 +689,12 @@ pub fn build_adaptive_card(
     if !text.is_empty() {
         body.push(json!({ "type": "TextBlock", "text": text, "wrap": true }));
     }
-    // The rendered chart (inline report / upstream PNG), served from the
-    // adapter's signed image route — Teams fetches it by URL (#635).
-    if let Some(url) = image_url {
+    // Chart: a NATIVE interactive Adaptive Card chart (Teams) when we have a
+    // Vega spec to map; it carries a `fallback` Image so chart-incapable hosts
+    // still show the rasterized PNG. Otherwise the plain signed-image PNG.
+    if let Some(chart) = chart {
+        body.push(chart.clone());
+    } else if let Some(url) = image_url {
         body.push(json!({ "type": "Image", "url": url, "altText": "chart" }));
     }
     if let Some((title, tiles)) = dashboard {
@@ -673,12 +765,23 @@ pub fn build_adaptive_card(
         }
     }
 
+    // Native charts need AC 1.5; bump ONLY when a chart is present, and set a
+    // readable `fallbackText` so a host capped below 1.5 shows the prose rather
+    // than nothing. Chartless cards stay at the 1.4 floor (unchanged for every
+    // other surface this ingress serves).
+    let (version, chart_present) = match chart {
+        Some(_) => (CHART_CARD_VERSION, true),
+        None => (ADAPTIVE_CARD_VERSION, false),
+    };
     let mut card = json!({
         "type": "AdaptiveCard",
         "$schema": ADAPTIVE_CARD_SCHEMA,
-        "version": ADAPTIVE_CARD_VERSION,
+        "version": version,
         "body": body,
     });
+    if chart_present && !text.is_empty() {
+        card["fallbackText"] = json!(text);
+    }
     if !actions.is_empty() {
         card["actions"] = Value::Array(actions);
     }
@@ -843,8 +946,14 @@ mod tests {
             },
             "TOKEN.MAC".to_string(),
         )];
-        let card =
-            build_adaptive_card("Hello, alice.", None, &signed, None, &CardChrome::default());
+        let card = build_adaptive_card(
+            "Hello, alice.",
+            None,
+            &signed,
+            None,
+            None,
+            &CardChrome::default(),
+        );
         assert_eq!(card["type"], "AdaptiveCard");
         // Text lands in a body TextBlock.
         assert_eq!(card["body"][0]["type"], "TextBlock");
@@ -892,7 +1001,7 @@ mod tests {
                 "FORM.MAC".to_string(),
             ),
         ];
-        let card = build_adaptive_card("", None, &signed, None, &CardChrome::default());
+        let card = build_adaptive_card("", None, &signed, None, None, &CardChrome::default());
         let body = card["body"].as_array().expect("body array");
         // Dropdown named after args_key.
         let choiceset = body
@@ -936,7 +1045,14 @@ mod tests {
         let dash = dashboard_from_result(&result).expect("dashboard lifted");
         assert_eq!(dash.0, "Stock at risk (€)");
         assert_eq!(dash.1.len(), 2);
-        let card = build_adaptive_card("top risk", Some(&dash), &[], None, &CardChrome::default());
+        let card = build_adaptive_card(
+            "top risk",
+            Some(&dash),
+            &[],
+            None,
+            None,
+            &CardChrome::default(),
+        );
         let body = card["body"].as_array().expect("body");
         let factset = body
             .iter()
@@ -950,7 +1066,7 @@ mod tests {
 
     #[test]
     fn card_activity_and_invoke_response_shapes() {
-        let card = build_adaptive_card("hi", None, &[], None, &CardChrome::default());
+        let card = build_adaptive_card("hi", None, &[], None, None, &CardChrome::default());
         let activity = build_card_activity_body("28:bot", "a:conv", "29:user", card.clone());
         assert_eq!(activity["type"], "message");
         assert_eq!(
@@ -1013,6 +1129,7 @@ mod tests {
             None,
             &[],
             Some("https://x/img/t"),
+            None,
             &CardChrome::default(),
         );
         let imgs: Vec<_> = card["body"]
@@ -1053,7 +1170,7 @@ mod tests {
             "brand_color": "#0f6cbd", "accent": "#22d3c5", "css": ":root {}",
         }));
         assert_eq!(chrome, CardChrome::default());
-        let card = build_adaptive_card("hi", None, &[], None, &chrome);
+        let card = build_adaptive_card("hi", None, &[], None, None, &chrome);
         assert_eq!(card["body"][0]["type"], "TextBlock");
         assert_eq!(card["body"][0]["text"], "hi");
     }
@@ -1068,7 +1185,7 @@ mod tests {
         assert_eq!(chrome.title, None, "empty string reads as unset");
         assert_eq!(chrome.logo_style, LogoStyle::Avatar, "junk style defaults");
         // A logo with no name still brands: the icon alone, no title row.
-        let card = build_adaptive_card("hi", None, &[], None, &chrome);
+        let card = build_adaptive_card("hi", None, &[], None, None, &chrome);
         let header = &card["body"][0];
         assert_eq!(header["type"], "Container");
         assert_eq!(header["items"][0]["type"], "Image");
@@ -1079,7 +1196,7 @@ mod tests {
     #[test]
     fn title_only_theme_renders_a_text_header() {
         let chrome = CardChrome::from_get_theme(&json!({ "title": "DataZoo Sales" }));
-        let card = build_adaptive_card("hi", None, &[], None, &chrome);
+        let card = build_adaptive_card("hi", None, &[], None, None, &chrome);
         let header = &card["body"][0];
         assert_eq!(header["type"], "Container");
         assert_eq!(header["style"], "emphasis");
@@ -1097,9 +1214,72 @@ mod tests {
         let chrome = CardChrome::from_get_theme(&json!({
             "title": "DataZoo Sales", "logo_style": "banner",
         }));
-        let card = build_adaptive_card("", None, &[], Some("https://x/img/t"), &chrome);
+        let card = build_adaptive_card("", None, &[], Some("https://x/img/t"), None, &chrome);
         assert_eq!(card["body"][0]["type"], "Container");
         assert_eq!(card["body"][1]["type"], "Image");
         assert_eq!(card["body"][1]["url"], "https://x/img/t");
+    }
+
+    #[test]
+    fn vega_maps_to_native_chart_with_image_fallback() {
+        // Single series → Chart.VerticalBar.
+        let single = json!({
+            "mark": "bar", "title": "Supplier reliability",
+            "data": { "values": [
+                { "s": "Nordwind", "pct": 88.9 },
+                { "s": "Baltic", "pct": 55.6 },
+            ] },
+            "encoding": { "x": { "field": "s" }, "y": { "field": "pct" } },
+        });
+        let c = chart_from_vega(&single, Some("https://x/img/t")).expect("chart");
+        assert_eq!(c["type"], "Chart.VerticalBar");
+        assert_eq!(c["data"][0]["x"], "Nordwind");
+        assert_eq!(c["data"][0]["y"], 88.9);
+        assert_eq!(c["fallback"]["type"], "Image"); // PNG fallback for non-chart hosts
+        assert_eq!(c["fallback"]["url"], "https://x/img/t");
+
+        // Multi-series (color) → grouped.
+        let multi = json!({
+            "mark": "bar",
+            "data": { "values": [
+                { "cust": "Initech", "cat": "widgets", "rev": 1500 },
+                { "cust": "Initech", "cat": "services", "rev": 600 },
+                { "cust": "Stark", "cat": "widgets", "rev": 1050 },
+            ] },
+            "encoding": { "x": { "field": "cust" }, "y": { "field": "rev" },
+                          "color": { "field": "cat" } },
+        });
+        let g = chart_from_vega(&multi, None).expect("grouped chart");
+        assert_eq!(g["type"], "Chart.VerticalBar.Grouped");
+        let legends: Vec<&str> = g["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["legend"].as_str().unwrap())
+            .collect();
+        assert_eq!(legends, vec!["widgets", "services"]);
+        assert_eq!(g["data"][0]["values"][0]["x"], "Initech");
+        assert_eq!(g["fallback"], "drop"); // no image → drop
+
+        // A card with a chart declares AC 1.5 + fallbackText; chartless stays 1.4.
+        let card = build_adaptive_card(
+            "prose",
+            None,
+            &[],
+            Some("u"),
+            Some(&c),
+            &CardChrome::default(),
+        );
+        assert_eq!(card["version"], "1.5");
+        assert_eq!(card["fallbackText"], "prose");
+        assert!(
+            card["body"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["type"] == "Chart.VerticalBar")
+        );
+        let plain = build_adaptive_card("p", None, &[], Some("u"), None, &CardChrome::default());
+        assert_eq!(plain["version"], "1.4");
     }
 }
