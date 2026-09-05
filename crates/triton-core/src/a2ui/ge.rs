@@ -140,6 +140,10 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
             "text" | "narration" => {}
             // Chart: the embedded agent stamps a signed public `image_url` on
             // the report; render it as a Material image (rounded, contained).
+            // MaterialImage needs an explicit size or it collapses to zero
+            // height (unlike the basic `Image`) — give it full width and a
+            // `contain` aspect ratio matching the peacock chart (≈16:9) so it
+            // scales responsively without cropping.
             "report" => {
                 if let Some(url) = c.get("image_url").and_then(Value::as_str) {
                     let cid = id("chart", &mut n);
@@ -148,6 +152,8 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                         "component": "MaterialImage",
                         "url": url,
                         "fit": "contain",
+                        "width": "100%",
+                        "aspectRatio": "16/9",
                         "roundedCorners": true,
                     });
                     if let Some(t) = c.get("title").and_then(Value::as_str) {
