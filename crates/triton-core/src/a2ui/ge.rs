@@ -43,15 +43,6 @@ pub const MIME: &str = "application/json+a2ui";
 /// The basic component catalog id (declared in the card and in `createSurface`).
 pub const BASIC_CATALOG: &str = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json";
 
-/// How many components Gemini Enterprise numbers BEFORE the ones in our
-/// `updateComponents` array. Observed on the wire: a button at 1-based array
-/// index `i` comes back on click as `sourceComponentId = "btn-(i+2)"` — GE
-/// renders `root` and `root-col` first (they occupy 1 and 2), so our array is
-/// offset by 2. This lets us PREDICT the id GE will echo for each button and
-/// map it back to the re-ask question (GE strips our name/context/id, so the
-/// predicted-id-per-surface map below is the only reliable channel).
-const GE_ID_OFFSET: usize = 2;
-
 /// Fixed surfaceId prefix; a v4 UUID follows. The id is kept SHORT
 /// (`triton-answer-<uuid>`, 50 chars) on purpose: Gemini Enterprise TRUNCATES
 /// the surfaceId to the uuid on a button click (observed on the wire — a longer
@@ -59,10 +50,10 @@ const GE_ID_OFFSET: usize = 2;
 /// survive, so it keys the per-card re-ask table below.
 const SURFACE_PREFIX: &str = "triton-answer-";
 
-/// Bounded, process-wide map: `surfaceId` → { predicted GE button id → re-ask
-/// question }. GE strips name/context and renumbers ids on click, and truncates
-/// the surfaceId to the uuid — so the ONLY recoverable pair is
-/// `(surfaceId-uuid, GE btn-N)`, which this table maps back to the question.
+/// Bounded, process-wide map: `surfaceId` → { button id number → re-ask
+/// question }. GE strips name/context on click and truncates the surfaceId to
+/// the uuid, but PRESERVES the component id — so the recoverable pair is
+/// `(surfaceId-uuid, our btn-N)`, which this table maps back to the question.
 ///
 /// This is process-local, so `dz-agent-template` runs a single replica in lab
 /// (values-lab `replicaCount: 1`); a multi-replica deployment would need a
@@ -78,10 +69,6 @@ fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, Str
         return;
     }
     if let Ok(mut store) = SURFACE_QUESTIONS.lock() {
-        println!(
-            "A2UI_STORE_WRITE surface={surface_id} keys={:?}",
-            qmap.keys().copied().collect::<Vec<_>>()
-        );
         store.push((surface_id.to_string(), qmap));
         let overflow = store.len().saturating_sub(MAX_SURFACES);
         if overflow > 0 {
@@ -97,14 +84,7 @@ fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, Str
 pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<String> {
     let n: usize = source_component_id.rsplit('-').next()?.parse().ok()?;
     let store = SURFACE_QUESTIONS.lock().ok()?;
-    let all: Vec<&String> = store.iter().map(|(s, _)| s).collect();
     let hit = store.iter().rev().find(|(sid, _)| sid == surface_id);
-    println!(
-        "A2UI_STORE_READ surface={surface_id} comp={source_component_id} n={n} found={} size={} all={:?}",
-        hit.is_some(),
-        store.len(),
-        all
-    );
     hit.and_then(|(_, m)| m.get(&n).cloned())
 }
 
@@ -166,16 +146,17 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                     .filter(|_| tool != "render_report");
                 let text_id = id("btn-text", &mut n);
                 let btn_id = id("btn", &mut n);
+                // GE strips our event name/context and truncates the surfaceId to
+                // its uuid on click, but it PRESERVES the component id: a click
+                // echoes `sourceComponentId` equal to the Button's own `id`
+                // (`btn-N`, verified on the wire — clicking our `btn-5` returns
+                // `btn-5`). `n` here is exactly that N. Record `N → question` so
+                // the inbound handler maps a click back to its re-ask
+                // (report/other buttons carry no question and are not recorded).
+                let btn_num = n;
                 flat.push(json!({ "id": text_id, "component": "Text", "text": label }));
-                // GE strips our event name/context and RENUMBERS component ids
-                // on click, so no per-button payload survives directly. But it
-                // echoes a deterministic `sourceComponentId` we can PREDICT: the
-                // button's 1-based index in this array + GE_ID_OFFSET. Record
-                // `predicted_ge_id → question` so the inbound handler can map a
-                // click back to the re-ask (report/other buttons carry none).
-                let predicted_ge_id = flat.len() + 1 + GE_ID_OFFSET;
                 if let Some(q) = question {
-                    qmap.insert(predicted_ge_id, q.to_string());
+                    qmap.insert(btn_num, q.to_string());
                 }
                 flat.push(json!({
                     "id": btn_id,
@@ -301,21 +282,22 @@ mod tests {
         assert_eq!(img["url"], "https://agent-lab.data-zoo.de/report/img/tok");
 
         // The re-ask button renders with its label as a child Text. GE strips
-        // our name/context and renumbers ids on click, so the question is
-        // recovered via the per-surface table keyed by the PREDICTED GE id
-        // (`surfaceId` + `btn-<predicted>`), not by anything on the button.
+        // our name/context on click but PRESERVES the component id, so the
+        // question is recovered via the per-surface table keyed by the button's
+        // own id number (`surfaceId` + `btn-N`).
         let btn = comps
             .iter()
             .find(|c| c["component"] == "Button" && c["action"]["event"]["name"] == "assistant")
             .expect("re-ask button");
         let btn_text = find(comps, btn["child"].as_str().unwrap());
         assert_eq!(btn_text["text"], "What does Initech buy?");
-        // The predicted GE id resolves to the question via `question_for`.
-        // This surface: chart=1, btn-text=2, button=3 (1-based array index),
-        // so GE echoes btn-(3+GE_ID_OFFSET) = btn-5 on click.
+        // GE echoes the Button's own id on click. This surface: chart=1,
+        // btn-text=2, button=3 — so `btn-3` resolves to the question, matching
+        // the id stamped on the Button component.
         let sid = msgs[0]["createSurface"]["surfaceId"].as_str().unwrap();
+        assert_eq!(btn["id"], "btn-3");
         assert_eq!(
-            question_for(sid, "btn-5").as_deref(),
+            question_for(sid, "btn-3").as_deref(),
             Some("What does Initech buy?"),
         );
         // A wrong id / unknown surface resolves to nothing.
