@@ -731,15 +731,23 @@ async fn message_stream(
         .into_response()
 }
 
-/// Deep-search a value for a peacock `{"kind":"vega","spec":{…}}` component and
-/// return its Vega-Lite `spec`. `render_report`'s result envelope varies (the
-/// spec can sit under `structuredContent.result.surface.components`), so search
-/// recursively — the same shape as googlechat's `png_base64` finder.
+/// Deep-search a `render_report` result for a Vega-Lite chart spec. Peacock
+/// exposes the composed specs at `_meta.vega_specs` (an array); older/other
+/// shapes carry a `{"kind":"vega","spec":{…}}` component. Search recursively for
+/// either — the same deep-search shape as googlechat's `png_base64` finder.
 fn find_vega_spec(v: &Value) -> Option<Value> {
     match v {
         Value::Object(m) => {
             if m.get("kind").and_then(Value::as_str) == Some("vega")
                 && let Some(spec) = m.get("spec").filter(|s| s.is_object())
+            {
+                return Some(spec.clone());
+            }
+            // Peacock's `_meta.vega_specs`: first non-empty object spec.
+            if let Some(spec) = m
+                .get("vega_specs")
+                .and_then(Value::as_array)
+                .and_then(|a| a.iter().find(|s| s.is_object()))
             {
                 return Some(spec.clone());
             }
@@ -798,17 +806,7 @@ async fn inject_report_vega(
     else {
         return;
     };
-    let spec = find_vega_spec(&rep.result);
-    // DIAGNOSTIC: quantify why a chart did/didn't become interactive.
-    println!(
-        "VEGA_EXPAND report={report_id} found={} top_keys={:?} has_vega_substr={}",
-        spec.is_some(),
-        rep.result
-            .as_object()
-            .map(|o| o.keys().cloned().collect::<Vec<_>>()),
-        rep.result.to_string().contains("\"vega\"")
-    );
-    let Some(spec) = spec else {
+    let Some(spec) = find_vega_spec(&rep.result) else {
         return;
     };
     if let Some(comp) = result
