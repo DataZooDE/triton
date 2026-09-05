@@ -1122,9 +1122,11 @@ async fn dispatch_and_post_reply(
                 &sender.from_id,
                 &dispatch.result,
                 image_hint,
+                &principal_for_post,
                 &chrome,
                 &sender.tenant,
-            );
+            )
+            .await;
             post_reply(
                 adapter,
                 verified,
@@ -1175,14 +1177,25 @@ async fn dispatch_and_refresh_card(
             let image_url =
                 image_hint.or_else(|| reply_image_url(adapter, &dispatch.result, &sender.tenant));
             let chrome = fetch_chrome(adapter, &principal_for_post).await;
-            let response_body =
-                match render_card_content(adapter, &dispatch.result, image_url.as_deref(), &chrome)
-                {
-                    Some(card) => surface_mapper::invoke_card_response(card),
-                    None => surface_mapper::invoke_message_response(
-                        &text_reply_message(&dispatch.result).text,
-                    ),
-                };
+            let chart = report_vega_chart(
+                adapter,
+                &dispatch.result,
+                &principal_for_post,
+                image_url.as_deref(),
+            )
+            .await;
+            let response_body = match render_card_content(
+                adapter,
+                &dispatch.result,
+                image_url.as_deref(),
+                chart.as_ref(),
+                &chrome,
+            ) {
+                Some(card) => surface_mapper::invoke_card_response(card),
+                None => surface_mapper::invoke_message_response(
+                    &text_reply_message(&dispatch.result).text,
+                ),
+            };
             // Audit the inline card reply as a successful post so the
             // pivot shows the callback produced a reply.
             adapter.dispatcher.record_post(
@@ -1389,13 +1402,14 @@ async fn serve_report_png(
 /// Adaptive Card when the surface carries interactive controls or a
 /// dashboard, otherwise the plain-text Activity.
 #[allow(clippy::too_many_arguments)]
-fn build_reply_body(
+async fn build_reply_body(
     adapter: &MsTeamsAdapter,
     bot_id: &str,
     conversation_id: &str,
     recipient_id: &str,
     result: &Value,
     image_hint: Option<String>,
+    principal: &triton_core::Principal,
     chrome: &surface_mapper::CardChrome,
     tenant: &str,
 ) -> Value {
@@ -1404,7 +1418,16 @@ fn build_reply_body(
     // component to lift a spec from — the caller minted the URL from
     // the invoked args instead.
     let image_url = image_hint.or_else(|| reply_image_url(adapter, result, tenant));
-    if let Some(card) = render_card_content(adapter, result, image_url.as_deref(), chrome) {
+    // Native interactive chart (Teams) from peacock's Vega spec, falling back
+    // to the PNG image.
+    let chart = report_vega_chart(adapter, result, principal, image_url.as_deref()).await;
+    if let Some(card) = render_card_content(
+        adapter,
+        result,
+        image_url.as_deref(),
+        chart.as_ref(),
+        chrome,
+    ) {
         surface_mapper::build_card_activity_body(bot_id, conversation_id, recipient_id, card)
     } else {
         let msg = text_reply_message(result);
@@ -1420,6 +1443,7 @@ fn render_card_content(
     adapter: &MsTeamsAdapter,
     result: &Value,
     image_url: Option<&str>,
+    chart: Option<&Value>,
     chrome: &surface_mapper::CardChrome,
 ) -> Option<Value> {
     let specs = surface_mapper::interactive_from_result(result);
@@ -1462,8 +1486,66 @@ fn render_card_content(
         dashboard.as_ref(),
         &signed,
         image_url,
+        chart,
         chrome,
     ))
+}
+
+/// Deep-search a `render_report` result for a Vega-Lite spec (peacock exposes
+/// them at `_meta.vega_specs`; also handles a `{kind:vega,spec}` component and
+/// JSON-string-wrapped MCP content).
+fn find_vega_spec(v: &Value) -> Option<Value> {
+    match v {
+        Value::Object(m) => {
+            if m.get("kind").and_then(Value::as_str) == Some("vega")
+                && let Some(spec) = m.get("spec").filter(|s| s.is_object())
+            {
+                return Some(spec.clone());
+            }
+            if let Some(spec) = m
+                .get("vega_specs")
+                .and_then(Value::as_array)
+                .and_then(|a| a.iter().find(|s| s.is_object()))
+            {
+                return Some(spec.clone());
+            }
+            m.values().find_map(find_vega_spec)
+        }
+        Value::Array(a) => a.iter().find_map(find_vega_spec),
+        Value::String(s) if s.trim_start().starts_with(['{', '[']) => {
+            serde_json::from_str::<Value>(s)
+                .ok()
+                .and_then(|p| find_vega_spec(&p))
+        }
+        _ => None,
+    }
+}
+
+/// Build a native Teams Adaptive Card chart element for a result's inline
+/// report: dispatch `render_report` to peacock, extract its Vega-Lite spec, and
+/// map it to a `Chart.*` element (with the PNG as `fallback`). `None` when there
+/// is no report, peacock is unreachable, or the report has no chart — the card
+/// then shows the static image.
+async fn report_vega_chart(
+    adapter: &MsTeamsAdapter,
+    result: &Value,
+    principal: &triton_core::Principal,
+    fallback_image_url: Option<&str>,
+) -> Option<Value> {
+    let (report_id, args) = surface_mapper::report_from_result(result)?;
+    let mut rargs = if args.is_object() {
+        args
+    } else {
+        serde_json::json!({})
+    };
+    rargs["report_id"] = serde_json::json!(report_id);
+    let rep = adapter
+        .dispatcher
+        .invoke("render_report", rargs, principal.clone(), PROTOCOL)
+        .await
+        .ok()?;
+    let spec = find_vega_spec(&rep.result)?;
+    surface_mapper::chart_from_vega(&spec, fallback_image_url)
 }
 
 /// Render a non-interactive result to the plain-text [`RenderedMessage`]
@@ -1774,9 +1856,11 @@ async fn courier_deliver(
                 &sender.from_id,
                 &result_value,
                 image_hint,
+                &principal_for_post,
                 &chrome,
                 &sender.tenant,
             )
+            .await
         }
         Err(e) => {
             tracing::warn!(error = %e, class = %e.class(), "msteams courier dispatch failed");
