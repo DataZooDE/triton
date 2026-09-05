@@ -103,9 +103,8 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     let mut root_children: Vec<String> = Vec::new();
     // Buttons are collected here and laid out in a single horizontal Row (chips)
     // rather than stacked full-width down the Column — matching the Teams/Chat
-    // action-chip row. Source labels collect into one caption line.
+    // action-chip row. (Sources are not in the card — see the `sources` arm.)
     let mut button_ids: Vec<String> = Vec::new();
-    let mut source_labels: Vec<String> = Vec::new();
     // Predicted-GE-id → re-ask question, for this card's follow-up buttons.
     let mut qmap: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut n = 0usize;
@@ -172,34 +171,12 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                 }));
                 button_ids.push(btn_id);
             }
-            // Sources: GE's basic catalog has NO link component, no `openUrl`
-            // function, and its Text explicitly excludes markdown links — so a
-            // source URL cannot be made clickable in GE (unlike the Teams/Chat
-            // cards). Collect the labels and render them as one caption line
-            // ("Sources: a · b · c"); the reference is conveyed, the card
-            // validates. (Only sources with an http(s) resource count; a ui://
-            // MCP resource can't open in GE and is skipped.)
-            "sources" => {
-                if let Some(items) = c.get("items").and_then(Value::as_array) {
-                    for it in items {
-                        let has_url = it
-                            .get("resource")
-                            .and_then(Value::as_str)
-                            .is_some_and(|u| u.starts_with("http"));
-                        if !has_url {
-                            continue;
-                        }
-                        let label = it
-                            .get("label")
-                            .and_then(Value::as_str)
-                            .unwrap_or("Source")
-                            .to_string();
-                        if !source_labels.contains(&label) {
-                            source_labels.push(label);
-                        }
-                    }
-                }
-            }
+            // Sources are NOT put in the card: GE's basic catalog has no link
+            // component and its Text excludes link markdown, so a card source
+            // could only be dead text. The spec-A2A text part (`reply_text`)
+            // instead appends them as clickable Markdown links in the prose
+            // bubble, which GE renders as real anchors. So drop `sources` here.
+            "sources" => {}
             _ => {}
         }
     }
@@ -213,16 +190,6 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
             "justify": "start",
         }));
         root_children.push("btn-row".to_string());
-    }
-    // Sources → one caption line under the actions.
-    if !source_labels.is_empty() {
-        flat.push(json!({
-            "id": "sources",
-            "component": "Text",
-            "text": format!("Sources: {}", source_labels.join(" · ")),
-            "variant": "caption",
-        }));
-        root_children.push("sources".to_string());
     }
 
     if root_children.is_empty() {
@@ -360,21 +327,19 @@ mod tests {
             "card must not repeat the answer prose"
         );
 
-        // http source → one compact "Sources: <labels>" caption line (GE can't
-        // hyperlink); ui:// source is dropped. No Button carries a functionCall.
-        let src = find(comps, "sources");
-        assert_eq!(src["component"], "Text");
+        // Sources are NOT in the card (GE can't hyperlink there); they ride the
+        // prose bubble as Markdown links via reply_text. So the card has no
+        // "sources" component and no source Text line at all.
         assert!(
-            src["text"].as_str().unwrap().starts_with("Sources: "),
-            "{src}"
+            !comps.iter().any(|c| c["id"] == "sources"),
+            "card must not carry a sources component"
         );
         assert!(
-            src["text"].as_str().unwrap().contains("sales-by-customer"),
-            "{src}"
-        );
-        assert!(
-            !src["text"].as_str().unwrap().contains("ui-only"),
-            "ui:// source must be dropped: {src}"
+            !comps
+                .iter()
+                .any(|c| c["component"] == "Text"
+                    && c["text"].as_str().unwrap_or("").contains("Source")),
+            "card must not carry a source text line"
         );
         assert!(
             !comps
