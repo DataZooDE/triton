@@ -101,6 +101,11 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     // that hang under the top Column, in surface order.
     let mut flat: Vec<Value> = Vec::new();
     let mut root_children: Vec<String> = Vec::new();
+    // Buttons are collected here and laid out in a single horizontal Row (chips)
+    // rather than stacked full-width down the Column — matching the Teams/Chat
+    // action-chip row. Source labels collect into one caption line.
+    let mut button_ids: Vec<String> = Vec::new();
+    let mut source_labels: Vec<String> = Vec::new();
     // Predicted-GE-id → re-ask question, for this card's follow-up buttons.
     let mut qmap: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut n = 0usize;
@@ -159,44 +164,65 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                     qmap.insert(btn_num, q.to_string());
                 }
                 flat.push(json!({
-                    "id": btn_id,
+                    "id": btn_id.clone(),
                     "component": "Button",
                     "child": text_id,
                     "variant": if c.get("primary").and_then(Value::as_bool) == Some(true) { "primary" } else { "default" },
                     "action": { "event": { "name": tool, "context": {} } },
                 }));
-                root_children.push(btn_id);
+                button_ids.push(btn_id);
             }
-            // Sources: GE's basic catalog has no link component and rejects a
-            // `functionCall: openUrl` Button action ("Validation failed for
-            // component 'Button'"), so render each source as a plain Text line
-            // ("Source: <label> — <url>"). Not clickable, but the reference is
-            // conveyed and the card validates. (http/https only; a ui:// MCP
-            // resource can't open in GE and is skipped.)
+            // Sources: GE's basic catalog has NO link component, no `openUrl`
+            // function, and its Text explicitly excludes markdown links — so a
+            // source URL cannot be made clickable in GE (unlike the Teams/Chat
+            // cards). Collect the labels and render them as one caption line
+            // ("Sources: a · b · c"); the reference is conveyed, the card
+            // validates. (Only sources with an http(s) resource count; a ui://
+            // MCP resource can't open in GE and is skipped.)
             "sources" => {
                 if let Some(items) = c.get("items").and_then(Value::as_array) {
                     for it in items {
-                        let label = it.get("label").and_then(Value::as_str).unwrap_or("Source");
-                        let Some(url) = it
+                        let has_url = it
                             .get("resource")
                             .and_then(Value::as_str)
-                            .filter(|u| u.starts_with("http"))
-                        else {
+                            .is_some_and(|u| u.starts_with("http"));
+                        if !has_url {
                             continue;
-                        };
-                        let cid = id("src", &mut n);
-                        flat.push(json!({
-                            "id": cid,
-                            "component": "Text",
-                            "text": format!("Source: {label} — {url}"),
-                            "variant": "caption",
-                        }));
-                        root_children.push(cid);
+                        }
+                        let label = it
+                            .get("label")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Source")
+                            .to_string();
+                        if !source_labels.contains(&label) {
+                            source_labels.push(label);
+                        }
                     }
                 }
             }
             _ => {}
         }
+    }
+
+    // Follow-up/report buttons → one horizontal Row of chips (not stacked).
+    if !button_ids.is_empty() {
+        flat.push(json!({
+            "id": "btn-row",
+            "component": "Row",
+            "children": button_ids,
+            "justify": "start",
+        }));
+        root_children.push("btn-row".to_string());
+    }
+    // Sources → one caption line under the actions.
+    if !source_labels.is_empty() {
+        flat.push(json!({
+            "id": "sources",
+            "component": "Text",
+            "text": format!("Sources: {}", source_labels.join(" · ")),
+            "variant": "caption",
+        }));
+        root_children.push("sources".to_string());
     }
 
     if root_children.is_empty() {
@@ -304,6 +330,28 @@ mod tests {
         assert_eq!(question_for(sid, "btn-99"), None);
         assert_eq!(question_for("nope", "btn-5"), None);
 
+        // Buttons are laid out in a single horizontal Row (chips), not stacked
+        // as direct Column children.
+        let row = find(comps, "btn-row");
+        assert_eq!(row["component"], "Row");
+        assert!(
+            row["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "btn-3"),
+            "button must live inside the Row: {row}"
+        );
+        assert_eq!(
+            col["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| *c == "btn-3"),
+            None,
+            "button must NOT be a direct Column child"
+        );
+
         // Prose is NOT duplicated inside the card (the bubble shows it).
         assert!(
             !comps
@@ -312,20 +360,21 @@ mod tests {
             "card must not repeat the answer prose"
         );
 
-        // http source → plain Text line (GE rejects functionCall:openUrl);
-        // ui:// source is dropped. No Button carries a functionCall action.
-        let src = comps
-            .iter()
-            .find(|c| {
-                c["component"] == "Text" && c["text"].as_str().unwrap_or("").starts_with("Source:")
-            })
-            .expect("source text line");
+        // http source → one compact "Sources: <labels>" caption line (GE can't
+        // hyperlink); ui:// source is dropped. No Button carries a functionCall.
+        let src = find(comps, "sources");
+        assert_eq!(src["component"], "Text");
         assert!(
-            src["text"]
-                .as_str()
-                .unwrap()
-                .contains("https://agent-lab.data-zoo.de/docs/tok"),
+            src["text"].as_str().unwrap().starts_with("Sources: "),
             "{src}"
+        );
+        assert!(
+            src["text"].as_str().unwrap().contains("sales-by-customer"),
+            "{src}"
+        );
+        assert!(
+            !src["text"].as_str().unwrap().contains("ui-only"),
+            "ui:// source must be dropped: {src}"
         );
         assert!(
             !comps
