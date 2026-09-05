@@ -58,6 +58,11 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     // that hang under the top Column, in surface order.
     let mut flat: Vec<Value> = Vec::new();
     let mut root_children: Vec<String> = Vec::new();
+    // Follow-up questions the buttons re-ask, keyed by button id. GE rejects a
+    // bare-string action context, so the question rides the data model and the
+    // button binds to it by `{path}`; on click GE resolves the path and posts
+    // the value back to us (handled in a2a_spec inbound A2UI actions).
+    let mut data_model = serde_json::Map::new();
     let mut n = 0usize;
     let id = |prefix: &str, n: &mut usize| {
         *n += 1;
@@ -67,32 +72,11 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     for c in components {
         let kind = c.get("kind").and_then(Value::as_str).unwrap_or_default();
         match kind {
-            "text" => {
-                if let Some(v) = c
-                    .get("value")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                {
-                    let cid = id("text", &mut n);
-                    flat.push(
-                        json!({ "id": cid, "component": "Text", "text": v, "variant": "body" }),
-                    );
-                    root_children.push(cid);
-                }
-            }
-            "narration" => {
-                if let Some(v) = c
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .filter(|s| !s.is_empty())
-                {
-                    let cid = id("note", &mut n);
-                    flat.push(
-                        json!({ "id": cid, "component": "Text", "text": v, "variant": "caption" }),
-                    );
-                    root_children.push(cid);
-                }
-            }
+            // Prose (text/narration) is intentionally NOT put in the card:
+            // the streamed answer already renders as the message bubble above
+            // the card, and duplicating it inside would show the answer twice.
+            // The card is the rich WIDGET — chart + actions + sources.
+            "text" | "narration" => {}
             // Chart: the embedded agent stamps a signed public `image_url` on
             // the report; the basic catalog has no chart, so it is an Image.
             "report" => {
@@ -110,22 +94,33 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
             "button" => {
                 let label = c.get("label").and_then(Value::as_str).unwrap_or("Open");
                 let tool = c.get("tool").and_then(Value::as_str).unwrap_or_default();
+                // A re-ask follow-up carries `args.message` (the question);
+                // report/other buttons don't. `render_report` opening is not a
+                // re-ask, so it keeps an empty context.
+                let question = c
+                    .get("args")
+                    .and_then(|a| a.get("message"))
+                    .and_then(Value::as_str)
+                    .filter(|_| tool != "render_report");
                 let text_id = id("btn-text", &mut n);
                 let btn_id = id("btn", &mut n);
                 flat.push(json!({ "id": text_id, "component": "Text", "text": label }));
-                // A2UI v0.9 action: `{event:{name, context}}`. GE's renderer
-                // rejects a bare-string context value ("Validation failed for
-                // component 'Button': action") — the canonical examples use an
-                // EMPTY context or `{path}` data-bindings, never a raw literal.
-                // We carry no data model, so emit an empty context; the tool to
-                // re-invoke rides as the event `name`. (Wiring the click
-                // round-trip to re-dispatch that tool is separate follow-up.)
+                // Context is bound to the data model by path (GE rejects a
+                // bare-string literal). The event NAME is the tool to
+                // re-dispatch; the inbound A2UI action handler reads the
+                // resolved `question` and runs a normal turn with it.
+                let context = if let Some(q) = question {
+                    data_model.insert(btn_id.clone(), json!(q));
+                    json!({ "question": { "path": format!("/{btn_id}") } })
+                } else {
+                    json!({})
+                };
                 flat.push(json!({
                     "id": btn_id,
                     "component": "Button",
                     "child": text_id,
                     "variant": if c.get("primary").and_then(Value::as_bool) == Some(true) { "primary" } else { "default" },
-                    "action": { "event": { "name": tool, "context": {} } },
+                    "action": { "event": { "name": tool, "context": context } },
                 }));
                 root_children.push(btn_id);
             }
@@ -169,16 +164,23 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     flat.push(json!({ "id": "root-col", "component": "Column", "children": root_children }));
     flat.push(json!({ "id": "root", "component": "Card", "child": "root-col" }));
 
-    Some(vec![
+    let mut msgs = vec![
         json!({
             "version": "v0.9",
-            "createSurface": { "surfaceId": SURFACE_ID, "catalogId": BASIC_CATALOG },
+            "createSurface": { "surfaceId": SURFACE_ID, "catalogId": BASIC_CATALOG, "sendDataModel": true },
         }),
         json!({
             "version": "v0.9",
             "updateComponents": { "surfaceId": SURFACE_ID, "components": flat },
         }),
-    ])
+    ];
+    if !data_model.is_empty() {
+        msgs.push(json!({
+            "version": "v0.9",
+            "updateDataModel": { "surfaceId": SURFACE_ID, "path": "/", "value": Value::Object(data_model) },
+        }));
+    }
+    Some(msgs)
 }
 
 /// Wrap each A2UI message as its OWN A2A `DataPart`.
@@ -218,7 +220,11 @@ mod tests {
         ] } });
 
         let msgs = build_messages(&result).expect("renderable");
-        assert_eq!(msgs.len(), 2);
+        assert_eq!(
+            msgs.len(),
+            3,
+            "createSurface + updateComponents + updateDataModel"
+        );
         assert_eq!(msgs[0]["version"], "v0.9");
         assert_eq!(msgs[0]["createSurface"]["catalogId"], BASIC_CATALOG);
         let comps = msgs[1]["updateComponents"]["components"]
@@ -245,16 +251,27 @@ mod tests {
             .find(|c| c["component"] == "Button" && c["action"]["event"].is_object())
             .expect("event button");
         assert_eq!(btn["action"]["event"]["name"], "assistant");
-        // Context is empty: GE rejects bare-string literals in an action
-        // context, and we carry no data model to bind a path to.
-        assert!(
-            btn["action"]["event"]["context"]
-                .as_object()
-                .unwrap()
-                .is_empty()
+        // A re-ask button binds its question by PATH (GE rejects bare-string
+        // literals in an action context); the question rides the data model.
+        let path = btn["action"]["event"]["context"]["question"]["path"]
+            .as_str()
+            .expect("path-bound question");
+        let dm = &msgs[2]["updateDataModel"]["value"];
+        let key = path.trim_start_matches('/');
+        assert_eq!(
+            dm[key], "What does Initech buy?",
+            "data model carries the question"
         );
         let btn_text = find(comps, btn["child"].as_str().unwrap());
         assert_eq!(btn_text["text"], "What does Initech buy?");
+
+        // Prose is NOT duplicated inside the card (the bubble shows it).
+        assert!(
+            !comps
+                .iter()
+                .any(|c| c["component"] == "Text" && c["text"] == "Initech leads at $2,500.75."),
+            "card must not repeat the answer prose"
+        );
 
         // http source → openUrl button; ui:// source is dropped (GE can't open it).
         let opener = comps
