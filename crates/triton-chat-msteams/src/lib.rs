@@ -976,10 +976,13 @@ async fn handle_callback(
     // Verify the HMAC BEFORE trusting the tool/args. A forged or
     // tampered token — even on an authenticated webhook — is refused
     // and audited as `error:auth`, never re-dispatched.
-    let (tool_name, mut args) = match triton_correlation::decode_with_cap(
+    // #250: verified against the SENDER's tenant, so a token minted into
+    // another tenant's conversation cannot be replayed here.
+    let (tool_name, mut args) = match triton_correlation::decode_bound(
         &token,
         &adapter.correlation_key,
         surface_mapper::MSTEAMS_CORRELATION_CAP,
+        &sender.tenant,
     ) {
         Ok(p) => p,
         Err(_) => {
@@ -1204,14 +1207,18 @@ async fn dispatch_and_refresh_card(
             let image_url =
                 image_hint.or_else(|| reply_image_url(adapter, &dispatch.result, &sender.tenant));
             let chrome = fetch_chrome(adapter, &principal_for_post).await;
-            let response_body =
-                match render_card_content(adapter, &dispatch.result, image_url.as_deref(), &chrome)
-                {
-                    Some(card) => surface_mapper::invoke_card_response(card),
-                    None => surface_mapper::invoke_message_response(
-                        &text_reply_message(&dispatch.result).text,
-                    ),
-                };
+            let response_body = match render_card_content(
+                adapter,
+                &dispatch.result,
+                image_url.as_deref(),
+                &chrome,
+                &sender.tenant,
+            ) {
+                Some(card) => surface_mapper::invoke_card_response(card),
+                None => surface_mapper::invoke_message_response(
+                    &text_reply_message(&dispatch.result).text,
+                ),
+            };
             // Audit the inline card reply as a successful post so the
             // pivot shows the callback produced a reply.
             adapter.dispatcher.record_post(
@@ -1267,6 +1274,15 @@ async fn fetch_chrome(
         }
     }
 }
+
+/// How long a card action token stays clickable (#250).
+///
+/// Unbound tokens never expired, which with an 8-byte truncated HMAC
+/// makes each one a permanent oracle until the correlation key rotates.
+/// A week matches the chart-image links: long enough that a user
+/// scrolling recent history still gets a working button, short enough
+/// that an old card is not a forever-capability.
+const CARD_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;
 
 /// Marker `tool` slot of the signed chart-image tokens — namespaced
 /// away from card-action tokens even under one key.
@@ -1433,7 +1449,7 @@ fn build_reply_body(
     // component to lift a spec from — the caller minted the URL from
     // the invoked args instead.
     let image_url = image_hint.or_else(|| reply_image_url(adapter, result, tenant));
-    if let Some(card) = render_card_content(adapter, result, image_url.as_deref(), chrome) {
+    if let Some(card) = render_card_content(adapter, result, image_url.as_deref(), chrome, tenant) {
         surface_mapper::build_card_activity_body(bot_id, conversation_id, recipient_id, card)
     } else {
         let msg = text_reply_message(result);
@@ -1450,6 +1466,7 @@ fn render_card_content(
     result: &Value,
     image_url: Option<&str>,
     chrome: &surface_mapper::CardChrome,
+    tenant: &str,
 ) -> Option<Value> {
     let specs = surface_mapper::interactive_from_result(result);
     let dashboard = surface_mapper::dashboard_from_result(result);
@@ -1463,11 +1480,13 @@ fn render_card_content(
     let signed: Vec<(surface_mapper::InteractiveSpec, String)> = specs
         .into_iter()
         .filter_map(|spec| {
-            match triton_correlation::encode_with_cap(
+            match triton_correlation::encode_bound(
                 spec.tool(),
                 &spec.base_args(),
                 &adapter.correlation_key,
                 surface_mapper::MSTEAMS_CORRELATION_CAP,
+                tenant,
+                CARD_TOKEN_TTL_SECS,
             ) {
                 Ok(token) => Some((spec, token)),
                 Err(e) => {

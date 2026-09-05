@@ -76,12 +76,34 @@ struct CompactBody<'a> {
     /// rationale.
     t: &'a str,
     a: &'a Value,
+    /// `n` is the TENANT this token was minted into (#250). Omitted on
+    /// the unbound path so existing callers keep their wire shape and
+    /// their byte budget.
+    ///
+    /// Without it a token is a bearer capability for `(tool, args)` and
+    /// nothing else: a card rendered into tenant A's conversation is
+    /// visible to everyone in that conversation and in the client's
+    /// network trace, so in a deployment serving more than one tenant a
+    /// sender in tenant B could replay it and get B's principal against
+    /// A's arguments. The chart-image tokens already bind a tenant and
+    /// an expiry; the action tokens did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    n: Option<&'a str>,
+    /// `x` is the expiry (unix seconds). Unbound tokens never expire,
+    /// which with an 8-byte truncated HMAC makes each one a permanent
+    /// oracle until the correlation key rotates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    x: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CompactBodyOwned {
     t: String,
     a: Value,
+    #[serde(default)]
+    n: Option<String>,
+    #[serde(default)]
+    x: Option<u64>,
 }
 
 /// Encode a `(tool, args)` pair into a callback-data token signed
@@ -110,7 +132,18 @@ pub fn encode_with_cap(
     if tool.is_empty() {
         return Err(EncodeError::EmptyTool);
     }
-    let body = CompactBody { t: tool, a: args };
+    let body = CompactBody {
+        t: tool,
+        a: args,
+        n: None,
+        x: None,
+    };
+    finish(body, key, cap)
+}
+
+/// Serialise, sign and cap-check one body. Shared by the bound and
+/// unbound mint paths so they cannot drift.
+fn finish(body: CompactBody<'_>, key: &[u8], cap: usize) -> Result<String, EncodeError> {
     let body_json =
         serde_json::to_string(&body).map_err(|e| EncodeError::Serialise(e.to_string()))?;
     let mac = compute_truncated_hmac(body_json.as_bytes(), key);
@@ -184,6 +217,109 @@ pub fn decode_with_cap(
         return Err(DecodeError::Body("empty tool".into()));
     }
     Ok((parsed.t, parsed.a))
+}
+
+/// Verify signature + shape and return the whole parsed body, so the
+/// bound path can inspect the binding fields the unbound path drops.
+fn decode_parsed(token: &str, key: &[u8], cap: usize) -> Result<CompactBodyOwned, DecodeError> {
+    if token.len() > cap {
+        return Err(DecodeError::Malformed);
+    }
+    let (body_b64, mac_b64) = token.split_once('.').ok_or(DecodeError::Malformed)?;
+    let body = URL_SAFE_NO_PAD
+        .decode(body_b64)
+        .map_err(|_| DecodeError::Malformed)?;
+    let presented_mac = URL_SAFE_NO_PAD
+        .decode(mac_b64)
+        .map_err(|_| DecodeError::Malformed)?;
+    let expected = compute_truncated_hmac(&body, key);
+    let lengths_match = presented_mac.len() == expected.len();
+    let content_eq: bool = if lengths_match {
+        presented_mac.ct_eq(&expected).into()
+    } else {
+        let mut padded = [0u8; HMAC_LEN];
+        let n = presented_mac.len().min(HMAC_LEN);
+        padded[..n].copy_from_slice(&presented_mac[..n]);
+        padded.ct_eq(&expected).into()
+    };
+    if !(content_eq && lengths_match) {
+        return Err(DecodeError::BadSignature);
+    }
+    let parsed: CompactBodyOwned =
+        serde_json::from_slice(&body).map_err(|e| DecodeError::Body(e.to_string()))?;
+    if parsed.t.is_empty() {
+        return Err(DecodeError::Body("empty tool".into()));
+    }
+    Ok(parsed)
+}
+
+/// Mint a token BOUND to a tenant and an expiry (#250).
+///
+/// The unbound [`encode_with_cap`] produces a capability for
+/// `(tool, args)` and nothing else, so a card token minted into one
+/// tenant's conversation is replayable by a sender in another. Binding
+/// makes the token answer "who was this for, and until when" as well as
+/// "what does it do".
+pub fn encode_bound(
+    tool: &str,
+    args: &Value,
+    key: &[u8],
+    cap: usize,
+    tenant: &str,
+    ttl_secs: u64,
+) -> Result<String, EncodeError> {
+    if tool.is_empty() {
+        return Err(EncodeError::EmptyTool);
+    }
+    let exp = now_secs().saturating_add(ttl_secs);
+    let body = CompactBody {
+        t: tool,
+        a: args,
+        n: Some(tenant),
+        x: Some(exp),
+    };
+    finish(body, key, cap)
+}
+
+/// Verify a token AND its binding: the tenant must equal `tenant` and
+/// the expiry must not have passed.
+///
+/// A token carrying no binding is refused, not accepted. Accepting it
+/// would leave the replay open for every card minted before this
+/// shipped — and since unbound tokens never expire, "before this
+/// shipped" means forever. The cost is bounded and self-healing: cards
+/// already sitting in a conversation stop responding to a click and the
+/// next reply mints a bound one.
+pub fn decode_bound(
+    token: &str,
+    key: &[u8],
+    cap: usize,
+    tenant: &str,
+) -> Result<(String, Value), DecodeError> {
+    let parsed = decode_parsed(token, key, cap)?;
+    let Some(bound_tenant) = parsed.n.as_deref() else {
+        return Err(DecodeError::Body("token carries no tenant binding".into()));
+    };
+    // Not constant-time on purpose: the tenant is not a secret, it is an
+    // identifier both sides already know.
+    if bound_tenant != tenant {
+        return Err(DecodeError::Body(
+            "token was minted for another tenant".into(),
+        ));
+    }
+    match parsed.x {
+        Some(exp) if exp >= now_secs() => {}
+        Some(_) => return Err(DecodeError::Body("token expired".into())),
+        None => return Err(DecodeError::Body("token carries no expiry".into())),
+    }
+    Ok((parsed.t, parsed.a))
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 fn compute_truncated_hmac(body: &[u8], key: &[u8]) -> Vec<u8> {
