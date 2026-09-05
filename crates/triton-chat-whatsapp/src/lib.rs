@@ -949,6 +949,10 @@ async fn process_message(
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        // #250: the ASSERTED platform id, recorded beside the resolved
+        // subject so an impersonation is not forensically identical to
+        // the victim's own session.
+        sender_ref: Some(sender_key.to_string()),
     };
 
     // Command parser mirrors Telegram's `route_command`: `/<tool>
@@ -1066,6 +1070,7 @@ async fn resolve_via_upstream(
         tenant: "system".to_string(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     };
     let args = json!({ "platform": "whatsapp", "sender": sender_key });
     let dispatch = dispatcher

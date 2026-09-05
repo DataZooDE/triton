@@ -116,6 +116,13 @@ pub struct AuditRecord<'a> {
     /// byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttfb_ms: Option<u64>,
+    /// The RAW platform sender id behind this principal, when the
+    /// adapter knows one (see [`crate::principal::Principal::sender_ref`]).
+    /// Recorded beside the resolved `subject` so an impersonation under
+    /// `identity.kind: upstream` is distinguishable from the victim's own
+    /// session; omitted where there is no platform sender.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_ref: Option<&'a str>,
     /// How many further rejections this line stands for (#249).
     ///
     /// Anonymous rejections on a public path are coalesced into one line
@@ -225,6 +232,9 @@ pub struct AuditEntry {
     pub error_detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttfb_ms: Option<u64>,
+    /// See [`AuditRecord::sender_ref`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_ref: Option<String>,
     /// See [`AuditRecord::suppressed`]. Mirrored into the buffer because
     /// the operator tailing `/v1/audit` is precisely the person who needs
     /// to know the entry stands for more than one refusal.
@@ -259,6 +269,7 @@ impl<'a> From<&AuditRecord<'a>> for AuditEntry {
                 .as_deref()
                 .map(|d| clamp_audited(d).into_owned()),
             ttfb_ms: r.ttfb_ms,
+            sender_ref: r.sender_ref.map(|v| clamp_audited(v).into_owned()),
             suppressed: r.suppressed,
             trace_id: r.trace_id.to_string(),
         }
@@ -351,6 +362,7 @@ mod rejection_reason_tests {
             status_detail: None,
             error_detail: Some("bot framework jwt: jwt issuer does not match".into()),
             ttfb_ms: None,
+            sender_ref: None,
             suppressed: None,
             trace_id: "t-1",
         };
@@ -384,6 +396,7 @@ mod rejection_reason_tests {
             status_detail: None,
             error_detail: None,
             ttfb_ms: None,
+            sender_ref: None,
             suppressed: None,
             trace_id: "t-2",
         };

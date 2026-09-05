@@ -422,6 +422,7 @@ impl DiscordGatewayAdapter {
             tenant: claims.tenant.clone(),
             raw_token: String::new(),
             trace_id: uuid::Uuid::new_v4().to_string(),
+            sender_ref: None,
         };
         let principal_for_post = principal.clone();
         let (tool, args) = route_command(content, &self.inbound_tool);

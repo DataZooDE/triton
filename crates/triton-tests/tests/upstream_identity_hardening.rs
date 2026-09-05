@@ -289,6 +289,50 @@ async fn a_hostile_tenant_never_reaches_the_rate_limiter() {
     );
 }
 
+/// On a boundary that cannot be made cryptographic, detection is the
+/// only compensating control — and it is missing.
+///
+/// Under `identity.kind: upstream` the resolver REPLACES the asserted
+/// sender id with whatever principal it chooses, and the asserted id is
+/// then dropped: `AuditRecord` records `who`/`subject` (the RESOLVED
+/// sub) and nothing else. So a session driven by a spoofed platform id
+/// produces audit lines byte-identical to the victim's — there is no
+/// post-hoc way to answer "which sessions used this enrolment?" during
+/// an incident, and FR-AU-2's accountability claim does not hold on this
+/// path.
+///
+/// The audit line must therefore carry the RAW platform sender id
+/// alongside the resolved subject.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_audit_line_records_the_raw_sender_not_only_the_resolved_one() {
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-ada", "scopes": ["chat"], "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for(&whatsapp, &agent, &resolver),
+    )
+    .await;
+
+    assert!(post_inbound(&proc, "hi").await.status().is_success());
+
+    let dispatch = wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["tool"] == "assistant"
+    });
+    // The resolved identity is what authorises...
+    assert_eq!(dispatch["subject"], "resolved-ada");
+    // ...but the asserted one is what an incident responder needs.
+    assert_eq!(
+        dispatch["sender_ref"], UNKNOWN_WA_ID,
+        "the audit line must name the RAW platform sender the resolver was \
+         asked about, or an impersonation is indistinguishable from the \
+         victim's own session; got: {dispatch}"
+    );
+}
+
 fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {

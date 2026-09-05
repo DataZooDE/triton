@@ -598,6 +598,7 @@ async fn serve_dashboard_png(
             tenant: "-".to_string(),
             raw_token: String::new(),
             trace_id: uuid::Uuid::new_v4().to_string(),
+            sender_ref: None,
         };
         return match adapter
             .dispatcher
@@ -1207,6 +1208,8 @@ async fn handle_webhook(
         tenant: tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        // #250: see Principal::sender_ref.
+        sender_ref: Some(sender_name.to_string()),
     };
     let principal_for_post = principal.clone();
 
@@ -1952,6 +1955,7 @@ async fn resolve_via_upstream(
         tenant: "system".to_string(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     };
     let args = serde_json::json!({ "platform": "google_chat", "sender": sender_name });
     let dispatch = dispatcher

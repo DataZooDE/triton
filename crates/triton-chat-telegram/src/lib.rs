@@ -946,6 +946,10 @@ async fn resolve_via_upstream(
         tenant: "system".to_string(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        // #250: the ASSERTED platform id, recorded beside the resolved
+        // subject so an impersonation is not forensically identical to
+        // the victim's own session.
+        sender_ref: Some(sender_key.to_string()),
     };
     let args = json!({ "platform": "telegram", "sender": sender_key });
     let dispatch = dispatcher
@@ -1038,6 +1042,7 @@ async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     };
 
     let chat_id = message.chat.id;
@@ -1289,6 +1294,7 @@ async fn handle_form_outcome(
                 tenant,
                 raw_token: String::new(),
                 trace_id: uuid::Uuid::new_v4().to_string(),
+                sender_ref: None,
             };
             let principal_for_post = principal.clone();
             dispatch_and_render(
@@ -1533,6 +1539,7 @@ async fn handle_callback_query(
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     };
 
     // For private chats the post-back chat_id equals `from.id`;

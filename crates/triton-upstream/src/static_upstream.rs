@@ -816,6 +816,7 @@ impl UpstreamDispatch for StaticUpstream {
             tenant: self.tenant.clone(),
             raw_token: String::new(),
             trace_id: String::new(),
+            sender_ref: None,
         };
         let bearer = match self.bearer(&principal) {
             Ok(b) => b,

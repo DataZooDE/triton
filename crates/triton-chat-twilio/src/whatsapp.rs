@@ -478,6 +478,7 @@ async fn handle_status_callback(
         tenant: "-".to_string(),
         raw_token: String::new(),
         trace_id: message_sid.to_string(),
+        sender_ref: None,
     };
     match status {
         "delivered" | "read" => {
@@ -566,6 +567,7 @@ async fn process_message(
         tenant: claims.tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     };
 
     let (tool_name, args) = route_command(text, &adapter.inbound_tool);

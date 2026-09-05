@@ -37,6 +37,23 @@ pub struct Principal {
     #[serde(skip)]
     pub raw_token: String,
     pub trace_id: String,
+    /// The RAW platform sender id this principal was derived from, when
+    /// the adapter knows one (`wa_id`, Telegram user id, `users/<id>`,
+    /// Teams `from.id`). Recorded in the audit line beside the resolved
+    /// subject; never used for authorisation.
+    ///
+    /// It exists because under `identity.kind: upstream` (FR-I-7) the
+    /// resolver REPLACES the asserted identity, so without this the
+    /// asserted one is dropped and a session driven by a spoofed sender
+    /// id produces audit lines byte-identical to the victim's. On a
+    /// boundary that cannot be made cryptographic — the Bot Framework
+    /// body is not signed per-user — detection is the compensating
+    /// control, and it needs the asserted value on record (#250).
+    ///
+    /// `None` where there is no platform sender (the HTTP trio, internal
+    /// dispatches), in which case the field is omitted from the line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_ref: Option<String>,
 }
 
 /// Cap on a principal field accepted from an out-of-process identity

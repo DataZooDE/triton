@@ -887,6 +887,21 @@ fn check_tenant_limit(adapter: &Arc<MsTeamsAdapter>, sub: &str, tenant: &str) ->
     None
 }
 
+/// `sender_ref` is the RAW platform id the principal was derived from
+/// (Teams `from.id` / `aadObjectId`), recorded in the audit line beside
+/// the resolved subject — see [`Principal::sender_ref`] (#250).
+fn make_principal_with_sender(
+    sub: &str,
+    scopes: &[String],
+    tenant: &str,
+    sender_ref: Option<&str>,
+) -> Principal {
+    Principal {
+        sender_ref: sender_ref.map(str::to_owned),
+        ..make_principal(sub, scopes, tenant)
+    }
+}
+
 fn make_principal(sub: &str, scopes: &[String], tenant: &str) -> Principal {
     Principal {
         sub: sub.to_string(),
@@ -895,6 +910,7 @@ fn make_principal(sub: &str, scopes: &[String], tenant: &str) -> Principal {
         tenant: tenant.to_string(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     }
 }
 
@@ -1128,7 +1144,12 @@ async fn dispatch_and_post_reply(
         );
         return StatusCode::OK.into_response();
     }
-    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let principal = make_principal_with_sender(
+        &sender.sub,
+        &sender.scopes,
+        &sender.tenant,
+        Some(&sender.from_id),
+    );
     let principal_for_post = principal.clone();
     // Direct render_report (the "Open report:" Execute): the chart URL
     // is minted from the INVOKED args — the result carries only a PNG.
@@ -1188,7 +1209,12 @@ async fn dispatch_and_refresh_card(
     args: Value,
     sender: &ResolvedSender,
 ) -> Response {
-    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let principal = make_principal_with_sender(
+        &sender.sub,
+        &sender.scopes,
+        &sender.tenant,
+        Some(&sender.from_id),
+    );
     let principal_for_post = principal.clone();
     let image_hint = (tool_name == "render_report")
         .then(|| report_image_url(adapter, &args, &sender.tenant))
