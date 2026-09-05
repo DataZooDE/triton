@@ -139,25 +139,18 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
             // The card is the rich WIDGET — chart + actions + sources.
             "text" | "narration" => {}
             // Chart: the embedded agent stamps a signed public `image_url` on
-            // the report; render it as a Material image (rounded, contained).
-            // MaterialImage needs an explicit size or it collapses to zero
-            // height (unlike the basic `Image`) — give it full width and a
-            // `contain` aspect ratio matching the peacock chart (≈16:9) so it
-            // scales responsively without cropping.
+            // the report. Use the basic `Image` (also in the composite catalog),
+            // NOT `MaterialImage`: GE's Material renderer would not load the
+            // signed URL (rendered a broken/empty <img> on the wire), whereas
+            // the basic Image loads it and self-sizes. Everything else stays
+            // Material — mixing is fine since the composite catalog defines both.
             "report" => {
                 if let Some(url) = c.get("image_url").and_then(Value::as_str) {
                     let cid = id("chart", &mut n);
-                    let mut img = json!({
-                        "id": cid,
-                        "component": "MaterialImage",
-                        "url": url,
-                        "fit": "contain",
-                        "width": "100%",
-                        "aspectRatio": "16/9",
-                        "roundedCorners": true,
-                    });
+                    let mut img =
+                        json!({ "id": cid, "component": "Image", "url": url, "fit": "contain" });
                     if let Some(t) = c.get("title").and_then(Value::as_str) {
-                        img["alt"] = json!(t);
+                        img["description"] = json!(t);
                     }
                     flat.push(img);
                     root_children.push(cid);
@@ -327,10 +320,11 @@ mod tests {
         let col = find(comps, col_id);
         assert_eq!(col["component"], "MaterialColumn");
 
-        // Exactly one MaterialImage, carrying the signed chart URL.
+        // Exactly one Image (basic — GE's MaterialImage won't load the signed
+        // URL), carrying the signed chart URL.
         let img = comps
             .iter()
-            .find(|c| c["component"] == "MaterialImage")
+            .find(|c| c["component"] == "Image")
             .expect("image");
         assert_eq!(img["url"], "https://agent-lab.data-zoo.de/report/img/tok");
 

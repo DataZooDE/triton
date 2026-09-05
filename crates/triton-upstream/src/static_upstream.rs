@@ -321,19 +321,44 @@ impl StaticUpstream {
                 // otherwise the deployment-static tenant and no scopes.
                 // #114: resolver-supplied values are sanitised/capped (and
                 // allowlisted) before signing — see `sanitise_scopes`.
-                let (tenant, scopes, groups): (String, Vec<String>, Vec<String>) = if self
-                    .forward_principal
-                {
-                    // #250: refuse, never blank. See `validate_signed_field`.
+                // #283: the TENANT is identity, not an opt-in enrichment, so
+                // it ships regardless of the forwarding flag — same as `sub`
+                // just below. With shipped defaults this token previously
+                // carried NO tenant claim at all (`self.tenant` empty, and an
+                // empty tenant omits the claim), so an upstream could not
+                // distinguish "single-tenant Triton" from "claim withheld" and
+                // the delegated authorization model was unimplementable.
+                //
+                // Precedence: the CALLER's tenant wins, the deployment-static
+                // one is the fallback. The static value exists to name a
+                // tenant when there is no per-caller one; once there is, it is
+                // the more specific answer.
+                //
+                // #250: whichever one is chosen is validated before signing —
+                // refuse, never blank, never silently substitute. Falling back
+                // to the static tenant on a hostile caller value would sign a
+                // token attributing one tenant's call to another. Both inbound
+                // paths (`SenderTable::parse`, `UpstreamResolver::resolve`)
+                // validate at the boundary now, so a violation reaching here
+                // means an invariant broke upstream of it and the right answer
+                // is to stop.
+                let tenant = if principal.tenant.is_empty() {
+                    self.tenant.clone()
+                } else {
                     validate_signed_field("tenant", &principal.tenant, MAX_TENANT_LEN)?;
-                    let tenant = principal.tenant.clone();
+                    principal.tenant.clone()
+                };
+                // The flag keeps governing SCOPES and GROUPS only. Shipping
+                // scopes by default would be a deny-side regression for an
+                // upstream whose rule is "if scopes are present, enforce them".
+                let (scopes, groups): (Vec<String>, Vec<String>) = if self.forward_principal {
                     let scopes =
                         sanitise_scopes(&principal.scopes, self.forward_scope_allowlist.as_ref());
                     // RBAC: same sanitise/cap/allowlist as scopes. Rides
                     // `triton_sender_groups`, never `roles`.
                     let groups =
                         sanitise_scopes(&principal.groups, self.forward_group_allowlist.as_ref());
-                    (tenant, scopes, groups)
+                    (scopes, groups)
                 } else {
                     // This is the exact instant the memberships disappear: a
                     // resolved sender HAS groups and the token we are about to
@@ -352,7 +377,7 @@ impl StaticUpstream {
                             "resolved sender has group memberships but principal forwarding is OFF; the minted upstream token carries no `triton_sender_groups`. An upstream that filters by group will see nothing. Set TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true (and TRITON_STATIC_UPSTREAM_GROUP_ALLOWLIST) if that is not intended. Warned once per process."
                         );
                     }
-                    (self.tenant.clone(), Vec::new(), Vec::new())
+                    (Vec::new(), Vec::new())
                 };
                 // #250: `sub` is signed regardless of `forward_principal`, so
                 // it is validated here rather than inside that branch.
