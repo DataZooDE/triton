@@ -472,6 +472,7 @@ async fn handle_message_component(
         token,
         &adapter.correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "discord",
         &claims.tenant,
     ) {
         Ok(v) => v,
@@ -1042,6 +1043,7 @@ async fn handle_modal_submit(
         token,
         &adapter.correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "discord",
         &claims.tenant,
     ) {
         Ok(v) => v,

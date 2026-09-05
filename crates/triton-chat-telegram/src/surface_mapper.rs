@@ -289,6 +289,7 @@ pub fn render(
                     args,
                     correlation_key,
                     triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+                    "telegram",
                     tenant,
                     None,
                 ) {
@@ -352,6 +353,7 @@ pub fn render(
                         &args,
                         correlation_key,
                         triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+                        "telegram",
                         tenant,
                         None,
                     ) {
@@ -748,6 +750,7 @@ mod tests {
             row[0]["callback_data"].as_str().unwrap(),
             TEST_KEY,
             triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+            "telegram",
             "acme",
         )
         .expect("verifies");
@@ -757,6 +760,7 @@ mod tests {
             row[1]["callback_data"].as_str().unwrap(),
             TEST_KEY,
             triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+            "telegram",
             "acme",
         )
         .expect("verifies");
@@ -916,6 +920,7 @@ mod tests {
             token,
             TEST_KEY,
             triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+            "telegram",
             "acme",
         )
         .expect("token verifies for its tenant");

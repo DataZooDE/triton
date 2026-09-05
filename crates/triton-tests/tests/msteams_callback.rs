@@ -268,6 +268,7 @@ async fn an_expired_card_token_is_rejected() {
         &json!({ "subject": "alice" }),
         b"correlation-key-for-test",
         1536,
+        "msteams",
         "acme",
         // Two hours ago, so it is stale even at hour granularity.
         (now_unix() as u64) - 2 * 3600,
@@ -309,6 +310,7 @@ async fn a_token_minted_for_another_tenant_is_rejected() {
         &json!({ "subject": "victim" }),
         b"correlation-key-for-test",
         1536,
+        "msteams",
         "globex",
         Some(3600),
     )

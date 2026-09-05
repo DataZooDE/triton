@@ -1557,6 +1557,7 @@ async fn handle_callback_query(
         token,
         &adapter.correlation_key,
         triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+        "telegram",
         &tenant,
     ) {
         Ok(v) => v,

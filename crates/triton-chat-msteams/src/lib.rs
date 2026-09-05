@@ -1049,6 +1049,7 @@ async fn handle_callback(
         &token,
         &adapter.correlation_key,
         surface_mapper::MSTEAMS_CORRELATION_CAP,
+        "msteams",
         &sender.tenant,
     ) {
         Ok(p) => p,
@@ -1564,6 +1565,7 @@ fn render_card_content(
                 &spec.base_args(),
                 &adapter.correlation_key,
                 surface_mapper::MSTEAMS_CORRELATION_CAP,
+                "msteams",
                 tenant,
                 Some(CARD_TOKEN_TTL_SECS),
             ) {

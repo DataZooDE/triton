@@ -1247,6 +1247,7 @@ async fn handle_webhook(
             token,
             &adapter.correlation_key,
             CARD_CORRELATION_CAP,
+            "google_chat",
             &principal.tenant,
         ) {
             Ok((tool, decoded_args)) => {
@@ -1503,6 +1504,7 @@ async fn build_reply_message(
                                 &spec.base_args(),
                                 &adapter.correlation_key,
                                 CARD_CORRELATION_CAP,
+                                "google_chat",
                                 &principal.tenant,
                                 Some(CARD_TOKEN_TTL_SECS),
                             ) {

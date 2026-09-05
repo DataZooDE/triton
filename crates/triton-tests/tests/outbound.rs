@@ -468,6 +468,7 @@ async fn outbound_buttons_are_minted_for_the_recipients_tenant() {
             &minted,
             b"whatsapp-correlation-key-for-test",
             triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+            "whatsapp",
             "globex",
         )
         .is_ok(),

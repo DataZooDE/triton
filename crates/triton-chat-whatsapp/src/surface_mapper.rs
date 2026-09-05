@@ -189,6 +189,7 @@ pub fn render(
                     args,
                     correlation_key,
                     triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+                    "whatsapp",
                     tenant,
                     None,
                 ) {
@@ -221,6 +222,7 @@ pub fn render(
                         &args,
                         correlation_key,
                         triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+                        "whatsapp",
                         tenant,
                         None,
                     ) {

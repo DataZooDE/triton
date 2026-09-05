@@ -186,6 +186,7 @@ pub fn render(
                     args,
                     correlation_key,
                     triton_correlation::DISCORD_MAX_CUSTOM_ID,
+                    "discord",
                     tenant,
                     Some(CARD_TOKEN_TTL_SECS),
                 ) {
@@ -242,6 +243,7 @@ pub fn render(
                     &args,
                     correlation_key,
                     triton_correlation::DISCORD_MAX_CUSTOM_ID,
+                    "discord",
                     tenant,
                     Some(CARD_TOKEN_TTL_SECS),
                 ) {
@@ -590,6 +592,7 @@ fn build_modal_response(
         &args,
         correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "discord",
         tenant,
         Some(CARD_TOKEN_TTL_SECS),
     )
@@ -728,6 +731,7 @@ mod tests {
             token,
             TEST_KEY,
             triton_correlation::DISCORD_MAX_CUSTOM_ID,
+            "discord",
             "acme",
         )
         .expect("token verifies for its tenant");
@@ -975,6 +979,7 @@ mod tests {
             token,
             TEST_KEY,
             triton_correlation::DISCORD_MAX_CUSTOM_ID,
+            "discord",
             "acme",
         )
         .expect("verifies for its tenant");

@@ -306,6 +306,7 @@ async fn demo_selection_defers_when_any_option_overflows_cap() {
         refresh["callback_data"].as_str().unwrap(),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+        "telegram",
         "acme",
     )
     .expect("Refresh token verifies for its tenant");
