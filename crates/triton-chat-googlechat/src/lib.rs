@@ -1256,8 +1256,14 @@ async fn handle_webhook(
             token,
             &adapter.correlation_key,
             CARD_CORRELATION_CAP,
-            "google_chat",
-            &principal.tenant,
+            triton_correlation::Binding {
+                platform: "google_chat",
+                tenant: &principal.tenant,
+                // #287: the CLICKER. A card in a space is visible to
+                // every member of it, so the tenant binding alone left
+                // the token a capability held by all of them.
+                sender: sender_name,
+            },
         ) {
             Ok((tool, decoded_args)) => {
                 tool_name = tool;
@@ -1313,6 +1319,7 @@ async fn handle_webhook(
                 // The public image base derives from request headers, which
                 // the spawned task no longer has — capture it now.
                 let base = public_base(&headers);
+                let sender_owned = sender_name.to_string();
                 let task = async move {
                     courier_reply(
                         adapter,
@@ -1321,6 +1328,7 @@ async fn handle_webhook(
                         tool_name,
                         args,
                         principal,
+                        sender_owned,
                         action_echo,
                     )
                     .await;
@@ -1384,6 +1392,7 @@ async fn handle_webhook(
             &dispatch.result,
             &action_echo,
             &principal_for_post,
+            sender_name,
             workspace_addon,
             image_hint,
         )
@@ -1472,6 +1481,10 @@ async fn build_reply_message(
     dispatch_result: &Value,
     action_echo: &Option<String>,
     principal: &Principal,
+    // #287: the platform sender the card is rendered for — folded into
+    // the derived signing key beside the tenant, so only they can
+    // submit its actions.
+    sender_name: &str,
     workspace_addon: bool,
     image_hint: Option<String>,
 ) -> Result<Value, surface_mapper::RenderError> {
@@ -1513,8 +1526,11 @@ async fn build_reply_message(
                                 &spec.base_args(),
                                 adapter.correlation_key.signing(),
                                 CARD_CORRELATION_CAP,
-                                "google_chat",
-                                &principal.tenant,
+                                triton_correlation::Binding {
+                                    platform: "google_chat",
+                                    tenant: &principal.tenant,
+                                    sender: sender_name,
+                                },
                                 Some(CARD_TOKEN_TTL_SECS),
                             ) {
                                 Ok(token) => Some((spec, token)),
@@ -1647,6 +1663,7 @@ async fn build_reply_message(
 /// one patch per turn sits inside the 1-write/s per-space quota with no
 /// limiter. A failed placeholder create degrades to a plain create of
 /// the final answer — never a dropped turn.
+#[allow(clippy::too_many_arguments)]
 async fn courier_reply(
     adapter: Arc<GoogleChatAdapter>,
     space: String,
@@ -1654,6 +1671,9 @@ async fn courier_reply(
     tool_name: String,
     args: Value,
     principal: Principal,
+    // #287: the platform sender the reply's card is minted for. Owned,
+    // because this runs in a spawned task that outlives the request.
+    sender_name: String,
     action_echo: Option<String>,
 ) {
     let principal_for_post = principal.clone();
@@ -1732,6 +1752,7 @@ async fn courier_reply(
                 &result_value,
                 &action_echo,
                 &principal_for_post,
+                &sender_name,
                 false,
                 image_hint,
             )

@@ -240,6 +240,29 @@ fn decode_parsed(token: &str, key: &[u8], cap: usize) -> Result<CompactBodyOwned
     Ok(parsed)
 }
 
+/// Who a bound token is FOR: the three values folded into its derived
+/// signing key.
+///
+/// A struct rather than three positional arguments because `tenant` and
+/// `sender` are both `&str` and adjacent — swapping them compiles, and
+/// the result is a token bound to nothing anyone will ever present. The
+/// field names make that mistake unrepresentable at the call site, which
+/// matters more here than at most seams: the failure would not be a
+/// crash but a quiet, total loss of the binding.
+#[derive(Clone, Copy)]
+pub struct Binding<'a> {
+    /// The adapter minting it (`"telegram"`, `"discord"`, …). Without
+    /// this, two adapters sharing a `correlation_key` would accept each
+    /// other's tokens.
+    pub platform: &'a str,
+    /// The tenant the token is minted into (#250).
+    pub tenant: &'a str,
+    /// The PLATFORM id of the person who may redeem it (#287) — not the
+    /// resolved `Principal::sub`. It has to be the value the inbound
+    /// path has in hand before the token is verified.
+    pub sender: &'a str,
+}
+
 /// Mint a token BOUND to a tenant and an expiry (#250).
 ///
 /// The unbound [`encode_with_cap`] produces a capability for
@@ -260,8 +283,7 @@ pub fn encode_bound_at(
     args: &Value,
     key: &[u8],
     cap: usize,
-    platform: &str,
-    tenant: &str,
+    b: Binding<'_>,
     exp_unix_secs: u64,
 ) -> Result<String, EncodeError> {
     if tool.is_empty() {
@@ -272,7 +294,7 @@ pub fn encode_bound_at(
         a: args,
         x: Some(exp_unix_secs.div_ceil(3600)),
     };
-    finish(body, &tenant_key(key, platform, tenant), cap)
+    finish(body, &tenant_key(key, b), cap)
 }
 
 pub fn encode_bound(
@@ -280,8 +302,7 @@ pub fn encode_bound(
     args: &Value,
     key: &[u8],
     cap: usize,
-    platform: &str,
-    tenant: &str,
+    b: Binding<'_>,
     ttl_secs: Option<u64>,
 ) -> Result<String, EncodeError> {
     if tool.is_empty() {
@@ -305,7 +326,7 @@ pub fn encode_bound(
         a: args,
         x: exp,
     };
-    finish(body, &tenant_key(key, platform, tenant), cap)
+    finish(body, &tenant_key(key, b), cap)
 }
 
 /// Verify a token AND its binding: the tenant must equal `tenant` and
@@ -321,14 +342,13 @@ pub fn decode_bound(
     token: &str,
     key: &[u8],
     cap: usize,
-    platform: &str,
-    tenant: &str,
+    b: Binding<'_>,
 ) -> Result<(String, Value), DecodeError> {
     // The tenant is in the KEY, so a token minted for another tenant
     // fails the signature check here — there is no field to compare and
     // nothing to forget to check. A pre-binding token, minted under the
     // bare key, fails the same way.
-    let parsed = decode_parsed(token, &tenant_key(key, platform, tenant), cap)?;
+    let parsed = decode_parsed(token, &tenant_key(key, b), cap)?;
     // An expiry is present only where the platform's token budget could
     // afford one. Its ABSENCE is not attacker-selectable: the field is
     // covered by the MAC, so stripping it invalidates the token.
@@ -356,10 +376,9 @@ pub fn verify_tenant_binding(
     token: &str,
     key: &[u8],
     cap: usize,
-    platform: &str,
-    tenant: &str,
+    b: Binding<'_>,
 ) -> Result<(), DecodeError> {
-    decode_bound(token, key, cap, platform, tenant).map(|_| ())
+    decode_bound(token, key, cap, b).map(|_| ())
 }
 
 /// Derive a per-tenant signing key — what actually binds a token to a
@@ -382,17 +401,33 @@ pub fn verify_tenant_binding(
 /// a byte-valid Discord `custom_id`, re-creating the forever-capability
 /// this binding exists to close, one adapter over.
 ///
+/// The SENDER is folded in beside them (#287). Without it a token is a
+/// capability held by the whole tenant: `callback_data` is not a secret
+/// in a shared space, so any member who can see another member's button
+/// could click it and have the tool run under their OWN principal
+/// against the OTHER person's arguments. Cross-tenant replay was closed;
+/// intra-tenant replay was not. In the key it costs nothing on the wire,
+/// which is what makes it affordable at Telegram's 64-byte budget.
+///
 /// The label domain-separates the whole thing from the body MAC, which
 /// is computed over JSON and so always begins with `{`. The original key
 /// is appended so the derived key never carries less entropy than the
 /// one it replaces.
-fn tenant_key(key: &[u8], platform: &str, tenant: &str) -> Vec<u8> {
-    let mut input = Vec::with_capacity(DERIVATION_LABEL.len() + platform.len() + tenant.len() + 2);
+///
+/// Every component is NUL-separated and none of them may contain a NUL
+/// (a platform sender id and a tenant are both drawn from restricted
+/// alphabets), so no two distinct triples share a derivation input.
+fn tenant_key(key: &[u8], b: Binding<'_>) -> Vec<u8> {
+    let mut input = Vec::with_capacity(
+        DERIVATION_LABEL.len() + b.platform.len() + b.tenant.len() + b.sender.len() + 3,
+    );
     input.extend_from_slice(DERIVATION_LABEL);
     input.push(0);
-    input.extend_from_slice(platform.as_bytes());
+    input.extend_from_slice(b.platform.as_bytes());
     input.push(0);
-    input.extend_from_slice(tenant.as_bytes());
+    input.extend_from_slice(b.tenant.as_bytes());
+    input.push(0);
+    input.extend_from_slice(b.sender.as_bytes());
     // The FULL tag, not the truncated one: truncation is a wire-budget
     // constraint and this key never leaves the process.
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
@@ -404,7 +439,12 @@ fn tenant_key(key: &[u8], platform: &str, tenant: &str) -> Vec<u8> {
 
 /// Versioned, unambiguous prefix for the key derivation. Rotating it
 /// invalidates every outstanding token, which is the point of having one.
-const DERIVATION_LABEL: &[u8] = b"triton/correlation/tenant-key/v1";
+///
+/// `v2` (#287) added the sender to the derivation input. The bump is not
+/// decoration: it guarantees a v1 token cannot collide with a v2 one for
+/// any input, so the deploy that adds sender binding cannot leave a
+/// pre-binding token verifying by accident.
+const DERIVATION_LABEL: &[u8] = b"triton/correlation/tenant-key/v2";
 
 /// `None` when the clock is before the epoch (a machine mid-NTP-sync,
 /// say). Callers treat that as "cannot decide" and refuse: mapping it to
@@ -542,10 +582,9 @@ pub fn decode_bound_any(
     token: &str,
     ring: &KeyRing,
     cap: usize,
-    platform: &str,
-    tenant: &str,
+    b: Binding<'_>,
 ) -> Result<(String, Value), DecodeError> {
-    try_ring(ring, |key| decode_bound(token, key, cap, platform, tenant))
+    try_ring(ring, |key| decode_bound(token, key, cap, b))
 }
 
 /// [`verify_tenant_binding`] against every key on the ring.
@@ -553,12 +592,9 @@ pub fn verify_tenant_binding_any(
     token: &str,
     ring: &KeyRing,
     cap: usize,
-    platform: &str,
-    tenant: &str,
+    b: Binding<'_>,
 ) -> Result<(), DecodeError> {
-    try_ring(ring, |key| {
-        verify_tenant_binding(token, key, cap, platform, tenant)
-    })
+    try_ring(ring, |key| verify_tenant_binding(token, key, cap, b))
 }
 
 /// [`decode_with_cap`] against every key on the ring. Used by the
@@ -634,18 +670,50 @@ mod tests {
 
     #[test]
     fn a_token_minted_under_a_dropped_key_stops_verifying() {
-        let token =
-            encode_bound("narrate", &json!({}), OLD, 200, "telegram", "acme", None).expect("fits");
+        let token = encode_bound(
+            "narrate",
+            &json!({}),
+            OLD,
+            200,
+            Binding {
+                platform: "telegram",
+                tenant: "acme",
+                sender: "u1",
+            },
+            None,
+        )
+        .expect("fits");
 
         let during = KeyRing {
             keys: vec![NEW.to_vec(), OLD.to_vec()],
         };
-        assert!(decode_bound_any(&token, &during, 200, "telegram", "acme").is_ok());
+        assert!(
+            decode_bound_any(
+                &token,
+                &during,
+                200,
+                Binding {
+                    platform: "telegram",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_ok()
+        );
 
         let after = KeyRing::single(NEW);
         assert!(
             matches!(
-                decode_bound_any(&token, &after, 200, "telegram", "acme"),
+                decode_bound_any(
+                    &token,
+                    &after,
+                    200,
+                    Binding {
+                        platform: "telegram",
+                        tenant: "acme",
+                        sender: "u1"
+                    }
+                ),
                 Err(DecodeError::BadSignature)
             ),
             "dropping the key must close the window",
@@ -656,12 +724,35 @@ mod tests {
     fn the_ring_does_not_widen_the_tenant_binding() {
         // Every key on the ring still derives a per-tenant key, so a
         // ring is not a way to smuggle a foreign-tenant token through.
-        let token = encode_bound("narrate", &json!({}), OLD, 200, "telegram", "globex", None)
-            .expect("fits");
+        let token = encode_bound(
+            "narrate",
+            &json!({}),
+            OLD,
+            200,
+            Binding {
+                platform: "telegram",
+                tenant: "globex",
+                sender: "u1",
+            },
+            None,
+        )
+        .expect("fits");
         let ring = KeyRing {
             keys: vec![NEW.to_vec(), OLD.to_vec()],
         };
-        assert!(decode_bound_any(&token, &ring, 200, "telegram", "acme").is_err());
+        assert!(
+            decode_bound_any(
+                &token,
+                &ring,
+                200,
+                Binding {
+                    platform: "telegram",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -675,15 +766,27 @@ mod tests {
             &json!({}),
             OLD,
             200,
-            "telegram",
-            "acme",
+            Binding {
+                platform: "telegram",
+                tenant: "acme",
+                sender: "u1",
+            },
             long_ago,
         )
         .expect("fits");
         let ring = KeyRing {
             keys: vec![NEW.to_vec(), OLD.to_vec()],
         };
-        match decode_bound_any(&token, &ring, 200, "telegram", "acme") {
+        match decode_bound_any(
+            &token,
+            &ring,
+            200,
+            Binding {
+                platform: "telegram",
+                tenant: "acme",
+                sender: "u1",
+            },
+        ) {
             Err(DecodeError::Body(m)) => assert!(m.contains("expired"), "{m}"),
             other => panic!("expected an expiry verdict, got {other:?}"),
         }
@@ -825,20 +928,167 @@ mod bound_tests {
             &json!({"s": "a"}),
             KEY,
             CAP,
-            "tg",
-            "acme",
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
             Some(3600),
         )
         .unwrap();
-        let (tool, args) = decode_bound(&t, KEY, CAP, "tg", "acme").unwrap();
+        let (tool, args) = decode_bound(
+            &t,
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+        )
+        .unwrap();
         assert_eq!(tool, "narrate");
         assert_eq!(args["s"], "a");
     }
 
     #[test]
+    fn another_sender_in_the_same_tenant_cannot_use_it() {
+        // #287. The tenant matches, so the #250 binding is satisfied
+        // and cannot be what refuses this — only the sender can.
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "alice",
+            },
+            Some(3600),
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "alice"
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            matches!(
+                decode_bound(
+                    &t,
+                    KEY,
+                    CAP,
+                    Binding {
+                        platform: "tg",
+                        tenant: "acme",
+                        sender: "bob"
+                    }
+                ),
+                Err(DecodeError::BadSignature)
+            ),
+            "a sibling in the same tenant must fail the SIGNATURE, not a comparison",
+        );
+    }
+
+    #[test]
+    fn the_derivation_inputs_cannot_be_confused_with_each_other() {
+        // NUL separators mean no two distinct triples share an input.
+        // Without them `(tenant="ac", sender="me")` and
+        // `(tenant="acme", sender="")` would derive the same key.
+        let a = tenant_key(
+            KEY,
+            Binding {
+                platform: "tg",
+                tenant: "ac",
+                sender: "me",
+            },
+        );
+        let b = tenant_key(
+            KEY,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "",
+            },
+        );
+        assert_ne!(a, b);
+        let c = tenant_key(
+            KEY,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+        );
+        let d = tenant_key(
+            KEY,
+            Binding {
+                platform: "tgacme",
+                tenant: "",
+                sender: "u1",
+            },
+        );
+        assert_ne!(c, d);
+    }
+
+    #[test]
+    fn a_sender_bound_token_still_fits_telegrams_budget() {
+        // The sender rides in the KEY, so it costs nothing on the wire.
+        // If that ever stops being true, Telegram's 64-byte
+        // callback_data is where it breaks first.
+        let t = encode_bound(
+            "narrate",
+            &json!({ "subject": "alice" }),
+            KEY,
+            PLATFORM_MAX_CALLBACK_DATA,
+            Binding {
+                platform: "tg",
+                tenant: "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+                sender: "298374928374982",
+            },
+            None,
+        )
+        .expect("a sender binding must stay free on the wire");
+        assert!(t.len() <= PLATFORM_MAX_CALLBACK_DATA, "{} bytes", t.len());
+    }
+
+    #[test]
     fn another_tenant_cannot_use_it() {
-        let t = encode_bound("narrate", &json!({}), KEY, CAP, "tg", "acme", Some(3600)).unwrap();
-        assert!(decode_bound(&t, KEY, CAP, "tg", "globex").is_err());
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+            Some(3600),
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "globex",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -847,7 +1097,19 @@ mod bound_tests {
         // the replay open for every card minted before the binding
         // shipped, and unbound tokens never expire.
         let legacy = encode_with_cap("narrate", &json!({}), KEY, CAP).unwrap();
-        assert!(decode_bound(&legacy, KEY, CAP, "tg", "acme").is_err());
+        assert!(
+            decode_bound(
+                &legacy,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
         // ...but it still decodes on the unbound path, so nothing else breaks.
         assert!(decode_with_cap(&legacy, KEY, CAP).is_ok());
     }
@@ -863,15 +1125,63 @@ mod bound_tests {
             a: &args,
             x: Some(now_secs().unwrap() / 3600 - 1),
         };
-        let t = finish(past, &tenant_key(KEY, "tg", "acme"), CAP).unwrap();
-        assert!(decode_bound(&t, KEY, CAP, "tg", "acme").is_err());
+        let t = finish(
+            past,
+            &tenant_key(
+                KEY,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1",
+                },
+            ),
+            CAP,
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn a_ttl_rounds_up_so_a_token_never_dies_early() {
         // Hour granularity must never shorten the caller's TTL.
-        let t = encode_bound("narrate", &json!({}), KEY, CAP, "tg", "acme", Some(1)).unwrap();
-        assert!(decode_bound(&t, KEY, CAP, "tg", "acme").is_ok());
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+            Some(1),
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -885,8 +1195,11 @@ mod bound_tests {
             &json!({ "subject": "alice" }),
             KEY,
             DISCORD_MAX_CUSTOM_ID,
-            "dc",
-            "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+            Binding {
+                platform: "dc",
+                tenant: "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+                sender: "u1",
+            },
             Some(7 * 24 * 3600),
         )
         .expect("a realistic bound token fits Discord's budget");
@@ -910,8 +1223,11 @@ mod bound_tests {
             &json!({ "subject": "alice" }),
             KEY,
             PLATFORM_MAX_CALLBACK_DATA,
-            "tg",
-            "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+            Binding {
+                platform: "tg",
+                tenant: "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+                sender: "u1",
+            },
             None,
         )
         .expect("a tenant-bound token fits Telegram when the expiry is dropped");
@@ -920,14 +1236,29 @@ mod bound_tests {
             "got {} bytes",
             t.len()
         );
-        assert!(decode_bound(&t, KEY, PLATFORM_MAX_CALLBACK_DATA, "tg", "globex").is_err());
         assert!(
             decode_bound(
                 &t,
                 KEY,
                 PLATFORM_MAX_CALLBACK_DATA,
-                "tg",
-                "28c0071d-815c-4ace-a3b5-9a28bde005fd"
+                Binding {
+                    platform: "tg",
+                    tenant: "globex",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                PLATFORM_MAX_CALLBACK_DATA,
+                Binding {
+                    platform: "tg",
+                    tenant: "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+                    sender: "u1"
+                }
             )
             .is_ok()
         );
@@ -937,15 +1268,75 @@ mod bound_tests {
     /// must still be refused for the wrong tenant.
     #[test]
     fn an_expiry_less_token_never_expires_but_stays_tenant_scoped() {
-        let t = encode_bound("narrate", &json!({}), KEY, CAP, "tg", "acme", None).unwrap();
-        assert!(decode_bound(&t, KEY, CAP, "tg", "acme").is_ok());
-        assert!(decode_bound(&t, KEY, CAP, "tg", "globex").is_err());
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+            None,
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "globex",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
     fn a_bound_token_still_fails_a_wrong_key() {
-        let t = encode_bound("narrate", &json!({}), KEY, CAP, "tg", "acme", Some(3600)).unwrap();
-        assert!(decode_bound(&t, b"other", CAP, "tg", "acme").is_err());
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+            Some(3600),
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                b"other",
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -955,8 +1346,19 @@ mod bound_tests {
         // surface as OversizedToken rather than a silently dropped
         // binding.
         let unbound = encode_with_cap("narrate", &json!({}), KEY, CAP).unwrap();
-        let bound =
-            encode_bound("narrate", &json!({}), KEY, CAP, "tg", "acme", Some(3600)).unwrap();
+        let bound = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+            Some(3600),
+        )
+        .unwrap();
         assert!(bound.len() > unbound.len());
         assert!(matches!(
             encode_bound(
@@ -964,8 +1366,11 @@ mod bound_tests {
                 &json!({}),
                 KEY,
                 unbound.len(),
-                "tg",
-                "acme",
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                },
                 Some(3600)
             ),
             Err(EncodeError::OversizedToken { .. })
@@ -980,10 +1385,44 @@ mod bound_tests {
     /// `custom_id`, re-creating the forever-capability one adapter over.
     #[test]
     fn a_token_from_one_platform_is_refused_on_another() {
-        let t = encode_bound("narrate", &json!({}), KEY, CAP, "telegram", "acme", None).unwrap();
-        assert!(decode_bound(&t, KEY, CAP, "telegram", "acme").is_ok());
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "telegram",
+                tenant: "acme",
+                sender: "u1",
+            },
+            None,
+        )
+        .unwrap();
         assert!(
-            decode_bound(&t, KEY, CAP, "discord", "acme").is_err(),
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "telegram",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "discord",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_err(),
             "same key, same tenant, different platform must not verify"
         );
     }

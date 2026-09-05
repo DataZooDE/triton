@@ -1087,14 +1087,19 @@ async fn handle_callback(
     // Verify the HMAC BEFORE trusting the tool/args. A forged or
     // tampered token — even on an authenticated webhook — is refused
     // and audited as `error:auth`, never re-dispatched.
-    // #250: verified against the SENDER's tenant, so a token minted into
-    // another tenant's conversation cannot be replayed here.
+    // #250/#287: verified against the SENDER's tenant AND the SENDER.
+    // An `Action.Submit.data` token travels in a card that every member
+    // of a Teams channel can see, so without the sender in the
+    // derivation the card is a capability held by the whole tenant.
     let (tool_name, mut args) = match triton_correlation::decode_bound_any(
         &token,
         &adapter.correlation_key,
         surface_mapper::MSTEAMS_CORRELATION_CAP,
-        "msteams",
-        &sender.tenant,
+        triton_correlation::Binding {
+            platform: "msteams",
+            tenant: &sender.tenant,
+            sender: &sender.from_id,
+        },
     ) {
         Ok(p) => p,
         Err(_) => {
@@ -1337,6 +1342,7 @@ async fn dispatch_and_refresh_card(
                 image_url.as_deref(),
                 &chrome,
                 &sender.tenant,
+                &sender.from_id,
             ) {
                 Some(card) => surface_mapper::invoke_card_response(card),
                 None => surface_mapper::invoke_message_response(
@@ -1573,7 +1579,14 @@ fn build_reply_body(
     // component to lift a spec from — the caller minted the URL from
     // the invoked args instead.
     let image_url = image_hint.or_else(|| reply_image_url(adapter, result, tenant));
-    if let Some(card) = render_card_content(adapter, result, image_url.as_deref(), chrome, tenant) {
+    if let Some(card) = render_card_content(
+        adapter,
+        result,
+        image_url.as_deref(),
+        chrome,
+        tenant,
+        recipient_id,
+    ) {
         surface_mapper::build_card_activity_body(bot_id, conversation_id, recipient_id, card)
     } else {
         let msg = text_reply_message(result);
@@ -1585,12 +1598,16 @@ fn build_reply_body(
 /// surface has no interactive controls or dashboard (caller then sends
 /// a plain-text reply). Each interactive control's `(tool, base_args)`
 /// is signed here — the adapter holds the correlation key.
+#[allow(clippy::too_many_arguments)]
 fn render_card_content(
     adapter: &MsTeamsAdapter,
     result: &Value,
     image_url: Option<&str>,
     chrome: &surface_mapper::CardChrome,
     tenant: &str,
+    // #287: the card's recipient. Folded into the derived signing key
+    // beside the tenant, so only they can submit its actions.
+    sender: &str,
 ) -> Option<Value> {
     let specs = surface_mapper::interactive_from_result(result);
     let dashboard = surface_mapper::dashboard_from_result(result);
@@ -1609,8 +1626,11 @@ fn render_card_content(
                 &spec.base_args(),
                 adapter.correlation_key.signing(),
                 surface_mapper::MSTEAMS_CORRELATION_CAP,
-                "msteams",
-                tenant,
+                triton_correlation::Binding {
+                    platform: "msteams",
+                    tenant,
+                    sender,
+                },
                 Some(CARD_TOKEN_TTL_SECS),
             ) {
                 Ok(token) => Some((spec, token)),

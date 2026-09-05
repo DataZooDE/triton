@@ -241,6 +241,16 @@ on implementation details not pinned below.
   every interactive component already delivered to a conversation,
   which in practice means the key is never rotated at all.
   *(M-CORRELATION-1.)*
+- **FR-A-15 (v0.2, #287)** A correlation token MUST be bound to the
+  PLATFORM SENDER it was minted for, in addition to the tenant
+  (FR-A-12). The binding MUST live in the derived signing key, not on
+  the wire, so it costs nothing against the tightest platform token
+  budget. A token presented by any other sender — including one in the
+  SAME tenant — MUST fail verification and MUST NOT reach the
+  dispatcher. Rationale: an interactive payload (`callback_data`,
+  `custom_id`, `Action.Submit.data`, a card action) is visible to every
+  member of a shared conversation, so a token bound only to the tenant
+  is a capability held by all of them. *(M-CORRELATION-1.)*
 - **FR-A-13 (v0.2)** For any tool invocation whose envelope carries
   only stable, non-rasterised component types (text, narration,
   button-row, selection-row), the `PlatformMessage` produced by
@@ -698,7 +708,7 @@ is the canonical mapping; the messenger paper's
 | M-MAP-1           | FR-A-9, FR-A-13 (mapper purity, parity)                | IMPL — PASS         |
 | M-RICHNESS-1      | FR-A-10 (SurfaceLimits at mapper edge)                 | IMPL — PASS         |
 | M-RASTER-1        | FR-A-11 (Rasterizer for dashboard components)          | IMPL — PASS         |
-| M-CORRELATION-1   | FR-A-12, FR-A-14 (HMAC token round-trip; key rotation) | IMPL — PASS         |
+| M-CORRELATION-1   | FR-A-12, FR-A-14, FR-A-15 (token round-trip; rotation; sender binding) | IMPL — PASS |
 | M-MANIFEST-1      | FR-L-4 (closed-set boot validation)                    | PAPER — PASS        |
 | M-COVERAGE-1      | FR-L-5 (degrade rule coverage)                         | PAPER — PASS        |
 | M-SECRETS-1       | FR-L-6, NFR-S-5 (Vault credentials)                    | PAPER — PASS        |

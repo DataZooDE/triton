@@ -468,11 +468,17 @@ async fn outbound_buttons_are_minted_for_the_recipients_tenant() {
             &minted,
             b"whatsapp-correlation-key-for-test",
             triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
-            "whatsapp",
-            "globex",
+            triton_correlation::Binding {
+                platform: "whatsapp",
+                tenant: "globex",
+                // #287: and the RECIPIENT themselves — the `to` of the
+                // proactive send, which is who will tap it.
+                sender: "490000000001",
+            },
         )
         .is_ok(),
-        "the button must be minted for the RECIPIENT's tenant (`globex`), \
-         or every click on a proactive message dies as a forged token"
+        "the button must be minted for the RECIPIENT's tenant (`globex`) and \
+         the recipient, or every click on a proactive message dies as a \
+         forged token"
     );
 }
