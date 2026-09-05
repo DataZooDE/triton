@@ -289,6 +289,22 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
         }
     };
 
+    // A2A extension activation: the client (e.g. Gemini Enterprise) lists the
+    // extensions it activated in `X-A2A-Extensions`. Log it so we can see
+    // whether GE actually activates A2UI, and echo the ones we support back on
+    // the response (the A2A spec says the agent SHOULD confirm activation this
+    // way — some renderers gate on the echo).
+    let inbound_ext = parts
+        .headers
+        .get("x-a2a-extensions")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    tracing::info!(x_a2a_extensions = ?inbound_ext, "a2a inbound extension activation");
+    let echo_a2ui = inbound_ext
+        .as_deref()
+        .map(|h| h.contains(triton_core::a2ui::ge::EXTENSION_URI))
+        .unwrap_or(false);
+
     let req: RpcRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return rpc_error(&Value::Null, PARSE_ERROR, format!("invalid JSON: {e}")),
@@ -297,7 +313,7 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
         return rpc_error(&req.id, INVALID_REQUEST, "jsonrpc must be \"2.0\"");
     }
 
-    match req.method.as_str() {
+    let mut resp = match req.method.as_str() {
         "message/send" => message_send(state, principal, req).await,
         "message/stream" => message_stream(state, principal, req).await,
         "tasks/get" => tasks_get(state, req),
@@ -310,7 +326,13 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
                 "unsupported method `{other}`; this agent implements message/send, message/stream, tasks/get"
             ),
         ),
+    };
+    if echo_a2ui
+        && let Ok(v) = axum::http::HeaderValue::from_str(triton_core::a2ui::ge::EXTENSION_URI)
+    {
+        resp.headers_mut().insert("x-a2a-extensions", v);
     }
+    resp
 }
 
 /// Does the client want the Task back immediately instead of blocking
