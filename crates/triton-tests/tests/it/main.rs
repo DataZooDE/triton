@@ -26,6 +26,8 @@ mod acc_hardening;
 mod audit_reject_coalescing;
 #[path = "../audit_retrieval.rs"]
 mod audit_retrieval;
+#[path = "../audit_tenant_scope.rs"]
+mod audit_tenant_scope;
 #[path = "../consumer_smoke.rs"]
 mod consumer_smoke;
 #[path = "../cors.rs"]
