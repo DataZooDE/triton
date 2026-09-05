@@ -29,7 +29,7 @@ use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{self, McpSessions, McpState};
 use triton_adapters_http::rest::{self, OidcProviderInfo, RestState, RuntimeDiscovery};
 use triton_core::{Dispatcher, RuntimeInfo, ToolRegistry};
-use triton_identity::{OidcConfig, OidcVerifier};
+use triton_identity::{GoogleAccessTokenVerifier, OidcConfig, OidcVerifier};
 
 /// Options for the embedded host.
 pub struct EmbedOpts {
@@ -63,6 +63,10 @@ pub struct EmbedOpts {
     /// contract (ADR-0017's verification reads `oidc_issuer`), so
     /// multi-issuer adds a field rather than redefining one.
     pub oidc_providers: Vec<(String, String)>,
+    /// Optional fallback for opaque Google OAuth access tokens (Gemini
+    /// Enterprise forwards these over A2A — they are not JWTs). Set with
+    /// [`EmbedOpts::google_access`]. `None` = only JWTs are accepted.
+    pub google_access: Option<Arc<GoogleAccessTokenVerifier>>,
 }
 
 impl Default for EmbedOpts {
@@ -78,6 +82,7 @@ impl Default for EmbedOpts {
             oidc_client_id: None,
             oidc_providers: Vec::new(),
             spec_a2a: None,
+            google_access: None,
         }
     }
 }
@@ -87,6 +92,21 @@ impl EmbedOpts {
     /// `dev-token` feature (default) for `Bearer dev-token` auth.
     pub fn dev() -> Self {
         Self::default()
+    }
+
+    /// Accept opaque Google OAuth access tokens (Gemini Enterprise / A2A) by
+    /// introspection, in addition to the configured JWT OIDC pairs. `audience`
+    /// is the Google OAuth client id the token's `aud` must match; `allowed_hd`
+    /// is the required hosted domain (recommended). Opt-in; JWT paths unchanged.
+    pub fn google_access(
+        mut self,
+        audience: impl Into<String>,
+        allowed_hd: Option<String>,
+    ) -> Self {
+        self.google_access = Some(Arc::new(GoogleAccessTokenVerifier::new(
+            audience, allowed_hd,
+        )));
+        self
     }
 
     pub fn port(mut self, port: u16) -> Self {
@@ -217,7 +237,11 @@ impl EmbedOpts {
 /// rejected while `/healthz` keeps answering. `/v1/runtime` reports the
 /// issuer precisely so that state is visible rather than inferred.
 pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
-    let identity = Arc::new(IdentityProvider::with_verifiers(opts.oidc.clone(), false));
+    let mut identity = IdentityProvider::with_verifiers(opts.oidc.clone(), false);
+    if let Some(g) = &opts.google_access {
+        identity = identity.with_google_access(g.clone());
+    }
+    let identity = Arc::new(identity);
     let metrics = dispatcher.metrics();
     let version = env!("CARGO_PKG_VERSION").to_string();
 
