@@ -188,6 +188,19 @@ async fn agent_card(State(state): State<CardState>) -> Response {
             // method, never before.
             "streaming": true,
             "pushNotifications": false,
+            // A2UI v0.9 (a2ui.org): the agent can return interactive UI
+            // (cards, charts-as-images, buttons) as an `application/a2ui+json`
+            // DataPart. Gemini Enterprise activates it via the
+            // `X-A2A-Extensions` header and renders it from the basic catalog.
+            "extensions": [{
+                "uri": triton_core::a2ui::ge::EXTENSION_URI,
+                "description": "Ability to render A2UI v0.9",
+                "required": false,
+                "params": {
+                    "supportedCatalogIds": [triton_core::a2ui::ge::BASIC_CATALOG],
+                    "acceptsInlineCatalogs": false,
+                },
+            }],
         },
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/plain"],
@@ -399,11 +412,15 @@ async fn message_send(
     match handle.await {
         Ok(Ok(d)) => {
             let reply = reply_text(&d.result);
+            let mut parts = vec![json!({ "kind": "text", "text": reply })];
+            if let Some(msgs) = triton_core::a2ui::ge::build_messages(&d.result) {
+                parts.push(triton_core::a2ui::ge::data_part(msgs));
+            }
             let msg = json!({
                 "kind": "message",
                 "role": "agent",
                 "messageId": uuid::Uuid::new_v4().to_string(),
-                "parts": [{ "kind": "text", "text": reply }],
+                "parts": parts,
                 // The task id, so a caller can follow up via tasks/get.
                 "taskId": d.trace_id,
                 "contextId": context_id,
@@ -505,6 +522,14 @@ async fn message_stream(
             triton_core::stream::StreamEvent::Done(v) => {
                 let reply = reply_text(&v);
                 tasks.record_entry(&task_for_frames, TaskState::Completed, Some(&reply), None);
+                // Final answer artifact carries the text part (every client)
+                // AND, when the surface has renderable components, an A2UI
+                // v0.9 DataPart (Gemini Enterprise renders the card/chart/
+                // buttons; text-only clients ignore the data part).
+                let mut parts = vec![json!({ "kind": "text", "text": reply })];
+                if let Some(msgs) = triton_core::a2ui::ge::build_messages(&v) {
+                    parts.push(triton_core::a2ui::ge::data_part(msgs));
+                }
                 vec![
                     rpc_frames(json!({
                         "kind": "artifact-update",
@@ -513,7 +538,7 @@ async fn message_stream(
                         "lastChunk": true,
                         "artifact": {
                             "artifactId": artifact_id,
-                            "parts": [{ "kind": "text", "text": reply }],
+                            "parts": parts,
                         },
                     })),
                     rpc_frames(json!({
