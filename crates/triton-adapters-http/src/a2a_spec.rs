@@ -354,6 +354,14 @@ fn wants_immediate_task(params: &Value) -> bool {
 /// get an answer to its words.
 fn text_from_params(params: &Value) -> Option<String> {
     let parts = params.get("message")?.get("parts")?.as_array()?;
+    // A2UI button click: Gemini Enterprise posts back the action as a
+    // `application/json+a2ui` DataPart. Honour its resolved `question` (bound
+    // by path in the card) as the turn text — this is what makes a follow-up
+    // button re-ask instead of the agent seeing GE's "User action triggered."
+    // placeholder text. Fall back to the plain text parts otherwise.
+    if let Some(q) = a2ui_action_question(parts) {
+        return Some(q);
+    }
     let text = parts
         .iter()
         .filter(|p| p.get("kind").and_then(Value::as_str).unwrap_or("text") == "text")
@@ -362,6 +370,38 @@ fn text_from_params(params: &Value) -> Option<String> {
         .join("\n");
     let trimmed = text.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// Pull a re-ask `question` out of an inbound A2UI `action` DataPart. The
+/// client-to-server A2UI message rides `DataPart.data` (an object or a
+/// one-element array) as `{version, action:{name, context:{question}}}`. We
+/// look for a non-empty string `context.question`; absent ⇒ `None` (a normal
+/// text turn). Tolerant of both the object and array `data` encodings.
+fn a2ui_action_question(parts: &[Value]) -> Option<String> {
+    for p in parts {
+        if p.get("kind").and_then(Value::as_str) != Some("data") {
+            continue;
+        }
+        let data = p.get("data")?;
+        // `data` may be a single message object or an array of messages.
+        let msgs: Vec<&Value> = match data {
+            Value::Array(a) => a.iter().collect(),
+            obj => vec![obj],
+        };
+        for m in msgs {
+            if let Some(q) = m
+                .get("action")
+                .and_then(|a| a.get("context"))
+                .and_then(|c| c.get("question"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(q.to_string());
+            }
+        }
+    }
+    None
 }
 
 async fn message_send(
