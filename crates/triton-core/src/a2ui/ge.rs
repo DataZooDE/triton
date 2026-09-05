@@ -203,17 +203,20 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
         }
     }
 
-    // Follow-up/report buttons → one horizontal Material Row (chips), not
-    // stacked full-width down the Column.
-    if !button_ids.is_empty() {
+    // Follow-up/report buttons → a small grid: MaterialRow has no wrap and no
+    // gap, so cramming 4 buttons in one row squeezes them and long labels wrap
+    // inside a fixed-height pill (visible "overprinting"). Chunk into rows of
+    // two so each button gets room; the rows stack in the outer Column.
+    for (k, chunk) in button_ids.chunks(2).enumerate() {
+        let row_id = format!("btn-row-{k}");
         flat.push(json!({
-            "id": "btn-row",
+            "id": row_id,
             "component": "MaterialRow",
-            "children": button_ids,
+            "children": chunk,
             "justify": "start",
-            "align": "center",
+            "align": "stretch",
         }));
-        root_children.push("btn-row".to_string());
+        root_children.push(row_id);
     }
 
     if root_children.is_empty() {
@@ -352,9 +355,9 @@ mod tests {
         assert_eq!(question_for(sid, "btn-99"), None);
         assert_eq!(question_for("nope", "btn-2"), None);
 
-        // Buttons are laid out in a single horizontal MaterialRow (chips), not
+        // Buttons are laid out in MaterialRows (a grid, ≤2 per row), not
         // stacked as direct Column children.
-        let row = find(comps, "btn-row");
+        let row = find(comps, "btn-row-0");
         assert_eq!(row["component"], "MaterialRow");
         assert!(
             row["children"]
