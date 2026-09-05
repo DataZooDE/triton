@@ -93,11 +93,16 @@ fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, Str
 pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<String> {
     let n: usize = source_component_id.rsplit('-').next()?.parse().ok()?;
     let store = SURFACE_QUESTIONS.lock().ok()?;
-    store
-        .iter()
-        .rev()
-        .find(|(sid, _)| sid == surface_id)
-        .and_then(|(_, m)| m.get(&n).cloned())
+    let entry = store.iter().rev().find(|(sid, _)| sid == surface_id);
+    // DIAGNOSTIC: show the lookup vs what we stored, to reconcile GE's actual
+    // btn-N against our predicted ids.
+    println!(
+        "A2UI_QLOOKUP surface={surface_id} comp={source_component_id} n={n} found_surface={} keys={:?} stored_surfaces={}",
+        entry.is_some(),
+        entry.map(|(_, m)| m.keys().copied().collect::<Vec<_>>()),
+        store.len()
+    );
+    entry.and_then(|(_, m)| m.get(&n).cloned())
 }
 
 /// Build the A2UI v0.9 message array from a raw surface value
