@@ -628,8 +628,9 @@ async fn message_stream_emits_task_artifact_final() {
         .iter()
         .find_map(|p| p["data"]["updateComponents"]["components"].as_array())
         .expect("an updateComponents message");
-    // GE's composite (Material) catalog — real Material components.
+    // GE's composite (Material) catalog — Material card/button; the chart is a
+    // basic Image (GE's MaterialImage won't load the signed URL).
     assert!(comps.iter().any(|c| c["component"] == "MaterialCard"));
-    assert!(comps.iter().any(|c| c["component"] == "MaterialImage"));
+    assert!(comps.iter().any(|c| c["component"] == "Image"));
     assert!(comps.iter().any(|c| c["component"] == "MaterialButton"));
 }
