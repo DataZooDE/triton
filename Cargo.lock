@@ -2677,7 +2677,6 @@ name = "triton-core"
 version = "0.0.1"
 dependencies = [
  "async-trait",
- "base64",
  "chrono",
  "futures",
  "serde",
