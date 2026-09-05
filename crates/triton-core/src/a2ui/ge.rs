@@ -129,9 +129,12 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                 }));
                 root_children.push(btn_id);
             }
-            // Sources: a row of secondary buttons that open the document URL
-            // client-side (openUrl). Items whose resource is not an http(s)
-            // URL are skipped (a ui:// MCP-App resource cannot open in GE).
+            // Sources: GE's basic catalog has no link component and rejects a
+            // `functionCall: openUrl` Button action ("Validation failed for
+            // component 'Button'"), so render each source as a plain Text line
+            // ("Source: <label> — <url>"). Not clickable, but the reference is
+            // conveyed and the card validates. (http/https only; a ui:// MCP
+            // resource can't open in GE and is skipped.)
             "sources" => {
                 if let Some(items) = c.get("items").and_then(Value::as_array) {
                     for it in items {
@@ -143,17 +146,14 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                         else {
                             continue;
                         };
-                        let text_id = id("src-text", &mut n);
-                        let btn_id = id("src", &mut n);
-                        flat.push(json!({ "id": text_id, "component": "Text", "text": label }));
+                        let cid = id("src", &mut n);
                         flat.push(json!({
-                            "id": btn_id,
-                            "component": "Button",
-                            "child": text_id,
-                            "variant": "borderless",
-                            "action": { "functionCall": { "name": "openUrl", "args": { "url": url } } },
+                            "id": cid,
+                            "component": "Text",
+                            "text": format!("Source: {label} — {url}"),
+                            "variant": "caption",
                         }));
-                        root_children.push(btn_id);
+                        root_children.push(cid);
                     }
                 }
             }
@@ -278,21 +278,26 @@ mod tests {
             "card must not repeat the answer prose"
         );
 
-        // http source → openUrl button; ui:// source is dropped (GE can't open it).
-        let opener = comps
+        // http source → plain Text line (GE rejects functionCall:openUrl);
+        // ui:// source is dropped. No Button carries a functionCall action.
+        let src = comps
             .iter()
-            .find(|c| c["action"]["functionCall"]["name"] == "openUrl")
-            .expect("openUrl button");
-        assert_eq!(
-            opener["action"]["functionCall"]["args"]["url"],
-            "https://agent-lab.data-zoo.de/docs/tok"
+            .find(|c| {
+                c["component"] == "Text" && c["text"].as_str().unwrap_or("").starts_with("Source:")
+            })
+            .expect("source text line");
+        assert!(
+            src["text"]
+                .as_str()
+                .unwrap()
+                .contains("https://agent-lab.data-zoo.de/docs/tok"),
+            "{src}"
         );
-        assert_eq!(
-            comps
+        assert!(
+            !comps
                 .iter()
-                .filter(|c| c["action"]["functionCall"]["name"] == "openUrl")
-                .count(),
-            1
+                .any(|c| c["action"]["functionCall"].is_object()),
+            "no functionCall actions (GE rejects them)"
         );
     }
 
