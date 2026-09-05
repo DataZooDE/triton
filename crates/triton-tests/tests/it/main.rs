@@ -31,6 +31,9 @@ mod consumer_smoke;
 #[path = "../correlation_sender_binding.rs"]
 mod correlation_sender_binding;
 
+#[path = "../chat_identity.rs"]
+mod chat_identity;
+
 #[path = "../principal_denylist.rs"]
 mod principal_denylist;
 
