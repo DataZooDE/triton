@@ -1114,6 +1114,7 @@ async fn dispatch_and_post_reply(
         Ok(dispatch) => {
             // `recipient.id` is the bot (reply `from`); `from.id` is the
             // user (reply `recipient`).
+            let chrome = fetch_chrome(adapter, &principal_for_post).await;
             let body = build_reply_body(
                 adapter,
                 recipient_id,
@@ -1121,6 +1122,7 @@ async fn dispatch_and_post_reply(
                 &sender.from_id,
                 &dispatch.result,
                 image_hint,
+                &chrome,
             );
             post_reply(
                 adapter,
@@ -1170,8 +1172,10 @@ async fn dispatch_and_refresh_card(
             // The refresh path renders the chart too — the invoke card
             // may carry the image URL like any other reply card.
             let image_url = image_hint.or_else(|| reply_image_url(adapter, &dispatch.result));
+            let chrome = fetch_chrome(adapter, &principal_for_post).await;
             let response_body =
-                match render_card_content(adapter, &dispatch.result, image_url.as_deref()) {
+                match render_card_content(adapter, &dispatch.result, image_url.as_deref(), &chrome)
+                {
                     Some(card) => surface_mapper::invoke_card_response(card),
                     None => surface_mapper::invoke_message_response(
                         &text_reply_message(&dispatch.result).text,
@@ -1197,6 +1201,38 @@ async fn dispatch_and_refresh_card(
                 axum::Json(surface_mapper::invoke_message_response("(no content)")),
             )
                 .into_response()
+        }
+    }
+}
+
+/// The card chrome (branded header) for this reply, from the report
+/// upstream's `get_theme`. Peacock owns ALL theming — one CSS of `--pk-*`
+/// tokens themes the chart PNG, the iframe AND this chrome — so the
+/// adapter holds no theme config and asks per reply.
+///
+/// A deployment that registers no `get_theme` upstream gets the default
+/// (unbranded) chrome and the card it always had; the failure is
+/// debug-logged, never surfaced. Themes are resolved against the
+/// principal's tenant on peacock's side, so the call carries the real
+/// principal rather than a synthetic one.
+async fn fetch_chrome(
+    adapter: &MsTeamsAdapter,
+    principal: &Principal,
+) -> surface_mapper::CardChrome {
+    match adapter
+        .dispatcher
+        .invoke(
+            "get_theme",
+            serde_json::json!({}),
+            principal.clone(),
+            PROTOCOL,
+        )
+        .await
+    {
+        Ok(t) => surface_mapper::CardChrome::from_get_theme(&t.result),
+        Err(e) => {
+            tracing::debug!(error = %e, "msteams: no get_theme upstream; unbranded card");
+            surface_mapper::CardChrome::default()
         }
     }
 }
@@ -1333,6 +1369,7 @@ async fn serve_report_png(
 /// Turn a dispatch result into an outbound reply Activity body: an
 /// Adaptive Card when the surface carries interactive controls or a
 /// dashboard, otherwise the plain-text Activity.
+#[allow(clippy::too_many_arguments)]
 fn build_reply_body(
     adapter: &MsTeamsAdapter,
     bot_id: &str,
@@ -1340,13 +1377,14 @@ fn build_reply_body(
     recipient_id: &str,
     result: &Value,
     image_hint: Option<String>,
+    chrome: &surface_mapper::CardChrome,
 ) -> Value {
     // `image_hint` covers the direct render_report invocation (the
     // "Open report:" Execute), whose RESULT carries a PNG but no Report
     // component to lift a spec from — the caller minted the URL from
     // the invoked args instead.
     let image_url = image_hint.or_else(|| reply_image_url(adapter, result));
-    if let Some(card) = render_card_content(adapter, result, image_url.as_deref()) {
+    if let Some(card) = render_card_content(adapter, result, image_url.as_deref(), chrome) {
         surface_mapper::build_card_activity_body(bot_id, conversation_id, recipient_id, card)
     } else {
         let msg = text_reply_message(result);
@@ -1362,6 +1400,7 @@ fn render_card_content(
     adapter: &MsTeamsAdapter,
     result: &Value,
     image_url: Option<&str>,
+    chrome: &surface_mapper::CardChrome,
 ) -> Option<Value> {
     let specs = surface_mapper::interactive_from_result(result);
     let dashboard = surface_mapper::dashboard_from_result(result);
@@ -1403,6 +1442,7 @@ fn render_card_content(
         dashboard.as_ref(),
         &signed,
         image_url,
+        chrome,
     ))
 }
 
@@ -1705,14 +1745,18 @@ async fn courier_deliver(
     }
 
     let mut body = match result {
-        Ok(result_value) => build_reply_body(
-            &adapter,
-            &recipient_id,
-            &conversation_id,
-            &sender.from_id,
-            &result_value,
-            image_hint,
-        ),
+        Ok(result_value) => {
+            let chrome = fetch_chrome(&adapter, &principal_for_post).await;
+            build_reply_body(
+                &adapter,
+                &recipient_id,
+                &conversation_id,
+                &sender.from_id,
+                &result_value,
+                image_hint,
+                &chrome,
+            )
+        }
         Err(e) => {
             tracing::warn!(error = %e, class = %e.class(), "msteams courier dispatch failed");
             // One audited post line (Dropped + error_response), then a

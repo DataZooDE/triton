@@ -23,6 +23,126 @@
 use serde_json::{Value, json};
 use triton_core::a2ui::{Component, FormFieldKind, Surface, extract_surface};
 
+/// The Adaptive Card chrome (branded header) — fetched per reply from the
+/// report upstream's `get_theme` tool. Peacock owns ALL theming (one CSS of
+/// `--pk-*` tokens themes charts, iframes AND this chrome); this adapter
+/// only consumes the resolved values and carries no theme config of its
+/// own. Default = unbranded, i.e. the pre-theme rendering.
+///
+/// NB peacock's `brand_color` (`--pk-brand`) is deliberately NOT consumed
+/// here, unlike the Google Chat chrome. Adaptive Cards carry no arbitrary
+/// colour — `TextBlock.color` / `Container.style` / `Action.style` are all
+/// host-resolved enums — and the only way to inject one is a served
+/// background image. Teams renders light, dark AND high-contrast themes
+/// that the card cannot detect, and nothing computes a contrasting
+/// foreground for us the way Google Chat does for a `FILLED` button, so a
+/// fixed brand band would be illegible in at least one theme. The header
+/// uses the host-themed `emphasis` container instead. See
+/// `doc/realizations.md` §7.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CardChrome {
+    /// Card header title (`--pk-name`).
+    pub title: Option<String>,
+    /// Card header logo — a public HTTPS image URL (`--pk-logo`).
+    pub logo_url: Option<String>,
+    /// How `logo_url` is placed (`--pk-logo-style`).
+    pub logo_style: LogoStyle,
+}
+
+/// Placement of the chrome's `logo_url` on the rendered card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogoStyle {
+    /// Small round image beside the title (square icon logos).
+    #[default]
+    Avatar,
+    /// Full-width image above the title (wide wordmark logos).
+    Banner,
+}
+
+impl CardChrome {
+    /// Parse a `get_theme` tool result (`{title, logo_url, logo_style,
+    /// brand_color, …}` — peacock's `mcp::get_theme`). `title` and
+    /// `logo_url` are `Option` on the wire and arrive as `null` for an
+    /// unbranded deployment; an unknown `logo_style` is the default —
+    /// theming never fails a reply.
+    pub fn from_get_theme(result: &Value) -> Self {
+        let get = |k: &str| {
+            result
+                .get(k)
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+        };
+        CardChrome {
+            title: get("title"),
+            logo_url: get("logo_url"),
+            logo_style: match result.get("logo_style").and_then(Value::as_str) {
+                Some("banner") => LogoStyle::Banner,
+                _ => LogoStyle::Avatar,
+            },
+        }
+    }
+
+    /// True when the theme has nothing to render — the card is then built
+    /// exactly as it was before theming existed.
+    fn is_unbranded(&self) -> bool {
+        self.title.is_none() && self.logo_url.is_none()
+    }
+}
+
+/// The branded header element prepended to a card's `body`, or `None`
+/// when the theme sets neither a name nor a logo.
+///
+/// `emphasis` + `bleed` gives a full-width tinted band that the Teams
+/// host themes for the viewer's light/dark/high-contrast mode (AC 1.2).
+fn header_container(theme: &CardChrome) -> Option<Value> {
+    if theme.is_unbranded() {
+        return None;
+    }
+    let title = theme.title.as_deref();
+    let logo = theme.logo_url.as_deref();
+    let title_block = |t: &str| {
+        json!({
+            "type": "TextBlock", "text": t,
+            "weight": "Bolder", "size": "Medium", "wrap": true
+        })
+    };
+    let items: Vec<Value> = match (theme.logo_style, logo, title) {
+        // Wide wordmark: full-width above the title, so the round avatar
+        // slot can't crop it.
+        (LogoStyle::Banner, Some(l), t) => {
+            let mut v = vec![json!({
+                "type": "Image", "url": l, "size": "Stretch",
+                "altText": t.unwrap_or("logo"),
+            })];
+            v.extend(t.map(title_block));
+            v
+        }
+        // Square icon beside the title.
+        (LogoStyle::Avatar, Some(l), Some(t)) => vec![json!({
+            "type": "ColumnSet",
+            "columns": [
+                { "type": "Column", "width": "auto", "items": [
+                    { "type": "Image", "url": l, "size": "Small",
+                      "style": "Person", "altText": t } ] },
+                { "type": "Column", "width": "stretch",
+                  "verticalContentAlignment": "Center",
+                  "items": [ title_block(t) ] }
+            ]
+        })],
+        (LogoStyle::Avatar, Some(l), None) => vec![json!({
+            "type": "Image", "url": l, "size": "Small",
+            "style": "Person", "altText": "logo",
+        })],
+        (_, None, Some(t)) => vec![title_block(t)],
+        // Excluded by `is_unbranded` above.
+        (_, None, None) => return None,
+    };
+    Some(json!({
+        "type": "Container", "style": "emphasis", "bleed": true, "items": items
+    }))
+}
+
 /// Hard ceiling on the Activity `text` body. The Bot Framework
 /// documented limit is ~28 KB; we keep Telegram's 4096-byte safe
 /// ceiling so chat-channel adapters share one truncation budget and
@@ -464,13 +584,19 @@ fn input_widget(field: &FormFieldSpec) -> Value {
 /// by an `ActionSet` submit — Teams gathers every input on the card
 /// with any action, so the callback merges the (non-empty) inputs onto
 /// the token's signed base args.
+///
+/// `chrome` is peacock's resolved theme (`get_theme`); a branded one
+/// leads the body with a header band. [`CardChrome::default`] renders
+/// byte-identically to the pre-theming card.
 pub fn build_adaptive_card(
     text: &str,
     dashboard: Option<&DashboardData>,
     signed: &[(InteractiveSpec, String)],
     image_url: Option<&str>,
+    chrome: &CardChrome,
 ) -> Value {
     let mut body: Vec<Value> = Vec::new();
+    body.extend(header_container(chrome));
     if !text.is_empty() {
         body.push(json!({ "type": "TextBlock", "text": text, "wrap": true }));
     }
@@ -717,7 +843,8 @@ mod tests {
             },
             "TOKEN.MAC".to_string(),
         )];
-        let card = build_adaptive_card("Hello, alice.", None, &signed, None);
+        let card =
+            build_adaptive_card("Hello, alice.", None, &signed, None, &CardChrome::default());
         assert_eq!(card["type"], "AdaptiveCard");
         // Text lands in a body TextBlock.
         assert_eq!(card["body"][0]["type"], "TextBlock");
@@ -765,7 +892,7 @@ mod tests {
                 "FORM.MAC".to_string(),
             ),
         ];
-        let card = build_adaptive_card("", None, &signed, None);
+        let card = build_adaptive_card("", None, &signed, None, &CardChrome::default());
         let body = card["body"].as_array().expect("body array");
         // Dropdown named after args_key.
         let choiceset = body
@@ -809,7 +936,7 @@ mod tests {
         let dash = dashboard_from_result(&result).expect("dashboard lifted");
         assert_eq!(dash.0, "Stock at risk (€)");
         assert_eq!(dash.1.len(), 2);
-        let card = build_adaptive_card("top risk", Some(&dash), &[], None);
+        let card = build_adaptive_card("top risk", Some(&dash), &[], None, &CardChrome::default());
         let body = card["body"].as_array().expect("body");
         let factset = body
             .iter()
@@ -823,7 +950,7 @@ mod tests {
 
     #[test]
     fn card_activity_and_invoke_response_shapes() {
-        let card = build_adaptive_card("hi", None, &[], None);
+        let card = build_adaptive_card("hi", None, &[], None, &CardChrome::default());
         let activity = build_card_activity_body("28:bot", "a:conv", "29:user", card.clone());
         assert_eq!(activity["type"], "message");
         assert_eq!(
@@ -881,7 +1008,13 @@ mod tests {
     /// card body is unchanged.
     #[test]
     fn card_includes_image_when_url_present() {
-        let card = build_adaptive_card("with chart", None, &[], Some("https://x/img/t"));
+        let card = build_adaptive_card(
+            "with chart",
+            None,
+            &[],
+            Some("https://x/img/t"),
+            &CardChrome::default(),
+        );
         let imgs: Vec<_> = card["body"]
             .as_array()
             .unwrap()
@@ -902,5 +1035,71 @@ mod tests {
         let (id, args) = report_from_result(&result).expect("report lifted");
         assert_eq!(id, "top-categories");
         assert!(args.is_object());
+    }
+
+    // ---- #200: peacock get_theme chrome -----------------------------
+
+    /// A theme with neither `--pk-name` nor `--pk-logo` — peacock's
+    /// unbranded default, where both arrive as JSON `null` — must leave
+    /// the card exactly as it was before theming existed.
+    #[test]
+    fn unbranded_theme_adds_no_header() {
+        let chrome = CardChrome::from_get_theme(&json!({
+            "brand": "-", "host": "teams.example",
+            "title": null, "logo_url": null, "logo_style": "avatar",
+            // peacock ALWAYS resolves a brand colour (stock default when
+            // no brand CSS is registered) — so a colour is never the
+            // signal that a deployment is branded.
+            "brand_color": "#0f6cbd", "accent": "#22d3c5", "css": ":root {}",
+        }));
+        assert_eq!(chrome, CardChrome::default());
+        let card = build_adaptive_card("hi", None, &[], None, &chrome);
+        assert_eq!(card["body"][0]["type"], "TextBlock");
+        assert_eq!(card["body"][0]["text"], "hi");
+    }
+
+    /// Junk in `--pk-logo-style` falls back to `avatar`, and empty
+    /// strings read as unset — theming never fails a reply.
+    #[test]
+    fn theme_parse_is_lenient() {
+        let chrome = CardChrome::from_get_theme(&json!({
+            "title": "", "logo_url": "https://x/l.png", "logo_style": "hexagon",
+        }));
+        assert_eq!(chrome.title, None, "empty string reads as unset");
+        assert_eq!(chrome.logo_style, LogoStyle::Avatar, "junk style defaults");
+        // A logo with no name still brands: the icon alone, no title row.
+        let card = build_adaptive_card("hi", None, &[], None, &chrome);
+        let header = &card["body"][0];
+        assert_eq!(header["type"], "Container");
+        assert_eq!(header["items"][0]["type"], "Image");
+        assert_eq!(header["items"][0]["style"], "Person");
+    }
+
+    /// `--pk-name` with no logo renders the title alone in the band.
+    #[test]
+    fn title_only_theme_renders_a_text_header() {
+        let chrome = CardChrome::from_get_theme(&json!({ "title": "DataZoo Sales" }));
+        let card = build_adaptive_card("hi", None, &[], None, &chrome);
+        let header = &card["body"][0];
+        assert_eq!(header["type"], "Container");
+        assert_eq!(header["style"], "emphasis");
+        assert_eq!(header["bleed"], true);
+        assert_eq!(header["items"][0]["type"], "TextBlock");
+        assert_eq!(header["items"][0]["text"], "DataZoo Sales");
+        // The answer follows the header, it is not replaced by it.
+        assert_eq!(card["body"][1]["text"], "hi");
+    }
+
+    /// The header precedes the chart image, so a themed report card
+    /// reads title → chart rather than chart → title.
+    #[test]
+    fn header_precedes_the_chart_image() {
+        let chrome = CardChrome::from_get_theme(&json!({
+            "title": "DataZoo Sales", "logo_style": "banner",
+        }));
+        let card = build_adaptive_card("", None, &[], Some("https://x/img/t"), &chrome);
+        assert_eq!(card["body"][0]["type"], "Container");
+        assert_eq!(card["body"][1]["type"], "Image");
+        assert_eq!(card["body"][1]["url"], "https://x/img/t");
     }
 }

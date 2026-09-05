@@ -76,6 +76,8 @@ mod msteams_callback;
 mod msteams_courier;
 #[path = "../msteams_federated.rs"]
 mod msteams_federated;
+#[path = "../msteams_theme.rs"]
+mod msteams_theme;
 #[path = "../multi_issuer.rs"]
 mod multi_issuer;
 #[path = "../oidc.rs"]
