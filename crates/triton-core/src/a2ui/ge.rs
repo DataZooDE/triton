@@ -22,7 +22,8 @@
 //!   - a `MaterialButton` carries its `label` DIRECTLY (no child Text) plus a
 //!     `variant`/`color`; its `action` is REQUIRED — we emit
 //!     `{"event":{"name","context"}}` so a click posts an A2UI `action` back.
-//!   - there is no chart primitive we use: a chart is a `MaterialImage` URL.
+//!   - charts render as a native `VegaChart` (Vega-Lite `spec`, interactive)
+//!     when the A2A layer injects one from peacock; else a static `Image` URL.
 //!
 //! Input is the RAW surface JSON the agent produced (`{components:[…]}` with
 //! each component tagged by `kind`), not the typed [`super::Surface`], because
@@ -138,14 +139,24 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
             // the card, and duplicating it inside would show the answer twice.
             // The card is the rich WIDGET — chart + actions + sources.
             "text" | "narration" => {}
-            // Chart: the embedded agent stamps a signed public `image_url` on
-            // the report. Use the basic `Image` (also in the composite catalog),
-            // NOT `MaterialImage`: GE's Material renderer would not load the
-            // signed URL (rendered a broken/empty <img> on the wire), whereas
-            // the basic Image loads it and self-sizes. Everything else stays
-            // Material — mixing is fine since the composite catalog defines both.
+            // Chart. Prefer a NATIVE interactive `VegaChart` when a Vega-Lite
+            // `vega_spec` is present (the A2A layer expands the report via
+            // `render_report` and injects peacock's spec) — GE renders it with
+            // tooltips/hover. Otherwise fall back to the static PNG as a basic
+            // `Image` (NOT `MaterialImage`: GE's Material renderer left the
+            // signed URL as a broken/empty <img>; basic Image loads + self-sizes.
+            // Mixing basic + Material is fine — the composite catalog has both).
             "report" => {
-                if let Some(url) = c.get("image_url").and_then(Value::as_str) {
+                if let Some(spec) = c.get("vega_spec").filter(|s| s.is_object()) {
+                    let cid = id("chart", &mut n);
+                    flat.push(json!({
+                        "id": cid,
+                        "component": "VegaChart",
+                        "spec": spec,
+                        "height": 300,
+                    }));
+                    root_children.push(cid);
+                } else if let Some(url) = c.get("image_url").and_then(Value::as_str) {
                     let cid = id("chart", &mut n);
                     let mut img =
                         json!({ "id": cid, "component": "Image", "url": url, "fit": "contain" });
@@ -406,6 +417,32 @@ mod tests {
                 .any(|c| c["action"]["functionCall"].is_object()),
             "no functionCall actions (GE rejects them)"
         );
+    }
+
+    #[test]
+    fn report_with_vega_spec_emits_native_vegachart() {
+        // When the report carries a Vega-Lite `vega_spec` (injected by the A2A
+        // layer from peacock's render_report), GE gets a native interactive
+        // VegaChart, not the static Image.
+        let spec = json!({
+            "mark": "bar",
+            "data": { "values": [{ "c": "widgets", "v": 900 }] },
+            "encoding": { "x": { "field": "c" }, "y": { "field": "v" } },
+        });
+        let result = json!({ "surface": { "components": [
+            { "kind": "report", "report_id": "sales", "image_url": "https://x/img/tok", "vega_spec": spec },
+        ] } });
+        let msgs = build_messages(&result).expect("renderable");
+        let comps = msgs[1]["updateComponents"]["components"]
+            .as_array()
+            .unwrap();
+        let vega = comps
+            .iter()
+            .find(|c| c["component"] == "VegaChart")
+            .expect("VegaChart");
+        assert_eq!(vega["spec"]["mark"], "bar");
+        // Static Image must NOT also be emitted (no double chart).
+        assert!(!comps.iter().any(|c| c["component"] == "Image"));
     }
 
     #[test]
