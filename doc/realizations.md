@@ -1414,6 +1414,29 @@ a trap the next developer should not have to step in.
   the window is consulted, so the exact total is never actually lost.
   Suppress the LINE, never the COUNTER.
 
+- **A test can go vacuous when you make the code better (#250,
+  2026-09-05).** An integration test asserted that a hostile resolver
+  tenant appeared *truncated* in the audit line. Later in the same
+  branch, resolver validation moved to the boundary — so the hostile
+  value no longer reached the audit path at all, the assertion started
+  reading `"-"`, and it passed with the clamp deleted. Nothing failed;
+  the test just stopped meaning anything, and the suite stayed green
+  throughout. Two lessons: assert on a value that is *supposed* to reach
+  the sink (here `sender_ref`, unvalidated platform input by design)
+  rather than one you are also busy eliminating; and re-run the mutation
+  check after any change that moves a boundary, not only when the test
+  is first written.
+
+- **Enumerate audit SINKS, not audit call sites (#250, 2026-09-05).**
+  Clamping principal-derived fields at three `AuditRecord` construction
+  sites left two uncovered — and one of them, `record_rejection`, also
+  emits `error_detail`, into which every chat adapter interpolates the
+  raw tenant. So the hostile value still reached the log through a field
+  the clamp never considered: bounding a field beside an unbounded
+  message is not a bound. Clamp once in `From<&AuditRecord> for
+  AuditEntry` and have `emit` serialise that, making the rule an
+  invariant of the emitter which new sites inherit for free.
+
 ---
 
 ## 8. CI/CD build-time traps (2026-08-30)
