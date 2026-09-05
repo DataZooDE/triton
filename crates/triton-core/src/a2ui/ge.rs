@@ -42,6 +42,10 @@ pub const EXTENSION_URI: &str = "https://a2ui.org/a2a-extension/a2ui/v0.9";
 pub const MIME: &str = "application/json+a2ui";
 /// The basic component catalog id (declared in the card and in `createSurface`).
 pub const BASIC_CATALOG: &str = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json";
+/// Surface theme `primaryColor` (`^#[0-9a-fA-F]{6}$`) sent in `createSurface`.
+/// Gemini brand blue — the same `--pk-brand` the peacock `gemini.css` host theme
+/// gives the charts — so the Material card's primary accents match the chart.
+const THEME_PRIMARY_COLOR: &str = "#1a73e8";
 
 /// Fixed surfaceId prefix; a v4 UUID follows. The id is kept SHORT
 /// (`triton-answer-<uuid>`, 50 chars) on purpose: Gemini Enterprise TRUNCATES
@@ -208,7 +212,21 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     Some(vec![
         json!({
             "version": "v0.9",
-            "createSurface": { "surfaceId": surface_id, "catalogId": BASIC_CATALOG },
+            "createSurface": {
+                "surfaceId": surface_id,
+                "catalogId": BASIC_CATALOG,
+                // v0.9 styling: `createSurface.theme` (which replaced v0.8's
+                // `styles`) carries theme params the Material renderer applies —
+                // GE uses `primaryColor` for primary buttons and active borders.
+                // We set the DataZoo/Gemini brand blue so the card's accents
+                // match the chart palette (peacock `gemini.css` `--pk-brand`),
+                // and name the agent beside the surface. Renderers ignore fields
+                // they don't use, so this is safe on every A2UI host.
+                "theme": {
+                    "primaryColor": THEME_PRIMARY_COLOR,
+                    "agentDisplayName": "DataZoo Agent",
+                },
+            },
         }),
         json!({
             "version": "v0.9",
@@ -257,6 +275,12 @@ mod tests {
         assert_eq!(msgs.len(), 2, "createSurface + updateComponents");
         assert_eq!(msgs[0]["version"], "v0.9");
         assert_eq!(msgs[0]["createSurface"]["catalogId"], BASIC_CATALOG);
+        // createSurface carries a v0.9 theme so GE styles the card (Material
+        // primary accents) with the brand color.
+        assert_eq!(
+            msgs[0]["createSurface"]["theme"]["primaryColor"],
+            THEME_PRIMARY_COLOR
+        );
         let comps = msgs[1]["updateComponents"]["components"]
             .as_array()
             .unwrap();
