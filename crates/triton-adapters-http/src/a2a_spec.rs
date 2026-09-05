@@ -528,18 +528,28 @@ async fn message_stream(
     let task_for_frames = trace_id.clone();
     let ctx_for_frames = context_id.clone();
     let rpc_frames = rpc.clone();
+    // Whether we streamed the answer as token deltas. If we did, the final
+    // artifact must NOT resend the full reply text — the client accumulates
+    // append-chunks, so a second full copy shows the answer twice (and drags
+    // the trailing `![chart]` markdown in as literal text on hosts that render
+    // A2UI, like Gemini Enterprise). When nothing streamed (a buffered tool),
+    // the final artifact carries the text once.
+    let mut streamed_text = false;
     let frames = events.flat_map(move |ev| {
         let out: Vec<Value> = match ev {
-            triton_core::stream::StreamEvent::Token(t) => vec![rpc_frames(json!({
-                "kind": "artifact-update",
-                "taskId": task_for_frames,
-                "contextId": ctx_for_frames,
-                "append": true,
-                "artifact": {
-                    "artifactId": artifact_id,
-                    "parts": [{ "kind": "text", "text": t }],
-                },
-            }))],
+            triton_core::stream::StreamEvent::Token(t) => {
+                streamed_text = true;
+                vec![rpc_frames(json!({
+                    "kind": "artifact-update",
+                    "taskId": task_for_frames,
+                    "contextId": ctx_for_frames,
+                    "append": true,
+                    "artifact": {
+                        "artifactId": artifact_id,
+                        "parts": [{ "kind": "text", "text": t }],
+                    },
+                }))]
+            }
             triton_core::stream::StreamEvent::Tool(_) => Vec::new(),
             triton_core::stream::StreamEvent::Done(v) => {
                 let reply = reply_text(&v);
@@ -548,12 +558,19 @@ async fn message_stream(
                 // AND, when the surface has renderable components, an A2UI
                 // v0.9 DataPart (Gemini Enterprise renders the card/chart/
                 // buttons; text-only clients ignore the data part).
-                let mut parts = vec![json!({ "kind": "text", "text": reply })];
+                // Only include the full text if we did NOT stream it as
+                // deltas (else it duplicates). A2UI DataParts always ride the
+                // final artifact (deltas never carried them).
+                let mut parts: Vec<Value> = Vec::new();
+                if !streamed_text {
+                    parts.push(json!({ "kind": "text", "text": reply }));
+                }
                 if let Some(msgs) = triton_core::a2ui::ge::build_messages(&v) {
                     parts.extend(triton_core::a2ui::ge::data_parts(msgs));
                 }
-                vec![
-                    rpc_frames(json!({
+                let mut frames = Vec::new();
+                if !parts.is_empty() {
+                    frames.push(rpc_frames(json!({
                         "kind": "artifact-update",
                         "taskId": task_for_frames,
                         "contextId": ctx_for_frames,
@@ -562,15 +579,16 @@ async fn message_stream(
                             "artifactId": artifact_id,
                             "parts": parts,
                         },
-                    })),
-                    rpc_frames(json!({
-                        "kind": "status-update",
-                        "taskId": task_for_frames,
-                        "contextId": ctx_for_frames,
-                        "status": { "state": "completed" },
-                        "final": true,
-                    })),
-                ]
+                    })));
+                }
+                frames.push(rpc_frames(json!({
+                    "kind": "status-update",
+                    "taskId": task_for_frames,
+                    "contextId": ctx_for_frames,
+                    "status": { "state": "completed" },
+                    "final": true,
+                })));
+                frames
             }
             triton_core::stream::StreamEvent::Error { error, .. } => {
                 tasks.record_entry(

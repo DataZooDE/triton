@@ -1356,6 +1356,42 @@ a trap the next developer should not have to step in.
   error path already logs before calling `record_post` with a static
   label.
 
+- **Adaptive Cards have no arbitrary colour, so a peacock `brand_color`
+  cannot cross onto a Teams card (#200, 2026-09-05).** Every colour slot
+  in the Adaptive Card schema is a host-resolved *enum* —
+  `TextBlock.color`, `Container.style`, `Action.style` — not a hex
+  value. The only way to inject a real colour is a served image behind
+  `backgroundImage`. Don't: Teams renders light, dark AND high-contrast
+  themes that the card cannot detect, and unlike Google Chat (which
+  computes a contrasting label for a `FILLED` button given RGB) nothing
+  picks a readable foreground for us, so a fixed brand band is illegible
+  in at least one theme for a large slice of brand colours. The msteams
+  chrome therefore consumes `--pk-name` and `--pk-logo` only and renders
+  the header in a `Container` with `style: emphasis` + `bleed`, which the
+  host themes per viewer. Corollary worth knowing: peacock's `get_theme`
+  ALWAYS returns a `brand_color` (the stock `#0f6cbd` when no brand CSS
+  is registered) while `title`/`logo_url` are `Option` and arrive as
+  `null` — so "is a colour set?" is never the test for whether a
+  deployment is branded; "is a name or logo set?" is.
+
+- **A synthetic principal on a signed-link route silently re-brands what
+  it renders (#200, 2026-09-05).** msteams' `…/img/{token}` route is
+  fetched anonymously by Teams, so it built a placeholder principal
+  (`tenant: "-"`) and dispatched `render_report` under it — correct for
+  authorization (the HMAC-signed token is the gate) but wrong for
+  everything the tenant *also* decides. Peacock keys `brand` off the
+  caller's tenant and Triton forwards `principal.tenant` into the JWT it
+  mints for an upstream, so a themed card ended up wrapping a
+  stock-branded chart, and the render orphaned from that tenant's audit
+  trail. Invisible while `forward_identity` is off (both sides then fall
+  back to the deployment-static tenant), which is why it survived
+  #236/#237. Rule of thumb: a synthetic principal must still carry every
+  claim that is *routing or rendering* input, not just the ones that are
+  authz input — put them inside the signed payload, where they are as
+  trustworthy as the args already there. Mind the migration: these tokens
+  live 7 days, so a new payload field needs a fallback for the links
+  already in the wild.
+
 ---
 
 ## 8. CI/CD build-time traps (2026-08-30)
