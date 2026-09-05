@@ -43,35 +43,50 @@ pub const MIME: &str = "application/json+a2ui";
 /// The basic component catalog id (declared in the card and in `createSurface`).
 pub const BASIC_CATALOG: &str = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json";
 
-/// Lowercase-hex encode a string, for embedding a re-ask question in a button
-/// id (`ask-<hex>`). GE echoes the component id on click but not the event
-/// name/context, so the id is the payload channel. Hex keeps the id in a safe
-/// charset (`0-9a-f`).
-fn hex_encode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for b in s.as_bytes() {
-        out.push(char::from_digit((b >> 4) as u32, 16).unwrap());
-        out.push(char::from_digit((b & 0xf) as u32, 16).unwrap());
+/// How many components Gemini Enterprise numbers BEFORE the ones in our
+/// `updateComponents` array. Observed on the wire: a button at 1-based array
+/// index `i` comes back on click as `sourceComponentId = "btn-(i+2)"` — GE
+/// renders `root` and `root-col` first (they occupy 1 and 2), so our array is
+/// offset by 2. This lets us PREDICT the id GE will echo for each button and
+/// map it back to the re-ask question (GE strips our name/context/id, so the
+/// predicted-id-per-surface map below is the only reliable channel).
+const GE_ID_OFFSET: usize = 2;
+
+/// Bounded, process-wide map: `surfaceId` → { predicted GE button id → re-ask
+/// question }. Populated when a card with follow-up buttons is built; read when
+/// GE posts a button-click action back. A plain FIFO capped at [`MAX_SURFACES`]
+/// entries — a card's buttons are only clickable while it is on screen, and a
+/// stale miss simply falls through to the placeholder text (no crash).
+static SURFACE_QUESTIONS: std::sync::Mutex<
+    Vec<(String, std::collections::HashMap<usize, String>)>,
+> = std::sync::Mutex::new(Vec::new());
+const MAX_SURFACES: usize = 512;
+
+fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, String>) {
+    if qmap.is_empty() {
+        return;
     }
-    out
+    if let Ok(mut store) = SURFACE_QUESTIONS.lock() {
+        store.push((surface_id.to_string(), qmap));
+        let overflow = store.len().saturating_sub(MAX_SURFACES);
+        if overflow > 0 {
+            store.drain(0..overflow);
+        }
+    }
 }
 
-/// Decode a lowercase-hex string back to UTF-8 (inverse of [`hex_encode`]).
-/// Returns `None` on odd length, a non-hex digit, or invalid UTF-8.
-pub fn hex_decode(s: &str) -> Option<String> {
-    if !s.len().is_multiple_of(2) {
-        return None;
-    }
-    let b = s.as_bytes();
-    let mut bytes = Vec::with_capacity(s.len() / 2);
-    let mut i = 0;
-    while i < b.len() {
-        let hi = (b[i] as char).to_digit(16)?;
-        let lo = (b[i + 1] as char).to_digit(16)?;
-        bytes.push((hi * 16 + lo) as u8);
-        i += 2;
-    }
-    String::from_utf8(bytes).ok()
+/// Resolve a GE button click to the re-ask question it should run. `surface_id`
+/// and `source_component_id` (e.g. `"btn-7"`) come from the inbound A2UI
+/// `action`. Returns `None` when the surface is unknown or the id isn't a
+/// remembered button (→ caller falls back to the turn's text).
+pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<String> {
+    let n: usize = source_component_id.rsplit('-').next()?.parse().ok()?;
+    let store = SURFACE_QUESTIONS.lock().ok()?;
+    store
+        .iter()
+        .rev()
+        .find(|(sid, _)| sid == surface_id)
+        .and_then(|(_, m)| m.get(&n).cloned())
 }
 
 // Surface id MUST be unique per card: Gemini Enterprise keeps surfaces for
@@ -94,6 +109,8 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     let surface_id = format!("triton-answer-{}", uuid::Uuid::new_v4());
     let mut flat: Vec<Value> = Vec::new();
     let mut root_children: Vec<String> = Vec::new();
+    // Predicted-GE-id → re-ask question, for this card's follow-up buttons.
+    let mut qmap: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut n = 0usize;
     let id = |prefix: &str, n: &mut usize| {
         *n += 1;
@@ -133,18 +150,18 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                     .and_then(Value::as_str)
                     .filter(|_| tool != "render_report");
                 let text_id = id("btn-text", &mut n);
-                // Carry the re-ask question in the BUTTON ID. Observed on the
-                // wire: on a card click Gemini Enterprise echoes
-                // `sourceComponentId` (our id) verbatim, but OVERWRITES
-                // `event.name` (→ the agent name) and DROPS the context (`{}`).
-                // So the component id is the only channel that survives. Encode
-                // the question as `ask-<hex>`; the inbound A2UI action handler
-                // decodes `sourceComponentId` and re-dispatches it as a turn.
-                let btn_id = match question {
-                    Some(q) => format!("ask-{}", hex_encode(q)),
-                    None => id("btn", &mut n),
-                };
+                let btn_id = id("btn", &mut n);
                 flat.push(json!({ "id": text_id, "component": "Text", "text": label }));
+                // GE strips our event name/context and RENUMBERS component ids
+                // on click, so no per-button payload survives directly. But it
+                // echoes a deterministic `sourceComponentId` we can PREDICT: the
+                // button's 1-based index in this array + GE_ID_OFFSET. Record
+                // `predicted_ge_id → question` so the inbound handler can map a
+                // click back to the re-ask (report/other buttons carry none).
+                let predicted_ge_id = flat.len() + 1 + GE_ID_OFFSET;
+                if let Some(q) = question {
+                    qmap.insert(predicted_ge_id, q.to_string());
+                }
                 flat.push(json!({
                     "id": btn_id,
                     "component": "Button",
@@ -193,6 +210,10 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     // Top: Card → Column(root_children).
     flat.push(json!({ "id": "root-col", "component": "Column", "children": root_children }));
     flat.push(json!({ "id": "root", "component": "Card", "child": "root-col" }));
+
+    // Remember this card's clickable follow-ups so an inbound GE action can be
+    // mapped back to its question (see `question_for`).
+    remember_surface(&surface_id, qmap);
 
     Some(vec![
         json!({
@@ -263,24 +284,27 @@ mod tests {
             .expect("image");
         assert_eq!(img["url"], "https://agent-lab.data-zoo.de/report/img/tok");
 
-        // The re-ask button carries the question in its ID as `ask-<hex>` (GE
-        // echoes sourceComponentId on click but overwrites name / drops
-        // context), and its label rides as a child Text.
+        // The re-ask button renders with its label as a child Text. GE strips
+        // our name/context and renumbers ids on click, so the question is
+        // recovered via the per-surface table keyed by the PREDICTED GE id
+        // (`surfaceId` + `btn-<predicted>`), not by anything on the button.
         let btn = comps
             .iter()
-            .find(|c| {
-                c["component"] == "Button"
-                    && c["id"].as_str().map(|i| i.starts_with("ask-")) == Some(true)
-            })
+            .find(|c| c["component"] == "Button" && c["action"]["event"]["name"] == "assistant")
             .expect("re-ask button");
-        let bid = btn["id"].as_str().unwrap();
-        assert_eq!(
-            hex_decode(bid.strip_prefix("ask-").unwrap()).as_deref(),
-            Some("What does Initech buy?"),
-        );
-        assert_eq!(btn["action"]["event"]["name"], "assistant");
         let btn_text = find(comps, btn["child"].as_str().unwrap());
         assert_eq!(btn_text["text"], "What does Initech buy?");
+        // The predicted GE id resolves to the question via `question_for`.
+        // This surface: chart=1, btn-text=2, button=3 (1-based array index),
+        // so GE echoes btn-(3+GE_ID_OFFSET) = btn-5 on click.
+        let sid = msgs[0]["createSurface"]["surfaceId"].as_str().unwrap();
+        assert_eq!(
+            question_for(sid, "btn-5").as_deref(),
+            Some("What does Initech buy?"),
+        );
+        // A wrong id / unknown surface resolves to nothing.
+        assert_eq!(question_for(sid, "btn-99"), None);
+        assert_eq!(question_for("nope", "btn-5"), None);
 
         // Prose is NOT duplicated inside the card (the bubble shows it).
         assert!(
