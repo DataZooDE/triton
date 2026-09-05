@@ -279,6 +279,32 @@ async fn an_empty_channel_allowlist_refuses_to_boot() {
     assert_boot_refused("manifest-msteams-nochannels.yaml", &["allowed_channel_ids"]);
 }
 
+/// #250, the original defect — closed by making the configuration
+/// unrepresentable rather than by trying to verify the unverifiable.
+///
+/// Under `identity.kind: azure` the tenant is read from
+/// `channelData.tenant.id`: unsigned body metadata. With ONE allowed
+/// tenant that is harmless — the only value that passes is the only
+/// value it could have been, so the check is equivalent to pinning.
+/// With two or more, the body field becomes a privilege SELECTOR: a
+/// caller who can present an Activity chooses which tenant's data the
+/// downstream Escurel token is scoped to, and nothing in the Bot
+/// Framework transport can contradict them (the connector token carries
+/// no `tid`; see doc/realizations.md §7).
+///
+/// Nobody can make that assertion trustworthy, so the fix is to refuse
+/// the configuration. Multi-tenant needs an identity mode that does not
+/// read the tenant off the body — `upstream`, where a resolver decides
+/// it — or one bot registration per tenant, which puts the tenant in the
+/// credential. Both remain available; the unsafe middle does not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn azure_identity_refuses_more_than_one_tenant() {
+    assert_boot_refused(
+        "manifest-msteams-multitenant.yaml",
+        &["allowed_tenants", "upstream"],
+    );
+}
+
 /// Spawn with `manifest` and assert the binary exits non-zero with a
 /// message containing every fragment in `must_contain`.
 fn assert_boot_refused(manifest: &str, must_contain: &[&str]) {

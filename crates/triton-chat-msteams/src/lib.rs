@@ -371,12 +371,44 @@ impl MsTeamsAdapter {
                          Use `sender_table` or `upstream` for that channel."
                     )));
                 }
-                if cfg.allowed_tenants.is_empty() {
-                    return Err(BuildError::Unsupported(
-                        "azure identity requires a non-empty `allowed_tenants` list \
-                         (fail-closed cross-tenant isolation)"
-                            .into(),
-                    ));
+                // #250: the tenant this strategy derives comes from
+                // `channelData.tenant.id` — unsigned body metadata. With
+                // ONE allowed tenant that is harmless: the only value
+                // that passes is the only value it could have been, so
+                // the check is equivalent to pinning. With two or more
+                // the body field becomes a privilege SELECTOR — a caller
+                // able to present an Activity chooses which tenant the
+                // downstream Escurel token is scoped to, and nothing in
+                // the transport can contradict them (the Bot Framework
+                // connector token carries no `tid`; realizations §7).
+                //
+                // No mechanism Microsoft ships makes that assertion
+                // trustworthy, so the configuration is refused rather
+                // than served insecurely. Multi-tenant has two supported
+                // shapes, both of which keep the tenant out of the body:
+                // `identity.kind: upstream`, where a resolver decides
+                // it, or one bot registration per tenant, which puts it
+                // in the credential.
+                match cfg.allowed_tenants.len() {
+                    0 => {
+                        return Err(BuildError::Unsupported(
+                            "azure identity requires a non-empty `allowed_tenants` list \
+                             (fail-closed cross-tenant isolation)"
+                                .into(),
+                        ));
+                    }
+                    1 => {}
+                    n => {
+                        return Err(BuildError::Unsupported(format!(
+                            "azure identity lists {n} `allowed_tenants`, but it derives the \
+                             tenant from `channelData.tenant.id` — unsigned body metadata. \
+                             With one tenant that check is equivalent to pinning; with more \
+                             it lets the caller SELECT which tenant's data their token is \
+                             scoped to, and the Bot Framework token carries no `tid` to \
+                             contradict them. Use `identity.kind: upstream` (a resolver \
+                             decides the tenant) or one bot registration per tenant."
+                        )));
+                    }
                 }
                 IdentityMode::Azure(cfg)
             }
@@ -904,8 +936,11 @@ fn resolve_sender(
                 );
                 return Err((StatusCode::UNAUTHORIZED, "missing tenant").into_response());
             };
-            // Cross-tenant isolation: the inbound tenant MUST be on
-            // the allowlist (guaranteed non-empty at build time).
+            // Cross-tenant isolation: the inbound tenant MUST match the
+            // single configured one (the list is guaranteed to hold
+            // exactly one entry at build time — see `from_manifest`), so
+            // this is an equality check against configuration, not a
+            // selection the caller gets to make.
             if !cfg.allowed_tenants.iter().any(|t| t == tenant) {
                 record_rejection(
                     adapter,

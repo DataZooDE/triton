@@ -1498,6 +1498,27 @@ a trap the next developer should not have to step in.
   — a mismatch becomes a signature failure rather than a comparison
   someone can forget to write.
 
+- **When an assertion cannot be made trustworthy, refuse the
+  configuration that needs it (#250, 2026-09-05).** The original defect
+  was that `identity.kind: azure` reads the tenant from
+  `channelData.tenant.id` and checks it only against `allowed_tenants`.
+  Months of work went into asking how to VERIFY that field, and the
+  answer is that you cannot: the Bot Framework connector token carries
+  no `tid`, endorsements bind only `channelId`, and Teams SSO is
+  Teams-only. What finally closed it was noticing the check is sound at
+  exactly one list length. With ONE allowed tenant the only value that
+  passes is the only value it could have been, so the check is
+  equivalent to pinning; with two or more the body field becomes a
+  privilege selector. So refuse `n > 1` at boot and point at the two
+  shapes that keep the tenant out of the body — `upstream`, where a
+  resolver decides it, or one bot registration per tenant, where it is
+  in the credential.
+  The general move: when an input cannot be verified, look for the
+  configuration boundary at which it stops mattering, and make
+  everything past that boundary unrepresentable. It converts an open
+  security question into a deployment-topology choice, which is a
+  decision someone can actually make.
+
 ---
 
 ## 8. CI/CD build-time traps (2026-08-30)
