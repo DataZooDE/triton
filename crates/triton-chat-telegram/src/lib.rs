@@ -273,6 +273,23 @@ impl TelegramAdapter {
                          tool; the upstream resolver must be a distinct upstream agent"
                     )));
                 }
+                // #250: state the trust model out loud, once, at boot.
+                // `upstream` resolution is an authorization-table LOOKUP,
+                // not a verification: the resolver is keyed on the
+                // platform sender id, which arrives in the request body
+                // and is not signed by anything. Whoever can cause the
+                // platform to deliver a message bearing a chosen sender
+                // id inherits that sender's principal. That is acceptable
+                // for the deployments this mode was built for, but it
+                // should be a decision an operator sees rather than one
+                // buried in a doc comment.
+                tracing::warn!(
+                    adapter = %name,
+                    resolver_tool = %resolver_tool,
+                    "identity.kind `upstream`: the resolver maps an UNSIGNED platform sender id to a principal. \
+                     It is an authorization table, not a cryptographic identity proof — anyone able to present \
+                     a chosen sender id inherits that sender's tenant and scopes. See doc/realizations.md §7."
+                );
                 IdentityMode::Upstream { resolver_tool }
             }
             // Guarded above; unreachable for other kinds.
@@ -946,6 +963,11 @@ async fn resolve_via_upstream(
         tenant: "system".to_string(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        // #250: this principal exists only on the `upstream` path, and
+        // the sender it names is the whole subject of the call — so the
+        // resolver dispatch is auditable against the id it was asked
+        // about, not only against the answer it gave.
+        sender_ref: Some(sender_key.to_string()),
     };
     let args = json!({ "platform": "telegram", "sender": sender_key });
     let dispatch = dispatcher
@@ -954,11 +976,11 @@ async fn resolve_via_upstream(
         .map_err(|e| TritonError::Auth(format!("identity resolver `{resolver_tool}`: {e}")))?;
     let resolved: ResolvedPrincipal = serde_json::from_value(dispatch.result)
         .map_err(|e| TritonError::Auth(format!("resolver reply not {{sub,scopes,tenant}}: {e}")))?;
-    if resolved.sub.trim().is_empty() || resolved.tenant.trim().is_empty() {
-        return Err(TritonError::Auth(
-            "resolver returned empty sub or tenant".into(),
-        ));
-    }
+    // #250: validate at the BOUNDARY, before these values are used for
+    // anything — the per-tenant rate limiter turns `tenant` into a
+    // process-lifetime map key well before the mint-time check in
+    // `static_upstream::bearer` runs.
+    triton_core::principal::validate_resolved(&resolved.sub, &resolved.tenant)?;
     Ok((resolved.sub, resolved.scopes, resolved.tenant))
 }
 
@@ -1031,6 +1053,9 @@ async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -
     // OIDC-derived one (`raw_token` is empty here — chat platforms
     // don't carry a JWT we forward; the upstream router won't
     // touch this field for messenger-routed calls).
+    // #250: the raw sender only earns a place in the audit line
+    // when the resolver replaced the asserted identity.
+    let identity_was_resolved_upstream = matches!(adapter.identity, IdentityMode::Upstream { .. });
     let principal = Principal {
         sub,
         scopes,
@@ -1038,6 +1063,8 @@ async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        // #250: only under `upstream` — see Principal::sender_ref.
+        sender_ref: identity_was_resolved_upstream.then(|| sender_key.to_string()),
     };
 
     let chat_id = message.chat.id;
@@ -1140,7 +1167,11 @@ async fn dispatch_and_render(
                 )
                 .await;
             }
-            match render_dispatch_result(&dispatch.result, &adapter.correlation_key) {
+            match render_dispatch_result(
+                &dispatch.result,
+                &adapter.correlation_key,
+                &principal_for_post.tenant,
+            ) {
                 Ok(rendered) => {
                     if rendered.deferred_buttons > 0 {
                         tracing::warn!(
@@ -1282,6 +1313,10 @@ async fn handle_form_outcome(
                     return StatusCode::OK.into_response();
                 }
             };
+            // #250: the raw sender only earns a place in the audit line
+            // when the resolver replaced the asserted identity.
+            let identity_was_resolved_upstream =
+                matches!(adapter.identity, IdentityMode::Upstream { .. });
             let principal = Principal {
                 sub,
                 scopes,
@@ -1289,6 +1324,8 @@ async fn handle_form_outcome(
                 tenant,
                 raw_token: String::new(),
                 trace_id: uuid::Uuid::new_v4().to_string(),
+                // #250: see Principal::sender_ref.
+                sender_ref: identity_was_resolved_upstream.then(|| sender_key.to_string()),
             };
             let principal_for_post = principal.clone();
             dispatch_and_render(
@@ -1513,7 +1550,16 @@ async fn handle_callback_query(
         return (StatusCode::UNAUTHORIZED, "future-dated callback").into_response();
     }
 
-    let (tool_name, args) = match triton_correlation::decode(token, &adapter.correlation_key) {
+    // #250: verified against the CLICKER's tenant. The binding lives in
+    // the derived key, so it costs nothing against Telegram's 64-byte
+    // callback_data budget — a wire field could not have fitted.
+    let (tool_name, args) = match triton_correlation::decode_bound(
+        token,
+        &adapter.correlation_key,
+        triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+        "telegram",
+        &tenant,
+    ) {
         Ok(v) => v,
         Err(e) => {
             record_rejection(
@@ -1526,6 +1572,9 @@ async fn handle_callback_query(
         }
     };
 
+    // #250: the raw sender only earns a place in the audit line
+    // when the resolver replaced the asserted identity.
+    let identity_was_resolved_upstream = matches!(adapter.identity, IdentityMode::Upstream { .. });
     let principal = Principal {
         sub,
         scopes,
@@ -1533,6 +1582,8 @@ async fn handle_callback_query(
         tenant,
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        // #250: only under `upstream` — see Principal::sender_ref.
+        sender_ref: identity_was_resolved_upstream.then(|| sender_key.to_string()),
     };
 
     // For private chats the post-back chat_id equals `from.id`;
@@ -1551,7 +1602,11 @@ async fn handle_callback_query(
         .invoke(&tool_name, args, principal, PROTOCOL)
         .await;
     match result {
-        Ok(dispatch) => match render_dispatch_result(&dispatch.result, &adapter.correlation_key) {
+        Ok(dispatch) => match render_dispatch_result(
+            &dispatch.result,
+            &adapter.correlation_key,
+            &principal_for_post.tenant,
+        ) {
             Ok(rendered) => {
                 post_back(adapter, &principal_for_post, &tool_name, chat_id, rendered).await;
                 StatusCode::OK.into_response()
@@ -1630,12 +1685,16 @@ fn route_command(text: &str, default_tool: &str) -> (String, Value) {
 fn render_dispatch_result(
     result: &serde_json::Value,
     correlation_key: &[u8],
+    // #250: the tenant any interactive token is minted for. It rides in
+    // the derived signing key, so it costs nothing on the wire — which
+    // is what makes a binding affordable at this platform's token budget.
+    tenant: &str,
 ) -> Result<RenderedMessage, surface_mapper::RenderError> {
     // Tools that emit an A2UI surface route through the mapper.
     // Everything else falls back to PR 18's bare-text path so the
     // echo-shaped `{ "echo": "..." }` reply still works without
     // forcing every tool into the A2UI envelope.
-    if let Some(r) = surface_mapper::try_render_surface(result, correlation_key) {
+    if let Some(r) = surface_mapper::try_render_surface(result, correlation_key, tenant) {
         return r;
     }
     let text = if let Some(obj) = result.as_object()

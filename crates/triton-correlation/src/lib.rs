@@ -76,12 +76,22 @@ struct CompactBody<'a> {
     /// rationale.
     t: &'a str,
     a: &'a Value,
+    /// `x` is the expiry in unix HOURS, not seconds — four fewer digits,
+    /// which matters because the whole token has to fit a platform
+    /// budget as small as Telegram's 64 bytes. Hour granularity is ample
+    /// for TTLs measured in days. Unbound tokens never expire,
+    /// which with an 8-byte truncated HMAC makes each one a permanent
+    /// oracle until the correlation key rotates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    x: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CompactBodyOwned {
     t: String,
     a: Value,
+    #[serde(default)]
+    x: Option<u64>,
 }
 
 /// Encode a `(tool, args)` pair into a callback-data token signed
@@ -110,7 +120,17 @@ pub fn encode_with_cap(
     if tool.is_empty() {
         return Err(EncodeError::EmptyTool);
     }
-    let body = CompactBody { t: tool, a: args };
+    let body = CompactBody {
+        t: tool,
+        a: args,
+        x: None,
+    };
+    finish(body, key, cap)
+}
+
+/// Serialise, sign and cap-check one body. Shared by the bound and
+/// unbound mint paths so they cannot drift.
+fn finish(body: CompactBody<'_>, key: &[u8], cap: usize) -> Result<String, EncodeError> {
     let body_json =
         serde_json::to_string(&body).map_err(|e| EncodeError::Serialise(e.to_string()))?;
     let mac = compute_truncated_hmac(body_json.as_bytes(), key);
@@ -184,6 +204,216 @@ pub fn decode_with_cap(
         return Err(DecodeError::Body("empty tool".into()));
     }
     Ok((parsed.t, parsed.a))
+}
+
+/// Verify signature + shape and return the whole parsed body, so the
+/// bound path can inspect the binding fields the unbound path drops.
+fn decode_parsed(token: &str, key: &[u8], cap: usize) -> Result<CompactBodyOwned, DecodeError> {
+    if token.len() > cap {
+        return Err(DecodeError::Malformed);
+    }
+    let (body_b64, mac_b64) = token.split_once('.').ok_or(DecodeError::Malformed)?;
+    let body = URL_SAFE_NO_PAD
+        .decode(body_b64)
+        .map_err(|_| DecodeError::Malformed)?;
+    let presented_mac = URL_SAFE_NO_PAD
+        .decode(mac_b64)
+        .map_err(|_| DecodeError::Malformed)?;
+    let expected = compute_truncated_hmac(&body, key);
+    let lengths_match = presented_mac.len() == expected.len();
+    let content_eq: bool = if lengths_match {
+        presented_mac.ct_eq(&expected).into()
+    } else {
+        let mut padded = [0u8; HMAC_LEN];
+        let n = presented_mac.len().min(HMAC_LEN);
+        padded[..n].copy_from_slice(&presented_mac[..n]);
+        padded.ct_eq(&expected).into()
+    };
+    if !(content_eq && lengths_match) {
+        return Err(DecodeError::BadSignature);
+    }
+    let parsed: CompactBodyOwned =
+        serde_json::from_slice(&body).map_err(|e| DecodeError::Body(e.to_string()))?;
+    if parsed.t.is_empty() {
+        return Err(DecodeError::Body("empty tool".into()));
+    }
+    Ok(parsed)
+}
+
+/// Mint a token BOUND to a tenant and an expiry (#250).
+///
+/// The unbound [`encode_with_cap`] produces a capability for
+/// `(tool, args)` and nothing else, so a card token minted into one
+/// tenant's conversation is replayable by a sender in another. Binding
+/// makes the token answer "who was this for, and until when" as well as
+/// "what does it do".
+/// Mint a bound token with an ABSOLUTE expiry (unix seconds).
+///
+/// [`encode_bound`] takes a relative TTL and rounds up to the next hour,
+/// so no caller can produce an already-expired token — which meant the
+/// expiry branch could only ever be exercised through crate internals,
+/// never against a running binary (CLAUDE.md §1). This is the seam that
+/// lets an integration test present a genuinely stale token to a real
+/// adapter.
+pub fn encode_bound_at(
+    tool: &str,
+    args: &Value,
+    key: &[u8],
+    cap: usize,
+    platform: &str,
+    tenant: &str,
+    exp_unix_secs: u64,
+) -> Result<String, EncodeError> {
+    if tool.is_empty() {
+        return Err(EncodeError::EmptyTool);
+    }
+    let body = CompactBody {
+        t: tool,
+        a: args,
+        x: Some(exp_unix_secs.div_ceil(3600)),
+    };
+    finish(body, &tenant_key(key, platform, tenant), cap)
+}
+
+pub fn encode_bound(
+    tool: &str,
+    args: &Value,
+    key: &[u8],
+    cap: usize,
+    platform: &str,
+    tenant: &str,
+    ttl_secs: Option<u64>,
+) -> Result<String, EncodeError> {
+    if tool.is_empty() {
+        return Err(EncodeError::EmptyTool);
+    }
+    // Hours, not seconds — see `CompactBody::x`. Rounded UP so a token
+    // never expires earlier than the caller asked for. `None` where the
+    // platform's budget cannot afford the field at all (Telegram); the
+    // TENANT binding is free and applies regardless.
+    let exp = match ttl_secs {
+        Some(ttl) => Some(
+            now_secs()
+                .ok_or_else(|| EncodeError::Serialise("system clock before the epoch".into()))?
+                .saturating_add(ttl)
+                .div_ceil(3600),
+        ),
+        None => None,
+    };
+    let body = CompactBody {
+        t: tool,
+        a: args,
+        x: exp,
+    };
+    finish(body, &tenant_key(key, platform, tenant), cap)
+}
+
+/// Verify a token AND its binding: the tenant must equal `tenant` and
+/// the expiry must not have passed.
+///
+/// A token carrying no binding is refused, not accepted. Accepting it
+/// would leave the replay open for every card minted before this
+/// shipped — and since unbound tokens never expire, "before this
+/// shipped" means forever. The cost is bounded and self-healing: cards
+/// already sitting in a conversation stop responding to a click and the
+/// next reply mints a bound one.
+pub fn decode_bound(
+    token: &str,
+    key: &[u8],
+    cap: usize,
+    platform: &str,
+    tenant: &str,
+) -> Result<(String, Value), DecodeError> {
+    // The tenant is in the KEY, so a token minted for another tenant
+    // fails the signature check here — there is no field to compare and
+    // nothing to forget to check. A pre-binding token, minted under the
+    // bare key, fails the same way.
+    let parsed = decode_parsed(token, &tenant_key(key, platform, tenant), cap)?;
+    // An expiry is present only where the platform's token budget could
+    // afford one. Its ABSENCE is not attacker-selectable: the field is
+    // covered by the MAC, so stripping it invalidates the token.
+    if let Some(exp_hours) = parsed.x {
+        let Some(now) = now_secs() else {
+            return Err(DecodeError::Body(
+                "system clock before the epoch; cannot check expiry".into(),
+            ));
+        };
+        if exp_hours.saturating_mul(3600) < now {
+            return Err(DecodeError::Body("token expired".into()));
+        }
+    }
+    Ok((parsed.t, parsed.a))
+}
+
+/// Verify only the BINDING of an already-decoded token.
+///
+/// Some adapters decode a callback token before they resolve the sender
+/// — Google Chat routes on the token's tool to decide what to do next —
+/// so the tenant is not known at decode time. They call this once the
+/// principal exists, before dispatching. Same rules as
+/// [`decode_bound`]: unbound and expired are both refused.
+pub fn verify_tenant_binding(
+    token: &str,
+    key: &[u8],
+    cap: usize,
+    platform: &str,
+    tenant: &str,
+) -> Result<(), DecodeError> {
+    decode_bound(token, key, cap, platform, tenant).map(|_| ())
+}
+
+/// Derive a per-tenant signing key — what actually binds a token to a
+/// tenant, at ZERO cost on the wire.
+///
+/// That cost is the whole point. Carrying the tenant, even as a
+/// 6-character digest, plus an expiry cost ~32 bytes; Telegram's
+/// `callback_data` cap is 64 and a real unbound token already reaches
+/// it, so a wire field could not be afforded there at all and Telegram
+/// and WhatsApp Cloud were left with the replay open. In the key it is
+/// free — and stronger, because a token minted for another tenant fails
+/// the SIGNATURE rather than an equality comparison a caller could
+/// forget to make.
+///
+/// The PLATFORM is folded in beside the tenant. Without it, two adapters
+/// sharing a `correlation_key` — nothing refuses that today, and every
+/// fixture uses one literal — would accept each other's tokens for the
+/// same tenant and tool. That matters most for the expiry-less tokens
+/// Telegram's budget forces: an immortal `callback_data` token would be
+/// a byte-valid Discord `custom_id`, re-creating the forever-capability
+/// this binding exists to close, one adapter over.
+///
+/// The label domain-separates the whole thing from the body MAC, which
+/// is computed over JSON and so always begins with `{`. The original key
+/// is appended so the derived key never carries less entropy than the
+/// one it replaces.
+fn tenant_key(key: &[u8], platform: &str, tenant: &str) -> Vec<u8> {
+    let mut input = Vec::with_capacity(DERIVATION_LABEL.len() + platform.len() + tenant.len() + 2);
+    input.extend_from_slice(DERIVATION_LABEL);
+    input.push(0);
+    input.extend_from_slice(platform.as_bytes());
+    input.push(0);
+    input.extend_from_slice(tenant.as_bytes());
+    // The FULL tag, not the truncated one: truncation is a wire-budget
+    // constraint and this key never leaves the process.
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(&input);
+    let mut derived = mac.finalize().into_bytes().to_vec();
+    derived.extend_from_slice(key);
+    derived
+}
+
+/// Versioned, unambiguous prefix for the key derivation. Rotating it
+/// invalidates every outstanding token, which is the point of having one.
+const DERIVATION_LABEL: &[u8] = b"triton/correlation/tenant-key/v1";
+
+/// `None` when the clock is before the epoch (a machine mid-NTP-sync,
+/// say). Callers treat that as "cannot decide" and refuse: mapping it to
+/// `0` made the expiry check `exp >= 0`, i.e. every expired token passed.
+fn now_secs() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
 }
 
 fn compute_truncated_hmac(body: &[u8], key: &[u8]) -> Vec<u8> {
@@ -327,5 +557,184 @@ mod tests {
         let bad_mac = URL_SAFE_NO_PAD.encode(&bytes);
         let bad = format!("{body}.{bad_mac}");
         assert!(matches!(decode(&bad, KEY), Err(DecodeError::BadSignature)));
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+    use serde_json::json;
+
+    const KEY: &[u8] = b"k";
+    const CAP: usize = 4096;
+
+    #[test]
+    fn a_bound_token_round_trips_for_its_own_tenant() {
+        let t = encode_bound(
+            "narrate",
+            &json!({"s": "a"}),
+            KEY,
+            CAP,
+            "tg",
+            "acme",
+            Some(3600),
+        )
+        .unwrap();
+        let (tool, args) = decode_bound(&t, KEY, CAP, "tg", "acme").unwrap();
+        assert_eq!(tool, "narrate");
+        assert_eq!(args["s"], "a");
+    }
+
+    #[test]
+    fn another_tenant_cannot_use_it() {
+        let t = encode_bound("narrate", &json!({}), KEY, CAP, "tg", "acme", Some(3600)).unwrap();
+        assert!(decode_bound(&t, KEY, CAP, "tg", "globex").is_err());
+    }
+
+    #[test]
+    fn an_unbound_legacy_token_is_refused() {
+        // The compatibility decision, pinned: accepting these would keep
+        // the replay open for every card minted before the binding
+        // shipped, and unbound tokens never expire.
+        let legacy = encode_with_cap("narrate", &json!({}), KEY, CAP).unwrap();
+        assert!(decode_bound(&legacy, KEY, CAP, "tg", "acme").is_err());
+        // ...but it still decodes on the unbound path, so nothing else breaks.
+        assert!(decode_with_cap(&legacy, KEY, CAP).is_ok());
+    }
+
+    #[test]
+    fn an_expired_token_is_refused() {
+        // Built directly with a past expiry: with HOUR granularity a
+        // `ttl_secs = 0` token still runs to the end of the current
+        // hour, so a sleep cannot make one lapse inside a test.
+        let args = json!({});
+        let past = CompactBody {
+            t: "narrate",
+            a: &args,
+            x: Some(now_secs().unwrap() / 3600 - 1),
+        };
+        let t = finish(past, &tenant_key(KEY, "tg", "acme"), CAP).unwrap();
+        assert!(decode_bound(&t, KEY, CAP, "tg", "acme").is_err());
+    }
+
+    #[test]
+    fn a_ttl_rounds_up_so_a_token_never_dies_early() {
+        // Hour granularity must never shorten the caller's TTL.
+        let t = encode_bound("narrate", &json!({}), KEY, CAP, "tg", "acme", Some(1)).unwrap();
+        assert!(decode_bound(&t, KEY, CAP, "tg", "acme").is_ok());
+    }
+
+    #[test]
+    fn a_realistic_bound_token_fits_discords_budget() {
+        // Discord buttons were silently DEFERRED until the keyed digest
+        // and hour-expiry shrank the binding — a hardening that costs
+        // functionality is not a hardening. A GUID tenant with a 7-day
+        // TTL is the realistic worst case.
+        let t = encode_bound(
+            "narrate",
+            &json!({ "subject": "alice" }),
+            KEY,
+            DISCORD_MAX_CUSTOM_ID,
+            "dc",
+            "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+            Some(7 * 24 * 3600),
+        )
+        .expect("a realistic bound token fits Discord's budget");
+        assert!(t.len() <= DISCORD_MAX_CUSTOM_ID, "got {} bytes", t.len());
+    }
+
+    /// Telegram's 64-byte `callback_data` is the tightest budget any
+    /// adapter mints into, and a real unbound token already reaches it.
+    /// A WIRE binding could never fit — carrying the tenant plus an
+    /// expiry cost ~32 bytes — which is why the first attempt at this
+    /// left Telegram and WhatsApp Cloud with the replay open.
+    ///
+    /// Deriving the key from the tenant costs nothing on the wire, so
+    /// the binding fits everywhere. The expiry is the part still dropped
+    /// at this budget; a stale token stays tenant-scoped, which is the
+    /// property that matters.
+    #[test]
+    fn a_tenant_binding_fits_even_telegrams_budget() {
+        let t = encode_bound(
+            "narrate",
+            &json!({ "subject": "alice" }),
+            KEY,
+            PLATFORM_MAX_CALLBACK_DATA,
+            "tg",
+            "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+            None,
+        )
+        .expect("a tenant-bound token fits Telegram when the expiry is dropped");
+        assert!(
+            t.len() <= PLATFORM_MAX_CALLBACK_DATA,
+            "got {} bytes",
+            t.len()
+        );
+        assert!(decode_bound(&t, KEY, PLATFORM_MAX_CALLBACK_DATA, "tg", "globex").is_err());
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                PLATFORM_MAX_CALLBACK_DATA,
+                "tg",
+                "28c0071d-815c-4ace-a3b5-9a28bde005fd"
+            )
+            .is_ok()
+        );
+    }
+
+    /// An expiry-less token must not be mistaken for an expired one, and
+    /// must still be refused for the wrong tenant.
+    #[test]
+    fn an_expiry_less_token_never_expires_but_stays_tenant_scoped() {
+        let t = encode_bound("narrate", &json!({}), KEY, CAP, "tg", "acme", None).unwrap();
+        assert!(decode_bound(&t, KEY, CAP, "tg", "acme").is_ok());
+        assert!(decode_bound(&t, KEY, CAP, "tg", "globex").is_err());
+    }
+
+    #[test]
+    fn a_bound_token_still_fails_a_wrong_key() {
+        let t = encode_bound("narrate", &json!({}), KEY, CAP, "tg", "acme", Some(3600)).unwrap();
+        assert!(decode_bound(&t, b"other", CAP, "tg", "acme").is_err());
+    }
+
+    #[test]
+    fn the_binding_costs_bytes_and_the_cap_still_applies() {
+        // The tenant + expiry make the token longer; a cap that fitted
+        // the unbound form may not fit the bound one, and that must
+        // surface as OversizedToken rather than a silently dropped
+        // binding.
+        let unbound = encode_with_cap("narrate", &json!({}), KEY, CAP).unwrap();
+        let bound =
+            encode_bound("narrate", &json!({}), KEY, CAP, "tg", "acme", Some(3600)).unwrap();
+        assert!(bound.len() > unbound.len());
+        assert!(matches!(
+            encode_bound(
+                "narrate",
+                &json!({}),
+                KEY,
+                unbound.len(),
+                "tg",
+                "acme",
+                Some(3600)
+            ),
+            Err(EncodeError::OversizedToken { .. })
+        ));
+    }
+
+    /// #250 F5: two adapters sharing one `correlation_key` — nothing
+    /// refuses that today, and every fixture uses a single literal —
+    /// must not accept each other's tokens. It matters most for the
+    /// expiry-less tokens Telegram's budget forces: an immortal
+    /// `callback_data` token would otherwise be a byte-valid Discord
+    /// `custom_id`, re-creating the forever-capability one adapter over.
+    #[test]
+    fn a_token_from_one_platform_is_refused_on_another() {
+        let t = encode_bound("narrate", &json!({}), KEY, CAP, "telegram", "acme", None).unwrap();
+        assert!(decode_bound(&t, KEY, CAP, "telegram", "acme").is_ok());
+        assert!(
+            decode_bound(&t, KEY, CAP, "discord", "acme").is_err(),
+            "same key, same tenant, different platform must not verify"
+        );
     }
 }

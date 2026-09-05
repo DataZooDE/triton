@@ -142,9 +142,10 @@ pub enum RenderError {
 pub fn try_render_surface(
     result: &Value,
     correlation_key: &[u8],
+    tenant: &str,
 ) -> Option<Result<RenderedMessage, RenderError>> {
     let surface = extract_surface(result).ok()?;
-    Some(render(&surface, correlation_key))
+    Some(render(&surface, correlation_key, tenant))
 }
 
 /// PR 32 (numbered_prompts intercept): if the tool result is an
@@ -223,7 +224,11 @@ pub struct FormOnly {
 ///    a string of `&` chars, which inflate 1→5 bytes when escaped,
 ///    is bounded correctly). The result is then escaped + wrapped
 ///    fresh, so the output stays syntactically valid.
-pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessage, RenderError> {
+pub fn render(
+    surface: &Surface,
+    correlation_key: &[u8],
+    tenant: &str,
+) -> Result<RenderedMessage, RenderError> {
     // Each renderable component contributes one PreRender; action
     // components (Selection / Form) bump the deferred counter and
     // also contribute a text fragment that names the surface so
@@ -279,7 +284,15 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
             Component::Button {
                 label, tool, args, ..
             } => {
-                match triton_correlation::encode(tool, args, correlation_key) {
+                match triton_correlation::encode_bound(
+                    tool,
+                    args,
+                    correlation_key,
+                    triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+                    "telegram",
+                    tenant,
+                    None,
+                ) {
                     Ok(token) => {
                         keyboard_rows.push(vec![json!({
                             "text": label,
@@ -335,7 +348,15 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
                 let mut any_overflow = false;
                 for opt in options {
                     let args = json!({ args_key.as_str(): &opt.value });
-                    match triton_correlation::encode(tool, &args, correlation_key) {
+                    match triton_correlation::encode_bound(
+                        tool,
+                        &args,
+                        correlation_key,
+                        triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+                        "telegram",
+                        tenant,
+                        None,
+                    ) {
                         Ok(token) => option_buttons.push(json!({
                             "text": opt.label,
                             "callback_data": token,
@@ -668,7 +689,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert_eq!(r.text, "hello\n\n<i>a footnote</i>");
         assert_eq!(r.parse_mode, Some("HTML"));
         assert_eq!(r.deferred_buttons, 0);
@@ -683,7 +704,7 @@ mod tests {
                 value: "plain".into(),
             }],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert_eq!(r.text, "plain");
         assert_eq!(r.parse_mode, None);
     }
@@ -714,7 +735,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         let markup = r.reply_markup.expect("inline_keyboard set");
         let rows = markup["inline_keyboard"].as_array().unwrap();
         // 2 buttons in a single row of 8 (cap).
@@ -725,14 +746,24 @@ mod tests {
         assert_eq!(row[1]["text"], "B");
 
         // Each button's token decodes to the right (tool, args).
-        let (t1, a1) =
-            triton_correlation::decode(row[0]["callback_data"].as_str().unwrap(), TEST_KEY)
-                .expect("verifies");
+        let (t1, a1) = triton_correlation::decode_bound(
+            row[0]["callback_data"].as_str().unwrap(),
+            TEST_KEY,
+            triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+            "telegram",
+            "acme",
+        )
+        .expect("verifies");
         assert_eq!(t1, "narrate");
         assert_eq!(a1["s"], "a");
-        let (_, a2) =
-            triton_correlation::decode(row[1]["callback_data"].as_str().unwrap(), TEST_KEY)
-                .expect("verifies");
+        let (_, a2) = triton_correlation::decode_bound(
+            row[1]["callback_data"].as_str().unwrap(),
+            TEST_KEY,
+            triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+            "telegram",
+            "acme",
+        )
+        .expect("verifies");
         assert_eq!(a2["s"], "b");
         assert_eq!(r.deferred_selections, 0);
     }
@@ -764,7 +795,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         // None of the tile content appears in the caption — only
         // the leading Text/Narration components do.
         assert!(!r.text.contains("invocations"));
@@ -805,7 +836,7 @@ mod tests {
         let s = Surface {
             components: vec![make_dash("first"), make_dash("second")],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         let dash = r.dashboard.expect("first surfaced");
         assert_eq!(dash.title, "first");
         assert_eq!(r.deferred_dashboards, 1);
@@ -827,7 +858,7 @@ mod tests {
                 }],
             }],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert!(r.text.is_empty());
         assert!(r.dashboard.is_some());
     }
@@ -848,7 +879,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert_eq!(r.deferred_selections, 1);
         assert!(r.reply_markup.is_none());
         // The Selection's prompt MUST NOT ship as visible text
@@ -875,7 +906,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert_eq!(r.deferred_buttons, 0);
         assert!(r.text.contains("label"));
         let markup = r.reply_markup.expect("inline_keyboard set");
@@ -885,7 +916,14 @@ mod tests {
         assert_eq!(cell["text"], "Refresh");
         let token = cell["callback_data"].as_str().expect("token is a string");
         // Token round-trips back to (narrate, {}) under the same key.
-        let (tool, args) = triton_correlation::decode(token, TEST_KEY).expect("token verifies");
+        let (tool, args) = triton_correlation::decode_bound(
+            token,
+            TEST_KEY,
+            triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+            "telegram",
+            "acme",
+        )
+        .expect("token verifies for its tenant");
         assert_eq!(tool, "narrate");
         assert_eq!(args, json!({}));
     }
@@ -912,7 +950,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert_eq!(r.deferred_buttons, 1);
         assert!(r.reply_markup.is_none());
     }
@@ -930,7 +968,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert!(r.text.contains("a &lt; b &amp; c &gt; d"));
         assert!(r.text.contains("<i>x&lt;i&gt;y&lt;/i&gt;z</i>"));
     }
@@ -942,7 +980,7 @@ mod tests {
         // on empty text. The mapper now refuses at its edge.
         let s = Surface { components: vec![] };
         assert!(matches!(
-            render(&s, TEST_KEY),
+            render(&s, TEST_KEY, "acme"),
             Err(RenderError::EmptyAfterRender)
         ));
     }
@@ -963,7 +1001,7 @@ mod tests {
                 resource: None,
             }],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert_eq!(r.text, BUTTON_ONLY_PLACEHOLDER);
         let markup = r.reply_markup.expect("inline_keyboard set");
         assert_eq!(markup["inline_keyboard"][0][0]["text"], "Click");
@@ -978,7 +1016,7 @@ mod tests {
                 value: big,
             }],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert!(r.truncated);
         assert!(r.text.len() <= TELEGRAM_TEXT_MAX_BYTES);
         assert!(r.text.ends_with(TRUNCATION_SENTINEL));
@@ -995,7 +1033,7 @@ mod tests {
                 value: fourbyte.repeat(2000),
             }],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert!(r.truncated);
         // The String type already guarantees valid UTF-8 globally;
         // the per-byte loop confirms the cut wasn't mid-sequence.
@@ -1018,7 +1056,7 @@ mod tests {
                 value: big,
             }],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert!(r.truncated);
         let before_sentinel = &r.text[..r.text.len() - TRUNCATION_SENTINEL.len()];
         // Stripping every `&lt;` should leave nothing — i.e. the
@@ -1040,7 +1078,7 @@ mod tests {
         let s = Surface {
             components: vec![Component::Narration { text: big }],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert!(r.truncated);
         assert_eq!(r.parse_mode, Some("HTML"));
         let opens = r.text.matches("<i>").count();
@@ -1065,7 +1103,7 @@ mod tests {
         let s = Surface {
             components: (0..50).map(|_| small.clone()).collect(),
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert!(r.truncated);
         assert!(r.text.ends_with(TRUNCATION_SENTINEL));
         let body = r.text.trim_end_matches(TRUNCATION_SENTINEL);
@@ -1164,7 +1202,7 @@ mod tests {
                 Component::Narration { text: "4".into() },
             ],
         };
-        let r = render(&s, TEST_KEY).expect("renders");
+        let r = render(&s, TEST_KEY, "acme").expect("renders");
         assert_eq!(r.text, "1\n\n<i>2</i>\n\n3\n\n<i>4</i>");
     }
 }

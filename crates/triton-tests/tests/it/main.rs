@@ -74,6 +74,8 @@ mod metrics_endpoint;
 mod msteams;
 #[path = "../msteams_callback.rs"]
 mod msteams_callback;
+#[path = "../msteams_channels.rs"]
+mod msteams_channels;
 #[path = "../msteams_courier.rs"]
 mod msteams_courier;
 #[path = "../msteams_federated.rs"]
@@ -144,6 +146,8 @@ mod twilio_whatsapp_button_reply;
 mod twilio_whatsapp_status_callback;
 #[path = "../twilio_whatsapp_template.rs"]
 mod twilio_whatsapp_template;
+#[path = "../upstream_identity_hardening.rs"]
+mod upstream_identity_hardening;
 #[path = "../upstream_listing.rs"]
 mod upstream_listing;
 #[path = "../version.rs"]

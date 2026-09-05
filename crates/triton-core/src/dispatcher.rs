@@ -358,6 +358,7 @@ impl Dispatcher {
                     let sub = principal.sub.clone();
                     let tenant = principal.tenant.clone();
                     let trace_id = principal.trace_id.clone();
+                    let sender_ref = principal.sender_ref.clone();
                     let open_offset = started.elapsed();
                     let finalized =
                         Finalized::new(inner, move |term: Termination, timing: Timing| {
@@ -370,6 +371,7 @@ impl Dispatcher {
                                 tool: &tool,
                                 sub: &sub,
                                 tenant: &tenant,
+                                sender_ref: sender_ref.as_deref(),
                                 trace_id: &trace_id,
                                 term,
                                 total_ms,
@@ -434,6 +436,7 @@ impl Dispatcher {
                 let sub = principal.sub.clone();
                 let tenant = principal.tenant.clone();
                 let trace_id = principal.trace_id.clone();
+                let sender_ref = principal.sender_ref.clone();
                 // Offset from request start to the moment the stream
                 // opened, so `ttfb`/`total` reflect the whole request, not
                 // just the post-200 window the combinator clocks.
@@ -448,6 +451,7 @@ impl Dispatcher {
                         tool: &tool,
                         sub: &sub,
                         tenant: &tenant,
+                        sender_ref: sender_ref.as_deref(),
                         trace_id: &trace_id,
                         term,
                         total_ms,
@@ -614,6 +618,9 @@ impl Dispatcher {
             // audit line alone rather than from adapter source.
             error_detail: Some(error.to_string()),
             ttfb_ms: None,
+            // A boundary rejection happens before a Principal exists, so
+            // there is no resolved identity to contrast a raw sender with.
+            sender_ref: None,
             suppressed,
             trace_id,
         });
@@ -673,6 +680,7 @@ impl Dispatcher {
             status_detail: detail,
             error_detail: None,
             ttfb_ms: None,
+            sender_ref: principal.sender_ref.as_deref(),
             suppressed: None,
             trace_id: &principal.trace_id,
         });
@@ -746,6 +754,7 @@ impl Dispatcher {
             status_detail: None,
             error_detail: None,
             ttfb_ms: None,
+            sender_ref: principal.sender_ref.as_deref(),
             suppressed: None,
             trace_id: &principal.trace_id,
         });
@@ -792,6 +801,7 @@ impl Dispatcher {
             status_detail: None,
             error_detail: None,
             ttfb_ms: None,
+            sender_ref: principal.sender_ref.as_deref(),
             suppressed: None,
             trace_id: &principal.trace_id,
         });
@@ -841,6 +851,8 @@ struct StreamAudit<'a> {
     tool: &'a str,
     sub: &'a str,
     tenant: &'a str,
+    /// See [`crate::audit::AuditRecord::sender_ref`].
+    sender_ref: Option<&'a str>,
     trace_id: &'a str,
     term: Termination,
     total_ms: u64,
@@ -889,6 +901,7 @@ fn emit_stream_audit(a: StreamAudit<'_>) {
         status_detail,
         error_detail: None,
         ttfb_ms: a.ttfb_ms,
+        sender_ref: a.sender_ref,
         suppressed: None,
         trace_id: a.trace_id,
     });
@@ -935,6 +948,7 @@ mod tests {
             tenant: "default".into(),
             raw_token: String::new(),
             trace_id: "trace-test".into(),
+            sender_ref: None,
         }
     }
 

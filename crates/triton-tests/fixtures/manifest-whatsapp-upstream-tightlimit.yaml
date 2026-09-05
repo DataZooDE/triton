@@ -1,0 +1,32 @@
+# #250: same as manifest-whatsapp-cloud-upstream-identity.yaml but with a
+# burst of 1, so the per-tenant limiter trips on the second inbound and the
+# `record_rejection` audit sink is reachable in a test.
+version: "0.2"
+
+adapters:
+  whatsapp:
+    kind: whatsapp_cloud
+    tool: assistant
+    inbound:
+      kind: webhook
+      signature: hmac256
+      secret: whatsapp-app-secret-for-test
+      verify_token: meta-verify-token-for-test
+    outbound:
+      kind: rest_api
+      token: whatsapp-access-token-for-test
+      phone_number_id: "100200300"
+    identity:
+      kind: upstream
+      resolver_tool: resolve_identity
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 1
+      burst: 1
+    correlation_key: whatsapp-correlation-key-for-test

@@ -37,6 +37,74 @@ pub struct Principal {
     #[serde(skip)]
     pub raw_token: String,
     pub trace_id: String,
+    /// The RAW platform sender id this principal was derived from, when
+    /// the adapter knows one (`wa_id`, Telegram user id, `users/<id>`,
+    /// Teams `from.id`). Recorded in the audit line beside the resolved
+    /// subject; never used for authorisation.
+    ///
+    /// It exists because under `identity.kind: upstream` (FR-I-7) the
+    /// resolver REPLACES the asserted identity, so without this the
+    /// asserted one is dropped and a session driven by a spoofed sender
+    /// id produces audit lines byte-identical to the victim's. On a
+    /// boundary that cannot be made cryptographic — the Bot Framework
+    /// body is not signed per-user — detection is the compensating
+    /// control, and it needs the asserted value on record (#250).
+    ///
+    /// `None` where there is no platform sender (the HTTP trio, internal
+    /// dispatches), in which case the field is omitted from the line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_ref: Option<String>,
+}
+
+/// Cap on a principal field accepted from an out-of-process identity
+/// resolver (FR-I-7 `identity.kind: upstream`).
+///
+/// Generous: real subjects and tenants are GUIDs, `29:`-prefixed Teams
+/// ids, `users/99`, or phone numbers.
+pub const MAX_RESOLVED_FIELD_LEN: usize = 128;
+
+/// Validate a `{sub, tenant}` an identity resolver returned, BEFORE the
+/// values are used for anything.
+///
+/// The resolver is out-of-process and its reply is unauthenticated
+/// beyond transport, so everything it returns is untrusted input. It has
+/// to be checked at the boundary rather than at the point of use,
+/// because the points of use are plural and one of them is a map key:
+/// `PerTenantBuckets::try_take` inserts `tenant` into a process-lifetime
+/// `HashMap`, and that runs before the mint-time check in
+/// `static_upstream::bearer`. Its doc-comment promises "the cardinality
+/// is bounded by the manifest, not by inbound traffic" — true for
+/// `sender_table`, false for `upstream` until this runs first (#250).
+///
+/// Empty `tenant` is refused here even though an empty tenant claim is a
+/// legitimate SHIPPED state: a resolver that answers at all must name a
+/// tenant, and the existing resolver code already refuses an empty one.
+/// Whitespace and control characters are refused; a stricter allowlist
+/// is deliberately not applied — see `static_upstream`'s
+/// `validate_signed_field`, which keeps the same rule as defence in
+/// depth at mint time.
+pub fn validate_resolved(sub: &str, tenant: &str) -> Result<(), crate::error::TritonError> {
+    for (field, value) in [("sub", sub), ("tenant", tenant)] {
+        if value.trim().is_empty() {
+            return Err(crate::error::TritonError::Auth(format!(
+                "identity resolver returned an empty {field}"
+            )));
+        }
+        if value.len() > MAX_RESOLVED_FIELD_LEN {
+            return Err(crate::error::TritonError::Auth(format!(
+                "identity resolver returned a {field} of {} bytes, over the \
+                 {MAX_RESOLVED_FIELD_LEN}-byte cap",
+                value.len()
+            )));
+        }
+        if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(crate::error::TritonError::Auth(format!(
+                "identity resolver returned a {field} containing whitespace or \
+                 control characters"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// `Debug` is manual so an accidental `tracing!(?principal)` or

@@ -300,11 +300,16 @@ async fn demo_selection_defers_when_any_option_overflows_cap() {
         .iter()
         .find(|b| b["text"] == "Refresh")
         .expect("Refresh button present");
-    let (refresh_tool, _) = triton_correlation::decode(
+    // #250: tokens are bound to the minting tenant via the derived key,
+    // so verification needs the same tenant the adapter resolved.
+    let (refresh_tool, _) = triton_correlation::decode_bound(
         refresh["callback_data"].as_str().unwrap(),
         CORRELATION_KEY.as_bytes(),
+        triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+        "telegram",
+        "acme",
     )
-    .expect("Refresh token verifies");
+    .expect("Refresh token verifies for its tenant");
     assert_eq!(refresh_tool, "demo_panel");
 
     // None of the three Selection option labels ship as buttons —

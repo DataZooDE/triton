@@ -1414,6 +1414,111 @@ a trap the next developer should not have to step in.
   the window is consulted, so the exact total is never actually lost.
   Suppress the LINE, never the COUNTER.
 
+- **A test can go vacuous when you make the code better (#250,
+  2026-09-05).** An integration test asserted that a hostile resolver
+  tenant appeared *truncated* in the audit line. Later in the same
+  branch, resolver validation moved to the boundary — so the hostile
+  value no longer reached the audit path at all, the assertion started
+  reading `"-"`, and it passed with the clamp deleted. Nothing failed;
+  the test just stopped meaning anything, and the suite stayed green
+  throughout. Two lessons: assert on a value that is *supposed* to reach
+  the sink (here `sender_ref`, unvalidated platform input by design)
+  rather than one you are also busy eliminating; and re-run the mutation
+  check after any change that moves a boundary, not only when the test
+  is first written.
+
+- **Enumerate audit SINKS, not audit call sites (#250, 2026-09-05).**
+  Clamping principal-derived fields at three `AuditRecord` construction
+  sites left two uncovered — and one of them, `record_rejection`, also
+  emits `error_detail`, into which every chat adapter interpolates the
+  raw tenant. So the hostile value still reached the log through a field
+  the clamp never considered: bounding a field beside an unbounded
+  message is not a bound. Clamp once in `From<&AuditRecord> for
+  AuditEntry` and have `emit` serialise that, making the rule an
+  invariant of the emitter which new sites inherit for free.
+
+- **An invariant a type documents should hold IN the type (#250,
+  2026-09-05).** `PerTenantBuckets` promised "the cardinality is bounded
+  by the manifest, not by inbound traffic". True for `sender_table`,
+  where tenants are enumerated at boot; false the moment FR-I-7
+  `upstream` let an out-of-process resolver name the tenant per request.
+  Validating at the resolver boundary keeps hostile values out, but a
+  merely buggy resolver or a large tenant estate still grows the map for
+  the process lifetime. When a doc-comment states a bound, enforce it in
+  the type rather than trusting every present and future caller.
+
+- **Eviction can be a reset, and the obvious reasoning about who gets
+  evicted is backwards (#250, 2026-09-05).** Capping that map needs an
+  eviction policy, and least-recently-used looks safe — "an attacker
+  flooding the map evicts themselves first". Exactly wrong: a caller
+  naming a FRESH key each time is never the least recently used, so the
+  flood evicts the throttled victim, who then returns with a full
+  bucket. A rate limiter's state IS the thing being protected, so evict
+  only entries that have refilled to capacity (nothing owed), and when
+  none qualify refuse the newcomer rather than make room. The first
+  version of that doc-comment asserted the false claim confidently; the
+  test caught it, because it was written to assert the property rather
+  than the implementation.
+
+- **Telegram's 64-byte `callback_data` cannot carry a token binding at
+  all (#250, 2026-09-05).** Binding a correlation token to a tenant and
+  an expiry closed a cross-tenant replay on Teams, Google Chat and
+  Discord. It does NOT fit Telegram: the smallest possible bound body —
+  one-character tool, empty args, 6-char keyed tenant digest, hour-
+  granularity expiry — is 66 bytes before base64, against a hard
+  platform cap of 64. WhatsApp Cloud mints on the same budget. So those
+  two adapters still mint unbound, never-expiring callback tokens, and
+  the replay stays open there. This is a **wire-format decision**, not a
+  follow-up commit: closing it needs a shorter epoch unit, a 4-character
+  digest, or a different token shape entirely. Pinned by
+  `telegrams_budget_cannot_carry_a_binding_at_all` so nobody
+  re-discovers it by writing a comment that claims otherwise — which is
+  exactly what happened on the first attempt.
+
+  **The fix is known and costs zero wire bytes: derive the HMAC key from
+  the tenant** (`HMAC(key, "n\0" || tenant)`) instead of carrying a
+  tenant field. A token minted for tenant A then fails the SIGNATURE for
+  tenant B — stronger than an equality check, since there is no field to
+  forget to compare — and it fits every budget because nothing is added
+  to the payload. Prototyped and measured: it drops ~17 bytes and a
+  tenant-bound, expiry-less token fits Telegram's 64 with room to spare.
+  What blocks it is **Google Chat's handler ordering**, not the crypto:
+  gc decodes the token with the bare key to route on its tool BEFORE it
+  resolves the sender, so it has no tenant to derive with at that point.
+  Landing it meant moving gc's decode after sender resolution, as
+  msteams already does — a real refactor of that handler, done in the
+  commit that follows. The crypto was the easy half, exactly as
+  predicted: the work was proving nothing between the match arm and the
+  principal reads the tool or args, so the click path can carry
+  placeholders until the verified token supplies them.
+
+  The general lesson: when a binding does not fit a budget, look at
+  whether it needs to be ON the wire at all. Anything both sides already
+  know can move into the key instead, and there it is free AND stronger
+  — a mismatch becomes a signature failure rather than a comparison
+  someone can forget to write.
+
+- **When an assertion cannot be made trustworthy, refuse the
+  configuration that needs it (#250, 2026-09-05).** The original defect
+  was that `identity.kind: azure` reads the tenant from
+  `channelData.tenant.id` and checks it only against `allowed_tenants`.
+  Months of work went into asking how to VERIFY that field, and the
+  answer is that you cannot: the Bot Framework connector token carries
+  no `tid`, endorsements bind only `channelId`, and Teams SSO is
+  Teams-only. What finally closed it was noticing the check is sound at
+  exactly one list length. With ONE allowed tenant the only value that
+  passes is the only value it could have been, so the check is
+  equivalent to pinning; with two or more the body field becomes a
+  privilege selector. So refuse `n > 1` at boot and point at the two
+  shapes that keep the tenant out of the body — `upstream`, where a
+  resolver decides it, or one bot registration per tenant, where it is
+  in the credential.
+  The general move: when an input cannot be verified, look for the
+  configuration boundary at which it stops mattering, and make
+  everything past that boundary unrepresentable. It converts an open
+  security question into a deployment-topology choice, which is a
+  decision someone can actually make.
+
 ---
 
 ## 8. CI/CD build-time traps (2026-08-30)

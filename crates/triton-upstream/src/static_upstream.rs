@@ -48,6 +48,54 @@ const MAX_TENANT_LEN: usize = 128;
 /// (#114 / RBAC): drop empty / whitespace-bearing / over-length values,
 /// apply the operator allowlist when configured, and cap the count. Pure so
 /// it's unit-testable.
+/// Cap on the resolved subject signed into an upstream token.
+///
+/// `sub` reaches `s.sign(...)` OUTSIDE the `forward_principal` gate, so
+/// under `identity.kind: upstream` (FR-I-7) a value chosen by an
+/// out-of-process resolver is signed into every minted bearer in every
+/// deployment. Unbounded, it becomes an unbounded `Authorization` header
+/// on every upstream call.
+const MAX_SUB_LEN: usize = 128;
+
+/// Reject a principal field that must not reach a signed upstream claim
+/// rather than silently substituting one.
+///
+/// Silent substitution was the bug (#250): an over-cap tenant became
+/// `String::new()`, and because `JwtSigner` omits an empty tenant claim
+/// the resulting token was byte-identical to the supported
+/// `forward_principal = false` token — so a hostile resolver reply could
+/// not be distinguished from a legitimate configuration, by a downstream
+/// consumer or in the audit log. Fail closed instead: the caller turns
+/// this into an audited refusal and no upstream call.
+///
+/// Empty is allowed: an empty tenant is a legitimate shipped state (the
+/// claim is simply omitted). It is the OVER-CAP and malformed cases that
+/// must not be laundered into it.
+///
+/// The charset check deliberately rejects only whitespace and ASCII
+/// control characters rather than allowlisting. Subjects in the wild take
+/// several shapes across the seven chat adapters — `users/99`,
+/// `29:1abc…`, bare phone numbers, GUIDs — and a tighter allowlist would
+/// refuse legitimate senders. The LENGTH cap is the load-bearing half;
+/// JSON serialisation already neutralises the rest (the token body is
+/// base64url and `serde_json` escapes control characters).
+fn validate_signed_field(field: &str, value: &str, max: usize) -> Result<(), TritonError> {
+    if value.len() > max {
+        return Err(TritonError::Auth(format!(
+            "resolved {field} is {} bytes, over the {max}-byte cap; refusing to \
+             mint an upstream token",
+            value.len()
+        )));
+    }
+    if value.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(TritonError::Auth(format!(
+            "resolved {field} contains whitespace or control characters; \
+             refusing to mint an upstream token"
+        )));
+    }
+    Ok(())
+}
+
 fn sanitise_scopes(scopes: &[String], allowlist: Option<&HashSet<String>>) -> Vec<String> {
     scopes
         .iter()
@@ -276,15 +324,9 @@ impl StaticUpstream {
                 let (tenant, scopes, groups): (String, Vec<String>, Vec<String>) = if self
                     .forward_principal
                 {
-                    let tenant = if principal.tenant.len() <= MAX_TENANT_LEN {
-                        principal.tenant.clone()
-                    } else {
-                        tracing::warn!(
-                            len = principal.tenant.len(),
-                            "forwarded tenant over cap; dropping"
-                        );
-                        String::new()
-                    };
+                    // #250: refuse, never blank. See `validate_signed_field`.
+                    validate_signed_field("tenant", &principal.tenant, MAX_TENANT_LEN)?;
+                    let tenant = principal.tenant.clone();
                     let scopes =
                         sanitise_scopes(&principal.scopes, self.forward_scope_allowlist.as_ref());
                     // RBAC: same sanitise/cap/allowlist as scopes. Rides
@@ -312,6 +354,9 @@ impl StaticUpstream {
                     }
                     (self.tenant.clone(), Vec::new(), Vec::new())
                 };
+                // #250: `sub` is signed regardless of `forward_principal`, so
+                // it is validated here rather than inside that branch.
+                validate_signed_field("sub", &principal.sub, MAX_SUB_LEN)?;
                 s.sign(&auds, &principal.sub, &tenant, &scopes, &groups, TOKEN_TTL)
                     .map_err(|e| TritonError::Tool(format!("mint upstream token: {e}")))
             }
@@ -771,6 +816,7 @@ impl UpstreamDispatch for StaticUpstream {
             tenant: self.tenant.clone(),
             raw_token: String::new(),
             trace_id: String::new(),
+            sender_ref: None,
         };
         let bearer = match self.bearer(&principal) {
             Ok(b) => b,

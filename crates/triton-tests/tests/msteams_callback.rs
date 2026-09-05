@@ -251,6 +251,126 @@ async fn action_submit_callback_posts_a_reply() {
     assert_eq!(count_dispatches(&proc, "narrate"), 2);
 }
 
+/// #250: expiry is half the headline of the token binding, and until
+/// now it had never fired inside a running binary — `encode_bound` only
+/// takes a relative TTL and rounds UP, so no caller could mint a stale
+/// token and the branch was only reachable through crate internals.
+/// `encode_bound_at` is the seam; this drives a genuinely expired token
+/// at the real adapter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_card_token_is_rejected() {
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&fake)).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    let stale = triton_correlation::encode_bound_at(
+        "narrate",
+        &json!({ "subject": "alice" }),
+        b"correlation-key-for-test",
+        1536,
+        "msteams",
+        "acme",
+        // Two hours ago, so it is stale even at hour granularity.
+        (now_unix() as u64) - 2 * 3600,
+    )
+    .expect("encode stale token");
+
+    let jwt = fake.sign_jwt(good_claims(&fake));
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&invoke_activity(&stale))
+        .send()
+        .await
+        .expect("POST invoke");
+    assert_eq!(resp.status(), 401, "an expired card token must 401");
+    assert_eq!(
+        count_dispatches(&proc, "narrate"),
+        0,
+        "and must never re-dispatch the tool"
+    );
+}
+
+/// #250: a card action token is a bearer capability. A card rendered
+/// into one tenant's conversation is visible to everyone in it and in
+/// the client's network trace, so without a tenant binding a sender in
+/// another tenant can replay it and get THEIR principal against the
+/// original arguments. The chart-image tokens have bound a tenant and an
+/// expiry since #259; the action tokens did not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_token_minted_for_another_tenant_is_rejected() {
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&fake)).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    // Correctly signed under this adapter's key, but minted into a
+    // DIFFERENT tenant. The inbound sender resolves to `acme`.
+    let other_tenant = triton_correlation::encode_bound(
+        "narrate",
+        &json!({ "subject": "victim" }),
+        b"correlation-key-for-test",
+        1536,
+        "msteams",
+        "globex",
+        Some(3600),
+    )
+    .expect("encode cross-tenant token");
+
+    let jwt = fake.sign_jwt(good_claims(&fake));
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&invoke_activity(&other_tenant))
+        .send()
+        .await
+        .expect("POST invoke");
+    assert_eq!(
+        resp.status(),
+        401,
+        "a token minted for another tenant must not be honoured"
+    );
+    assert_eq!(
+        count_dispatches(&proc, "narrate"),
+        0,
+        "and it must never re-dispatch the tool"
+    );
+}
+
+/// The same binding must not break the legitimate round trip: a token
+/// this adapter minted for THIS sender still works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_token_minted_for_this_tenant_still_works() {
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&fake)).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+    let client = reqwest::Client::new();
+
+    // Drive a real card so the token is one the ADAPTER minted.
+    let jwt = fake.sign_jwt(good_claims(&fake));
+    client
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&message_activity("/narrate carol"))
+        .send()
+        .await
+        .expect("POST inbound");
+    let first = wait_for(Duration::from_secs(5), || {
+        fake.captured().into_iter().next()
+    });
+    let token = token_from_reply(&first.body);
+
+    let jwt = fake.sign_jwt(good_claims(&fake));
+    let resp = client
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&invoke_activity(&token))
+        .send()
+        .await
+        .expect("POST invoke");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert_eq!(count_dispatches(&proc, "narrate"), 2);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forged_invoke_token_is_rejected() {
     let fake = FakeBotFramework::start().await;

@@ -226,6 +226,43 @@ async fn forged_callback_token_is_rejected_with_phase_rejected() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_callback_token_from_another_tenant_is_rejected() {
+    // #250: a Telegram inline-keyboard `callback_data` is a bearer
+    // capability, visible to everyone in the chat. Until the binding
+    // moved into the derived signing key it could not be protected at
+    // all — carrying a tenant field does not fit the 64-byte budget.
+    let telegram = FakeTelegramApi::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
+    let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
+
+    // Correctly signed under the adapter's key, but for another tenant;
+    // user 42 resolves to `acme`.
+    let foreign = triton_correlation::encode_bound(
+        "narrate",
+        &json!({ "s": "victim" }),
+        CORRELATION_KEY.as_bytes(),
+        triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+        "telegram",
+        "globex",
+        None,
+    )
+    .expect("token fits");
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook_addr}/telegram/webhook"))
+        .header("X-Telegram-Bot-Api-Secret-Token", RESOLVED_SECRET)
+        .json(&callback_query_at(&foreign, now_secs()))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(
+        resp.status(),
+        401,
+        "a callback token minted for another tenant must not be honoured"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn stale_callback_rejected_with_phase_rejected() {
     // PR 23 replay protection: a click on a message older than
     // CALLBACK_TTL_SECS (5 min) is treated as auth-class rejected.
@@ -236,10 +273,14 @@ async fn stale_callback_rejected_with_phase_rejected() {
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
 
-    let valid_token = triton_correlation::encode(
+    let valid_token = triton_correlation::encode_bound(
         "narrate",
         &json!({ "s": "alice" }),
         CORRELATION_KEY.as_bytes(),
+        triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+        "telegram",
+        "acme",
+        None,
     )
     .expect("token fits");
 
@@ -297,10 +338,14 @@ async fn callback_without_message_date_fails_closed() {
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&telegram)).await;
     let webhook_addr = proc.chat_webhook_addr.expect("listener bound");
 
-    let valid_token = triton_correlation::encode(
+    let valid_token = triton_correlation::encode_bound(
         "narrate",
         &json!({ "s": "alice" }),
         CORRELATION_KEY.as_bytes(),
+        triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+        "telegram",
+        "acme",
+        None,
     )
     .expect("token fits");
     // No `message` field on the callback_query at all.
