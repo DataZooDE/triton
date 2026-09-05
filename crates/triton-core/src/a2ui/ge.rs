@@ -63,11 +63,6 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     let surface_id = format!("triton-answer-{}", uuid::Uuid::new_v4());
     let mut flat: Vec<Value> = Vec::new();
     let mut root_children: Vec<String> = Vec::new();
-    // Follow-up questions the buttons re-ask, keyed by button id. GE rejects a
-    // bare-string action context, so the question rides the data model and the
-    // button binds to it by `{path}`; on click GE resolves the path and posts
-    // the value back to us (handled in a2a_spec inbound A2UI actions).
-    let mut data_model = serde_json::Map::new();
     let mut n = 0usize;
     let id = |prefix: &str, n: &mut usize| {
         *n += 1;
@@ -100,8 +95,7 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                 let label = c.get("label").and_then(Value::as_str).unwrap_or("Open");
                 let tool = c.get("tool").and_then(Value::as_str).unwrap_or_default();
                 // A re-ask follow-up carries `args.message` (the question);
-                // report/other buttons don't. `render_report` opening is not a
-                // re-ask, so it keeps an empty context.
+                // report/other buttons don't (`render_report` opens a report).
                 let question = c
                     .get("args")
                     .and_then(|a| a.get("message"))
@@ -110,22 +104,23 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                 let text_id = id("btn-text", &mut n);
                 let btn_id = id("btn", &mut n);
                 flat.push(json!({ "id": text_id, "component": "Text", "text": label }));
-                // Context is bound to the data model by path (GE rejects a
-                // bare-string literal). The event NAME is the tool to
-                // re-dispatch; the inbound A2UI action handler reads the
-                // resolved `question` and runs a normal turn with it.
-                let context = if let Some(q) = question {
-                    data_model.insert(btn_id.clone(), json!(q));
-                    json!({ "question": { "path": format!("/{btn_id}") } })
-                } else {
-                    json!({})
+                // Carry the re-ask question in the event NAME. On click Gemini
+                // Enterprise posts the action back with `name` verbatim but
+                // DROPS the context (`context:{}`) and does NOT resolve data
+                // bindings — observed on the wire — so the name is the only
+                // channel that survives. `ask:<question>` is decoded by the
+                // inbound A2UI action handler and re-dispatched as a turn;
+                // other buttons keep the tool name.
+                let event_name = match question {
+                    Some(q) => format!("ask:{q}"),
+                    None => tool.to_string(),
                 };
                 flat.push(json!({
                     "id": btn_id,
                     "component": "Button",
                     "child": text_id,
                     "variant": if c.get("primary").and_then(Value::as_bool) == Some(true) { "primary" } else { "default" },
-                    "action": { "event": { "name": tool, "context": context } },
+                    "action": { "event": { "name": event_name, "context": {} } },
                 }));
                 root_children.push(btn_id);
             }
@@ -169,23 +164,16 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     flat.push(json!({ "id": "root-col", "component": "Column", "children": root_children }));
     flat.push(json!({ "id": "root", "component": "Card", "child": "root-col" }));
 
-    let mut msgs = vec![
+    Some(vec![
         json!({
             "version": "v0.9",
-            "createSurface": { "surfaceId": surface_id, "catalogId": BASIC_CATALOG, "sendDataModel": true },
+            "createSurface": { "surfaceId": surface_id, "catalogId": BASIC_CATALOG },
         }),
         json!({
             "version": "v0.9",
             "updateComponents": { "surfaceId": surface_id, "components": flat },
         }),
-    ];
-    if !data_model.is_empty() {
-        msgs.push(json!({
-            "version": "v0.9",
-            "updateDataModel": { "surfaceId": surface_id, "path": "/", "value": Value::Object(data_model) },
-        }));
-    }
-    Some(msgs)
+    ])
 }
 
 /// Wrap each A2UI message as its OWN A2A `DataPart`.
@@ -225,11 +213,7 @@ mod tests {
         ] } });
 
         let msgs = build_messages(&result).expect("renderable");
-        assert_eq!(
-            msgs.len(),
-            3,
-            "createSurface + updateComponents + updateDataModel"
-        );
+        assert_eq!(msgs.len(), 2, "createSurface + updateComponents");
         assert_eq!(msgs[0]["version"], "v0.9");
         assert_eq!(msgs[0]["createSurface"]["catalogId"], BASIC_CATALOG);
         let comps = msgs[1]["updateComponents"]["components"]
@@ -253,19 +237,22 @@ mod tests {
         // label rides as a child Text (never inline).
         let btn = comps
             .iter()
-            .find(|c| c["component"] == "Button" && c["action"]["event"].is_object())
+            .find(|c| {
+                c["component"] == "Button"
+                    && c["action"]["event"]["name"]
+                        .as_str()
+                        .map(|n| n.starts_with("ask:"))
+                        == Some(true)
+            })
             .expect("event button");
-        assert_eq!(btn["action"]["event"]["name"], "assistant");
-        // A re-ask button binds its question by PATH (GE rejects bare-string
-        // literals in an action context); the question rides the data model.
-        let path = btn["action"]["event"]["context"]["question"]["path"]
-            .as_str()
-            .expect("path-bound question");
-        let dm = &msgs[2]["updateDataModel"]["value"];
-        let key = path.trim_start_matches('/');
-        assert_eq!(
-            dm[key], "What does Initech buy?",
-            "data model carries the question"
+        // The re-ask question rides the event NAME as `ask:<question>` (GE
+        // drops the action context on click but echoes the name verbatim).
+        assert_eq!(btn["action"]["event"]["name"], "ask:What does Initech buy?");
+        assert!(
+            btn["action"]["event"]["context"]
+                .as_object()
+                .unwrap()
+                .is_empty()
         );
         let btn_text = find(comps, btn["child"].as_str().unwrap());
         assert_eq!(btn_text["text"], "What does Initech buy?");
