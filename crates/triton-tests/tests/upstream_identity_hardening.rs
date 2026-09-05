@@ -285,15 +285,19 @@ async fn a_rejected_field_is_truncated_in_the_audit_line() {
     .await;
     let agent = FakeAgent::start_echoing().await;
     let whatsapp = FakeWhatsAppApi::start().await;
-    let proc =
-        TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&whatsapp, &agent, &resolver))
-            .await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for(&whatsapp, &agent, &resolver),
+    )
+    .await;
 
     let _ = post_inbound(&proc, "hi").await;
 
     let line = wait_for_audit(&proc, Duration::from_secs(5), |v| {
         v["kind"] == "audit"
-            && v["result"].as_str().is_some_and(|r| r.starts_with("error:"))
+            && v["result"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("error:"))
             && v["tool"] == "assistant"
     });
     let recorded = line["tenant"].as_str().unwrap_or_default();

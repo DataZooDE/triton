@@ -131,6 +131,37 @@ pub struct AuditRecord<'a> {
     pub trace_id: &'a str,
 }
 
+/// How much of a principal-derived field is recorded in an audit line.
+///
+/// Under `identity.kind: upstream` (FR-I-7) an out-of-process resolver
+/// chooses `sub` and `tenant`, so these are attacker-influenced values
+/// recorded on a path that runs BEFORE anything validates them.
+/// Uncapped, a hostile resolver writes unbounded data into stdout and the
+/// 1024-entry ring buffer on every request — the harm #249 addressed,
+/// arriving through a different door. Observed live while verifying the
+/// #250 fail-closed path: the refusal was correct, and the audit line it
+/// emitted still carried the full 5000-character hostile tenant.
+///
+/// Generous enough that no legitimate value is ever touched: the longest
+/// real subjects are GUIDs and `29:`-prefixed Teams ids.
+pub const MAX_AUDITED_FIELD_LEN: usize = 128;
+
+/// Clamp a principal-derived field for recording. Zero-copy for every
+/// legitimate value; an over-long one is truncated with a marker naming
+/// the true length, so an operator can still see what was refused and
+/// that it was cut.
+pub fn clamp_audited(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.len() <= MAX_AUDITED_FIELD_LEN {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    // Cut on a char boundary so the line stays valid UTF-8.
+    let mut end = MAX_AUDITED_FIELD_LEN;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!("{}…[{} bytes]", &value[..end], value.len()))
+}
+
 /// Emit one audit line to stdout. `stdout().lock()` plus an explicit
 /// flush survives concurrent emission from multiple in-flight
 /// requests (the lock serialises) and SIGTERM drain (`flush` makes
