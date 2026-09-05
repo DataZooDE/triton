@@ -52,46 +52,52 @@ pub const BASIC_CATALOG: &str = "https://a2ui.org/specification/v0_9/catalogs/ba
 /// predicted-id-per-surface map below is the only reliable channel).
 const GE_ID_OFFSET: usize = 2;
 
-/// Fixed surfaceId prefix; a v4 UUID (36 chars) follows, then an optional
-/// base64url table of the card's re-ask buttons (see [`encode_surface_id`]).
+/// Fixed surfaceId prefix; a v4 UUID follows. The id is kept SHORT
+/// (`triton-answer-<uuid>`, 50 chars) on purpose: Gemini Enterprise TRUNCATES
+/// the surfaceId to the uuid on a button click (observed on the wire — a longer
+/// encoded id came back stripped), so it cannot carry a payload. The uuid does
+/// survive, so it keys the per-card re-ask table below.
 const SURFACE_PREFIX: &str = "triton-answer-";
 
-/// Build the card's `surfaceId`, embedding the `{predicted GE button id →
-/// question}` table so a click can be resolved WITHOUT server state.
+/// Bounded, process-wide map: `surfaceId` → { predicted GE button id → re-ask
+/// question }. GE strips name/context and renumbers ids on click, and truncates
+/// the surfaceId to the uuid — so the ONLY recoverable pair is
+/// `(surfaceId-uuid, GE btn-N)`, which this table maps back to the question.
 ///
-/// The agent runs multiple replicas, so an in-process map fails when the click
-/// lands on a different pod than built the card. GE echoes the `surfaceId`
-/// verbatim on click, and we mint it, so it is a durable, replica-independent
-/// channel: `triton-answer-<uuid36><base64url(json{ge_id:question})>`. The
-/// UUID keeps it unique per card (GE rejects a duplicate `createSurface`).
-fn encode_surface_id(qmap: &std::collections::HashMap<usize, String>) -> String {
-    use base64::Engine as _;
-    let uuid = uuid::Uuid::new_v4().to_string();
+/// This is process-local, so `dz-agent-template` runs a single replica in lab
+/// (values-lab `replicaCount: 1`); a multi-replica deployment would need a
+/// shared store keyed by the same surfaceId. FIFO-capped at [`MAX_SURFACES`];
+/// a stale miss falls through to the turn's placeholder text (no crash).
+static SURFACE_QUESTIONS: std::sync::Mutex<
+    Vec<(String, std::collections::HashMap<usize, String>)>,
+> = std::sync::Mutex::new(Vec::new());
+const MAX_SURFACES: usize = 512;
+
+fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, String>) {
     if qmap.is_empty() {
-        return format!("{SURFACE_PREFIX}{uuid}");
+        return;
     }
-    let json = serde_json::to_vec(qmap).unwrap_or_default();
-    let tok = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
-    format!("{SURFACE_PREFIX}{uuid}{tok}")
+    if let Ok(mut store) = SURFACE_QUESTIONS.lock() {
+        store.push((surface_id.to_string(), qmap));
+        let overflow = store.len().saturating_sub(MAX_SURFACES);
+        if overflow > 0 {
+            store.drain(0..overflow);
+        }
+    }
 }
 
-/// Resolve a GE button click to the re-ask question it should run — statelessly,
-/// from the `surfaceId` alone. `source_component_id` is GE's echoed id (e.g.
-/// `"btn-7"`); its trailing number is the key into the table encoded in
-/// `surface_id` by [`encode_surface_id`]. `None` ⇒ not a re-ask (→ caller falls
-/// back to the turn's text).
+/// Resolve a GE button click to the re-ask question it should run.
+/// `source_component_id` is GE's echoed id (`"btn-N"`); its trailing number
+/// keys the per-card table recorded at build time under `surface_id`. `None` ⇒
+/// not a re-ask (→ caller falls back to the turn's text).
 pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<String> {
-    use base64::Engine as _;
     let n: usize = source_component_id.rsplit('-').next()?.parse().ok()?;
-    // Layout: PREFIX + uuid(36) + base64url(table). Anything past the uuid is
-    // the table; absent ⇒ no re-ask buttons on this card.
-    let rest = surface_id.strip_prefix(SURFACE_PREFIX)?;
-    let tok = rest.get(36..).filter(|s| !s.is_empty())?;
-    let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(tok)
-        .ok()?;
-    let map: std::collections::HashMap<String, String> = serde_json::from_slice(&json).ok()?;
-    map.get(&n.to_string()).cloned()
+    let store = SURFACE_QUESTIONS.lock().ok()?;
+    store
+        .iter()
+        .rev()
+        .find(|(sid, _)| sid == surface_id)
+        .and_then(|(_, m)| m.get(&n).cloned())
 }
 
 /// Build the A2UI v0.9 message array from a raw surface value
@@ -209,10 +215,10 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     flat.push(json!({ "id": "root-col", "component": "Column", "children": root_children }));
     flat.push(json!({ "id": "root", "component": "Card", "child": "root-col" }));
 
-    // Mint the surfaceId LAST: it embeds this card's re-ask table (stateless,
-    // replica-independent — see `encode_surface_id`). Only createSurface /
-    // updateComponents reference it, so computing it after the loop is fine.
-    let surface_id = encode_surface_id(&qmap);
+    // Short, unique surfaceId (GE truncates anything longer to the uuid), and
+    // record this card's re-ask table under it for the click round-trip.
+    let surface_id = format!("{SURFACE_PREFIX}{}", uuid::Uuid::new_v4());
+    remember_surface(&surface_id, qmap);
 
     Some(vec![
         json!({
