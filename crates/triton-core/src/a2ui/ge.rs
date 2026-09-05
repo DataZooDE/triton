@@ -52,48 +52,47 @@ pub const BASIC_CATALOG: &str = "https://a2ui.org/specification/v0_9/catalogs/ba
 /// predicted-id-per-surface map below is the only reliable channel).
 const GE_ID_OFFSET: usize = 2;
 
-/// Bounded, process-wide map: `surfaceId` → { predicted GE button id → re-ask
-/// question }. Populated when a card with follow-up buttons is built; read when
-/// GE posts a button-click action back. A plain FIFO capped at [`MAX_SURFACES`]
-/// entries — a card's buttons are only clickable while it is on screen, and a
-/// stale miss simply falls through to the placeholder text (no crash).
-static SURFACE_QUESTIONS: std::sync::Mutex<
-    Vec<(String, std::collections::HashMap<usize, String>)>,
-> = std::sync::Mutex::new(Vec::new());
-const MAX_SURFACES: usize = 512;
+/// Fixed surfaceId prefix; a v4 UUID (36 chars) follows, then an optional
+/// base64url table of the card's re-ask buttons (see [`encode_surface_id`]).
+const SURFACE_PREFIX: &str = "triton-answer-";
 
-fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, String>) {
+/// Build the card's `surfaceId`, embedding the `{predicted GE button id →
+/// question}` table so a click can be resolved WITHOUT server state.
+///
+/// The agent runs multiple replicas, so an in-process map fails when the click
+/// lands on a different pod than built the card. GE echoes the `surfaceId`
+/// verbatim on click, and we mint it, so it is a durable, replica-independent
+/// channel: `triton-answer-<uuid36><base64url(json{ge_id:question})>`. The
+/// UUID keeps it unique per card (GE rejects a duplicate `createSurface`).
+fn encode_surface_id(qmap: &std::collections::HashMap<usize, String>) -> String {
+    use base64::Engine as _;
+    let uuid = uuid::Uuid::new_v4().to_string();
     if qmap.is_empty() {
-        return;
+        return format!("{SURFACE_PREFIX}{uuid}");
     }
-    if let Ok(mut store) = SURFACE_QUESTIONS.lock() {
-        store.push((surface_id.to_string(), qmap));
-        let overflow = store.len().saturating_sub(MAX_SURFACES);
-        if overflow > 0 {
-            store.drain(0..overflow);
-        }
-    }
+    let json = serde_json::to_vec(qmap).unwrap_or_default();
+    let tok = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json);
+    format!("{SURFACE_PREFIX}{uuid}{tok}")
 }
 
-/// Resolve a GE button click to the re-ask question it should run. `surface_id`
-/// and `source_component_id` (e.g. `"btn-7"`) come from the inbound A2UI
-/// `action`. Returns `None` when the surface is unknown or the id isn't a
-/// remembered button (→ caller falls back to the turn's text).
+/// Resolve a GE button click to the re-ask question it should run — statelessly,
+/// from the `surfaceId` alone. `source_component_id` is GE's echoed id (e.g.
+/// `"btn-7"`); its trailing number is the key into the table encoded in
+/// `surface_id` by [`encode_surface_id`]. `None` ⇒ not a re-ask (→ caller falls
+/// back to the turn's text).
 pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<String> {
+    use base64::Engine as _;
     let n: usize = source_component_id.rsplit('-').next()?.parse().ok()?;
-    let store = SURFACE_QUESTIONS.lock().ok()?;
-    store
-        .iter()
-        .rev()
-        .find(|(sid, _)| sid == surface_id)
-        .and_then(|(_, m)| m.get(&n).cloned())
+    // Layout: PREFIX + uuid(36) + base64url(table). Anything past the uuid is
+    // the table; absent ⇒ no re-ask buttons on this card.
+    let rest = surface_id.strip_prefix(SURFACE_PREFIX)?;
+    let tok = rest.get(36..).filter(|s| !s.is_empty())?;
+    let json = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(tok)
+        .ok()?;
+    let map: std::collections::HashMap<String, String> = serde_json::from_slice(&json).ok()?;
+    map.get(&n.to_string()).cloned()
 }
-
-// Surface id MUST be unique per card: Gemini Enterprise keeps surfaces for
-// the life of a conversation and rejects a second `createSurface` with an id
-// it already has ("Surface <id> already exists"), which would blank every
-// card after the first (follow-up turns, button responses). One fresh id per
-// build.
 
 /// Build the A2UI v0.9 message array from a raw surface value
 /// (`result["surface"]["components"]`). Returns `None` when the value carries
@@ -106,7 +105,6 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
 
     // Flat component list (id-referenced); `root_children` collects the ids
     // that hang under the top Column, in surface order.
-    let surface_id = format!("triton-answer-{}", uuid::Uuid::new_v4());
     let mut flat: Vec<Value> = Vec::new();
     let mut root_children: Vec<String> = Vec::new();
     // Predicted-GE-id → re-ask question, for this card's follow-up buttons.
@@ -211,9 +209,10 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     flat.push(json!({ "id": "root-col", "component": "Column", "children": root_children }));
     flat.push(json!({ "id": "root", "component": "Card", "child": "root-col" }));
 
-    // Remember this card's clickable follow-ups so an inbound GE action can be
-    // mapped back to its question (see `question_for`).
-    remember_surface(&surface_id, qmap);
+    // Mint the surfaceId LAST: it embeds this card's re-ask table (stateless,
+    // replica-independent — see `encode_surface_id`). Only createSurface /
+    // updateComponents reference it, so computing it after the loop is fine.
+    let surface_id = encode_surface_id(&qmap);
 
     Some(vec![
         json!({
