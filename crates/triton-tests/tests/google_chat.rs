@@ -119,7 +119,7 @@ fn sign_button(tool: &str, args: Value) -> String {
         b"correlation-key-for-test",
         1536,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("encode correlation token")
 }
@@ -521,7 +521,7 @@ async fn a_card_token_from_another_tenant_is_rejected() {
         b"correlation-key-for-test",
         1536,
         "globex",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("encode");
 
@@ -1607,7 +1607,7 @@ async fn async_courier_click_ack_is_click_shaped() {
         b"correlation-key-for-test",
         512,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("token");
     let jwt = jwks.sign_jwt(standard_claims());

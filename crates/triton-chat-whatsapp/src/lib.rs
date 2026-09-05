@@ -470,14 +470,15 @@ impl OutboundCourier for WhatsAppAdapter {
                 req.to
             )));
         }
-        let rendered = match render_dispatch_result(&req.result, &self.correlation_key) {
-            Ok(r) => r,
-            Err(surface_mapper::RenderError::EmptyAfterRender) => {
-                return Err(TritonError::Validation(
-                    "outbound surface rendered to nothing".into(),
-                ));
-            }
-        };
+        let rendered =
+            match render_dispatch_result(&req.result, &self.correlation_key, &principal.tenant) {
+                Ok(r) => r,
+                Err(surface_mapper::RenderError::EmptyAfterRender) => {
+                    return Err(TritonError::Validation(
+                        "outbound surface rendered to nothing".into(),
+                    ));
+                }
+            };
         log_deferrals(OUTBOUND_TOOL, &rendered);
         post_back(self, principal, OUTBOUND_TOOL, &req.to, rendered).await;
         Ok(())
@@ -973,7 +974,11 @@ async fn process_message(
         .invoke(&tool_name, args, principal, PROTOCOL)
         .await;
     match result {
-        Ok(dispatch) => match render_dispatch_result(&dispatch.result, &adapter.correlation_key) {
+        Ok(dispatch) => match render_dispatch_result(
+            &dispatch.result,
+            &adapter.correlation_key,
+            &principal_for_post.tenant,
+        ) {
             Ok(rendered) => {
                 log_deferrals(&tool_name, &rendered);
                 post_back(adapter, &principal_for_post, &tool_name, &to, rendered).await;
@@ -1118,8 +1123,12 @@ fn route_command(text: &str, default_tool: &str) -> (String, Value) {
 fn render_dispatch_result(
     result: &serde_json::Value,
     correlation_key: &[u8],
+    // #250: the tenant any interactive token is minted for. It rides in
+    // the derived signing key, so it costs nothing on the wire — which
+    // is what makes a binding affordable at this platform's token budget.
+    tenant: &str,
 ) -> Result<RenderedMessage, surface_mapper::RenderError> {
-    if let Some(r) = surface_mapper::try_render_surface(result, correlation_key) {
+    if let Some(r) = surface_mapper::try_render_surface(result, correlation_key, tenant) {
         return r;
     }
     let text = if let Some(obj) = result.as_object()

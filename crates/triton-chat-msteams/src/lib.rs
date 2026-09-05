@@ -1499,7 +1499,7 @@ fn render_card_content(
                 &adapter.correlation_key,
                 surface_mapper::MSTEAMS_CORRELATION_CAP,
                 tenant,
-                CARD_TOKEN_TTL_SECS,
+                Some(CARD_TOKEN_TTL_SECS),
             ) {
                 Ok(token) => Some((spec, token)),
                 Err(e) => {

@@ -1150,7 +1150,11 @@ async fn dispatch_and_render(
                 )
                 .await;
             }
-            match render_dispatch_result(&dispatch.result, &adapter.correlation_key) {
+            match render_dispatch_result(
+                &dispatch.result,
+                &adapter.correlation_key,
+                &principal_for_post.tenant,
+            ) {
                 Ok(rendered) => {
                     if rendered.deferred_buttons > 0 {
                         tracing::warn!(
@@ -1529,7 +1533,15 @@ async fn handle_callback_query(
         return (StatusCode::UNAUTHORIZED, "future-dated callback").into_response();
     }
 
-    let (tool_name, args) = match triton_correlation::decode(token, &adapter.correlation_key) {
+    // #250: verified against the CLICKER's tenant. The binding lives in
+    // the derived key, so it costs nothing against Telegram's 64-byte
+    // callback_data budget — a wire field could not have fitted.
+    let (tool_name, args) = match triton_correlation::decode_bound(
+        token,
+        &adapter.correlation_key,
+        triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+        &tenant,
+    ) {
         Ok(v) => v,
         Err(e) => {
             record_rejection(
@@ -1572,7 +1584,11 @@ async fn handle_callback_query(
         .invoke(&tool_name, args, principal, PROTOCOL)
         .await;
     match result {
-        Ok(dispatch) => match render_dispatch_result(&dispatch.result, &adapter.correlation_key) {
+        Ok(dispatch) => match render_dispatch_result(
+            &dispatch.result,
+            &adapter.correlation_key,
+            &principal_for_post.tenant,
+        ) {
             Ok(rendered) => {
                 post_back(adapter, &principal_for_post, &tool_name, chat_id, rendered).await;
                 StatusCode::OK.into_response()
@@ -1651,12 +1667,16 @@ fn route_command(text: &str, default_tool: &str) -> (String, Value) {
 fn render_dispatch_result(
     result: &serde_json::Value,
     correlation_key: &[u8],
+    // #250: the tenant any interactive token is minted for. It rides in
+    // the derived signing key, so it costs nothing on the wire — which
+    // is what makes a binding affordable at this platform's token budget.
+    tenant: &str,
 ) -> Result<RenderedMessage, surface_mapper::RenderError> {
     // Tools that emit an A2UI surface route through the mapper.
     // Everything else falls back to PR 18's bare-text path so the
     // echo-shaped `{ "echo": "..." }` reply still works without
     // forcing every tool into the A2UI envelope.
-    if let Some(r) = surface_mapper::try_render_surface(result, correlation_key) {
+    if let Some(r) = surface_mapper::try_render_surface(result, correlation_key, tenant) {
         return r;
     }
     let text = if let Some(obj) = result.as_object()

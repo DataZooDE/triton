@@ -1035,130 +1035,112 @@ async fn handle_webhook(
         .then(|| event.card_token())
         .flatten()
         .map(str::to_owned);
-    let (sender_name, tool_name, args, action_echo): (String, String, Value, Option<String>) =
-        match event.kind.as_str() {
-            "MESSAGE" => {
-                let Some(message) = event.message else {
-                    record_rejection(
-                        &adapter,
-                        "-",
-                        "-",
-                        TritonError::Validation("MESSAGE event missing message body".into()),
-                    );
-                    return (StatusCode::BAD_REQUEST, "missing message").into_response();
-                };
-                let Some(text) = message.text.as_deref().filter(|s| !s.is_empty()) else {
-                    // Empty text (Google sends these for image/attachments) —
-                    // out of scope; ack and ignore.
-                    return (
-                        StatusCode::OK,
-                        axum::Json(Value::Object(Default::default())),
-                    )
-                        .into_response();
-                };
-                let sender = message
-                    .sender
-                    .as_ref()
-                    .and_then(|s| s.name.as_deref())
-                    .unwrap_or("")
-                    .to_string();
-                let (tool, args) = route_command(text, &adapter.inbound_tool);
-                (sender, tool, args, None)
-            }
-            "CARD_CLICKED" => {
-                let Some(token) = event.card_token() else {
-                    record_rejection(
-                        &adapter,
-                        "-",
-                        "-",
-                        TritonError::Validation("CARD_CLICKED missing correlation token".into()),
-                    );
-                    return (StatusCode::BAD_REQUEST, "missing action").into_response();
-                };
-                let (tool, mut args) = match triton_correlation::decode_with_cap(
-                    token,
-                    &adapter.correlation_key,
-                    CARD_CORRELATION_CAP,
-                ) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        // Forged/expired/oversized token — never trust the
-                        // click's tool/args. Audited as `error:auth`.
-                        record_rejection(
-                            &adapter,
-                            "-",
-                            "-",
-                            TritonError::Auth("CARD_CLICKED correlation token invalid".into()),
-                        );
-                        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-                    }
-                };
-                // Merge the user-supplied Selection/Form values onto the
-                // token's signed base args (the token fixed the TOOL; the
-                // values are user query params bound by the named-query
-                // layer). Skip EMPTY values: Google Chat submits *every*
-                // input on the card with *any* action, so tapping a
-                // preset button also sends the (blank) follow-up form and
-                // dropdown — an empty merge would clobber the button's own
-                // preset args (e.g. blank out its `question`). Only a value
-                // the user actually entered/selected overrides the preset.
-                let inputs = event.form_inputs();
-                let non_empty: Vec<(String, String)> =
-                    inputs.into_iter().filter(|(_, v)| !v.is_empty()).collect();
-                if !non_empty.is_empty() {
-                    let map = match &mut args {
-                        Value::Object(m) => m,
-                        other => {
-                            *other = Value::Object(Default::default());
-                            other.as_object_mut().unwrap()
-                        }
-                    };
-                    for (k, v) in non_empty {
-                        map.insert(k, Value::String(v));
-                    }
-                }
-                let echo = event.action_echo();
-                let sender = event
-                    .user
-                    .as_ref()
-                    .and_then(|u| u.name.as_deref())
-                    .unwrap_or("")
-                    .to_string();
-                (sender, tool, args, echo)
-            }
-            "ADDED_TO_SPACE" => {
-                let sender = event
-                    .user
-                    .as_ref()
-                    .and_then(|u| u.name.as_deref())
-                    .unwrap_or("")
-                    .to_string();
-                (
-                    sender,
-                    "help".to_string(),
-                    Value::Object(Default::default()),
-                    None,
-                )
-            }
-            other => {
-                // Ack-and-ignore, but SAY SO. This arm silently absorbed
-                // every Workspace Add-on delivery for six days: a 200 is
-                // the one answer Google never retries, so an unhandled
-                // event kind that logs nothing is indistinguishable from a
-                // working app. One line here is the difference between a
-                // grep and an archaeology session.
-                println!(
-                    r#"{{"kind":"log","level":"warn","msg":"unhandled google chat event kind","channel":"{}","event_kind":"{}"}}"#,
-                    adapter.name.escape_default(),
-                    other.escape_default(),
+    // Captured with it: the token is decoded AFTER sender resolution
+    // (see below), by which point `event` is partially moved.
+    let card_inputs: Vec<(String, String)> = if is_card_click {
+        event
+            .form_inputs()
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // `tool_name`/`args` are DEFERRED on the click path: the correlation
+    // token is bound to a tenant (#250), and the tenant is only known
+    // once the sender is resolved further down. Nothing between here and
+    // that point reads either, and the click path cannot dispatch until
+    // they are filled in from the VERIFIED token.
+    let (sender_name, mut tool_name, mut args, action_echo): (
+        String,
+        String,
+        Value,
+        Option<String>,
+    ) = match event.kind.as_str() {
+        "MESSAGE" => {
+            let Some(message) = event.message else {
+                record_rejection(
+                    &adapter,
+                    "-",
+                    "-",
+                    TritonError::Validation("MESSAGE event missing message body".into()),
                 );
+                return (StatusCode::BAD_REQUEST, "missing message").into_response();
+            };
+            let Some(text) = message.text.as_deref().filter(|s| !s.is_empty()) else {
+                // Empty text (Google sends these for image/attachments) —
+                // out of scope; ack and ignore.
                 return (
                     StatusCode::OK,
                     axum::Json(Value::Object(Default::default())),
                 )
                     .into_response();
+            };
+            let sender = message
+                .sender
+                .as_ref()
+                .and_then(|s| s.name.as_deref())
+                .unwrap_or("")
+                .to_string();
+            let (tool, args) = route_command(text, &adapter.inbound_tool);
+            (sender, tool, args, None)
+        }
+        "CARD_CLICKED" => {
+            if card_token.is_none() {
+                record_rejection(
+                    &adapter,
+                    "-",
+                    "-",
+                    TritonError::Validation("CARD_CLICKED missing correlation token".into()),
+                );
+                return (StatusCode::BAD_REQUEST, "missing action").into_response();
             }
-        };
+            let echo = event.action_echo();
+            let sender = event
+                .user
+                .as_ref()
+                .and_then(|u| u.name.as_deref())
+                .unwrap_or("")
+                .to_string();
+            // Tool and args come from the token, which cannot be
+            // verified until the tenant is known. Placeholders here;
+            // filled in from the verified token below, before any
+            // dispatch.
+            (sender, String::new(), Value::Null, echo)
+        }
+        "ADDED_TO_SPACE" => {
+            let sender = event
+                .user
+                .as_ref()
+                .and_then(|u| u.name.as_deref())
+                .unwrap_or("")
+                .to_string();
+            (
+                sender,
+                "help".to_string(),
+                Value::Object(Default::default()),
+                None,
+            )
+        }
+        other => {
+            // Ack-and-ignore, but SAY SO. This arm silently absorbed
+            // every Workspace Add-on delivery for six days: a 200 is
+            // the one answer Google never retries, so an unhandled
+            // event kind that logs nothing is indistinguishable from a
+            // working app. One line here is the difference between a
+            // grep and an archaeology session.
+            println!(
+                r#"{{"kind":"log","level":"warn","msg":"unhandled google chat event kind","channel":"{}","event_kind":"{}"}}"#,
+                adapter.name.escape_default(),
+                other.escape_default(),
+            );
+            return (
+                StatusCode::OK,
+                axum::Json(Value::Object(Default::default())),
+            )
+                .into_response();
+        }
+    };
     let sender_name = sender_name.as_str();
 
     // FR-I-7 sender resolution → (sub, scopes, tenant).
@@ -1235,22 +1217,56 @@ async fn handle_webhook(
     // (visible to every member of that space and in the client's network
     // trace) is replayable by a sender in another, yielding their
     // principal against the original arguments.
-    if let Some(token) = card_token.as_deref()
-        && triton_correlation::verify_tenant_binding(
+    // #250: a card action token is a bearer capability, and it is only
+    // NOW — with the sender resolved — that its tenant binding can be
+    // checked. So this is where the click's tool and args come from:
+    // decoded from the VERIFIED token, never from the placeholder above.
+    // Without the binding a token minted into one tenant's space (visible
+    // to every member of that space and in the client's network trace)
+    // would be replayable by a sender in another, yielding their
+    // principal against the original arguments.
+    if let Some(token) = card_token.as_deref() {
+        match triton_correlation::decode_bound(
             token,
             &adapter.correlation_key,
             CARD_CORRELATION_CAP,
             &principal.tenant,
-        )
-        .is_err()
-    {
-        record_rejection(
-            &adapter,
-            &sub,
-            &tenant,
-            TritonError::Auth("card token was not minted for this tenant".into()),
-        );
-        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        ) {
+            Ok((tool, decoded_args)) => {
+                tool_name = tool;
+                args = decoded_args;
+            }
+            Err(_) => {
+                // Forged, expired, oversized, or minted for another
+                // tenant — never trust the click's tool/args.
+                record_rejection(
+                    &adapter,
+                    &sub,
+                    &tenant,
+                    TritonError::Auth("CARD_CLICKED correlation token invalid".into()),
+                );
+                return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+            }
+        }
+        // Merge the user-supplied Selection/Form values onto the token's
+        // signed base args (the token fixed the TOOL; the values are user
+        // query params bound by the named-query layer). Empty values were
+        // filtered at capture: Google Chat submits *every* input on the
+        // card with *any* action, so tapping a preset button also sends
+        // the blank follow-up form and dropdown — an empty merge would
+        // clobber the button's own preset args.
+        if !card_inputs.is_empty() {
+            let map = match &mut args {
+                Value::Object(m) => m,
+                other => {
+                    *other = Value::Object(Default::default());
+                    other.as_object_mut().unwrap()
+                }
+            };
+            for (k, v) in card_inputs {
+                map.insert(k, Value::String(v));
+            }
+        }
     }
 
     // #164 T1a: async reply courier. Google Chat's webhook is
@@ -1471,7 +1487,7 @@ async fn build_reply_message(
                                 &adapter.correlation_key,
                                 CARD_CORRELATION_CAP,
                                 &principal.tenant,
-                                CARD_TOKEN_TTL_SECS,
+                                Some(CARD_TOKEN_TTL_SECS),
                             ) {
                                 Ok(token) => Some((spec, token)),
                                 Err(e) => {

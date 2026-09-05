@@ -187,7 +187,7 @@ pub fn render(
                     correlation_key,
                     triton_correlation::DISCORD_MAX_CUSTOM_ID,
                     tenant,
-                    CARD_TOKEN_TTL_SECS,
+                    Some(CARD_TOKEN_TTL_SECS),
                 ) {
                     Ok(token) => {
                         buttons.push(json!({
@@ -243,7 +243,7 @@ pub fn render(
                     correlation_key,
                     triton_correlation::DISCORD_MAX_CUSTOM_ID,
                     tenant,
-                    CARD_TOKEN_TTL_SECS,
+                    Some(CARD_TOKEN_TTL_SECS),
                 ) {
                     Ok(t) => t,
                     Err(_) => {
@@ -591,7 +591,7 @@ fn build_modal_response(
         correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         tenant,
-        CARD_TOKEN_TTL_SECS,
+        Some(CARD_TOKEN_TTL_SECS),
     )
     .map_err(|_| FormModalError::TokenOversize)?;
 

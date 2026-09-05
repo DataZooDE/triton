@@ -153,7 +153,7 @@ async fn button_click_dispatches_via_correlation_token() {
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("token fits");
 
@@ -245,7 +245,7 @@ async fn forged_custom_id_token_rejected_at_inbound() {
         b"wrong-correlation-key-32-bytes!!",
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("forged token fits");
     let interaction = json!({
@@ -292,7 +292,7 @@ async fn stale_message_timestamp_rejects_button_click() {
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("token fits");
 
@@ -377,7 +377,7 @@ async fn burst_succeeds_then_excess_is_ratelimited() {
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("token fits");
     let send = |i: u32| {
@@ -443,7 +443,7 @@ async fn a_modal_token_from_another_tenant_is_rejected() {
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "globex",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("encode");
 
@@ -494,7 +494,7 @@ async fn a_component_token_from_another_tenant_is_rejected() {
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "globex",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("encode");
 
@@ -541,7 +541,7 @@ async fn button_callback_with_values_is_rejected() {
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("token fits");
     let interaction = json!({
@@ -589,7 +589,7 @@ async fn selection_callback_substitutes_picked_value_and_dispatches() {
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("token fits");
 
@@ -645,7 +645,7 @@ async fn missing_message_timestamp_fails_closed() {
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("token fits");
     // Note: no `message` field at all.
@@ -863,12 +863,14 @@ async fn slash_command_form_only_surface_opens_modal() {
     // Token must decode to (echo, {message:null}). Discord modal
     // custom_ids use the platform-native 100-byte cap, not
     // Telegram's 64-byte callback_data cap.
-    let (tool, args) = triton_correlation::decode_with_cap(
+    // #250: the modal custom_id is bound to the minting tenant.
+    let (tool, args) = triton_correlation::decode_bound(
         custom_id,
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
     )
-    .expect("token verifies");
+    .expect("token verifies for its tenant");
     assert_eq!(tool, "echo");
     let obj = args.as_object().expect("args object");
     assert_eq!(obj.len(), 1);
@@ -904,7 +906,7 @@ async fn modal_submit_substitutes_values_and_dispatches() {
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("token fits");
 
@@ -980,7 +982,7 @@ async fn modal_submit_with_extra_field_rejected() {
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("token fits");
 
@@ -1037,7 +1039,7 @@ async fn modal_submit_with_forged_custom_id_rejected() {
         b"wrong-correlation-key-32-bytes!!",
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
         "acme",
-        7 * 24 * 3600,
+        Some(7 * 24 * 3600),
     )
     .expect("forged token fits");
 

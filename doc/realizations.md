@@ -1485,10 +1485,18 @@ a trap the next developer should not have to step in.
   What blocks it is **Google Chat's handler ordering**, not the crypto:
   gc decodes the token with the bare key to route on its tool BEFORE it
   resolves the sender, so it has no tenant to derive with at that point.
-  Landing this means moving gc's decode after sender resolution (as
-  msteams already does) — a real refactor of that handler, and the
-  reason it was backed out rather than rushed. Whoever picks it up: the
-  crypto is the easy half.
+  Landing it meant moving gc's decode after sender resolution, as
+  msteams already does — a real refactor of that handler, done in the
+  commit that follows. The crypto was the easy half, exactly as
+  predicted: the work was proving nothing between the match arm and the
+  principal reads the tool or args, so the click path can carry
+  placeholders until the verified token supplies them.
+
+  The general lesson: when a binding does not fit a budget, look at
+  whether it needs to be ON the wire at all. Anything both sides already
+  know can move into the key instead, and there it is free AND stronger
+  — a mismatch becomes a signature failure rather than a comparison
+  someone can forget to write.
 
 ---
 

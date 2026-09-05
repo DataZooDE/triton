@@ -281,6 +281,8 @@ async fn surface_render(
             match triton_chat_telegram::surface_mapper::try_render_surface(
                 &surface_input,
                 &PREVIEW_KEY,
+                // Preview only — see the discord arm.
+                "preview",
             ) {
                 None => not_a2ui(),
                 Some(Err(_)) => empty("telegram"),
@@ -377,6 +379,8 @@ async fn surface_render(
         "whatsapp" => match triton_chat_whatsapp::surface_mapper::try_render_surface(
             &surface_input,
             &PREVIEW_KEY,
+            // Preview only — see the discord arm.
+            "preview",
         ) {
             None => not_a2ui(),
             Some(Err(_)) => empty("whatsapp"),

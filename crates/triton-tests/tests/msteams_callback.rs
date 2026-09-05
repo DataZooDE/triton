@@ -271,7 +271,7 @@ async fn a_token_minted_for_another_tenant_is_rejected() {
         b"correlation-key-for-test",
         1536,
         "globex",
-        3600,
+        Some(3600),
     )
     .expect("encode cross-tenant token");
 

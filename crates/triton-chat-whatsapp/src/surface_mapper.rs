@@ -102,9 +102,10 @@ pub enum RenderError {
 pub fn try_render_surface(
     result: &Value,
     correlation_key: &[u8],
+    tenant: &str,
 ) -> Option<Result<RenderedMessage, RenderError>> {
     let surface = extract_surface(result).ok()?;
-    Some(render(&surface, correlation_key))
+    Some(render(&surface, correlation_key, tenant))
 }
 
 /// Render a [`Surface`] into a `RenderedMessage` or a
@@ -112,7 +113,11 @@ pub fn try_render_surface(
 /// the mapper without spinning the whole binary. `correlation_key`
 /// signs the interactive `id`s (#94) so a future inbound handler can
 /// route a tap back to its `(tool, args)`.
-pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessage, RenderError> {
+pub fn render(
+    surface: &Surface,
+    correlation_key: &[u8],
+    tenant: &str,
+) -> Result<RenderedMessage, RenderError> {
     let mut chunks: Vec<String> = Vec::new();
     let mut deferred_buttons = 0usize;
     let mut deferred_selections = 0usize;
@@ -179,7 +184,14 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
                 // signed correlation token (NOT the tool/args), so the
                 // user can't re-execute by typing. Defer on encode
                 // failure (token over cap).
-                match triton_correlation::encode(tool, args, correlation_key) {
+                match triton_correlation::encode_bound(
+                    tool,
+                    args,
+                    correlation_key,
+                    triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+                    tenant,
+                    None,
+                ) {
                     Ok(token) => buttons.push(InteractiveChoice {
                         title: truncate_chars(label, BUTTON_TITLE_MAX),
                         id: token,
@@ -204,7 +216,14 @@ pub fn render(surface: &Surface, correlation_key: &[u8]) -> Result<RenderedMessa
                     let args = json!({ args_key.as_str(): &opt.value });
                     // Skip individual over-cap options; the rest of the
                     // list still ships.
-                    if let Ok(token) = triton_correlation::encode(tool, &args, correlation_key) {
+                    if let Ok(token) = triton_correlation::encode_bound(
+                        tool,
+                        &args,
+                        correlation_key,
+                        triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+                        tenant,
+                        None,
+                    ) {
                         rows.push(InteractiveChoice {
                             title: truncate_chars(&opt.label, LIST_ROW_TITLE_MAX),
                             id: token,
@@ -580,7 +599,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, &KEY).expect("renders");
+        let r = render(&s, &KEY, "acme").expect("renders");
         assert_eq!(r.text, "hello\n\n_a footnote_");
         assert_eq!(r.deferred_buttons, 0);
         assert!(!r.truncated);
@@ -640,7 +659,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, &KEY).expect("renders");
+        let r = render(&s, &KEY, "acme").expect("renders");
         // None of the interactive components contribute to text.
         assert_eq!(r.text, "preamble");
         assert_eq!(r.deferred_buttons, 1);
@@ -674,7 +693,7 @@ mod tests {
         let s = Surface {
             components: vec![make_dash("first"), make_dash("second")],
         };
-        let r = render(&s, &KEY).expect("renders");
+        let r = render(&s, &KEY, "acme").expect("renders");
         let dash = r.dashboard.expect("first surfaced");
         assert_eq!(dash.title, "first");
         assert_eq!(r.deferred_dashboards, 1);
@@ -697,7 +716,7 @@ mod tests {
                 }],
             }],
         };
-        let r = render(&s, &KEY).expect("renders");
+        let r = render(&s, &KEY, "acme").expect("renders");
         assert!(r.text.is_empty());
         assert!(r.dashboard.is_some());
     }
@@ -706,7 +725,7 @@ mod tests {
     fn empty_surface_is_a_render_error() {
         let s = Surface { components: vec![] };
         assert!(matches!(
-            render(&s, &KEY),
+            render(&s, &KEY, "acme"),
             Err(RenderError::EmptyAfterRender)
         ));
     }
@@ -726,7 +745,7 @@ mod tests {
                 resource: None,
             }],
         };
-        let r = render(&s, &KEY).expect("renders");
+        let r = render(&s, &KEY, "acme").expect("renders");
         let i = r.interactive.expect("interactive built");
         assert_eq!(i["type"], "button");
         assert!(i["body"]["text"].as_str().is_some_and(|s| !s.is_empty()));
@@ -757,7 +776,7 @@ mod tests {
                 button("d"),
             ],
         };
-        let r = render(&s, &KEY).expect("renders");
+        let r = render(&s, &KEY, "acme").expect("renders");
         let i = r.interactive.expect("interactive built");
         assert_eq!(i["action"]["buttons"].as_array().unwrap().len(), 3);
         assert_eq!(r.deferred_buttons, 1);
@@ -772,7 +791,7 @@ mod tests {
                 value: big,
             }],
         };
-        let r = render(&s, &KEY).expect("renders");
+        let r = render(&s, &KEY, "acme").expect("renders");
         assert!(r.truncated);
         assert!(r.text.len() <= WHATSAPP_TEXT_MAX_BYTES);
         assert!(r.text.ends_with(TRUNCATION_SENTINEL));
@@ -787,7 +806,7 @@ mod tests {
                 value: fourbyte.repeat(2000),
             }],
         };
-        let r = render(&s, &KEY).expect("renders");
+        let r = render(&s, &KEY, "acme").expect("renders");
         assert!(r.truncated);
         // The String type guarantees valid UTF-8; spot-check char
         // boundaries don't panic when iterated.
@@ -802,7 +821,7 @@ mod tests {
         let s = Surface {
             components: vec![Component::Narration { text: big }],
         };
-        let r = render(&s, &KEY).expect("renders");
+        let r = render(&s, &KEY, "acme").expect("renders");
         assert!(r.truncated);
         // The italic wrapper must remain matched: one opener + one
         // closer in the body. We tolerate raw text that itself
