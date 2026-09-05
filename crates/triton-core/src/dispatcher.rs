@@ -655,24 +655,18 @@ impl Dispatcher {
         };
         self.metrics.record_dispatch(tool_name, protocol, &result);
         self.metrics.record_audit("post");
-        // #250: `sub`/`tenant` may be resolver-chosen (FR-I-7
-        // `upstream`), i.e. attacker-influenced, and are recorded
-        // here BEFORE anything validates them. Clamp so a hostile
-        // value cannot flood the log or the ring buffer.
-        let a_sub = crate::audit::clamp_audited(&principal.sub);
-        let a_tenant = crate::audit::clamp_audited(&principal.tenant);
         emit(&AuditRecord {
             kind: "audit",
             phase: AuditPhase::Post,
             when: now_rfc3339(),
-            who: &a_sub,
+            who: &principal.sub,
             what: tool_name,
             env: &self.env,
             result,
             protocol,
             tool: tool_name,
-            subject: &a_sub,
-            tenant: &a_tenant,
+            subject: &principal.sub,
+            tenant: &principal.tenant,
             latency_ms,
             status,
             status_label,
@@ -734,24 +728,18 @@ impl Dispatcher {
         let result = format!("error:{}", error.class());
         self.metrics.record_dispatch(tool_name, protocol, &result);
         self.metrics.record_audit("dispatch");
-        // #250: `sub`/`tenant` may be resolver-chosen (FR-I-7
-        // `upstream`), i.e. attacker-influenced, and are recorded
-        // here BEFORE anything validates them. Clamp so a hostile
-        // value cannot flood the log or the ring buffer.
-        let a_sub = crate::audit::clamp_audited(&principal.sub);
-        let a_tenant = crate::audit::clamp_audited(&principal.tenant);
         emit(&AuditRecord {
             kind: "audit",
             phase: AuditPhase::Dispatch,
             when: now_rfc3339(),
-            who: &a_sub,
+            who: &principal.sub,
             what: tool_name,
             env: &self.env,
             result,
             protocol,
             tool: tool_name,
-            subject: &a_sub,
-            tenant: &a_tenant,
+            subject: &principal.sub,
+            tenant: &principal.tenant,
             latency_ms,
             status: status_for(error),
             status_label: None,
@@ -786,24 +774,18 @@ impl Dispatcher {
         };
         self.metrics.record_dispatch(tool_name, protocol, &result);
         self.metrics.record_audit("dispatch");
-        // #250: `sub`/`tenant` may be resolver-chosen (FR-I-7
-        // `upstream`), i.e. attacker-influenced, and are recorded
-        // here BEFORE anything validates them. Clamp so a hostile
-        // value cannot flood the log or the ring buffer.
-        let a_sub = crate::audit::clamp_audited(&principal.sub);
-        let a_tenant = crate::audit::clamp_audited(&principal.tenant);
         emit(&AuditRecord {
             kind: "audit",
             phase: AuditPhase::Dispatch,
             when: now_rfc3339(),
-            who: &a_sub,
+            who: &principal.sub,
             what: tool_name,
             env: &self.env,
             result,
             protocol,
             tool: tool_name,
-            subject: &a_sub,
-            tenant: &a_tenant,
+            subject: &principal.sub,
+            tenant: &principal.tenant,
             latency_ms,
             status,
             status_label: None,

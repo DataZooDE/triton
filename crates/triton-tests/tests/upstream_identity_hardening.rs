@@ -152,6 +152,74 @@ fn jwt_claims(jwt: &str) -> Value {
     serde_json::from_slice(&bytes).expect("payload json")
 }
 
+/// The clamp must be an INVARIANT of the audit emitter, not a habit of
+/// three call sites. A crew review found the first cut covered 3 of 5
+/// `AuditRecord` sinks: `record_rejection` and `emit_stream_audit` still
+/// wrote the raw principal, and `record_rejection` additionally emits
+/// `error_detail`, into which the chat adapters interpolate the
+/// **unvalidated** tenant (`tenant \`{tenant}\` rate limit hit …`). So a
+/// hostile tenant still reached stdout and the ring buffer twice per
+/// request, through a different door.
+///
+/// This asserts the property directly over every audit line the process
+/// emits, so a future sink added without clamping fails here rather than
+/// in production. Driven through the per-tenant rate limiter (burst 1),
+/// which is the reachable path to `record_rejection`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_audit_line_carries_an_oversized_field() {
+    let hostile = "t".repeat(5000);
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-ada", "scopes": ["chat"], "tenant": hostile
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let mut env = env_for(&whatsapp, &agent, &resolver);
+    env.insert(
+        "TRITON_MANIFEST_PATH".to_string(),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/manifest-whatsapp-upstream-tightlimit.yaml")
+            .display()
+            .to_string(),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    // Two inbounds: the second trips the per-tenant limiter and reaches
+    // `record_rejection`, the sink the first cut missed.
+    for _ in 0..2 {
+        let _ = post_inbound(&proc, "hi").await;
+    }
+    // Wait until the rate-limit refusal has been recorded.
+    wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit"
+            && v["result"]
+                .as_str()
+                .is_some_and(|r| r.contains("ratelimit"))
+    });
+
+    // Now hold the invariant over EVERY audit line, every string field.
+    const CEILING: usize = 512;
+    for line in proc.stdout_snapshot() {
+        let Ok(v) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if v["kind"] != "audit" {
+            continue;
+        }
+        for (field, val) in v.as_object().expect("audit object") {
+            if let Some(text) = val.as_str() {
+                assert!(
+                    text.len() <= CEILING,
+                    "audit field `{field}` is {} bytes — an attacker-controlled \
+                     value reached an audit sink unclamped. Line: {}",
+                    text.len(),
+                    &line[..line.len().min(300)]
+                );
+            }
+        }
+    }
+}
+
 fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {

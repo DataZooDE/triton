@@ -171,7 +171,13 @@ pub fn clamp_audited(value: &str) -> std::borrow::Cow<'_, str> {
 /// buffer (FR-AU-5) so a tailnet-only operator endpoint can serve
 /// the recent history without scraping the substrate's log shipper.
 pub fn emit(record: &AuditRecord<'_>) {
-    let Ok(line) = serde_json::to_string(record) else {
+    // Serialise the ENTRY, not the record: `From<&AuditRecord>` is the
+    // one place principal-derived fields are clamped, so routing both
+    // sinks through it makes the bound an invariant of the emitter
+    // rather than a habit of each call site. A crew review found the
+    // per-site version covered 3 of 5 sinks (#250).
+    let entry = AuditEntry::from(record);
+    let Ok(line) = serde_json::to_string(&entry) else {
         return;
     };
     let stdout = std::io::stdout();
@@ -182,7 +188,7 @@ pub fn emit(record: &AuditRecord<'_>) {
     let _ = handle.write_all(b"\n");
     let _ = handle.flush();
     drop(handle);
-    AuditBuffer::push(record);
+    AuditBuffer::push_entry(entry);
 }
 
 /// In-process bounded history of recent audit records, exposed via
@@ -212,6 +218,11 @@ pub struct AuditEntry {
     pub status_label: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<&'static str>,
+    /// See [`AuditRecord::error_detail`]. Mirrored so the buffer and
+    /// stdout carry the same line — and so the clamp in `From` covers
+    /// it, since adapters interpolate resolver-chosen values into it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttfb_ms: Option<u64>,
     /// See [`AuditRecord::suppressed`]. Mirrored into the buffer because
@@ -228,18 +239,25 @@ impl<'a> From<&AuditRecord<'a>> for AuditEntry {
             kind: r.kind,
             phase: r.phase,
             when: r.when.clone(),
-            who: r.who.to_string(),
+            who: clamp_audited(r.who).into_owned(),
             what: r.what.to_string(),
             env: r.env.to_string(),
             result: r.result.clone(),
             protocol: r.protocol.to_string(),
             tool: r.tool.to_string(),
-            subject: r.subject.to_string(),
-            tenant: r.tenant.to_string(),
+            subject: clamp_audited(r.subject).into_owned(),
+            tenant: clamp_audited(r.tenant).into_owned(),
             latency_ms: r.latency_ms,
             status: r.status,
             status_label: r.status_label,
             status_detail: r.status_detail,
+            // Bounded here too: adapters interpolate the resolver-chosen
+            // tenant into rate-limit messages, so an unclamped
+            // `error_detail` re-leaks what the fields above clamp.
+            error_detail: r
+                .error_detail
+                .as_deref()
+                .map(|d| clamp_audited(d).into_owned()),
             ttfb_ms: r.ttfb_ms,
             suppressed: r.suppressed,
             trace_id: r.trace_id.to_string(),
@@ -263,8 +281,9 @@ impl AuditBuffer {
         BUF.get_or_init(AuditBuffer::new)
     }
 
-    fn push(record: &AuditRecord<'_>) {
-        let entry: AuditEntry = record.into();
+    /// Push an already-clamped entry (see [`emit`], which builds it once
+    /// and shares it between stdout and the buffer).
+    fn push_entry(entry: AuditEntry) {
         let buf = Self::global();
         let mut q = buf.inner.lock().unwrap_or_else(|e| e.into_inner());
         if q.len() == AUDIT_BUFFER_CAPACITY {
