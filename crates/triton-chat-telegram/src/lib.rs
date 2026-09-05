@@ -1292,6 +1292,10 @@ async fn handle_form_outcome(
                     return StatusCode::OK.into_response();
                 }
             };
+            // #250: the raw sender only earns a place in the audit line
+            // when the resolver replaced the asserted identity.
+            let identity_was_resolved_upstream =
+                matches!(adapter.identity, IdentityMode::Upstream { .. });
             let principal = Principal {
                 sub,
                 scopes,
@@ -1300,7 +1304,7 @@ async fn handle_form_outcome(
                 raw_token: String::new(),
                 trace_id: uuid::Uuid::new_v4().to_string(),
                 // #250: see Principal::sender_ref.
-                sender_ref: Some(sender_key.to_string()),
+                sender_ref: identity_was_resolved_upstream.then(|| sender_key.to_string()),
             };
             let principal_for_post = principal.clone();
             dispatch_and_render(

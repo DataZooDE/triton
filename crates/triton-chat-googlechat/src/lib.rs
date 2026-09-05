@@ -131,12 +131,12 @@ const DASHBOARD_MARKER: &str = "__dashboard_png";
 /// Correlation-token "tool" marker for an upstream-rendered chart-image token
 /// (e.g. peacock `render_report`, which returns its own PNG). Distinguishes it
 /// from a dashboard token on the shared `…/img/` route.
+const RENDER_REPORT_IMG_MARKER: &str = "__render_report_png";
+
 /// How long a card action token stays clickable (#250). Unbound tokens
 /// never expired, making each one a permanent replay oracle until the
 /// correlation key rotates.
 const CARD_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;
-
-const RENDER_REPORT_IMG_MARKER: &str = "__render_report_png";
 /// PNG canvas width (matches the standalone `triton-rasterizer` bin).
 const DASHBOARD_PNG_WIDTH: u32 = 1200;
 
@@ -1031,7 +1031,10 @@ async fn handle_webhook(
     // #250: captured now, because `event` is partially moved below and
     // the TENANT binding can only be verified once the sender is
     // resolved, further down.
-    let card_token: Option<String> = event.card_token().map(str::to_owned);
+    let card_token: Option<String> = is_card_click
+        .then(|| event.card_token())
+        .flatten()
+        .map(str::to_owned);
     let (sender_name, tool_name, args, action_echo): (String, String, Value, Option<String>) =
         match event.kind.as_str() {
             "MESSAGE" => {

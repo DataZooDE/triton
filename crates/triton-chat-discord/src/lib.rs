@@ -621,9 +621,11 @@ async fn handle_message_component(
             // get rendered as deferred text. Mixed surfaces (form
             // + other components) still fall through to the
             // existing path where Form defers.
-            if let Some(form_result) =
-                surface_mapper::try_render_form_modal(&dispatch.result, &adapter.correlation_key)
-            {
+            if let Some(form_result) = surface_mapper::try_render_form_modal(
+                &dispatch.result,
+                &adapter.correlation_key,
+                &principal_for_post.tenant,
+            ) {
                 match form_result {
                     Ok(modal) => {
                         adapter.dispatcher.record_post(
@@ -651,6 +653,13 @@ async fn handle_message_component(
                 &principal_for_post.tenant,
             ) {
                 Some(Ok(rendered)) => {
+                    // #250: a component that would not fit the token
+                    // budget is dropped, not rendered — the button
+                    // simply is not there. Every other adapter warns;
+                    // this one counted silently, so a deferral was
+                    // invisible in production. It matters more now that
+                    // the tenant binding costs ~32 of the 100 bytes.
+                    warn_deferred(&tool_name, &rendered);
                     build_response_with_rasterizer(
                         adapter,
                         &tool_name,
@@ -844,9 +853,11 @@ async fn handle_application_command(
             // get rendered as deferred text. Mixed surfaces (form
             // + other components) still fall through to the
             // existing path where Form defers.
-            if let Some(form_result) =
-                surface_mapper::try_render_form_modal(&dispatch.result, &adapter.correlation_key)
-            {
+            if let Some(form_result) = surface_mapper::try_render_form_modal(
+                &dispatch.result,
+                &adapter.correlation_key,
+                &principal_for_post.tenant,
+            ) {
                 match form_result {
                     Ok(modal) => {
                         adapter.dispatcher.record_post(
@@ -874,6 +885,13 @@ async fn handle_application_command(
                 &principal_for_post.tenant,
             ) {
                 Some(Ok(rendered)) => {
+                    // #250: a component that would not fit the token
+                    // budget is dropped, not rendered — the button
+                    // simply is not there. Every other adapter warns;
+                    // this one counted silently, so a deferral was
+                    // invisible in production. It matters more now that
+                    // the tenant binding costs ~32 of the 100 bytes.
+                    warn_deferred(tool_name, &rendered);
                     build_response_with_rasterizer(
                         adapter,
                         tool_name,
@@ -1017,10 +1035,14 @@ async fn handle_modal_submit(
         return (StatusCode::BAD_REQUEST, "missing custom_id").into_response();
     };
 
-    let (tool_name, mut args) = match triton_correlation::decode_with_cap(
+    // #250: verified against the SUBMITTER's tenant, like the button and
+    // select paths — a modal custom_id captured from another tenant's
+    // card must not be replayable here.
+    let (tool_name, mut args) = match triton_correlation::decode_bound(
         token,
         &adapter.correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        &claims.tenant,
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -1151,6 +1173,13 @@ async fn handle_modal_submit(
                 &principal_for_post.tenant,
             ) {
                 Some(Ok(rendered)) => {
+                    // #250: a component that would not fit the token
+                    // budget is dropped, not rendered — the button
+                    // simply is not there. Every other adapter warns;
+                    // this one counted silently, so a deferral was
+                    // invisible in production. It matters more now that
+                    // the tenant binding costs ~32 of the 100 bytes.
+                    warn_deferred(&tool_name, &rendered);
                     build_response_with_rasterizer(
                         adapter,
                         &tool_name,
@@ -1282,6 +1311,27 @@ fn options_to_args(opts: &[DiscordCommandOption]) -> Result<Value, String> {
 /// On rasterizer failure we synthesise the same one-line placeholder
 /// the Telegram adapter emits — operators get one consistent shape
 /// across both platforms.
+/// Surface any components the mapper had to drop. Mirrors the shape
+/// telegram/whatsapp/signal/twilio already use — discord counted them
+/// and never logged, so an oversized correlation token made a control
+/// disappear with no trace (#250).
+fn warn_deferred(tool_name: &str, r: &surface_mapper::RenderedInteraction) {
+    if r.deferred_buttons > 0 {
+        tracing::warn!(
+            tool = %tool_name,
+            deferred_buttons = r.deferred_buttons,
+            "discord surface mapper: button components deferred (token over the custom_id budget)",
+        );
+    }
+    if r.deferred_selections > 0 {
+        tracing::warn!(
+            tool = %tool_name,
+            deferred_selections = r.deferred_selections,
+            "discord surface mapper: selection components deferred (token over the custom_id budget)",
+        );
+    }
+}
+
 async fn build_response_with_rasterizer(
     adapter: &Arc<DiscordAdapter>,
     tool_name: &str,

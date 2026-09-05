@@ -277,7 +277,10 @@ pub fn encode_bound(
     }
     // Hours, not seconds — see `CompactBody::x`. Rounded UP so a token
     // never expires earlier than the caller asked for.
-    let exp = now_secs().saturating_add(ttl_secs).div_ceil(3600);
+    let exp = now_secs()
+        .ok_or_else(|| EncodeError::Serialise("system clock before the epoch".into()))?
+        .saturating_add(ttl_secs)
+        .div_ceil(3600);
     let digest = tenant_digest(tenant, key);
     let body = CompactBody {
         t: tool,
@@ -315,8 +318,13 @@ pub fn decode_bound(
             "token was minted for another tenant".into(),
         ));
     }
+    let Some(now) = now_secs() else {
+        return Err(DecodeError::Body(
+            "system clock before the epoch; cannot check expiry".into(),
+        ));
+    };
     match parsed.x {
-        Some(exp_hours) if exp_hours.saturating_mul(3600) >= now_secs() => {}
+        Some(exp_hours) if exp_hours.saturating_mul(3600) >= now => {}
         Some(_) => return Err(DecodeError::Body("token expired".into())),
         None => return Err(DecodeError::Body("token carries no expiry".into())),
     }
@@ -352,15 +360,23 @@ pub fn verify_tenant_binding(
 /// HMAC that covers this field. Keyed so a token cannot be carried
 /// between deployments that happen to share a tenant name.
 fn tenant_digest(tenant: &str, key: &[u8]) -> String {
-    let mac = compute_truncated_hmac(tenant.as_bytes(), key);
+    // Domain separation from the body MAC: a body always starts with
+    // `{`, so this prefix can never collide with one.
+    let mut input = Vec::with_capacity(tenant.len() + 2);
+    input.extend_from_slice(b"n\0");
+    input.extend_from_slice(tenant.as_bytes());
+    let mac = compute_truncated_hmac(&input, key);
     URL_SAFE_NO_PAD.encode(mac).chars().take(6).collect()
 }
 
-fn now_secs() -> u64 {
+/// `None` when the clock is before the epoch (a machine mid-NTP-sync,
+/// say). Callers treat that as "cannot decide" and refuse: mapping it to
+/// `0` made the expiry check `exp >= 0`, i.e. every expired token passed.
+fn now_secs() -> Option<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
+        .ok()
         .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
 
 fn compute_truncated_hmac(body: &[u8], key: &[u8]) -> Vec<u8> {
@@ -551,7 +567,7 @@ mod bound_tests {
             t: "narrate",
             a: &args,
             n: Some(&digest),
-            x: Some(now_secs() / 3600 - 1),
+            x: Some(now_secs().unwrap() / 3600 - 1),
         };
         let t = finish(past, KEY, CAP).unwrap();
         assert!(decode_bound(&t, KEY, CAP, "acme").is_err());
@@ -565,11 +581,11 @@ mod bound_tests {
     }
 
     #[test]
-    fn the_bound_token_fits_the_tightest_platform_budget() {
-        // Telegram's 64-byte callback_data is the smallest budget any
-        // adapter mints into. A binding that does not fit there is a
-        // functional regression, not a hardening — Discord buttons were
-        // silently deferred until the digest and hour-expiry shrank it.
+    fn a_realistic_bound_token_fits_discords_budget() {
+        // Discord buttons were silently DEFERRED until the keyed digest
+        // and hour-expiry shrank the binding — a hardening that costs
+        // functionality is not a hardening. A GUID tenant with a 7-day
+        // TTL is the realistic worst case.
         let t = encode_bound(
             "narrate",
             &json!({ "subject": "alice" }),
@@ -580,6 +596,22 @@ mod bound_tests {
         )
         .expect("a realistic bound token fits Discord's budget");
         assert!(t.len() <= DISCORD_MAX_CUSTOM_ID, "got {} bytes", t.len());
+    }
+
+    /// Telegram's 64-byte `callback_data` CANNOT carry a binding, and
+    /// this pins that rather than leaving it as a comment somebody will
+    /// contradict. The smallest possible bound body — one-char tool,
+    /// empty args — is 66 bytes, so `encode_bound` refuses for every
+    /// input at that cap. Telegram (and WhatsApp Cloud, on the same
+    /// budget) therefore still mint UNBOUND tokens; that residual is
+    /// recorded in doc/realizations.md §7 and needs a wire decision, not
+    /// a follow-up commit.
+    #[test]
+    fn telegrams_budget_cannot_carry_a_binding_at_all() {
+        assert!(matches!(
+            encode_bound("x", &json!({}), KEY, PLATFORM_MAX_CALLBACK_DATA, "t", 3600),
+            Err(EncodeError::OversizedToken { .. })
+        ));
     }
 
     #[test]

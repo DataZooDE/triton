@@ -428,6 +428,55 @@ async fn burst_succeeds_then_excess_is_ratelimited() {
     });
 }
 
+/// #250: the MODAL path is the same bearer capability as a button, and
+/// was the one the first pass missed — the commit said "component
+/// tokens" and the modal `custom_id` stayed unbound and never-expiring.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_modal_token_from_another_tenant_is_rejected() {
+    let (signing, pk_hex) = keypair();
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&pk_hex)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    let foreign = triton_correlation::encode_bound(
+        "echo",
+        &json!({ "message": Value::Null }),
+        CORRELATION_KEY.as_bytes(),
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "globex",
+        7 * 24 * 3600,
+    )
+    .expect("encode");
+
+    let interaction = json!({
+        "type": 5, // MODAL_SUBMIT
+        "id": "i-modal-cross-tenant",
+        "user": { "id": "99" },
+        "data": {
+            "custom_id": foreign,
+            "components": [{ "type": 1, "components": [
+                { "type": 4, "custom_id": "message", "value": "stolen" }
+            ]}]
+        },
+        "message": { "timestamp": now_rfc3339() }
+    });
+    let body = interaction.to_string();
+    let (ts, sig) = sign(&signing, body.as_bytes());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/discord/interactions"))
+        .header("X-Signature-Ed25519", sig)
+        .header("X-Signature-Timestamp", ts)
+        .header("content-type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(
+        resp.status(),
+        401,
+        "a modal token minted for another tenant must not be honoured"
+    );
+}
+
 /// #250: a component token minted into one tenant's guild must not work
 /// for a clicker in another — the custom_id travels in the client and is
 /// visible to anyone who can see the message.
@@ -848,11 +897,14 @@ async fn modal_submit_substitutes_values_and_dispatches() {
     // Mint the token the modal-opener would have minted: echo
     // tool, args = { message: null }. Uses the 100-byte Discord
     // modal cap.
-    let token = triton_correlation::encode_with_cap(
+    // #250: the modal path binds like the button and select paths.
+    let token = triton_correlation::encode_bound(
         "echo",
         &json!({ "message": Value::Null }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        "acme",
+        7 * 24 * 3600,
     )
     .expect("token fits");
 

@@ -486,6 +486,7 @@ pub fn clamp_plain_text(raw: &str) -> String {
 pub fn try_render_form_modal(
     result: &Value,
     correlation_key: &[u8],
+    tenant: &str,
 ) -> Option<Result<Value, FormModalError>> {
     let surface = extract_surface(result).ok()?;
     if surface.components.len() != 1 {
@@ -500,7 +501,13 @@ pub fn try_render_form_modal(
     else {
         return None;
     };
-    Some(build_modal_response(title, fields, tool, correlation_key))
+    Some(build_modal_response(
+        title,
+        fields,
+        tool,
+        correlation_key,
+        tenant,
+    ))
 }
 
 /// Maximum number of TEXT_INPUTs we'll put in a single modal. The
@@ -541,6 +548,7 @@ fn build_modal_response(
     fields: &[triton_core::a2ui::FormField],
     submit_tool: &str,
     correlation_key: &[u8],
+    tenant: &str,
 ) -> Result<Value, FormModalError> {
     if fields.is_empty() {
         return Err(FormModalError::NoFields);
@@ -575,11 +583,15 @@ fn build_modal_response(
         skeleton.insert(f.name.clone(), Value::Null);
     }
     let args = Value::Object(skeleton);
-    let custom_id = triton_correlation::encode_with_cap(
+    // #250: bound like every other component token — a modal custom_id
+    // is the same never-expiring bearer capability otherwise.
+    let custom_id = triton_correlation::encode_bound(
         submit_tool,
         &args,
         correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        tenant,
+        CARD_TOKEN_TTL_SECS,
     )
     .map_err(|_| FormModalError::TokenOversize)?;
 
