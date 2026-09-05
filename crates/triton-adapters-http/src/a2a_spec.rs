@@ -746,6 +746,13 @@ fn find_vega_spec(v: &Value) -> Option<Value> {
             m.values().find_map(find_vega_spec)
         }
         Value::Array(a) => a.iter().find_map(find_vega_spec),
+        // MCP tool results carry the surface as a JSON STRING in
+        // `content[].text`; descend into anything that parses as JSON.
+        Value::String(s) if s.trim_start().starts_with(['{', '[']) => {
+            serde_json::from_str::<Value>(s)
+                .ok()
+                .and_then(|parsed| find_vega_spec(&parsed))
+        }
         _ => None,
     }
 }
@@ -784,14 +791,24 @@ async fn inject_report_vega(
     let Some((idx, report_id, params)) = target else {
         return;
     };
-    let args = json!({ "report_id": report_id, "params": params });
+    let args = json!({ "report_id": &report_id, "params": params });
     let Ok(rep) = dispatcher
         .invoke("render_report", args, principal.clone(), "a2a")
         .await
     else {
         return;
     };
-    let Some(spec) = find_vega_spec(&rep.result) else {
+    let spec = find_vega_spec(&rep.result);
+    // DIAGNOSTIC: quantify why a chart did/didn't become interactive.
+    println!(
+        "VEGA_EXPAND report={report_id} found={} top_keys={:?} has_vega_substr={}",
+        spec.is_some(),
+        rep.result
+            .as_object()
+            .map(|o| o.keys().cloned().collect::<Vec<_>>()),
+        rep.result.to_string().contains("\"vega\"")
+    );
+    let Some(spec) = spec else {
         return;
     };
     if let Some(comp) = result
