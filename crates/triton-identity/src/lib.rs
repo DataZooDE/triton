@@ -1275,9 +1275,8 @@ mod google_access_token_tests {
 
     #[tokio::test]
     async fn verify_rejects_wrong_audience_from_live_response() {
-        let body = format!(
-            r#"{{"aud":"attacker.apps.googleusercontent.com","email":"jr@data-zoo.de","email_verified":"true","exp":"9999999999","hd":"data-zoo.de"}}"#
-        );
+        let body = r#"{"aud":"attacker.apps.googleusercontent.com","email":"jr@data-zoo.de","email_verified":"true","exp":"9999999999","hd":"data-zoo.de"}"#
+            .to_string();
         let url = spawn_tokeninfo(200, body).await;
         let v = GoogleAccessTokenVerifier::new(AUD, Some(HD.into())).with_tokeninfo_url(url);
         let err = v
