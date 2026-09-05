@@ -1475,6 +1475,21 @@ a trap the next developer should not have to step in.
   re-discovers it by writing a comment that claims otherwise — which is
   exactly what happened on the first attempt.
 
+  **The fix is known and costs zero wire bytes: derive the HMAC key from
+  the tenant** (`HMAC(key, "n\0" || tenant)`) instead of carrying a
+  tenant field. A token minted for tenant A then fails the SIGNATURE for
+  tenant B — stronger than an equality check, since there is no field to
+  forget to compare — and it fits every budget because nothing is added
+  to the payload. Prototyped and measured: it drops ~17 bytes and a
+  tenant-bound, expiry-less token fits Telegram's 64 with room to spare.
+  What blocks it is **Google Chat's handler ordering**, not the crypto:
+  gc decodes the token with the bare key to route on its tool BEFORE it
+  resolves the sender, so it has no tenant to derive with at that point.
+  Landing this means moving gc's decode after sender resolution (as
+  msteams already does) — a real refactor of that handler, and the
+  reason it was backed out rather than rushed. Whoever picks it up: the
+  crypto is the easy half.
+
 ---
 
 ## 8. CI/CD build-time traps (2026-08-30)
