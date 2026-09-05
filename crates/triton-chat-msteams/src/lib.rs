@@ -1101,7 +1101,7 @@ async fn dispatch_and_post_reply(
     // Direct render_report (the "Open report:" Execute): the chart URL
     // is minted from the INVOKED args — the result carries only a PNG.
     let image_hint = (tool_name == "render_report")
-        .then(|| report_image_url(adapter, &args))
+        .then(|| report_image_url(adapter, &args, &sender.tenant))
         .flatten();
     let started = std::time::Instant::now();
     let result = adapter
@@ -1123,6 +1123,7 @@ async fn dispatch_and_post_reply(
                 &dispatch.result,
                 image_hint,
                 &chrome,
+                &sender.tenant,
             );
             post_reply(
                 adapter,
@@ -1158,7 +1159,7 @@ async fn dispatch_and_refresh_card(
     let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
     let image_hint = (tool_name == "render_report")
-        .then(|| report_image_url(adapter, &args))
+        .then(|| report_image_url(adapter, &args, &sender.tenant))
         .flatten();
     let started = std::time::Instant::now();
     let result = adapter
@@ -1171,7 +1172,8 @@ async fn dispatch_and_refresh_card(
         Ok(dispatch) => {
             // The refresh path renders the chart too — the invoke card
             // may carry the image URL like any other reply card.
-            let image_url = image_hint.or_else(|| reply_image_url(adapter, &dispatch.result));
+            let image_url =
+                image_hint.or_else(|| reply_image_url(adapter, &dispatch.result, &sender.tenant));
             let chrome = fetch_chrome(adapter, &principal_for_post).await;
             let response_body =
                 match render_card_content(adapter, &dispatch.result, image_url.as_deref(), &chrome)
@@ -1292,9 +1294,18 @@ fn now_secs() -> u64 {
 /// serve it. The first cut cached PNG bytes in process memory, and with
 /// `replicaCount: 2` the fetch landed on the other pod's empty cache:
 /// a 404 that looked exactly like a broken chart (#635, live).
-fn report_image_url(adapter: &MsTeamsAdapter, rargs: &Value) -> Option<String> {
+fn report_image_url(adapter: &MsTeamsAdapter, rargs: &Value, tenant: &str) -> Option<String> {
     let base = public_base()?;
-    let payload = serde_json::json!({ "a": rargs, "exp": now_secs() + IMG_TOKEN_TTL_SECS });
+    // `t`: the tenant this link was minted for. Peacock keys `brand` off
+    // the caller's tenant, and Triton forwards `principal.tenant` into
+    // the JWT it mints for an upstream — so without it the chart PNG
+    // resolves a DIFFERENT brand from the card chrome wrapped around it
+    // (#200), and the render orphans from that tenant's audit trail. It
+    // rides inside the HMAC-signed payload, so it is exactly as
+    // trustworthy as the args beside it.
+    let payload = serde_json::json!({
+        "a": rargs, "exp": now_secs() + IMG_TOKEN_TTL_SECS, "t": tenant,
+    });
     let token = triton_correlation::encode_with_cap(
         RENDER_REPORT_IMG_MARKER,
         &payload,
@@ -1308,7 +1319,7 @@ fn report_image_url(adapter: &MsTeamsAdapter, rargs: &Value) -> Option<String> {
 /// The chart-image URL for this reply, when its surface carries an
 /// inline `Report` component. No render happens at reply time — the
 /// URL is a signed promise the img route fulfils on fetch.
-fn reply_image_url(adapter: &MsTeamsAdapter, result: &Value) -> Option<String> {
+fn reply_image_url(adapter: &MsTeamsAdapter, result: &Value, tenant: &str) -> Option<String> {
     let (report_id, args) = surface_mapper::report_from_result(result)?;
     let mut rargs = if args.is_object() {
         args
@@ -1316,7 +1327,7 @@ fn reply_image_url(adapter: &MsTeamsAdapter, result: &Value) -> Option<String> {
         serde_json::json!({})
     };
     rargs["report_id"] = serde_json::json!(report_id);
-    report_image_url(adapter, &rargs)
+    report_image_url(adapter, &rargs, tenant)
 }
 
 async fn serve_report_png(
@@ -1341,10 +1352,18 @@ async fn serve_report_png(
     let Some(rargs) = payload.get("a").cloned() else {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     };
-    // Render on fetch. The principal is for audit only — the render is a
-    // read through peacock's own standing escurel identity; the SIGNED
-    // token (args fixed at mint time) is the authorization.
-    let principal = make_principal("msteams-img", &["chat".to_string()], "-");
+    // Render on fetch. The principal does not AUTHORIZE anything — the
+    // signed token (args fixed at mint time) does that, and the render is
+    // a read through peacock's own standing escurel identity. It carries
+    // the tenant the link was minted for so the chart resolves the same
+    // peacock brand as the card chrome around it, and so the render joins
+    // that tenant's audit trail. The subject stays synthetic: a
+    // long-lived URL should not embed a user id, and the audit line
+    // should say plainly that this came from the image route.
+    // A token minted before `t` existed (they live 7 days) has no tenant
+    // and keeps the old placeholder rather than failing the fetch.
+    let tenant = payload.get("t").and_then(Value::as_str).unwrap_or("-");
+    let principal = make_principal("msteams-img", &["chat".to_string()], tenant);
     match adapter
         .dispatcher
         .invoke("render_report", rargs, principal, PROTOCOL)
@@ -1378,12 +1397,13 @@ fn build_reply_body(
     result: &Value,
     image_hint: Option<String>,
     chrome: &surface_mapper::CardChrome,
+    tenant: &str,
 ) -> Value {
     // `image_hint` covers the direct render_report invocation (the
     // "Open report:" Execute), whose RESULT carries a PNG but no Report
     // component to lift a spec from — the caller minted the URL from
     // the invoked args instead.
-    let image_url = image_hint.or_else(|| reply_image_url(adapter, result));
+    let image_url = image_hint.or_else(|| reply_image_url(adapter, result, tenant));
     if let Some(card) = render_card_content(adapter, result, image_url.as_deref(), chrome) {
         surface_mapper::build_card_activity_body(bot_id, conversation_id, recipient_id, card)
     } else {
@@ -1624,7 +1644,7 @@ async fn courier_deliver(
     // See dispatch_and_post_reply: direct render_report invocations get
     // their chart URL minted from the invoked args, pre-dispatch.
     let image_hint = (tool_name == "render_report")
-        .then(|| report_image_url(&adapter, &args))
+        .then(|| report_image_url(&adapter, &args, &sender.tenant))
         .flatten();
     let personal = conversation_type.as_deref() == Some("personal");
 
@@ -1755,6 +1775,7 @@ async fn courier_deliver(
                 &result_value,
                 image_hint,
                 &chrome,
+                &sender.tenant,
             )
         }
         Err(e) => {

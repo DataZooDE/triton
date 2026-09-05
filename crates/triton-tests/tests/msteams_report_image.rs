@@ -311,6 +311,135 @@ async fn expired_image_token_is_gone() {
     );
 }
 
+/// The chart and the card chrome must resolve to the SAME peacock brand.
+/// Peacock keys `brand` off the caller's tenant (`themes.resolve(&state
+/// .principal.tenant, host)`), and Triton forwards `principal.tenant`
+/// into the JWT it mints for an upstream, so the tenant the img route
+/// dispatches under decides which brand themes the PNG. The route's
+/// principal is synthetic — the render is authorized by the SIGNED token,
+/// not by the fetcher — but it must still carry the tenant of the sender
+/// the link was minted for, or a themed card ends up wrapping a
+/// differently-branded chart. It is also what joins the render to that
+/// tenant's activity in the audit pivot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn img_route_renders_under_the_senders_tenant() {
+    let fake = FakeBotFramework::start().await;
+    let assistant = FakeAgent::start_returning(report_surface()).await;
+    let report = FakeAgent::start_returning(peacock_png_result()).await;
+    let proc = spawn_with_report_upstreams(&fake, &assistant, &report).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    // Alice is `tenant: acme` in the fixture's sender_table.
+    let jwt = fake.sign_jwt(good_claims(&fake));
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&message_activity("how concentrated are our suppliers?"))
+        .send()
+        .await
+        .expect("POST inbound");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let first = wait_for(Duration::from_secs(5), || {
+        fake.captured().into_iter().next()
+    });
+    let url = first.body["attachments"][0]["content"]["body"]
+        .as_array()
+        .expect("card body")
+        .iter()
+        .find(|e| e["type"] == "Image")
+        .and_then(|e| e["url"].as_str())
+        .unwrap_or_else(|| panic!("expected an Image; got: {}", first.body))
+        .to_string();
+    let token = url.rsplit('/').next().expect("token in url");
+
+    let img = reqwest::Client::new()
+        .get(format!("http://{webhook}/msteams/img/{token}"))
+        .send()
+        .await
+        .expect("GET img");
+    assert!(img.status().is_success(), "{}", img.status());
+
+    let dispatch = wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["tool"] == "render_report"
+    });
+    assert_eq!(
+        dispatch["tenant"], "acme",
+        "the img render must run under the minting sender's tenant, not a \
+         placeholder — peacock brands the chart off it; got: {dispatch}"
+    );
+}
+
+/// Image links live 7 days, so a token minted before the tenant field
+/// existed is still in the wild when this ships. It must still render —
+/// falling back to the old placeholder tenant — rather than 401 and
+/// break every chart already sitting in a Teams conversation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_token_minted_before_the_tenant_field_still_renders() {
+    let fake = FakeBotFramework::start().await;
+    let assistant = FakeAgent::start_returning(report_surface()).await;
+    let report = FakeAgent::start_returning(peacock_png_result()).await;
+    let proc = spawn_with_report_upstreams(&fake, &assistant, &report).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    // The pre-#200 payload shape: args + expiry, no `t`.
+    let legacy = triton_correlation::encode_with_cap(
+        IMG_MARKER,
+        &json!({
+            "a": { "report_id": "supplier-concentration" },
+            "exp": now_unix() + 600,
+        }),
+        CORRELATION_KEY,
+        IMG_TOKEN_CAP,
+    )
+    .expect("encode legacy token");
+
+    let resp = reqwest::Client::new()
+        .get(format!("http://{webhook}/msteams/img/{legacy}"))
+        .send()
+        .await
+        .expect("GET img legacy");
+    assert!(
+        resp.status().is_success(),
+        "a pre-tenant token must still render; got {}",
+        resp.status()
+    );
+    let bytes = resp.bytes().await.expect("png bytes");
+    assert_eq!(&bytes[..4], b"\x89PNG");
+
+    let dispatch = wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit" && v["phase"] == "dispatch" && v["tool"] == "render_report"
+    });
+    assert_eq!(
+        dispatch["tenant"], "-",
+        "a tenant-less token keeps the old placeholder; got: {dispatch}"
+    );
+}
+
+fn wait_for_audit(
+    proc: &TritonProcess,
+    deadline: Duration,
+    matches: impl Fn(&Value) -> bool,
+) -> Value {
+    let start = Instant::now();
+    loop {
+        for line in proc.stdout_snapshot() {
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if matches(&v) {
+                return v;
+            }
+        }
+        if start.elapsed() > deadline {
+            panic!(
+                "audit line not found within {deadline:?}\nstdout:\n{}",
+                proc.stdout_snapshot().join("\n")
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {
