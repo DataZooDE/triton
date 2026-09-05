@@ -305,15 +305,6 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
         .map(|h| h.contains(triton_core::a2ui::ge::EXTENSION_URI))
         .unwrap_or(false);
 
-    // DIAGNOSTIC: raw inbound body to stdout (captured in kubectl logs) —
-    // to see exactly what Gemini Enterprise echoes on a card button click.
-    {
-        use std::io::Write as _;
-        let mut o = std::io::stdout().lock();
-        let _ = writeln!(o, "A2A_INBOUND_BODY {}", String::from_utf8_lossy(&body));
-        let _ = o.flush();
-    }
-
     let req: RpcRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return rpc_error(&Value::Null, PARSE_ERROR, format!("invalid JSON: {e}")),
@@ -401,10 +392,9 @@ fn a2ui_action_question(parts: &[Value]) -> Option<String> {
             let Some(action) = m.get("action") else {
                 continue;
             };
-            // Preferred: a resolved `context.question` (if GE ever forwards
-            // context). Observed reality: GE posts `context:{}` and echoes the
-            // event `name` verbatim, so the re-ask question rides the name as
-            // `ask:<question>` (see triton_core::a2ui::ge). Decode either.
+            // A resolved `context.question`, if a host ever forwards context
+            // (GE does not — it posts `context:{}`, overwrites `name`, and
+            // renumbers ids). Kept as a forward-compatible fallback.
             if let Some(q) = action
                 .get("context")
                 .and_then(|c| c.get("question"))
@@ -414,26 +404,14 @@ fn a2ui_action_question(parts: &[Value]) -> Option<String> {
             {
                 return Some(q.to_string());
             }
-            if let Some(q) = action
-                .get("name")
-                .and_then(Value::as_str)
-                .and_then(|n| n.strip_prefix("ask:"))
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                return Some(q.to_string());
-            }
-            // Reality on the GE wire: it echoes `sourceComponentId` (our button
-            // id) but overwrites `name` and drops `context`. So the re-ask
-            // question rides the button id as `ask-<hex>` (see
-            // triton_core::a2ui::ge). Decode it.
-            if let Some(q) = action
-                .get("sourceComponentId")
-                .and_then(Value::as_str)
-                .and_then(|c| c.strip_prefix("ask-"))
-                .and_then(triton_core::a2ui::ge::hex_decode)
-                .map(|q| q.trim().to_string())
-                .filter(|s| !s.is_empty())
+            // GE reality: the only reliable channels are `surfaceId` (we mint
+            // it) and a deterministic `sourceComponentId` (GE's own `btn-N`).
+            // Map them back to the re-ask question via the per-surface table
+            // recorded when the card was built.
+            if let (Some(sid), Some(cid)) = (
+                action.get("surfaceId").and_then(Value::as_str),
+                action.get("sourceComponentId").and_then(Value::as_str),
+            ) && let Some(q) = triton_core::a2ui::ge::question_for(sid, cid)
             {
                 return Some(q);
             }
