@@ -22,6 +22,7 @@ use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use triton_tests::chat_courier_fixture::FakeWhatsAppApi;
+use triton_tests::upstream_fixture::FakeAgent;
 use triton_tests::{TestIssuer, TritonProcess};
 
 const APP_SECRET: &str = "whatsapp-app-secret-for-test";
@@ -383,4 +384,94 @@ fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
         }
         std::thread::sleep(Duration::from_millis(30));
     }
+}
+
+/// #250: under `identity.kind: upstream` the caller's tenant and the
+/// RECIPIENT's tenant are not the same thing.
+///
+/// `authorize` forces them equal for `sender_table` (`claims.tenant ==
+/// principal.tenant`) but returns `Ok(())` unconditionally for
+/// `upstream` — nothing ties an agent's tenant to the tenant its
+/// recipient resolves to. Card tokens are now bound to the minting
+/// tenant, so minting against the CALLER would make every button in a
+/// proactive message dead: the click fails the signature and is audited
+/// as a forged token, i.e. a functional break disguised as an attack.
+///
+/// The token must be minted for the tenant the RECIPIENT will resolve
+/// to, because that is who clicks it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outbound_buttons_are_minted_for_the_recipients_tenant() {
+    let issuer = TestIssuer::start().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    // The resolver answers with a tenant DIFFERENT from the caller's
+    // (`acme`, from the outbound token).
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-ada", "scopes": ["chat"], "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let mut env = env_for(&issuer, &whatsapp);
+    env.insert(
+        "TRITON_MANIFEST_PATH".to_string(),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/manifest-whatsapp-cloud-upstream-identity.yaml")
+            .display()
+            .to_string(),
+    );
+    env.insert(
+        "TRITON_STATIC_UPSTREAMS".to_string(),
+        format!(
+            "assistant={},resolve_identity={}",
+            agent.host_port(),
+            resolver.host_port()
+        ),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    open_service_window(&proc, "490000000001").await;
+    let _ = wait_for(Duration::from_secs(3), || {
+        let v = whatsapp.captured();
+        (!v.is_empty()).then_some(v)
+    });
+    let before = whatsapp.captured().len();
+
+    let token = token_with_aud(&issuer, OUTBOUND_AUDIENCE);
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "adapter": "whatsapp",
+            "to": "490000000001",
+            "result": { "surface": { "components": [
+                { "kind": "text", "value": "Pick one" },
+                { "kind": "button", "label": "Yes", "tool": "assistant", "args": {} }
+            ] } },
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+    assert_eq!(resp.status(), 202, "{}", resp.status());
+
+    let sent = wait_for(Duration::from_secs(5), || {
+        let v = whatsapp.captured();
+        (v.len() > before).then(|| v[before].clone())
+    });
+    let body = serde_json::to_string(&sent.body).expect("body json");
+    // Pull the interactive reply id (the correlation token) out.
+    let minted = sent.body["interactive"]["action"]["buttons"][0]["reply"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an interactive button; got: {body}"))
+        .to_string();
+
+    assert!(
+        triton_correlation::decode_bound(
+            &minted,
+            b"whatsapp-correlation-key-for-test",
+            triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+            "globex",
+        )
+        .is_ok(),
+        "the button must be minted for the RECIPIENT's tenant (`globex`), \
+         or every click on a proactive message dies as a forged token"
+    );
 }

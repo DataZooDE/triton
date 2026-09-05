@@ -188,6 +188,29 @@ struct CourierClient {
 }
 
 impl WhatsAppAdapter {
+    /// The tenant an outbound message's interactive tokens must be
+    /// minted for: the RECIPIENT's, because the recipient is who clicks.
+    ///
+    /// Under `sender_table` `authorize` has already established that the
+    /// recipient is in the caller's tenant, so the caller's is correct
+    /// and no lookup is needed. Under `upstream` there is no such
+    /// guarantee, so the recipient is resolved — and a resolver failure
+    /// fails the SEND rather than shipping buttons that cannot work.
+    async fn outbound_mint_tenant(
+        &self,
+        to: &str,
+        principal: &Principal,
+    ) -> Result<String, TritonError> {
+        match &self.identity {
+            IdentityMode::SenderTable(_) => Ok(principal.tenant.clone()),
+            IdentityMode::Upstream { resolver_tool } => {
+                let (_, _, _, tenant) =
+                    resolve_via_upstream(&self.dispatcher, resolver_tool, to).await?;
+                Ok(tenant)
+            }
+        }
+    }
+
     pub async fn from_manifest(
         name: &str,
         adapter: &Adapter,
@@ -487,8 +510,16 @@ impl OutboundCourier for WhatsAppAdapter {
                 req.to
             )));
         }
+        // #250: interactive tokens are bound to the tenant that will
+        // CLICK them, which is the recipient's — not the caller's.
+        // `authorize` forces those equal under `sender_table`; under
+        // `upstream` nothing does, so the recipient is resolved here by
+        // the same resolver the inbound path uses. Getting this wrong
+        // does not fail loudly: it mints buttons that die on click and
+        // audit as forged tokens.
+        let mint_tenant = self.outbound_mint_tenant(&req.to, principal).await?;
         let rendered =
-            match render_dispatch_result(&req.result, &self.correlation_key, &principal.tenant) {
+            match render_dispatch_result(&req.result, &self.correlation_key, &mint_tenant) {
                 Ok(r) => r,
                 Err(surface_mapper::RenderError::EmptyAfterRender) => {
                     return Err(TritonError::Validation(

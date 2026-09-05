@@ -167,9 +167,17 @@ fn jwt_claims(jwt: &str) -> Value {
 /// which is the reachable path to `record_rejection`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn no_audit_line_carries_an_oversized_field() {
-    let hostile = "t".repeat(5000);
+    // Driven by an oversized platform SENDER, not an oversized resolver
+    // tenant. A crew review caught the earlier version regressing to
+    // vacuous for exactly the reason this branch already fixed once:
+    // since `validate_resolved` moved to the resolver boundary a hostile
+    // tenant no longer reaches any audit sink, so the sweep inspected
+    // nothing long and passed with the clamp deleted. The `wa_id` is
+    // unvalidated platform input that by construction DOES reach the
+    // line, which is what makes the sweep bite.
+    let huge_sender = "9".repeat(5000);
     let resolver = FakeAgent::start_returning(json!({
-        "sub": "resolved-ada", "scopes": ["chat"], "tenant": hostile
+        "sub": "resolved-ada", "scopes": ["chat"], "tenant": "globex"
     }))
     .await;
     let agent = FakeAgent::start_echoing().await;
@@ -183,11 +191,21 @@ async fn no_audit_line_carries_an_oversized_field() {
             .to_string(),
     );
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener bound");
 
     // Two inbounds: the second trips the per-tenant limiter and reaches
-    // `record_rejection`, the sink the first cut missed.
+    // `record_rejection`, the sink the first cut of the clamp missed.
     for _ in 0..2 {
-        let _ = post_inbound(&proc, "hi").await;
+        let body = serde_json::to_vec(&inbound_envelope(&huge_sender, "hi")).unwrap();
+        let sig = sign(&body, APP_SECRET);
+        let _ = reqwest::Client::new()
+            .post(format!("http://{webhook}/whatsapp/webhook"))
+            .header("X-Hub-Signature-256", &sig)
+            .header("content-type", "application/json")
+            .body(body)
+            .send()
+            .await
+            .expect("POST inbound");
     }
     // Wait until a refusal has been recorded, whichever gate fired.
     wait_for_audit(&proc, Duration::from_secs(5), |v| {
