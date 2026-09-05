@@ -1074,11 +1074,11 @@ async fn resolve_via_upstream(
         .map_err(|e| TritonError::Auth(format!("identity resolver `{resolver_tool}`: {e}")))?;
     let resolved: ResolvedPrincipal = serde_json::from_value(dispatch.result)
         .map_err(|e| TritonError::Auth(format!("resolver reply not {{sub,scopes,tenant}}: {e}")))?;
-    if resolved.sub.trim().is_empty() || resolved.tenant.trim().is_empty() {
-        return Err(TritonError::Auth(
-            "resolver returned empty sub or tenant".into(),
-        ));
-    }
+    // #250: validate at the BOUNDARY, before these values are used for
+    // anything — the per-tenant rate limiter turns `tenant` into a
+    // process-lifetime map key well before the mint-time check in
+    // `static_upstream::bearer` runs.
+    triton_core::principal::validate_resolved(&resolved.sub, &resolved.tenant)?;
     Ok((
         resolved.sub,
         resolved.scopes,

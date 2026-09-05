@@ -189,12 +189,12 @@ async fn no_audit_line_carries_an_oversized_field() {
     for _ in 0..2 {
         let _ = post_inbound(&proc, "hi").await;
     }
-    // Wait until the rate-limit refusal has been recorded.
+    // Wait until a refusal has been recorded, whichever gate fired.
     wait_for_audit(&proc, Duration::from_secs(5), |v| {
         v["kind"] == "audit"
             && v["result"]
                 .as_str()
-                .is_some_and(|r| r.contains("ratelimit"))
+                .is_some_and(|r| r.starts_with("error:"))
     });
 
     // Now hold the invariant over EVERY audit line, every string field.
@@ -218,6 +218,75 @@ async fn no_audit_line_carries_an_oversized_field() {
             }
         }
     }
+}
+
+/// A hostile resolver reply must be refused AT THE RESOLVER BOUNDARY,
+/// before the value is used for anything.
+///
+/// `PerTenantBuckets::try_take` does `buckets.entry(tenant.to_string())
+/// .or_insert_with(...)` — an unbounded insert keyed on the tenant, run
+/// BEFORE the mint-time validation added earlier in this branch. Its own
+/// doc-comment asserts "the cardinality is bounded by the manifest, not
+/// by inbound traffic"; under FR-I-7 `upstream` that is false, and a
+/// resolver returning a fresh oversized tenant per message grows process
+/// memory without bound.
+///
+/// The observable: today the second hostile inbound is refused with
+/// `error:ratelimit`, which only happens if the hostile tenant was used
+/// as a limiter key. After the fix both are refused with `error:auth` at
+/// resolution and the limiter never sees the value.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_hostile_tenant_never_reaches_the_rate_limiter() {
+    let hostile = "t".repeat(5000);
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-ada", "scopes": ["chat"], "tenant": hostile
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let mut env = env_for(&whatsapp, &agent, &resolver);
+    env.insert(
+        "TRITON_MANIFEST_PATH".to_string(),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/manifest-whatsapp-upstream-tightlimit.yaml")
+            .display()
+            .to_string(),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    for _ in 0..3 {
+        let _ = post_inbound(&proc, "hi").await;
+    }
+    wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit"
+            && v["result"]
+                .as_str()
+                .is_some_and(|r| r.starts_with("error:"))
+    });
+    std::thread::sleep(Duration::from_millis(300));
+
+    let ratelimited: Vec<Value> = proc
+        .stdout_snapshot()
+        .iter()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| {
+            v["kind"] == "audit"
+                && v["result"]
+                    .as_str()
+                    .is_some_and(|r| r.contains("ratelimit"))
+        })
+        .collect();
+    assert!(
+        ratelimited.is_empty(),
+        "a hostile tenant reached the per-tenant limiter and became a map \
+         key before validation ran; got {} ratelimit line(s)",
+        ratelimited.len()
+    );
+    assert_eq!(
+        agent.hits(),
+        0,
+        "and it must never reach the upstream either"
+    );
 }
 
 fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
@@ -319,11 +388,13 @@ async fn an_over_cap_tenant_is_refused_not_blanked() {
 
     // The refusal is audited...
     wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        // Recorded against the ADAPTER, not the command tool: since the
+        // resolver-boundary check landed, a hostile reply is refused
+        // before any dispatch to `assistant` happens at all.
         v["kind"] == "audit"
             && v["result"]
                 .as_str()
-                .is_some_and(|r| r.starts_with("error:"))
-            && v["tool"] == "assistant"
+                .is_some_and(|r| r.starts_with("error:auth"))
     });
     // ...and — the property that matters — the upstream was never called,
     // so no token carrying a blanked tenant was ever minted or sent.
@@ -362,11 +433,13 @@ async fn a_rejected_field_is_truncated_in_the_audit_line() {
     let _ = post_inbound(&proc, "hi").await;
 
     let line = wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        // Recorded against the ADAPTER, not the command tool: since the
+        // resolver-boundary check landed, a hostile reply is refused
+        // before any dispatch to `assistant` happens at all.
         v["kind"] == "audit"
             && v["result"]
                 .as_str()
-                .is_some_and(|r| r.starts_with("error:"))
-            && v["tool"] == "assistant"
+                .is_some_and(|r| r.starts_with("error:auth"))
     });
     let recorded = line["tenant"].as_str().unwrap_or_default();
     assert!(
@@ -406,11 +479,13 @@ async fn an_over_cap_sub_is_refused() {
     let _ = post_inbound(&proc, "hi").await;
 
     wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        // Recorded against the ADAPTER, not the command tool: since the
+        // resolver-boundary check landed, a hostile reply is refused
+        // before any dispatch to `assistant` happens at all.
         v["kind"] == "audit"
             && v["result"]
                 .as_str()
-                .is_some_and(|r| r.starts_with("error:"))
-            && v["tool"] == "assistant"
+                .is_some_and(|r| r.starts_with("error:auth"))
     });
     assert_eq!(
         agent.hits(),
