@@ -180,15 +180,14 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                 if let Some(q) = question {
                     qmap.insert(n, q.to_string());
                 }
-                // `raised` (filled, themed primary) for the main re-ask actions;
-                // `stroked` (outlined) for report/other buttons — a clear Material
-                // hierarchy. `color:primary` picks up the surface theme color.
-                let primary = question.is_some();
+                // `flat` (Material filled, solid) + `color:primary` (picks up the
+                // surface theme color) → solid buttons with white text, uniform
+                // across the row.
                 flat.push(json!({
                     "id": btn_id.clone(),
                     "component": "MaterialButton",
                     "label": label,
-                    "variant": if primary { "raised" } else { "stroked" },
+                    "variant": "flat",
                     "color": "primary",
                     "action": { "event": { "name": tool, "context": {} } },
                 }));
@@ -339,7 +338,7 @@ mod tests {
             })
             .expect("re-ask button");
         assert_eq!(btn["label"], "What does Initech buy?");
-        assert_eq!(btn["variant"], "raised");
+        assert_eq!(btn["variant"], "flat");
         assert_eq!(btn["color"], "primary");
         // GE echoes the Button's own id on click. This surface: chart=1,
         // button=2 (MaterialButton needs no child Text) — so `btn-2` resolves.
