@@ -73,6 +73,26 @@ Whitespace around each key is trimmed, so `<new>, <old>` is fine. A list
 from which no key survives (`""`, `" , "`) refuses boot rather than
 starting an adapter that can verify nothing.
 
+### Revoking a principal (triton #287)
+
+`TRITON_DENIED_PRINCIPALS` is a comma-separated list of `tenant/sub`
+entries. A listed principal's dispatches are refused 403 and audited
+`error:forbidden`, on every protocol at once:
+
+```
+TRITON_DENIED_PRINCIPALS=acme/alice,globex/bob
+```
+
+This is the only lever that revokes a principal FASTER than its token
+expires — everything else is boot-time-only, and rotating a signing key
+takes out everyone. It takes effect on the next deploy.
+
+Entries must carry a tenant. A bare `alice` is ignored with a warning
+rather than applied to every tenant: the same subject in two tenants is
+two people, and an operator racing an incident is exactly who would type
+the short form. Check the boot log — an active denylist warns with the
+entries it accepted and the count.
+
 ## Upstream agents — `TRITON_STATIC_UPSTREAMS` (no Consul)
 
 Triton routes a tool name to a fixed `host:port` from the static map:

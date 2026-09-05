@@ -350,6 +350,23 @@ on implementation details not pinned below.
   filesystem). The refusal MUST be documented in stdout logs and
   MUST prevent `/healthz` from returning 200. *(M-LOCALITY-1; C-11.)*
 
+- **FR-I-10 (v0.2, #287)** Triton MUST support an operator-managed
+  denylist of principals, configured as tenant-qualified `tenant/sub`
+  entries. The check MUST happen at the dispatcher, so that it applies
+  to every protocol (MCP, A2A, REST, and every chat adapter) and every
+  entry point into a dispatch (`invoke`, `invoke_streaming`,
+  `read_resource`, `update_model_context`). A denied dispatch MUST be
+  refused with HTTP 403 and audited with result class
+  `error:forbidden` — distinct from `error:auth`, because the caller
+  authenticated successfully and was then revoked, and an operator must
+  be able to tell those apart in the audit stream. An entry lacking a
+  tenant qualifier MUST be ignored with a warning rather than applied
+  to every tenant. An empty or unset denylist MUST deny nobody.
+  Rationale: every other secret is boot-time-only and every token runs
+  to its own expiry, so without this there is no lever that revokes a
+  compromised principal sooner than its issuer's TTL.
+  *(M-DENYLIST-1.)*
+
 ### 5.4 Upstream router (FR-U)
 
 - **FR-U-1** Triton MUST discover upstream agents by querying Consul
@@ -712,6 +729,7 @@ is the canonical mapping; the messenger paper's
 | M-MANIFEST-1      | FR-L-4 (closed-set boot validation)                    | PAPER — PASS        |
 | M-COVERAGE-1      | FR-L-5 (degrade rule coverage)                         | PAPER — PASS        |
 | M-SECRETS-1       | FR-L-6, NFR-S-5 (Vault credentials)                    | PAPER — PASS        |
+| M-DENYLIST-1      | FR-I-10 (operator principal revocation)                | IMPL — PASS         |
 | M-LOCALITY-1      | FR-I-9, NFR-S-6, C-11 (Signal loopback refusal)        | IMPL — PASS         |
 | M-LIFECYCLE-1     | NFR-P-4 (socket recovery bound)                        | IMPL — deferred     |
 | M-PARITY-MULTI-1  | FR-A-13 (pairwise cross-adapter parity)                | IMPL — PASS         |
