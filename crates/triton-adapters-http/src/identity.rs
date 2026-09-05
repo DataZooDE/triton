@@ -30,7 +30,7 @@ use axum::http::HeaderName;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use triton_core::{Principal, TritonError};
-use triton_identity::{OidcVerifier, issuer_matches, unverified_issuer};
+use triton_identity::{GoogleAccessTokenVerifier, OidcVerifier, issuer_matches, unverified_issuer};
 
 /// Header set by the upstream `oauth2-proxy` sidecar
 /// (`--pass-user-headers=true`). Matches what `auth-portal-dz`
@@ -65,6 +65,11 @@ pub struct IdentityProvider {
     /// value disables the dev-token path entirely (rejects every bearer):
     /// a kill-switch even in a `dev-token` build.
     dev_token: String,
+    /// Optional fallback for **opaque** Google OAuth access tokens (not JWTs)
+    /// — what Gemini Enterprise forwards over A2A. Tried ONLY when the bearer
+    /// has no readable `iss` (i.e. is not a JWT); JWTs always route to `oidc`.
+    /// Validated by introspection (audience + hosted domain, fail-closed).
+    google_access: Option<Arc<GoogleAccessTokenVerifier>>,
 }
 
 impl IdentityProvider {
@@ -76,6 +81,7 @@ impl IdentityProvider {
             oidc: oidc.into_iter().collect(),
             trust_forwarded_auth: false,
             dev_token: DEFAULT_DEV_TOKEN.to_string(),
+            google_access: None,
         }
     }
 
@@ -86,6 +92,7 @@ impl IdentityProvider {
             oidc,
             trust_forwarded_auth,
             dev_token: DEFAULT_DEV_TOKEN.to_string(),
+            google_access: None,
         }
     }
 
@@ -99,6 +106,7 @@ impl IdentityProvider {
             oidc: oidc.into_iter().collect(),
             trust_forwarded_auth,
             dev_token: DEFAULT_DEV_TOKEN.to_string(),
+            google_access: None,
         }
     }
 
@@ -107,6 +115,13 @@ impl IdentityProvider {
     /// `Bearer dev-token` — are unchanged. Empty disables the path.
     pub fn with_dev_token(mut self, token: String) -> Self {
         self.dev_token = token;
+        self
+    }
+
+    /// Add the opaque Google access-token fallback (Gemini Enterprise / A2A).
+    /// Builder so existing call sites are unchanged.
+    pub fn with_google_access(mut self, verifier: Arc<GoogleAccessTokenVerifier>) -> Self {
+        self.google_access = Some(verifier);
         self
     }
 
@@ -147,6 +162,16 @@ impl IdentityProvider {
     /// without a network call.
     async fn verify_bearer_via_oidc(&self, parts: &Parts) -> Result<Principal, TritonError> {
         let token = bearer_from(parts)?;
+        // Opaque (non-JWT) bearer: no readable `iss` to route on. If a Google
+        // access-token verifier is configured, introspect it (Gemini Enterprise
+        // forwards opaque Google access tokens over A2A). Checked before the
+        // single-verifier shortcut so it works for one- and multi-pair
+        // deployments alike. JWTs (with an `iss`) fall through to OIDC routing.
+        if unverified_issuer(token).is_none()
+            && let Some(g) = &self.google_access
+        {
+            return g.verify(token).await;
+        }
         if let [only] = self.oidc.as_slice() {
             return only.verify(token).await;
         }

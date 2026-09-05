@@ -520,6 +520,233 @@ fn is_entra_guid(s: &str) -> bool {
             .all(|(p, n)| p.len() == n && p.bytes().all(|b| b.is_ascii_hexdigit()))
 }
 
+// ---- Google opaque access-token introspection (Gemini Enterprise / A2A) ----
+//
+// Gemini Enterprise forwards Google OAuth **access tokens**, which are opaque
+// (not JWTs), so they cannot be verified with a local key. Google validates
+// them at its tokeninfo endpoint and returns the audience, email, scopes and
+// expiry; we enforce audience + hosted-domain + expiry (fail-closed) and cache
+// the result briefly. Opt-in via `GoogleAccessTokenVerifier`; wired as a
+// fallback for non-JWT bearers in the HTTP identity middleware.
+
+/// Default Google tokeninfo endpoint. Overridable in tests.
+const GOOGLE_TOKENINFO_URL: &str = "https://oauth2.googleapis.com/tokeninfo";
+
+/// The subset of Google's tokeninfo response we consume. `email_verified` and
+/// `exp` are typed as `Value` because tokeninfo returns them as JSON strings
+/// (e.g. `"true"`, `"1788600000"`) while other Google surfaces use native
+/// bool/number — accept both rather than fail to deserialize.
+#[derive(Debug, Deserialize, Default)]
+struct GoogleTokenInfo {
+    aud: Option<String>,
+    email: Option<String>,
+    email_verified: Option<serde_json::Value>,
+    exp: Option<serde_json::Value>,
+    scope: Option<String>,
+    /// Google Workspace hosted domain, when present.
+    hd: Option<String>,
+}
+
+fn json_is_true(v: Option<&serde_json::Value>) -> bool {
+    matches!(v, Some(serde_json::Value::Bool(true)))
+        || matches!(v, Some(serde_json::Value::String(s)) if s == "true")
+}
+
+fn json_as_i64(v: Option<&serde_json::Value>) -> Option<i64> {
+    match v {
+        Some(serde_json::Value::Number(n)) => n.as_i64(),
+        Some(serde_json::Value::String(s)) => s.parse().ok(),
+        _ => None,
+    }
+}
+
+/// Identity distilled from a validated tokeninfo response.
+#[derive(Debug)]
+struct GoogleIdentity {
+    sub: String,
+    scopes: Vec<String>,
+}
+
+/// Pure, fail-closed validation of a tokeninfo response against the configured
+/// audience and hosted domain. Every missing/invalid field is a rejection.
+/// Unit-tested without any HTTP.
+fn validate_google_tokeninfo(
+    info: &GoogleTokenInfo,
+    audience: &str,
+    allowed_hd: Option<&str>,
+    now_unix: i64,
+) -> Result<GoogleIdentity, TritonError> {
+    // (1) Audience MUST equal our client id. Without this, an access token
+    // minted for ANY Google client would be accepted here — the confused-
+    // deputy / token-substitution hole. This is the load-bearing check.
+    if info.aud.as_deref() != Some(audience) {
+        return Err(TritonError::Auth(
+            "google access token audience mismatch".into(),
+        ));
+    }
+    // (2) A verified email is required.
+    let email = info
+        .email
+        .as_deref()
+        .filter(|e| !e.is_empty())
+        .ok_or_else(|| TritonError::Auth("google access token has no email".into()))?;
+    if !json_is_true(info.email_verified.as_ref()) {
+        return Err(TritonError::Auth(
+            "google access token email is not verified".into(),
+        ));
+    }
+    // (3) Hosted-domain boundary (mirrors ADR-0017 pair-1). Prefer the `hd`
+    // claim; fall back to the email domain when `hd` is absent.
+    if let Some(hd) = allowed_hd {
+        let domain_ok = info.hd.as_deref() == Some(hd) || email.rsplit('@').next() == Some(hd);
+        if !domain_ok {
+            return Err(TritonError::Auth(
+                "google access token is outside the allowed domain".into(),
+            ));
+        }
+    }
+    // (4) Expiry.
+    let exp = json_as_i64(info.exp.as_ref())
+        .ok_or_else(|| TritonError::Auth("google access token has no exp".into()))?;
+    if exp <= now_unix {
+        return Err(TritonError::Auth("google access token is expired".into()));
+    }
+    let scopes = info
+        .scope
+        .as_deref()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    Ok(GoogleIdentity {
+        sub: email.to_string(),
+        scopes,
+    })
+}
+
+struct GoogleCacheEntry {
+    sub: String,
+    scopes: Vec<String>,
+    expires: Instant,
+}
+
+/// Verifier for Google **opaque** OAuth access tokens forwarded over A2A
+/// (Gemini Enterprise). Validation is by introspection against Google's
+/// tokeninfo endpoint plus [`validate_google_tokeninfo`]; results are cached by
+/// token for up to 5 minutes (bounded) so it is not one network call per
+/// request. Fail-closed on every error.
+pub struct GoogleAccessTokenVerifier {
+    audience: String,
+    allowed_hd: Option<String>,
+    tokeninfo_url: String,
+    http: reqwest::Client,
+    cache: RwLock<HashMap<String, GoogleCacheEntry>>,
+}
+
+impl GoogleAccessTokenVerifier {
+    pub fn new(audience: impl Into<String>, allowed_hd: Option<String>) -> Self {
+        Self {
+            audience: audience.into(),
+            allowed_hd: allowed_hd.filter(|d| !d.trim().is_empty()),
+            tokeninfo_url: GOOGLE_TOKENINFO_URL.to_string(),
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(3))
+                .build()
+                .expect("reqwest client"),
+            cache: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// The audience this verifier requires (the Google OAuth client id).
+    pub fn audience(&self) -> &str {
+        &self.audience
+    }
+
+    /// Test-only: point introspection at a local fake tokeninfo server.
+    pub fn with_tokeninfo_url(mut self, url: impl Into<String>) -> Self {
+        self.tokeninfo_url = url.into();
+        self
+    }
+
+    pub async fn verify(&self, raw_token: &str) -> Result<Principal, TritonError> {
+        if let Some((sub, scopes)) = self.cache_get(raw_token).await {
+            return Ok(self.principal(sub, scopes, raw_token));
+        }
+        let resp = self
+            .http
+            .get(&self.tokeninfo_url)
+            .query(&[("access_token", raw_token)])
+            .send()
+            .await
+            .map_err(|e| TritonError::Auth(format!("google tokeninfo request failed: {e}")))?;
+        if !resp.status().is_success() {
+            // 400 = invalid/expired token; any non-2xx is a fail-closed reject.
+            return Err(TritonError::Auth(
+                "google access token rejected by tokeninfo".into(),
+            ));
+        }
+        let info: GoogleTokenInfo = resp
+            .json()
+            .await
+            .map_err(|e| TritonError::Auth(format!("google tokeninfo decode failed: {e}")))?;
+        let now = now_unix();
+        let id = validate_google_tokeninfo(&info, &self.audience, self.allowed_hd.as_deref(), now)?;
+        let exp = json_as_i64(info.exp.as_ref()).unwrap_or(now);
+        let ttl = (exp - now).clamp(0, 300) as u64;
+        self.cache_put(raw_token, &id, Duration::from_secs(ttl))
+            .await;
+        Ok(self.principal(id.sub, id.scopes, raw_token))
+    }
+
+    fn principal(&self, sub: String, scopes: Vec<String>, raw_token: &str) -> Principal {
+        Principal {
+            sub,
+            scopes,
+            groups: Vec::new(),
+            // Google access-token callers carry no tenant claim; the agent's
+            // own escurel signer applies its default tenant (single-tenant).
+            tenant: "-".to_string(),
+            raw_token: raw_token.to_string(),
+            trace_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+
+    async fn cache_get(&self, token: &str) -> Option<(String, Vec<String>)> {
+        let cache = self.cache.read().await;
+        let e = cache.get(token)?;
+        (e.expires > Instant::now()).then(|| (e.sub.clone(), e.scopes.clone()))
+    }
+
+    async fn cache_put(&self, token: &str, id: &GoogleIdentity, ttl: Duration) {
+        if ttl.is_zero() {
+            return;
+        }
+        let mut cache = self.cache.write().await;
+        let now = Instant::now();
+        cache.retain(|_, e| e.expires > now);
+        // Bounded: never grow past the cap (correctness is unaffected — a
+        // cache miss just re-introspects).
+        if cache.len() >= 1024 {
+            return;
+        }
+        cache.insert(
+            token.to_string(),
+            GoogleCacheEntry {
+                sub: id.sub.clone(),
+                scopes: id.scopes.clone(),
+                expires: now + ttl,
+            },
+        );
+    }
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod multi_issuer_tests {
     use super::*;
@@ -801,5 +1028,183 @@ mod entra_multitenant_tests {
         // An upper-case GUID is accepted but normalised to lowercase.
         let upper = "28C0071D-815C-4ACE-A3B5-9A28BDE005FD";
         assert_eq!(entra_tid_from_issuer(&iss(upper)).as_deref(), Some(TID_A));
+    }
+}
+
+#[cfg(test)]
+mod google_access_token_tests {
+    use super::*;
+    use serde_json::json;
+
+    const AUD: &str = "741034231082-94ns.apps.googleusercontent.com";
+    const HD: &str = "data-zoo.de";
+
+    fn info(overrides: serde_json::Value) -> GoogleTokenInfo {
+        // Base: a valid token for AUD, verified email at HD, far-future exp.
+        let mut base = json!({
+            "aud": AUD,
+            "email": "jr@data-zoo.de",
+            "email_verified": "true",
+            "exp": "9999999999",
+            "scope": "openid email profile",
+            "hd": "data-zoo.de",
+        });
+        for (k, v) in overrides.as_object().unwrap() {
+            if v.is_null() {
+                base.as_object_mut().unwrap().remove(k);
+            } else {
+                base[k] = v.clone();
+            }
+        }
+        serde_json::from_value(base).unwrap()
+    }
+
+    #[test]
+    fn valid_token_yields_email_subject_and_scopes() {
+        let id = validate_google_tokeninfo(&info(json!({})), AUD, Some(HD), 1000).unwrap();
+        assert_eq!(id.sub, "jr@data-zoo.de");
+        assert_eq!(id.scopes, vec!["openid", "email", "profile"]);
+    }
+
+    #[test]
+    fn audience_mismatch_is_rejected() {
+        let err = validate_google_tokeninfo(
+            &info(json!({"aud": "someone-else.apps.googleusercontent.com"})),
+            AUD,
+            Some(HD),
+            1000,
+        )
+        .expect_err("wrong aud must fail");
+        assert!(format!("{err}").contains("audience mismatch"), "{err}");
+    }
+
+    #[test]
+    fn missing_or_unverified_email_is_rejected() {
+        assert!(
+            validate_google_tokeninfo(&info(json!({"email": null})), AUD, Some(HD), 1000).is_err()
+        );
+        assert!(
+            validate_google_tokeninfo(
+                &info(json!({"email_verified": "false"})),
+                AUD,
+                Some(HD),
+                1000
+            )
+            .is_err()
+        );
+        assert!(
+            validate_google_tokeninfo(&info(json!({"email_verified": null})), AUD, Some(HD), 1000)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn domain_enforced_via_hd_or_email_fallback() {
+        // hd absent but email domain matches → ok.
+        assert!(validate_google_tokeninfo(&info(json!({"hd": null})), AUD, Some(HD), 1000).is_ok());
+        // wrong domain (both hd and email) → rejected.
+        let err = validate_google_tokeninfo(
+            &info(json!({"hd": "evil.com", "email": "x@evil.com"})),
+            AUD,
+            Some(HD),
+            1000,
+        )
+        .expect_err("wrong domain must fail");
+        assert!(format!("{err}").contains("allowed domain"), "{err}");
+        // No allowed_hd configured → any domain passes (still needs aud+email).
+        assert!(
+            validate_google_tokeninfo(
+                &info(json!({"hd": null, "email": "x@other.com"})),
+                AUD,
+                None,
+                1000
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn expired_token_is_rejected_and_exp_accepts_string_or_number() {
+        // Expired (exp <= now).
+        let err = validate_google_tokeninfo(&info(json!({"exp": "500"})), AUD, Some(HD), 1000)
+            .expect_err("expired must fail");
+        assert!(format!("{err}").contains("expired"), "{err}");
+        // exp as a native number is also accepted.
+        assert!(
+            validate_google_tokeninfo(&info(json!({"exp": 9999999999i64})), AUD, Some(HD), 1000)
+                .is_ok()
+        );
+        // missing exp → rejected.
+        assert!(
+            validate_google_tokeninfo(&info(json!({"exp": null})), AUD, Some(HD), 1000).is_err()
+        );
+    }
+
+    #[test]
+    fn email_verified_accepts_bool_true_too() {
+        assert!(
+            validate_google_tokeninfo(&info(json!({"email_verified": true})), AUD, Some(HD), 1000)
+                .is_ok()
+        );
+    }
+
+    async fn spawn_tokeninfo(status: u16, body: String) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let body = body.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 2048];
+                    let _ = sock.read(&mut buf).await;
+                    let reason = if status == 200 { "OK" } else { "Bad Request" };
+                    let resp = format!(
+                        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn verify_admits_valid_opaque_token_and_caches() {
+        let body = format!(
+            r#"{{"aud":"{AUD}","email":"jr@data-zoo.de","email_verified":"true","exp":"9999999999","scope":"openid email","hd":"data-zoo.de"}}"#
+        );
+        let url = spawn_tokeninfo(200, body).await;
+        let v = GoogleAccessTokenVerifier::new(AUD, Some(HD.into())).with_tokeninfo_url(url);
+        let p = v.verify("ya29.opaque").await.expect("valid token admitted");
+        assert_eq!(p.sub, "jr@data-zoo.de");
+        assert_eq!(p.tenant, "-");
+        // Second call is a cache hit (still Ok).
+        let p2 = v.verify("ya29.opaque").await.expect("cache hit");
+        assert_eq!(p2.sub, "jr@data-zoo.de");
+    }
+
+    #[tokio::test]
+    async fn verify_fails_closed_on_tokeninfo_non_2xx() {
+        let url = spawn_tokeninfo(400, r#"{"error":"invalid_token"}"#.to_string()).await;
+        let v = GoogleAccessTokenVerifier::new(AUD, Some(HD.into())).with_tokeninfo_url(url);
+        let err = v.verify("bad").await.expect_err("400 must fail closed");
+        assert!(matches!(err, TritonError::Auth(_)), "{err}");
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_wrong_audience_from_live_response() {
+        let body = format!(
+            r#"{{"aud":"attacker.apps.googleusercontent.com","email":"jr@data-zoo.de","email_verified":"true","exp":"9999999999","hd":"data-zoo.de"}}"#
+        );
+        let url = spawn_tokeninfo(200, body).await;
+        let v = GoogleAccessTokenVerifier::new(AUD, Some(HD.into())).with_tokeninfo_url(url);
+        let err = v
+            .verify("token-for-other-app")
+            .await
+            .expect_err("aud mismatch must fail");
+        assert!(format!("{err}").contains("audience mismatch"), "{err}");
     }
 }
