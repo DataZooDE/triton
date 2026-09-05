@@ -273,25 +273,43 @@ impl StaticUpstream {
                 // otherwise the deployment-static tenant and no scopes.
                 // #114: resolver-supplied values are sanitised/capped (and
                 // allowlisted) before signing — see `sanitise_scopes`.
-                let (tenant, scopes, groups): (String, Vec<String>, Vec<String>) = if self
-                    .forward_principal
-                {
-                    let tenant = if principal.tenant.len() <= MAX_TENANT_LEN {
-                        principal.tenant.clone()
-                    } else {
-                        tracing::warn!(
-                            len = principal.tenant.len(),
-                            "forwarded tenant over cap; dropping"
-                        );
-                        String::new()
-                    };
+                // #283: the TENANT is identity, not an opt-in enrichment, so
+                // it ships regardless of the forwarding flag — same as `sub`
+                // just below. With shipped defaults this token previously
+                // carried NO tenant claim at all (`self.tenant` empty, and an
+                // empty tenant omits the claim), so an upstream could not
+                // distinguish "single-tenant Triton" from "claim withheld" and
+                // the delegated authorization model was unimplementable.
+                //
+                // Precedence: the CALLER's tenant wins, the deployment-static
+                // one is the fallback. The static value exists to name a
+                // tenant when there is no per-caller one; once there is, it is
+                // the more specific answer.
+                let tenant = if principal.tenant.is_empty() {
+                    self.tenant.clone()
+                } else if principal.tenant.len() <= MAX_TENANT_LEN {
+                    principal.tenant.clone()
+                } else {
+                    // Refusing here would change an existing failure mode on a
+                    // path that is not this change's subject; the cap is
+                    // enforced with a warning, as before.
+                    tracing::warn!(
+                        len = principal.tenant.len(),
+                        "resolved tenant over cap; falling back to the deployment-static tenant"
+                    );
+                    self.tenant.clone()
+                };
+                // The flag keeps governing SCOPES and GROUPS only. Shipping
+                // scopes by default would be a deny-side regression for an
+                // upstream whose rule is "if scopes are present, enforce them".
+                let (scopes, groups): (Vec<String>, Vec<String>) = if self.forward_principal {
                     let scopes =
                         sanitise_scopes(&principal.scopes, self.forward_scope_allowlist.as_ref());
                     // RBAC: same sanitise/cap/allowlist as scopes. Rides
                     // `triton_sender_groups`, never `roles`.
                     let groups =
                         sanitise_scopes(&principal.groups, self.forward_group_allowlist.as_ref());
-                    (tenant, scopes, groups)
+                    (scopes, groups)
                 } else {
                     // This is the exact instant the memberships disappear: a
                     // resolved sender HAS groups and the token we are about to
@@ -310,7 +328,7 @@ impl StaticUpstream {
                             "resolved sender has group memberships but principal forwarding is OFF; the minted upstream token carries no `triton_sender_groups`. An upstream that filters by group will see nothing. Set TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true (and TRITON_STATIC_UPSTREAM_GROUP_ALLOWLIST) if that is not intended. Warned once per process."
                         );
                     }
-                    (self.tenant.clone(), Vec::new(), Vec::new())
+                    (Vec::new(), Vec::new())
                 };
                 s.sign(&auds, &principal.sub, &tenant, &scopes, &groups, TOKEN_TTL)
                     .map_err(|e| TritonError::Tool(format!("mint upstream token: {e}")))
