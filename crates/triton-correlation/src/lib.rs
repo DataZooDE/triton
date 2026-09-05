@@ -247,6 +247,33 @@ fn decode_parsed(token: &str, key: &[u8], cap: usize) -> Result<CompactBodyOwned
 /// tenant's conversation is replayable by a sender in another. Binding
 /// makes the token answer "who was this for, and until when" as well as
 /// "what does it do".
+/// Mint a bound token with an ABSOLUTE expiry (unix seconds).
+///
+/// [`encode_bound`] takes a relative TTL and rounds up to the next hour,
+/// so no caller can produce an already-expired token — which meant the
+/// expiry branch could only ever be exercised through crate internals,
+/// never against a running binary (CLAUDE.md §1). This is the seam that
+/// lets an integration test present a genuinely stale token to a real
+/// adapter.
+pub fn encode_bound_at(
+    tool: &str,
+    args: &Value,
+    key: &[u8],
+    cap: usize,
+    tenant: &str,
+    exp_unix_secs: u64,
+) -> Result<String, EncodeError> {
+    if tool.is_empty() {
+        return Err(EncodeError::EmptyTool);
+    }
+    let body = CompactBody {
+        t: tool,
+        a: args,
+        x: Some(exp_unix_secs.div_ceil(3600)),
+    };
+    finish(body, &tenant_key(key, tenant), cap)
+}
+
 pub fn encode_bound(
     tool: &str,
     args: &Value,

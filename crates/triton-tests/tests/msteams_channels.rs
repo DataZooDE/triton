@@ -259,6 +259,81 @@ async fn azure_identity_refuses_to_boot_on_a_client_id_channel() {
     );
 }
 
+/// A security gate whose closed set depends on Microsoft's casing is
+/// the very assumption this branch set out to remove. `"DirectLine"`
+/// must be refused exactly like `"directline"`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_client_id_channel_refusal_is_case_insensitive() {
+    assert_boot_refused(
+        "manifest-msteams-directline-cased.yaml",
+        &["directline", "client-chosen"],
+    );
+}
+
+/// An explicitly empty `allowed_channel_ids` silently disables the
+/// adapter — every Activity refused, no error anywhere. Empty
+/// `allowed_tenants` is already a named boot error; this is the same
+/// class of fail-silent misconfiguration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_channel_allowlist_refuses_to_boot() {
+    assert_boot_refused("manifest-msteams-nochannels.yaml", &["allowed_channel_ids"]);
+}
+
+/// Spawn with `manifest` and assert the binary exits non-zero with a
+/// message containing every fragment in `must_contain`.
+fn assert_boot_refused(manifest: &str, must_contain: &[&str]) {
+    let bin = locate_triton_binary();
+    let mut child = std::process::Command::new(&bin)
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_ENV", "local")
+        .env("TRITON_MANIFEST_PATH", manifest_path(manifest))
+        .env(
+            "TRITON_MSTEAMS_OPENID_URL",
+            "https://login.botframework.com",
+        )
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn triton");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(s) => break s,
+            None if Instant::now() > deadline => {
+                let _ = child.kill();
+                panic!("{manifest} MUST refuse boot, but the binary kept running");
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    assert!(!status.success(), "must exit non-zero; got {status:?}");
+    use std::io::Read;
+    let mut out = String::new();
+    let mut err = String::new();
+    let _ = child
+        .stdout
+        .take()
+        .expect("stdout")
+        .read_to_string(&mut out);
+    let _ = child
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut err);
+    let combined = format!("{out}{err}").to_lowercase();
+    for frag in must_contain {
+        assert!(
+            combined.contains(&frag.to_lowercase()),
+            "the refusal must mention `{frag}`; got: {combined}"
+        );
+    }
+}
+
 fn locate_triton_binary() -> PathBuf {
     if let Some(p) = std::env::var_os("CARGO_BIN_EXE_triton") {
         return PathBuf::from(p);

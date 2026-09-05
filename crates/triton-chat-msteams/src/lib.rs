@@ -109,7 +109,17 @@ pub struct AzureConfig {
 /// on the user id), the id in the Activity is whatever the client sent.
 /// `webchat` and `emulator` sit on the same machinery, and Copilot
 /// Studio's test canvas is Direct Line underneath.
-const CLIENT_CHOSEN_ID_CHANNELS: &[&str] = &["directline", "webchat", "emulator"];
+/// Lowercase; compared case-insensitively. `directlinespeech` is the
+/// same Direct Line machinery with a speech front end, and `emulator`
+/// and `test` are developer surfaces where the id is whatever the tool
+/// sends.
+const CLIENT_CHOSEN_ID_CHANNELS: &[&str] = &[
+    "directline",
+    "directlinespeech",
+    "webchat",
+    "emulator",
+    "test",
+];
 
 fn default_allowed_channel_ids() -> Vec<String> {
     vec!["msteams".to_string()]
@@ -316,7 +326,7 @@ impl MsTeamsAdapter {
                     .resolve(cfg_field)
                     .await
                     .map_err(|e| BuildError::Resolve("identity.azure_identity", e))?;
-                let cfg: AzureConfig = serde_json::from_str(&cfg_json)
+                let mut cfg: AzureConfig = serde_json::from_str(&cfg_json)
                     .map_err(|e| BuildError::TableParse(e.to_string()))?;
                 // Fail closed: an empty allowlist is not cross-tenant
                 // isolation. A single-tenant deployment lists its one
@@ -332,6 +342,23 @@ impl MsTeamsAdapter {
                 // nobody has verified — serving those channels needs an
                 // identity mode that does not read the principal off the
                 // body (`sender_table` or `upstream`).
+                // Normalised once, here: comparing case-sensitively would
+                // make the gate depend on Microsoft's serialisation
+                // matching the operator's spelling — the class of
+                // unverified assumption this whole change exists to
+                // remove. `"DirectLine"` must be refused exactly like
+                // `"directline"`.
+                cfg.allowed_channel_ids
+                    .iter_mut()
+                    .for_each(|c| *c = c.trim().to_ascii_lowercase());
+                if cfg.allowed_channel_ids.is_empty() {
+                    return Err(BuildError::Unsupported(
+                        "identity.azure_identity `allowed_channel_ids` is present but empty; \
+                         that refuses every Activity while looking configured. Omit the field \
+                         for the Teams-only default, or name the channels this adapter serves."
+                            .into(),
+                    ));
+                }
                 if let Some(bad) = cfg
                     .allowed_channel_ids
                     .iter()
@@ -826,7 +853,13 @@ fn resolve_sender(
             // An absent or empty `channelId` matches nothing and is
             // therefore refused, never treated as a wildcard.
             let channel = activity.channel_id.as_deref().unwrap_or_default();
-            if !cfg.allowed_channel_ids.iter().any(|c| c == channel) {
+            // `allowed_channel_ids` was lowercased at build time; fold the
+            // inbound too so the gate cannot turn on Microsoft's casing.
+            if !cfg
+                .allowed_channel_ids
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(channel))
+            {
                 record_rejection(
                     adapter,
                     "-",

@@ -251,6 +251,45 @@ async fn action_submit_callback_posts_a_reply() {
     assert_eq!(count_dispatches(&proc, "narrate"), 2);
 }
 
+/// #250: expiry is half the headline of the token binding, and until
+/// now it had never fired inside a running binary — `encode_bound` only
+/// takes a relative TTL and rounds UP, so no caller could mint a stale
+/// token and the branch was only reachable through crate internals.
+/// `encode_bound_at` is the seam; this drives a genuinely expired token
+/// at the real adapter.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_expired_card_token_is_rejected() {
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&fake)).await;
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+
+    let stale = triton_correlation::encode_bound_at(
+        "narrate",
+        &json!({ "subject": "alice" }),
+        b"correlation-key-for-test",
+        1536,
+        "acme",
+        // Two hours ago, so it is stale even at hour granularity.
+        (now_unix() as u64) - 2 * 3600,
+    )
+    .expect("encode stale token");
+
+    let jwt = fake.sign_jwt(good_claims(&fake));
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&invoke_activity(&stale))
+        .send()
+        .await
+        .expect("POST invoke");
+    assert_eq!(resp.status(), 401, "an expired card token must 401");
+    assert_eq!(
+        count_dispatches(&proc, "narrate"),
+        0,
+        "and must never re-dispatch the tool"
+    );
+}
+
 /// #250: a card action token is a bearer capability. A card rendered
 /// into one tenant's conversation is visible to everyone in it and in
 /// the client's network trace, so without a tenant binding a sender in
