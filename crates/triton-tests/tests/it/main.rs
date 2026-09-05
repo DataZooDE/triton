@@ -92,6 +92,8 @@ mod optional_adapters;
 mod outbound;
 #[path = "../outbound_issuer.rs"]
 mod outbound_issuer;
+#[path = "../pairing_authz.rs"]
+mod pairing_authz;
 #[path = "../process_liveness.rs"]
 mod process_liveness;
 #[path = "../rasterizer.rs"]
