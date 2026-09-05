@@ -173,7 +173,7 @@ pub struct MsTeamsAdapter {
     audience: String,
     /// HMAC key signing/verifying the correlation tokens on Adaptive
     /// Card actions and the inbound callback (issue #155).
-    correlation_key: Vec<u8>,
+    correlation_key: triton_correlation::KeyRing,
     identity: IdentityMode,
     /// Manifest `tool`: where plain inbound text dispatches (default
     /// `echo`). Commands (`/narrate` etc.) keep their special routes.
@@ -420,11 +420,16 @@ impl MsTeamsAdapter {
             }
         };
 
-        let correlation_key = resolver
-            .resolve(&adapter.correlation_key)
-            .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?
-            .into_bytes();
+        // #287: a comma-separated RING — signed with the first key,
+        // verified against all — so the key can be rotated without
+        // invalidating every button already in a conversation.
+        let correlation_key = triton_correlation::KeyRing::parse(
+            &resolver
+                .resolve(&adapter.correlation_key)
+                .await
+                .map_err(|e| BuildError::Resolve("correlation_key", e))?,
+        )
+        .map_err(BuildError::CorrelationKey)?;
 
         // Adapter-wide rate limit is the DoS floor (10x headroom
         // over per-tenant). Same rationale as Telegram/Discord —
@@ -571,6 +576,10 @@ enum OutboundCredential {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #287: the resolved `correlation_key` secret is a
+    /// comma-separated ring; nothing usable survived parsing it.
+    #[error("correlation_key: {0}")]
+    CorrelationKey(#[source] triton_correlation::KeyRingError),
     #[error("adapter is not declared `kind: ms_teams`")]
     WrongKind,
     #[error("msteams adapter limitation: {0}")]
@@ -1080,7 +1089,7 @@ async fn handle_callback(
     // and audited as `error:auth`, never re-dispatched.
     // #250: verified against the SENDER's tenant, so a token minted into
     // another tenant's conversation cannot be replayed here.
-    let (tool_name, mut args) = match triton_correlation::decode_bound(
+    let (tool_name, mut args) = match triton_correlation::decode_bound_any(
         &token,
         &adapter.correlation_key,
         surface_mapper::MSTEAMS_CORRELATION_CAP,
@@ -1469,7 +1478,7 @@ fn report_image_url(adapter: &MsTeamsAdapter, rargs: &Value, tenant: &str) -> Op
     let token = triton_correlation::encode_with_cap(
         RENDER_REPORT_IMG_MARKER,
         &payload,
-        &adapter.correlation_key,
+        adapter.correlation_key.signing(),
         IMG_TOKEN_CAP,
     )
     .ok()?;
@@ -1495,7 +1504,7 @@ async fn serve_report_png(
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Response {
     let Ok((marker, payload)) =
-        triton_correlation::decode_with_cap(&token, &adapter.correlation_key, IMG_TOKEN_CAP)
+        triton_correlation::decode_with_cap_any(&token, &adapter.correlation_key, IMG_TOKEN_CAP)
     else {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     };
@@ -1598,7 +1607,7 @@ fn render_card_content(
             match triton_correlation::encode_bound(
                 spec.tool(),
                 &spec.base_args(),
-                &adapter.correlation_key,
+                adapter.correlation_key.signing(),
                 surface_mapper::MSTEAMS_CORRELATION_CAP,
                 "msteams",
                 tenant,

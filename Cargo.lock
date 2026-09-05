@@ -2599,6 +2599,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "triton-core",
+ "triton-correlation",
  "triton-manifest",
  "triton-secrets",
  "uuid",

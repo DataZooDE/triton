@@ -100,7 +100,7 @@ pub struct SenderClaims {
 pub struct DiscordAdapter {
     name: String,
     verifying_key: VerifyingKey,
-    correlation_key: Vec<u8>,
+    correlation_key: triton_correlation::KeyRing,
     sender_table: HashMap<String, SenderClaims>,
     dispatcher: Arc<Dispatcher>,
     rate_limit: triton_core::ratelimit::TokenBucket,
@@ -180,11 +180,16 @@ impl DiscordAdapter {
         let sender_table: HashMap<String, SenderClaims> =
             serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
 
-        let correlation_key = resolver
-            .resolve(&adapter.correlation_key)
-            .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?
-            .into_bytes();
+        // #287: a comma-separated RING — signed with the first key,
+        // verified against all — so the key can be rotated without
+        // invalidating every button already in a conversation.
+        let correlation_key = triton_correlation::KeyRing::parse(
+            &resolver
+                .resolve(&adapter.correlation_key)
+                .await
+                .map_err(|e| BuildError::Resolve("correlation_key", e))?,
+        )
+        .map_err(BuildError::CorrelationKey)?;
 
         // PR 28: see triton-chat-telegram for the 10x headroom
         // rationale (adapter-wide is DoS-floor, per-tenant is
@@ -224,6 +229,10 @@ impl DiscordAdapter {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #287: the resolved `correlation_key` secret is a
+    /// comma-separated ring; nothing usable survived parsing it.
+    #[error("correlation_key: {0}")]
+    CorrelationKey(#[source] triton_correlation::KeyRingError),
     #[error("adapter is not declared `kind: discord`")]
     WrongKind,
     #[error("PR 22 limitation: {0}")]
@@ -468,7 +477,7 @@ async fn handle_message_component(
 
     // #250: verified against the CLICKER's tenant, so a component token
     // minted into another tenant's channel cannot be replayed here.
-    let (tool_name, mut args) = match triton_correlation::decode_bound(
+    let (tool_name, mut args) = match triton_correlation::decode_bound_any(
         token,
         &adapter.correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
@@ -624,7 +633,7 @@ async fn handle_message_component(
             // existing path where Form defers.
             if let Some(form_result) = surface_mapper::try_render_form_modal(
                 &dispatch.result,
-                &adapter.correlation_key,
+                adapter.correlation_key.signing(),
                 &principal_for_post.tenant,
             ) {
                 match form_result {
@@ -650,7 +659,7 @@ async fn handle_message_component(
             }
             match surface_mapper::try_render_surface(
                 &dispatch.result,
-                &adapter.correlation_key,
+                adapter.correlation_key.signing(),
                 &principal_for_post.tenant,
             ) {
                 Some(Ok(rendered)) => {
@@ -856,7 +865,7 @@ async fn handle_application_command(
             // existing path where Form defers.
             if let Some(form_result) = surface_mapper::try_render_form_modal(
                 &dispatch.result,
-                &adapter.correlation_key,
+                adapter.correlation_key.signing(),
                 &principal_for_post.tenant,
             ) {
                 match form_result {
@@ -882,7 +891,7 @@ async fn handle_application_command(
             }
             match surface_mapper::try_render_surface(
                 &dispatch.result,
-                &adapter.correlation_key,
+                adapter.correlation_key.signing(),
                 &principal_for_post.tenant,
             ) {
                 Some(Ok(rendered)) => {
@@ -1039,7 +1048,7 @@ async fn handle_modal_submit(
     // #250: verified against the SUBMITTER's tenant, like the button and
     // select paths — a modal custom_id captured from another tenant's
     // card must not be replayable here.
-    let (tool_name, mut args) = match triton_correlation::decode_bound(
+    let (tool_name, mut args) = match triton_correlation::decode_bound_any(
         token,
         &adapter.correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
@@ -1171,7 +1180,7 @@ async fn handle_modal_submit(
         Ok(dispatch) => {
             match surface_mapper::try_render_surface(
                 &dispatch.result,
-                &adapter.correlation_key,
+                adapter.correlation_key.signing(),
                 &principal_for_post.tenant,
             ) {
                 Some(Ok(rendered)) => {

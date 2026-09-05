@@ -28,6 +28,8 @@ mod audit_reject_coalescing;
 mod audit_retrieval;
 #[path = "../consumer_smoke.rs"]
 mod consumer_smoke;
+#[path = "../correlation_rotation.rs"]
+mod correlation_rotation;
 #[path = "../cors.rs"]
 mod cors;
 #[path = "../demo_panel.rs"]
@@ -116,6 +118,7 @@ mod streaming;
 mod surface_render;
 #[path = "../telegram.rs"]
 mod telegram;
+
 #[path = "../telegram_callback.rs"]
 mod telegram_callback;
 #[path = "../telegram_courier.rs"]

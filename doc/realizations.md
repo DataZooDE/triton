@@ -1606,3 +1606,22 @@ a trap the next developer should not have to step in.
   3.44.4; a local 3.47.1 rewrites `apps/explorer/analysis_options.yaml`
   (adding an `analyzer: exclude:` block) on `pub get`. Harmless, but it
   shows up as an unrelated modified file in the diff.
+
+- **A secret that cannot be rotated without an outage is a secret that never
+  gets rotated.** `correlation_key` was one value used to both sign and
+  verify, so changing it invalidated every token in flight: every button
+  already sitting in a conversation stopped responding on the deploy that
+  rotated it. Nothing was broken, exactly — the failure mode was that the
+  operation was too expensive to ever perform, which is how a compromised
+  key becomes permanent.
+
+  The fix is a ring — `new,old`, sign with the first, verify against all —
+  and the ordering is the load-bearing part: were the LAST key the signer,
+  dropping the old one would change what gets minted and the window would
+  never close. Two things had to come along for the ring to be honest.
+  Unbound tokens (report images, dashboard PNGs) rotate on the same secret,
+  so they needed a ring-aware decode too or every card image would 404 on
+  the rotating deploy. And an expiry failure has to short-circuit the loop:
+  if key A's MAC passes and only the body is stale, trying key B and
+  reporting its `BadSignature` tells an operator their rotation broke when
+  in fact the token simply timed out.

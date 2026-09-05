@@ -423,6 +423,155 @@ fn compute_truncated_hmac(body: &[u8], key: &[u8]) -> Vec<u8> {
     full[..HMAC_LEN].to_vec()
 }
 
+/// The set of correlation keys a deployment will accept, newest first.
+///
+/// #287: before this, `correlation_key` was one value used to both sign
+/// and verify, so changing it invalidated every token in flight — every
+/// button already sitting in a conversation stopped responding on the
+/// deploy that rotated it. Faced with "rotate and break every live
+/// button", nobody rotates, and a key nobody can rotate is a key nobody
+/// can recover from once it leaks.
+///
+/// A ring makes rotation a three-step operation with no broken window:
+///
+/// 1. prepend the new key — `new,old`;
+/// 2. deploy: new tokens are signed with `new`, old ones still verify;
+/// 3. once every token minted under `old` has expired, drop it.
+///
+/// The FIRST key signs. That ordering is the operator-facing contract
+/// and it is what makes step 3 finite: were the last key the signer,
+/// dropping the old one would change what gets minted and the window
+/// would never close.
+///
+/// The ring holds SECRETS, so it deliberately implements neither
+/// `Debug` nor `Display` — a key that reaches a log line is a key that
+/// has to be rotated, and the whole point here is to make that rare.
+#[derive(Clone)]
+pub struct KeyRing {
+    keys: Vec<Vec<u8>>,
+}
+
+impl KeyRing {
+    /// Parse an operator-supplied secret: one key, or several separated
+    /// by commas during a rotation. Surrounding whitespace is trimmed
+    /// (a list gets pasted as `new, old` far more often than not) and
+    /// empty entries are dropped, so a trailing comma is not a key.
+    ///
+    /// Fails when nothing survives: an empty ring would verify nothing
+    /// and, worse, sign with a key that does not exist.
+    pub fn parse(spec: &str) -> Result<Self, KeyRingError> {
+        let keys: Vec<Vec<u8>> = spec
+            .split(',')
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(|k| k.as_bytes().to_vec())
+            .collect();
+        if keys.is_empty() {
+            return Err(KeyRingError::Empty);
+        }
+        Ok(Self { keys })
+    }
+
+    /// A ring of exactly one key — the shape every caller had before
+    /// rotation existed, and what tests mint under.
+    pub fn single(key: impl Into<Vec<u8>>) -> Self {
+        Self {
+            keys: vec![key.into()],
+        }
+    }
+
+    /// The key new tokens are signed with: the first on the ring.
+    pub fn signing(&self) -> &[u8] {
+        &self.keys[0]
+    }
+
+    /// Every key a token may have been minted under, newest first.
+    pub fn verifying(&self) -> impl Iterator<Item = &[u8]> {
+        self.keys.iter().map(Vec::as_slice)
+    }
+
+    /// How many keys are on the ring. Operators see this in a boot log
+    /// line: a ring left at 2 forever is an unfinished rotation.
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false // `parse` and `single` both refuse to build an empty ring.
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum KeyRingError {
+    #[error("correlation key list is empty; at least one key is required")]
+    Empty,
+}
+
+/// Try `verify` under each key on the ring, newest first.
+///
+/// Returns the first success. On failure it returns the error from the
+/// FIRST key that got far enough to decode a body — an expiry failure
+/// means that key's MAC passed, which is a strictly more informative
+/// verdict than the `BadSignature` every other key will produce, and
+/// reporting it keeps "your button timed out" distinguishable from
+/// "your button was signed with a key we dropped".
+fn try_ring<T>(
+    ring: &KeyRing,
+    verify: impl Fn(&[u8]) -> Result<T, DecodeError>,
+) -> Result<T, DecodeError> {
+    let mut first_error: Option<DecodeError> = None;
+    for key in ring.verifying() {
+        match verify(key) {
+            Ok(v) => return Ok(v),
+            // The MAC passed under this key and the BODY was the
+            // problem (expired, unparseable). No other key can do
+            // better, so stop and report it.
+            Err(e @ DecodeError::Body(_)) => return Err(e),
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+    Err(first_error.unwrap_or(DecodeError::BadSignature))
+}
+
+/// [`decode_bound`] against every key on the ring.
+pub fn decode_bound_any(
+    token: &str,
+    ring: &KeyRing,
+    cap: usize,
+    platform: &str,
+    tenant: &str,
+) -> Result<(String, Value), DecodeError> {
+    try_ring(ring, |key| decode_bound(token, key, cap, platform, tenant))
+}
+
+/// [`verify_tenant_binding`] against every key on the ring.
+pub fn verify_tenant_binding_any(
+    token: &str,
+    ring: &KeyRing,
+    cap: usize,
+    platform: &str,
+    tenant: &str,
+) -> Result<(), DecodeError> {
+    try_ring(ring, |key| {
+        verify_tenant_binding(token, key, cap, platform, tenant)
+    })
+}
+
+/// [`decode_with_cap`] against every key on the ring. Used by the
+/// UNBOUND tokens — report images, dashboard PNGs — which carry no
+/// tenant binding but rotate on the same schedule as everything else.
+pub fn decode_with_cap_any(
+    token: &str,
+    ring: &KeyRing,
+    cap: usize,
+) -> Result<(String, Value), DecodeError> {
+    try_ring(ring, |key| decode_with_cap(token, key, cap))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
     #[error("tool name must not be empty")]
@@ -451,6 +600,107 @@ pub enum DecodeError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    const OLD: &[u8] = b"an-old-correlation-key-32-bytes!";
+    const NEW: &[u8] = b"a-new-correlation-key-32-bytes!!";
+
+    #[test]
+    fn the_first_key_signs_and_every_key_verifies() {
+        let ring = KeyRing::parse("new-key,old-key").expect("two keys");
+        assert_eq!(ring.signing(), b"new-key");
+        assert_eq!(ring.len(), 2);
+        assert_eq!(
+            ring.verifying().collect::<Vec<_>>(),
+            vec![b"new-key".as_slice(), b"old-key".as_slice()],
+        );
+    }
+
+    #[test]
+    fn a_pasted_list_is_trimmed_and_a_trailing_comma_is_not_a_key() {
+        let ring = KeyRing::parse(" new , old ,").expect("parses");
+        assert_eq!(ring.len(), 2, "the empty tail entry is not a key");
+        assert_eq!(ring.signing(), b"new");
+        // The whitespace really is gone — not merely counted away.
+        assert_eq!(ring.verifying().nth(1).unwrap(), b"old");
+    }
+
+    #[test]
+    fn an_empty_spec_is_refused_rather_than_silently_signing_with_nothing() {
+        assert!(KeyRing::parse("").is_err());
+        assert!(KeyRing::parse("   ").is_err());
+        assert!(KeyRing::parse(",,,").is_err());
+        assert!(KeyRing::parse(" , ").is_err());
+    }
+
+    #[test]
+    fn a_token_minted_under_a_dropped_key_stops_verifying() {
+        let token =
+            encode_bound("narrate", &json!({}), OLD, 200, "telegram", "acme", None).expect("fits");
+
+        let during = KeyRing {
+            keys: vec![NEW.to_vec(), OLD.to_vec()],
+        };
+        assert!(decode_bound_any(&token, &during, 200, "telegram", "acme").is_ok());
+
+        let after = KeyRing::single(NEW);
+        assert!(
+            matches!(
+                decode_bound_any(&token, &after, 200, "telegram", "acme"),
+                Err(DecodeError::BadSignature)
+            ),
+            "dropping the key must close the window",
+        );
+    }
+
+    #[test]
+    fn the_ring_does_not_widen_the_tenant_binding() {
+        // Every key on the ring still derives a per-tenant key, so a
+        // ring is not a way to smuggle a foreign-tenant token through.
+        let token = encode_bound("narrate", &json!({}), OLD, 200, "telegram", "globex", None)
+            .expect("fits");
+        let ring = KeyRing {
+            keys: vec![NEW.to_vec(), OLD.to_vec()],
+        };
+        assert!(decode_bound_any(&token, &ring, 200, "telegram", "acme").is_err());
+    }
+
+    #[test]
+    fn an_expired_token_reports_expiry_not_a_signature_mismatch() {
+        // The MAC passes under the second key; only the body is stale.
+        // Reporting `BadSignature` there would tell an operator their
+        // rotation broke when in fact the token simply timed out.
+        let long_ago = 1_000_000; // ~1970
+        let token = encode_bound_at(
+            "narrate",
+            &json!({}),
+            OLD,
+            200,
+            "telegram",
+            "acme",
+            long_ago,
+        )
+        .expect("fits");
+        let ring = KeyRing {
+            keys: vec![NEW.to_vec(), OLD.to_vec()],
+        };
+        match decode_bound_any(&token, &ring, 200, "telegram", "acme") {
+            Err(DecodeError::Body(m)) => assert!(m.contains("expired"), "{m}"),
+            other => panic!("expected an expiry verdict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unbound_tokens_rotate_on_the_same_ring() {
+        // Report images and dashboard PNGs carry no tenant binding but
+        // are signed with the same secret, so they must survive a
+        // rotation too — otherwise every card image 404s on deploy.
+        let token = encode_with_cap("__img", &json!({ "a": 1 }), OLD, 4096).expect("fits");
+        let ring = KeyRing {
+            keys: vec![NEW.to_vec(), OLD.to_vec()],
+        };
+        let (marker, _) = decode_with_cap_any(&token, &ring, 4096).expect("verifies");
+        assert_eq!(marker, "__img");
+    }
 
     const KEY: &[u8] = b"test-correlation-key-32-bytes!!!";
 

@@ -50,6 +50,29 @@ a `vault://` ref now fails boot closed. Literals are refused outside
 manifest comments), e.g. `triton-whatsapp-app-secret`,
 `triton-telegram-bot-token`, `triton-*-correlation-key`, …
 
+### Rotating a correlation key (triton #287)
+
+`triton-*-correlation-key` accepts a **comma-separated list**. Tokens are
+signed with the FIRST key and verified against every key on the list, so a
+rotation never breaks the buttons already sitting in people's
+conversations:
+
+```
+# 1. Prepend the new key. Both values live in the one secret.
+triton-telegram-correlation-key = "<new>,<old>"
+# 2. Deploy. New buttons are signed with <new>; old ones still verify.
+# 3. Wait out the longest token TTL (cards: 24h; leave a day's margin),
+#    then drop <old> and deploy again.
+triton-telegram-correlation-key = "<new>"
+```
+
+Step 3 is what actually revokes the old key — until it runs, the old key
+is still accepted. A ring left at two keys is an unfinished rotation.
+
+Whitespace around each key is trimmed, so `<new>, <old>` is fine. A list
+from which no key survives (`""`, `" , "`) refuses boot rather than
+starting an adapter that can verify nothing.
+
 ## Upstream agents — `TRITON_STATIC_UPSTREAMS` (no Consul)
 
 Triton routes a tool name to a fixed `host:port` from the static map:
