@@ -51,6 +51,18 @@ impl TokenBucket {
         }
     }
 
+    /// True when the bucket has refilled to capacity — i.e. it holds no
+    /// throttle state anyone would lose. Used to pick an eviction victim
+    /// that cannot be turned into a reset (#250).
+    pub fn is_replenished(&self) -> bool {
+        let now = Instant::now();
+        let mut state = self.state.lock().expect("ratelimit mutex poisoned");
+        let elapsed = now.duration_since(state.last_refill).as_secs_f64();
+        state.tokens = (state.tokens + elapsed * self.rate).min(self.burst);
+        state.last_refill = now;
+        state.tokens >= self.burst
+    }
+
     /// Try to consume one token from the bucket. Returns `Ok(())`
     /// on admission, `Err(retry_after_secs)` on refusal with the
     /// number of seconds the caller would have to wait for a
@@ -85,16 +97,37 @@ impl TokenBucket {
 /// per-tenant bucket on top so one noisy tenant can't starve
 /// others sharing the same adapter quota.
 ///
-/// Memory: one `TokenBucket` per distinct tenant that's been
-/// seen, created lazily. The sender_table is fixed at boot so
-/// the cardinality is bounded by the manifest, not by inbound
-/// traffic — there's no per-request allocation pressure past
-/// the first message from each tenant.
+/// Memory: one `TokenBucket` per distinct tenant that's been seen,
+/// created lazily, capped at [`MAX_TENANT_BUCKETS`].
+///
+/// The cap is not decoration. This originally documented the
+/// cardinality as "bounded by the manifest, not by inbound traffic",
+/// which held for `sender_table` — tenants enumerated at boot — and was
+/// false for FR-I-7 `upstream`, where an out-of-process resolver names
+/// the tenant per request (#250). Validating the resolver reply at the
+/// boundary keeps hostile values out, but a merely buggy resolver, or a
+/// legitimately large tenant estate, still grows the map for the life of
+/// the process. An invariant a type claims should hold in the type.
+///
+/// Eviction is oldest-first by last use, and deliberately does NOT reset
+/// a bucket: see [`PerTenantBuckets::try_take`].
+/// Ceiling on distinct tenant buckets held at once. Far above any real
+/// estate, low enough that an unbounded key source cannot exhaust
+/// memory.
+pub const MAX_TENANT_BUCKETS: usize = 4096;
+
 #[derive(Debug)]
 pub struct PerTenantBuckets {
     rate: u32,
     burst: u32,
-    buckets: std::sync::Mutex<std::collections::HashMap<String, TokenBucket>>,
+    buckets: std::sync::Mutex<std::collections::HashMap<String, Tracked>>,
+}
+
+#[derive(Debug)]
+struct Tracked {
+    bucket: TokenBucket,
+    /// Last time this tenant was seen, for oldest-first eviction.
+    last_used: Instant,
 }
 
 impl PerTenantBuckets {
@@ -110,15 +143,64 @@ impl PerTenantBuckets {
     /// `tenant`. Same return shape as `TokenBucket::try_take`:
     /// `Ok(())` on admission, `Err(retry_after_secs)` on refusal.
     /// The bucket for `tenant` is created on first use.
+    /// Try to consume one token from the bucket dedicated to
+    /// `tenant`. Same return shape as `TokenBucket::try_take`:
+    /// `Ok(())` on admission, `Err(retry_after_secs)` on refusal.
+    /// The bucket for `tenant` is created on first use.
+    ///
+    /// When the map is full, a bucket is evicted to make room — but only
+    /// one that has refilled to capacity, and so holds no throttle state
+    /// to lose. Evicting a DEPLETED bucket would be a reset: the tenant
+    /// reappears with a full allowance. That is reachable, because an
+    /// attacker who can name tenants floods the map with fresh names and
+    /// pushes the throttled victim out — the eviction victim is not the
+    /// attacker, as an earlier version of this comment wrongly claimed;
+    /// a caller naming a new key each time is never the least recently
+    /// used.
+    ///
+    /// So: evict the least recently used REPLENISHED bucket, and when
+    /// every bucket is still owed something, refuse the newcomer rather
+    /// than make room. Fail closed — under a flood where everyone is
+    /// throttled, a new tenant waits.
     pub fn try_take(&self, tenant: &str) -> Result<(), f64> {
+        let now = Instant::now();
         let mut buckets = self
             .buckets
             .lock()
             .expect("per-tenant rate-limit mutex poisoned");
-        let bucket = buckets
+        if buckets.len() >= MAX_TENANT_BUCKETS && !buckets.contains_key(tenant) {
+            let victim = buckets
+                .iter()
+                .filter(|(k, t)| k.as_str() != tenant && t.bucket.is_replenished())
+                .min_by_key(|(_, t)| t.last_used)
+                .map(|(k, _)| k.clone());
+            match victim {
+                Some(v) => {
+                    buckets.remove(&v);
+                }
+                // Every tracked tenant is still owed tokens. Admitting
+                // this one would mean evicting throttle state, which is
+                // the bypass. Refuse instead.
+                None => return Err(1.0),
+            }
+        }
+        let tracked = buckets
             .entry(tenant.to_string())
-            .or_insert_with(|| TokenBucket::new(self.rate, self.burst));
-        bucket.try_take()
+            .or_insert_with(|| Tracked {
+                bucket: TokenBucket::new(self.rate, self.burst),
+                last_used: now,
+            });
+        tracked.last_used = now;
+        tracked.bucket.try_take()
+    }
+
+    /// How many tenant buckets are currently held. For tests and
+    /// diagnostics; never a decision input.
+    pub fn tracked_tenants(&self) -> usize {
+        self.buckets
+            .lock()
+            .expect("per-tenant rate-limit mutex poisoned")
+            .len()
     }
 }
 
@@ -290,6 +372,47 @@ mod tests {
         assert!(b.try_take("beta").is_err());
         // alpha hasn't been refilled in the meantime.
         assert!(b.try_take("alpha").is_err());
+    }
+
+    /// #250: the type's doc-comment promised "the cardinality is bounded
+    /// by the manifest, not by inbound traffic". That was true for
+    /// `sender_table`, where tenants are enumerated at boot — and false
+    /// for FR-I-7 `upstream`, where an out-of-process resolver names the
+    /// tenant per request. Validation at the resolver boundary keeps
+    /// hostile values out, but a resolver that is merely buggy, or a
+    /// legitimately large tenant estate, still grows the map for the
+    /// life of the process. The invariant has to hold in the type, not
+    /// only in its callers.
+    #[test]
+    fn the_bucket_map_is_bounded_regardless_of_what_callers_pass() {
+        let b = PerTenantBuckets::new(100, 100);
+        for i in 0..(MAX_TENANT_BUCKETS * 3) {
+            let _ = b.try_take(&format!("tenant-{i}"));
+        }
+        assert!(
+            b.tracked_tenants() <= MAX_TENANT_BUCKETS,
+            "map grew to {} entries",
+            b.tracked_tenants()
+        );
+    }
+
+    /// Eviction must not become a bypass: a tenant that has just been
+    /// refused must not get a fresh, full bucket by pushing itself out
+    /// of the map and back in.
+    #[test]
+    fn eviction_does_not_hand_out_a_fresh_bucket_to_a_throttled_tenant() {
+        let b = PerTenantBuckets::new(0, 1);
+        assert!(b.try_take("victim").is_ok());
+        assert!(b.try_take("victim").is_err(), "bucket now empty");
+        // Flood the map so `victim` is a candidate for eviction.
+        for i in 0..(MAX_TENANT_BUCKETS * 2) {
+            let _ = b.try_take(&format!("noise-{i}"));
+        }
+        assert!(
+            b.try_take("victim").is_err(),
+            "a throttled tenant must not regain a full bucket by \
+             flooding the map"
+        );
     }
 
     #[test]
