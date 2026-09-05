@@ -305,6 +305,16 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
         .map(|h| h.contains(triton_core::a2ui::ge::EXTENSION_URI))
         .unwrap_or(false);
 
+    // DIAGNOSTIC: raw inbound body to stdout to inspect the surfaceId +
+    // sourceComponentId GE echoes on a card button click (does GE truncate a
+    // long surfaceId?).
+    {
+        use std::io::Write as _;
+        let mut o = std::io::stdout().lock();
+        let _ = writeln!(o, "A2A_INBOUND_BODY {}", String::from_utf8_lossy(&body));
+        let _ = o.flush();
+    }
+
     let req: RpcRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return rpc_error(&Value::Null, PARSE_ERROR, format!("invalid JSON: {e}")),
