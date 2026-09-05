@@ -548,14 +548,26 @@ struct GoogleTokenInfo {
 }
 
 fn json_is_true(v: Option<&serde_json::Value>) -> bool {
-    matches!(v, Some(serde_json::Value::Bool(true)))
-        || matches!(v, Some(serde_json::Value::String(s)) if s == "true")
+    match v {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => {
+            let t = s.trim();
+            t.eq_ignore_ascii_case("true") || t == "1"
+        }
+        Some(serde_json::Value::Number(n)) => n.as_i64() == Some(1),
+        _ => false,
+    }
 }
 
 fn json_as_i64(v: Option<&serde_json::Value>) -> Option<i64> {
     match v {
-        Some(serde_json::Value::Number(n)) => n.as_i64(),
-        Some(serde_json::Value::String(s)) => s.parse().ok(),
+        Some(serde_json::Value::Number(n)) => n.as_i64().or_else(|| n.as_f64().map(|f| f as i64)),
+        Some(serde_json::Value::String(s)) => {
+            let t = s.trim();
+            t.parse::<i64>()
+                .ok()
+                .or_else(|| t.parse::<f64>().ok().map(|f| f as i64))
+        }
         _ => None,
     }
 }
@@ -565,6 +577,8 @@ fn json_as_i64(v: Option<&serde_json::Value>) -> Option<i64> {
 struct GoogleIdentity {
     sub: String,
     scopes: Vec<String>,
+    /// Token expiry (unix secs) — used to bound the cache TTL.
+    exp: i64,
 }
 
 /// Pure, fail-closed validation of a tokeninfo response against the configured
@@ -598,7 +612,18 @@ fn validate_google_tokeninfo(
     // (3) Hosted-domain boundary (mirrors ADR-0017 pair-1). Prefer the `hd`
     // claim; fall back to the email domain when `hd` is absent.
     if let Some(hd) = allowed_hd {
-        let domain_ok = info.hd.as_deref() == Some(hd) || email.rsplit('@').next() == Some(hd);
+        // The `hd` (Workspace hosted-domain) claim is AUTHORITATIVE when
+        // present: a conflicting `hd` is rejected even if the email domain
+        // matches (aliases/vanity domains make the email domain only a
+        // heuristic). Fall back to the email domain ONLY when `hd` is absent.
+        // Case-insensitive (DNS labels are).
+        let domain_ok = match info.hd.as_deref() {
+            Some(h) => h.trim().eq_ignore_ascii_case(hd),
+            None => email
+                .rsplit('@')
+                .next()
+                .is_some_and(|d| d.eq_ignore_ascii_case(hd)),
+        };
         if !domain_ok {
             return Err(TritonError::Auth(
                 "google access token is outside the allowed domain".into(),
@@ -621,6 +646,7 @@ fn validate_google_tokeninfo(
     Ok(GoogleIdentity {
         sub: email.to_string(),
         scopes,
+        exp,
     })
 }
 
@@ -647,10 +673,15 @@ impl GoogleAccessTokenVerifier {
     pub fn new(audience: impl Into<String>, allowed_hd: Option<String>) -> Self {
         Self {
             audience: audience.into(),
-            allowed_hd: allowed_hd.filter(|d| !d.trim().is_empty()),
+            allowed_hd: allowed_hd
+                .map(|d| d.trim().to_ascii_lowercase())
+                .filter(|d| !d.is_empty()),
             tokeninfo_url: GOOGLE_TOKENINFO_URL.to_string(),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(3))
+                // The bearer rides in the query string, so a redirect would
+                // replay it to the target — never follow one (crew F3).
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .expect("reqwest client"),
             cache: RwLock::new(HashMap::new()),
@@ -663,6 +694,9 @@ impl GoogleAccessTokenVerifier {
     }
 
     /// Test-only: point introspection at a local fake tokeninfo server.
+    /// Compiled out of release builds so it can never be wired to an env
+    /// var (SSRF footgun — crew F9).
+    #[cfg(test)]
     pub fn with_tokeninfo_url(mut self, url: impl Into<String>) -> Self {
         self.tokeninfo_url = url.into();
         self
@@ -678,21 +712,29 @@ impl GoogleAccessTokenVerifier {
             .query(&[("access_token", raw_token)])
             .send()
             .await
-            .map_err(|e| TritonError::Auth(format!("google tokeninfo request failed: {e}")))?;
+            .map_err(|e| {
+                // reqwest's Display embeds the request URL, which carries the
+                // `?access_token=` bearer — strip it before it reaches logs or
+                // the client error body (crew F2).
+                tracing::warn!(error = %e.without_url(), "google tokeninfo request failed");
+                TritonError::Auth("google tokeninfo request failed".into())
+            })?;
         if !resp.status().is_success() {
             // 400 = invalid/expired token; any non-2xx is a fail-closed reject.
             return Err(TritonError::Auth(
                 "google access token rejected by tokeninfo".into(),
             ));
         }
-        let info: GoogleTokenInfo = resp
-            .json()
-            .await
-            .map_err(|e| TritonError::Auth(format!("google tokeninfo decode failed: {e}")))?;
+        let info: GoogleTokenInfo = resp.json().await.map_err(|e| {
+            tracing::warn!(error = %e.without_url(), "google tokeninfo decode failed");
+            TritonError::Auth("google tokeninfo decode failed".into())
+        })?;
         let now = now_unix();
         let id = validate_google_tokeninfo(&info, &self.audience, self.allowed_hd.as_deref(), now)?;
-        let exp = json_as_i64(info.exp.as_ref()).unwrap_or(now);
-        let ttl = (exp - now).clamp(0, 300) as u64;
+        // Cache for min(remaining lifetime, 5 min). A token revoked at Google
+        // stays admitted for up to this window (crew F6 — documented tradeoff;
+        // there is no live revocation channel).
+        let ttl = (id.exp - now).clamp(0, 300) as u64;
         self.cache_put(raw_token, &id, Duration::from_secs(ttl))
             .await;
         Ok(self.principal(id.sub, id.scopes, raw_token))
@@ -1111,6 +1153,26 @@ mod google_access_token_tests {
         )
         .expect_err("wrong domain must fail");
         assert!(format!("{err}").contains("allowed domain"), "{err}");
+        // CONFLICTING hd (present) wins over a matching email domain → rejected
+        // (crew F1: hd is authoritative when present).
+        let err = validate_google_tokeninfo(
+            &info(json!({"hd": "evil.com", "email": "alice@data-zoo.de"})),
+            AUD,
+            Some(HD),
+            1000,
+        )
+        .expect_err("conflicting hd must fail even with a matching email");
+        assert!(format!("{err}").contains("allowed domain"), "{err}");
+        // Case-insensitive hosted-domain match.
+        assert!(
+            validate_google_tokeninfo(
+                &info(json!({"hd": "DATA-ZOO.DE"})),
+                AUD,
+                Some("data-zoo.de"),
+                1000
+            )
+            .is_ok()
+        );
         // No allowed_hd configured → any domain passes (still needs aud+email).
         assert!(
             validate_google_tokeninfo(
@@ -1184,6 +1246,23 @@ mod google_access_token_tests {
         // Second call is a cache hit (still Ok).
         let p2 = v.verify("ya29.opaque").await.expect("cache hit");
         assert_eq!(p2.sub, "jr@data-zoo.de");
+    }
+
+    #[tokio::test]
+    async fn error_string_never_contains_the_raw_token() {
+        // Point at a closed port so the send fails; the reqwest URL (which
+        // carries ?access_token=<secret>) must not leak into the error (F2).
+        let v = GoogleAccessTokenVerifier::new(AUD, Some(HD.into()))
+            .with_tokeninfo_url("http://127.0.0.1:1/tokeninfo");
+        let secret = "ya29.SUPER-SECRET-BEARER-VALUE";
+        let err = v
+            .verify(secret)
+            .await
+            .expect_err("closed port must fail closed");
+        assert!(
+            !format!("{err}").contains("SUPER-SECRET-BEARER-VALUE"),
+            "token leaked into error: {err}"
+        );
     }
 
     #[tokio::test]

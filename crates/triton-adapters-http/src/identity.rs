@@ -126,10 +126,13 @@ impl IdentityProvider {
     }
 
     pub async fn verify(&self, parts: &Parts) -> Result<Principal, TritonError> {
-        if !self.oidc.is_empty() {
-            // OIDC live → only OIDC. The forwarded-auth fast-path is
-            // disabled in this mode so a stale `trust_forwarded_auth=true`
-            // env var can never override real PKCE.
+        if !self.oidc.is_empty() || self.google_access.is_some() {
+            // OIDC (and/or the opaque Google access-token fallback) live → only
+            // that path. The forwarded-auth fast-path is disabled in this mode
+            // so a stale `trust_forwarded_auth=true` can never override real
+            // PKCE. Including `google_access` here means a host that configures
+            // ONLY the opaque fallback still gets it consulted (crew F4) rather
+            // than a silently-inert verifier.
             return self.verify_bearer_via_oidc(parts).await;
         }
 
