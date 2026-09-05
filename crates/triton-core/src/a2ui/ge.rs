@@ -78,6 +78,10 @@ fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, Str
         return;
     }
     if let Ok(mut store) = SURFACE_QUESTIONS.lock() {
+        println!(
+            "A2UI_STORE_WRITE surface={surface_id} keys={:?}",
+            qmap.keys().copied().collect::<Vec<_>>()
+        );
         store.push((surface_id.to_string(), qmap));
         let overflow = store.len().saturating_sub(MAX_SURFACES);
         if overflow > 0 {
@@ -93,11 +97,15 @@ fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, Str
 pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<String> {
     let n: usize = source_component_id.rsplit('-').next()?.parse().ok()?;
     let store = SURFACE_QUESTIONS.lock().ok()?;
-    store
-        .iter()
-        .rev()
-        .find(|(sid, _)| sid == surface_id)
-        .and_then(|(_, m)| m.get(&n).cloned())
+    let all: Vec<&String> = store.iter().map(|(s, _)| s).collect();
+    let hit = store.iter().rev().find(|(sid, _)| sid == surface_id);
+    println!(
+        "A2UI_STORE_READ surface={surface_id} comp={source_component_id} n={n} found={} size={} all={:?}",
+        hit.is_some(),
+        store.len(),
+        all
+    );
+    hit.and_then(|(_, m)| m.get(&n).cloned())
 }
 
 /// Build the A2UI v0.9 message array from a raw surface value
