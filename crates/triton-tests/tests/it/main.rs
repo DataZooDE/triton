@@ -31,6 +31,9 @@ mod consumer_smoke;
 #[path = "../correlation_sender_binding.rs"]
 mod correlation_sender_binding;
 
+#[path = "../principal_denylist.rs"]
+mod principal_denylist;
+
 #[path = "../correlation_rotation.rs"]
 mod correlation_rotation;
 #[path = "../cors.rs"]

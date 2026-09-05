@@ -145,6 +145,9 @@ pub struct Dispatcher {
     /// #249: coalescing window for ANONYMOUS rejection audit, so a
     /// scanner on a public path can't evict the ring buffer.
     reject_window: crate::ratelimit::RejectionWindow,
+    /// #287: principals an operator has revoked, as `tenant/sub`. Empty
+    /// by default — see [`Dispatcher::with_denied_principals`].
+    denied: std::collections::HashSet<String>,
 }
 
 /// The synthetic `subject` an adapter passes when it refused an inbound
@@ -166,7 +169,60 @@ impl Dispatcher {
             upstream: None,
             metrics: Arc::new(Metrics::new()),
             reject_window: crate::ratelimit::RejectionWindow::new(DEFAULT_REJECT_WINDOW),
+            denied: std::collections::HashSet::new(),
         }
+    }
+
+    /// #287: revoke a set of principals, named `tenant/sub`.
+    ///
+    /// Every secret here is boot-time-only and every token runs to its
+    /// own expiry, so between learning a principal is compromised and
+    /// its token lapsing there was no lever at all — rotating a signing
+    /// key invalidates everyone, which is not a lever, it is an outage.
+    /// This is the shorter one.
+    ///
+    /// It lives at the DISPATCHER because that is the single audit pivot
+    /// (ADR-6) and the one place every protocol converges. Put at any
+    /// single boundary — the OIDC verifier, one adapter — it would leave
+    /// the other twelve open.
+    ///
+    /// Entries are TENANT-QUALIFIED. A bare `sub` would deny `alice` in
+    /// every tenant at once: same string, different people, and the
+    /// mistake crosses a customer boundary silently.
+    ///
+    /// This is a kill switch, not an authorization system. It answers
+    /// "this principal is compromised, stop it now" and nothing else;
+    /// per-tool permission is `can_invoke`'s job.
+    pub fn with_denied_principals<I, S>(mut self, denied: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.denied = denied.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Whether this principal has been revoked. Cheap and allocation-free
+    /// on the empty-denylist path, which is every deployment that has
+    /// never had an incident.
+    fn is_denied(&self, principal: &Principal) -> bool {
+        if self.denied.is_empty() {
+            return false;
+        }
+        self.denied
+            .contains(&format!("{}/{}", principal.tenant, principal.sub))
+    }
+
+    /// The refusal, audited through the same `fail` path every other
+    /// dispatch error takes — so a revoked principal shows up on the
+    /// pivot exactly like any other `error:auth`, with its trace_id.
+    fn deny(&self, tool_name: &str, protocol: &str, principal: &Principal) -> TritonError {
+        let e = TritonError::Forbidden(format!(
+            "principal `{}/{}` has been revoked by the operator",
+            principal.tenant, principal.sub
+        ));
+        self.fail(tool_name, protocol, principal, &e, 0);
+        e
     }
 
     /// Override the anonymous-rejection coalescing window (#249).
@@ -327,6 +383,11 @@ impl Dispatcher {
         protocol: &str,
         a2ui: Option<crate::A2uiVersion>,
     ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        // #287: same gate as `invoke`. Streaming is a second entry point
+        // into the same dispatch, so a check on one alone is no check.
+        if self.is_denied(&principal) {
+            return Err(self.deny(tool_name, protocol, &principal));
+        }
         let started = Instant::now();
 
         // In-process tools that OPT IN to streaming (#635 P5) ride the
@@ -473,6 +534,12 @@ impl Dispatcher {
         principal: Principal,
         protocol: &str,
     ) -> Result<Dispatch, TritonError> {
+        // #287: before anything runs, and before the tool name is even
+        // looked up — a revoked principal must not be able to probe the
+        // registry either.
+        if self.is_denied(&principal) {
+            return Err(self.deny(tool_name, protocol, &principal));
+        }
         let started = Instant::now();
         let outcome = self.run(tool_name, args, &principal).await;
         let latency_ms = started.elapsed().as_millis() as u64;
@@ -505,6 +572,11 @@ impl Dispatcher {
         uri: &str,
         principal: Principal,
     ) -> Result<Dispatch, TritonError> {
+        // #287: reading an MCP-App resource is a dispatch like any
+        // other, and it reaches the upstream with the caller's identity.
+        if self.is_denied(&principal) {
+            return Err(self.deny(uri, "mcp", &principal));
+        }
         let started = Instant::now();
         let outcome = match &self.upstream {
             Some(upstream) => upstream.read_resource(uri, &principal).await,
@@ -532,6 +604,11 @@ impl Dispatcher {
         record: Value,
         principal: Principal,
     ) -> Result<Dispatch, TritonError> {
+        // #287: this writes the caller's record into an upstream's
+        // context. A revoked principal must not still be able to.
+        if self.is_denied(&principal) {
+            return Err(self.deny(uri, "mcp", &principal));
+        }
         let started = Instant::now();
         let outcome = match &self.upstream {
             Some(upstream) => upstream.update_model_context(uri, record, &principal).await,

@@ -193,7 +193,19 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or(triton_core::dispatcher::DEFAULT_REJECT_WINDOW);
     let mut dispatcher = Dispatcher::new(registry, settings.env.clone())
         .with_metrics(metrics.clone())
-        .with_rejection_window(reject_window);
+        .with_rejection_window(reject_window)
+        // #287: the operator's revocation lever. Logged at boot below so
+        // a live denylist is visible in the startup line rather than
+        // being something you have to know to go looking for.
+        .with_denied_principals(settings.denied_principals.clone());
+    if !settings.denied_principals.is_empty() {
+        tracing::warn!(
+            denied = ?settings.denied_principals,
+            count = settings.denied_principals.len(),
+            "TRITON_DENIED_PRINCIPALS active: these principals are revoked \
+             and every dispatch of theirs is refused (#287)",
+        );
+    }
 
     // Static-upstream OIDC signer: when a signing key + issuer + JWKS are all
     // configured, Triton mints a per-call RS256 JWT to agents (workload→workload

@@ -1650,3 +1650,28 @@ a trap the next developer should not have to step in.
   person who triggered a command can use its buttons. That is the point,
   but it IS a behaviour change — a colleague can no longer click "Refresh"
   on someone else's card.
+
+- **"Where does the check go" is answered by the audit pivot, not by the
+  boundary that happens to know first.** A principal denylist looks like it
+  belongs at the identity boundary — that is where the caller is
+  authenticated. But Triton has thirteen of those: the OIDC verifier, the
+  Entra multi-tenant verifier, the Google access-token verifier, the dev
+  token, and one per chat adapter. A check at any one of them leaves the
+  other twelve open, and a check at all thirteen is a rule nobody can
+  verify holds.
+
+  The dispatcher is the single audit pivot (ADR-6) precisely because it is
+  the one place every protocol converges, and that makes it the one place a
+  revocation is provable. Four entry points had to be gated, not one:
+  `invoke`, `invoke_streaming`, `read_resource` and `update_model_context`.
+  Gating only `invoke` would have left MCP-App resource reads and context
+  writes running under a revoked identity — both reach an upstream carrying
+  the caller.
+
+  Two details that make the difference between a lever and a trap. The
+  audit class is `error:forbidden`, not `error:auth`: the caller
+  authenticated fine and was then revoked, and an operator watching an
+  incident needs to tell those apart. And an entry without a `tenant/`
+  qualifier is DROPPED with a warning rather than read as a bare subject —
+  `alice` exists in every tenant, and the person typing it is by definition
+  in a hurry.
