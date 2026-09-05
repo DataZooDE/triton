@@ -175,7 +175,7 @@ pub struct WhatsAppAdapter {
     /// #94: per-adapter HMAC key signing interactive button/list `id`s
     /// so a future inbound `interactive`-reply handler can route a tap
     /// back to its `(tool, args)`.
-    correlation_key: Vec<u8>,
+    correlation_key: triton_correlation::KeyRing,
 }
 
 /// WhatsApp's documented customer-service window: free-form messages are
@@ -358,11 +358,16 @@ impl WhatsAppAdapter {
         // FR-L-6 / NFR-S-5: resolve at boot; a bad Vault ref must fail
         // closed at startup. #94 uses this key to sign the interactive
         // button/list `id`s the surface mapper emits.
-        let correlation_key = resolver
-            .resolve(&adapter.correlation_key)
-            .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?
-            .into_bytes();
+        // #287: a comma-separated RING — signed with the first key,
+        // verified against all — so the key can be rotated without
+        // invalidating every button already in a conversation.
+        let correlation_key = triton_correlation::KeyRing::parse(
+            &resolver
+                .resolve(&adapter.correlation_key)
+                .await
+                .map_err(|e| BuildError::Resolve("correlation_key", e))?,
+        )
+        .map_err(BuildError::CorrelationKey)?;
 
         let courier = CourierClient::new(courier_config)?;
         // 10x headroom rationale matches Telegram PR 28.
@@ -519,7 +524,8 @@ impl OutboundCourier for WhatsAppAdapter {
         // audit as forged tokens.
         let mint_tenant = self.outbound_mint_tenant(&req.to, principal).await?;
         let rendered =
-            match render_dispatch_result(&req.result, &self.correlation_key, &mint_tenant) {
+            match render_dispatch_result(&req.result, self.correlation_key.signing(), &mint_tenant)
+            {
                 Ok(r) => r,
                 Err(surface_mapper::RenderError::EmptyAfterRender) => {
                     return Err(TritonError::Validation(
@@ -755,6 +761,10 @@ fn redact(s: &str, token: &str) -> String {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #287: the resolved `correlation_key` secret is a
+    /// comma-separated ring; nothing usable survived parsing it.
+    #[error("correlation_key: {0}")]
+    CorrelationKey(#[source] triton_correlation::KeyRingError),
     #[error("adapter is not declared `kind: whatsapp_cloud`")]
     WrongKind,
     #[error("PR 31 limitation: {0}")]
@@ -1024,7 +1034,7 @@ async fn process_message(
     match result {
         Ok(dispatch) => match render_dispatch_result(
             &dispatch.result,
-            &adapter.correlation_key,
+            adapter.correlation_key.signing(),
             &principal_for_post.tenant,
         ) {
             Ok(rendered) => {

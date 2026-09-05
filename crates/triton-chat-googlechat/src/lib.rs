@@ -184,7 +184,7 @@ fn dashboard_image_url(
     let token = triton_correlation::encode_with_cap(
         DASHBOARD_MARKER,
         &spec,
-        &adapter.correlation_key,
+        adapter.correlation_key.signing(),
         DASHBOARD_TOKEN_CAP,
     )
     .ok()?;
@@ -240,7 +240,7 @@ fn report_image_url(
     let token = triton_correlation::encode_with_cap(
         RENDER_REPORT_IMG_MARKER,
         &payload,
-        &adapter.correlation_key,
+        adapter.correlation_key.signing(),
         DASHBOARD_TOKEN_CAP,
     )
     .ok()?;
@@ -322,7 +322,7 @@ pub struct GoogleChatAdapter {
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
     /// HMAC key signing/verifying button correlation tokens (FR-I,
     /// the `CARD_CLICKED` round-trip). Resolved from `correlation_key`.
-    correlation_key: Vec<u8>,
+    correlation_key: triton_correlation::KeyRing,
     /// Ephemeral cache of upstream-rendered chart PNGs, served on demand at
     /// the signed `…/img/{token}` route (peacock `render_report`).
     /// #164 T1a: async reply courier switch + Chat REST API base.
@@ -522,11 +522,16 @@ impl GoogleChatAdapter {
         // and verifies them on the `CARD_CLICKED` callback (see the
         // `surface_mapper::buttons_from_result` + `card_token` paths).
         // Resolved at boot so a bad `env://` ref also fails closed.
-        let correlation_key = resolver
-            .resolve(&adapter.correlation_key)
-            .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?
-            .into_bytes();
+        // #287: a comma-separated RING — signed with the first key,
+        // verified against all — so the key can be rotated without
+        // invalidating every button already in a conversation.
+        let correlation_key = triton_correlation::KeyRing::parse(
+            &resolver
+                .resolve(&adapter.correlation_key)
+                .await
+                .map_err(|e| BuildError::Resolve("correlation_key", e))?,
+        )
+        .map_err(BuildError::CorrelationKey)?;
 
         // PR 28 headroom rationale: see triton-chat-telegram.
         const ADAPTER_HEADROOM: u32 = 10;
@@ -590,7 +595,7 @@ async fn serve_dashboard_png(
     State(adapter): State<Arc<GoogleChatAdapter>>,
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Response {
-    let (marker, spec) = match triton_correlation::decode_with_cap(
+    let (marker, spec) = match triton_correlation::decode_with_cap_any(
         &token,
         &adapter.correlation_key,
         DASHBOARD_TOKEN_CAP,
@@ -675,6 +680,10 @@ async fn serve_dashboard_png(
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #287: the resolved `correlation_key` secret is a
+    /// comma-separated ring; nothing usable survived parsing it.
+    #[error("correlation_key: {0}")]
+    CorrelationKey(#[source] triton_correlation::KeyRingError),
     #[error("adapter is not declared `kind: google_chat`")]
     WrongKind,
     #[error("PR 33 limitation: {0}")]
@@ -1243,7 +1252,7 @@ async fn handle_webhook(
     // would be replayable by a sender in another, yielding their
     // principal against the original arguments.
     if let Some(token) = card_token.as_deref() {
-        match triton_correlation::decode_bound(
+        match triton_correlation::decode_bound_any(
             token,
             &adapter.correlation_key,
             CARD_CORRELATION_CAP,
@@ -1502,7 +1511,7 @@ async fn build_reply_message(
                             match triton_correlation::encode_bound(
                                 spec.tool(),
                                 &spec.base_args(),
-                                &adapter.correlation_key,
+                                adapter.correlation_key.signing(),
                                 CARD_CORRELATION_CAP,
                                 "google_chat",
                                 &principal.tenant,

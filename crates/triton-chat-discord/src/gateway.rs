@@ -114,10 +114,17 @@ impl DiscordGatewayAdapter {
 
         // FR-L-6: resolve correlation_key at boot so a bad ref fails
         // closed even though the gateway text path doesn't sign tokens.
-        resolver
-            .resolve(&adapter.correlation_key)
-            .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?;
+        // #287: parse the RING, not just the ref. A malformed key list
+        // must fail at boot on every adapter that declares one — even
+        // where the gateway text path never signs a token — so a rotation typo is caught
+        // by the deploy that carries it, not by the first click after.
+        triton_correlation::KeyRing::parse(
+            &resolver
+                .resolve(&adapter.correlation_key)
+                .await
+                .map_err(|e| BuildError::Resolve("correlation_key", e))?,
+        )
+        .map_err(BuildError::CorrelationKey)?;
 
         const ADAPTER_HEADROOM: u32 = 10;
         let rate_limit = triton_core::ratelimit::TokenBucket::new(

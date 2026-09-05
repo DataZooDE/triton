@@ -88,6 +88,10 @@ pub struct SignalAdapter {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #287: the resolved `correlation_key` secret is a
+    /// comma-separated ring; nothing usable survived parsing it.
+    #[error("correlation_key: {0}")]
+    CorrelationKey(#[source] triton_correlation::KeyRingError),
     #[error("adapter is not declared `kind: signal`")]
     WrongKind,
     #[error("signal adapter limitation: {0}")]
@@ -169,10 +173,16 @@ impl SignalAdapter {
         // though Signal has no native button primitive to feed it
         // — keeping the resolver call ensures a bad Vault ref fails
         // closed (mirrors Discord's outbound-token preflight).
-        let _ = resolver
-            .resolve(&adapter.correlation_key)
-            .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?;
+        // #287: parse the RING, not just the ref, so a rotation typo is
+        // caught by the deploy that carries it rather than surviving
+        // unnoticed on an adapter that never signs a token.
+        triton_correlation::KeyRing::parse(
+            &resolver
+                .resolve(&adapter.correlation_key)
+                .await
+                .map_err(|e| BuildError::Resolve("correlation_key", e))?,
+        )
+        .map_err(BuildError::CorrelationKey)?;
 
         const ADAPTER_HEADROOM: u32 = 10;
         let rate_limit = triton_core::ratelimit::TokenBucket::new(

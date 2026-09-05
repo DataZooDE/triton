@@ -228,6 +228,19 @@ on implementation details not pinned below.
   `Action.Submit.data`, numbered-prompt reply text for Signal /
   WhatsApp Web / Google Chat); rejection MUST surface as a
   documented error and MUST NOT reach the dispatcher. *(M-CORRELATION-1.)*
+- **FR-A-14 (v0.2, #287)** The `correlation_key` secret MUST be
+  accepted as a comma-separated **list** of keys. Tokens MUST be
+  signed with the FIRST key and verified against EVERY key on the
+  list. Surrounding whitespace is trimmed and empty entries are
+  dropped; a list from which no key survives MUST refuse adapter
+  construction (and therefore boot), on every adapter declaring a
+  `correlation_key` — including those that never sign a token.
+  This makes rotation an operation with no broken window: prepend
+  the new key, deploy, and drop the old one once every token minted
+  under it has expired. Without it, changing the key invalidates
+  every interactive component already delivered to a conversation,
+  which in practice means the key is never rotated at all.
+  *(M-CORRELATION-1.)*
 - **FR-A-13 (v0.2)** For any tool invocation whose envelope carries
   only stable, non-rasterised component types (text, narration,
   button-row, selection-row), the `PlatformMessage` produced by
@@ -685,7 +698,7 @@ is the canonical mapping; the messenger paper's
 | M-MAP-1           | FR-A-9, FR-A-13 (mapper purity, parity)                | IMPL — PASS         |
 | M-RICHNESS-1      | FR-A-10 (SurfaceLimits at mapper edge)                 | IMPL — PASS         |
 | M-RASTER-1        | FR-A-11 (Rasterizer for dashboard components)          | IMPL — PASS         |
-| M-CORRELATION-1   | FR-A-12 (HMAC token round-trip)                        | IMPL — PASS         |
+| M-CORRELATION-1   | FR-A-12, FR-A-14 (HMAC token round-trip; key rotation) | IMPL — PASS         |
 | M-MANIFEST-1      | FR-L-4 (closed-set boot validation)                    | PAPER — PASS        |
 | M-COVERAGE-1      | FR-L-5 (degrade rule coverage)                         | PAPER — PASS        |
 | M-SECRETS-1       | FR-L-6, NFR-S-5 (Vault credentials)                    | PAPER — PASS        |

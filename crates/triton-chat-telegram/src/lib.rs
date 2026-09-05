@@ -135,7 +135,7 @@ pub struct TelegramAdapter {
     name: String,
     secret_token: String,
     bot_token: String,
-    correlation_key: Vec<u8>,
+    correlation_key: triton_correlation::KeyRing,
     /// FR-I-7 sender resolution strategy: `sender_table` (static map)
     /// or `upstream` (resolver tool through the upstream router).
     identity: IdentityMode,
@@ -314,11 +314,16 @@ impl TelegramAdapter {
                 .map_err(|e| BuildError::Resolve("outbound.token", e))?,
             None => return Err(BuildError::MissingCredential("outbound.token")),
         };
-        let correlation_key = resolver
-            .resolve(&adapter.correlation_key)
-            .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?
-            .into_bytes();
+        // #287: the resolved secret is a comma-separated RING, not one
+        // key — signed with the first, verified against all — so the
+        // operator can rotate without breaking every live button.
+        let correlation_key = triton_correlation::KeyRing::parse(
+            &resolver
+                .resolve(&adapter.correlation_key)
+                .await
+                .map_err(|e| BuildError::Resolve("correlation_key", e))?,
+        )
+        .map_err(BuildError::CorrelationKey)?;
 
         let courier = CourierClient::new(courier_config)?;
         // PR 28: the adapter-wide bucket is the DoS-floor guard
@@ -769,6 +774,10 @@ fn redact_url(s: &str, bot_token: &str) -> String {
 /// carve-out was lifted in PR 16 once the resolver landed.
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #287: the resolved `correlation_key` secret is a
+    /// comma-separated ring; nothing usable survived parsing it.
+    #[error("correlation_key: {0}")]
+    CorrelationKey(#[source] triton_correlation::KeyRingError),
     #[error("adapter is not declared `kind: telegram`")]
     WrongKind,
     #[error("PR 13 limitation: {0}")]
@@ -1169,7 +1178,7 @@ async fn dispatch_and_render(
             }
             match render_dispatch_result(
                 &dispatch.result,
-                &adapter.correlation_key,
+                adapter.correlation_key.signing(),
                 &principal_for_post.tenant,
             ) {
                 Ok(rendered) => {
@@ -1553,7 +1562,7 @@ async fn handle_callback_query(
     // #250: verified against the CLICKER's tenant. The binding lives in
     // the derived key, so it costs nothing against Telegram's 64-byte
     // callback_data budget — a wire field could not have fitted.
-    let (tool_name, args) = match triton_correlation::decode_bound(
+    let (tool_name, args) = match triton_correlation::decode_bound_any(
         token,
         &adapter.correlation_key,
         triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
@@ -1604,7 +1613,7 @@ async fn handle_callback_query(
     match result {
         Ok(dispatch) => match render_dispatch_result(
             &dispatch.result,
-            &adapter.correlation_key,
+            adapter.correlation_key.signing(),
             &principal_for_post.tenant,
         ) {
             Ok(rendered) => {
