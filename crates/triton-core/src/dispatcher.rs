@@ -145,6 +145,11 @@ pub struct Dispatcher {
     /// #249: coalescing window for ANONYMOUS rejection audit, so a
     /// scanner on a public path can't evict the ring buffer.
     reject_window: crate::ratelimit::RejectionWindow,
+    /// #284: scopes that RESTRICT rather than grant. A principal holding
+    /// exactly one of these scopes and nothing else may invoke only the
+    /// tools it maps to. Empty by default, so a deployment that declares
+    /// nothing behaves exactly as before.
+    scope_restrictions: std::collections::HashMap<String, std::collections::HashSet<String>>,
 }
 
 /// The synthetic `subject` an adapter passes when it refused an inbound
@@ -166,6 +171,47 @@ impl Dispatcher {
             upstream: None,
             metrics: Arc::new(Metrics::new()),
             reject_window: crate::ratelimit::RejectionWindow::new(DEFAULT_REJECT_WINDOW),
+            scope_restrictions: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Declare that a principal holding ONLY `scope` may invoke only
+    /// `tools` (#284).
+    ///
+    /// This is the gateway's one authorization seam, and it is
+    /// deliberately **default-allow**: Triton authenticates and
+    /// propagates identity, leaving authorization to the resource owner.
+    /// What it must not do is make an authorization distinction and then
+    /// discard it — which is exactly what happened to `self_enrol`'s
+    /// pairing marker, where an un-enrolled sender was admitted with a
+    /// restricted scope and then allowed to invoke anything.
+    ///
+    /// "Holding only" is the right test: an enrolled principal carries
+    /// real scopes and is unaffected, so enrolment itself lifts the
+    /// restriction and there is no second mechanism to keep in sync.
+    pub fn with_scope_restriction(
+        mut self,
+        scope: impl Into<String>,
+        tools: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.scope_restrictions
+            .insert(scope.into(), tools.into_iter().collect());
+        self
+    }
+
+    /// May this principal invoke this tool? `Ok(())` unless a scope
+    /// restriction says otherwise.
+    fn can_invoke(&self, principal: &Principal, tool: &str) -> Result<(), TritonError> {
+        if self.scope_restrictions.is_empty() || principal.scopes.len() != 1 {
+            return Ok(());
+        }
+        let held = &principal.scopes[0];
+        match self.scope_restrictions.get(held) {
+            Some(allowed) if !allowed.contains(tool) => Err(TritonError::Forbidden(format!(
+                "principal holds only the `{held}` scope, which may invoke \
+                 {allowed:?} — not `{tool}`"
+            ))),
+            _ => Ok(()),
         }
     }
 
@@ -327,6 +373,20 @@ impl Dispatcher {
         protocol: &str,
         a2ui: Option<crate::A2uiVersion>,
     ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        // #284: the one authorization gate. Placed here so a denial is
+        // identical across REST/MCP/A2A and every chat adapter, and gets
+        // its audit line from the same pivot as everything else (ADR-6).
+        if let Err(e) = self.can_invoke(&principal, tool_name) {
+            // Audit takes the outcome by reference and `TritonError` is
+            // not `Clone`, so borrow it for the audit and hand the same
+            // value back rather than deciding twice.
+            let outcome: Result<Value, TritonError> = Err(e);
+            self.audit_dispatch(tool_name, protocol, &principal, 0, &outcome);
+            match outcome {
+                Err(e) => return Err(e),
+                Ok(_) => unreachable!("constructed as Err"),
+            }
+        }
         let started = Instant::now();
 
         // In-process tools that OPT IN to streaming (#635 P5) ride the
@@ -469,6 +529,20 @@ impl Dispatcher {
         principal: Principal,
         protocol: &str,
     ) -> Result<Dispatch, TritonError> {
+        // #284: the one authorization gate. Placed here so a denial is
+        // identical across REST/MCP/A2A and every chat adapter, and gets
+        // its audit line from the same pivot as everything else (ADR-6).
+        if let Err(e) = self.can_invoke(&principal, tool_name) {
+            // Audit takes the outcome by reference and `TritonError` is
+            // not `Clone`, so borrow it for the audit and hand the same
+            // value back rather than deciding twice.
+            let outcome: Result<Value, TritonError> = Err(e);
+            self.audit_dispatch(tool_name, protocol, &principal, 0, &outcome);
+            match outcome {
+                Err(e) => return Err(e),
+                Ok(_) => unreachable!("constructed as Err"),
+            }
+        }
         let started = Instant::now();
         let outcome = self.run(tool_name, args, &principal).await;
         let latency_ms = started.elapsed().as_millis() as u64;

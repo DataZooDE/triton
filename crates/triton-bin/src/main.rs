@@ -191,9 +191,32 @@ async fn main() -> std::io::Result<()> {
         .and_then(|v| v.trim().parse::<u64>().ok())
         .map(std::time::Duration::from_secs)
         .unwrap_or(triton_core::dispatcher::DEFAULT_REJECT_WINDOW);
+    // #284: a `self_enrol` adapter may name the ONE tool an un-enrolled
+    // sender is allowed to reach. Triton already mints those senders a
+    // restricted `pairing` principal and then forgets the restriction;
+    // this is where it is remembered. Opt-in: naming no tool leaves the
+    // gate default-allow, so no existing deployment changes behaviour.
+    let pairing_tools: Vec<String> = manifest
+        .as_ref()
+        .map(|m| {
+            m.adapters
+                .values()
+                .filter(|a| a.identity.kind == triton_manifest::IdentityKind::SelfEnrol)
+                .filter_map(|a| a.identity.pairing_tool.clone())
+                .filter(|t| !t.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut dispatcher = Dispatcher::new(registry, settings.env.clone())
         .with_metrics(metrics.clone())
         .with_rejection_window(reject_window);
+    if !pairing_tools.is_empty() {
+        tracing::info!(
+            tools = ?pairing_tools,
+            "self_enrol pairing restriction active: a principal holding only the `pairing` scope may invoke these tools and nothing else"
+        );
+        dispatcher = dispatcher.with_scope_restriction("pairing", pairing_tools);
+    }
 
     // Static-upstream OIDC signer: when a signing key + issuer + JWKS are all
     // configured, Triton mints a per-call RS256 JWT to agents (workload→workload
