@@ -1460,6 +1460,21 @@ a trap the next developer should not have to step in.
   test caught it, because it was written to assert the property rather
   than the implementation.
 
+- **Telegram's 64-byte `callback_data` cannot carry a token binding at
+  all (#250, 2026-09-05).** Binding a correlation token to a tenant and
+  an expiry closed a cross-tenant replay on Teams, Google Chat and
+  Discord. It does NOT fit Telegram: the smallest possible bound body —
+  one-character tool, empty args, 6-char keyed tenant digest, hour-
+  granularity expiry — is 66 bytes before base64, against a hard
+  platform cap of 64. WhatsApp Cloud mints on the same budget. So those
+  two adapters still mint unbound, never-expiring callback tokens, and
+  the replay stays open there. This is a **wire-format decision**, not a
+  follow-up commit: closing it needs a shorter epoch unit, a 4-character
+  digest, or a different token shape entirely. Pinned by
+  `telegrams_budget_cannot_carry_a_binding_at_all` so nobody
+  re-discovers it by writing a comment that claims otherwise — which is
+  exactly what happened on the first attempt.
+
 ---
 
 ## 8. CI/CD build-time traps (2026-08-30)
