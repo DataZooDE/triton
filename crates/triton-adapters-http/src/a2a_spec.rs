@@ -423,6 +423,20 @@ fn a2ui_action_question(parts: &[Value]) -> Option<String> {
             {
                 return Some(q.to_string());
             }
+            // Reality on the GE wire: it echoes `sourceComponentId` (our button
+            // id) but overwrites `name` and drops `context`. So the re-ask
+            // question rides the button id as `ask-<hex>` (see
+            // triton_core::a2ui::ge). Decode it.
+            if let Some(q) = action
+                .get("sourceComponentId")
+                .and_then(Value::as_str)
+                .and_then(|c| c.strip_prefix("ask-"))
+                .and_then(triton_core::a2ui::ge::hex_decode)
+                .map(|q| q.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                return Some(q);
+            }
         }
     }
     None
