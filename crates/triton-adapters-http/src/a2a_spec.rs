@@ -341,12 +341,16 @@ async fn message_send(
             "params.message.parts must contain at least one non-empty text part",
         );
     };
+    // A2A 0.3.0 requires `contextId` on Task; honor a client-supplied
+    // `message.contextId`, else generate one (strict clients reject its
+    // absence). Also stamped on the returned Message for follow-ups.
     let context_id = req
         .params
         .get("message")
         .and_then(|m| m.get("contextId"))
         .and_then(Value::as_str)
-        .map(str::to_string);
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let trace_id = principal.trace_id.clone();
     let tool = state.config.default_tool.clone();
 
@@ -383,31 +387,27 @@ async fn message_send(
     if wants_immediate_task(&req.params) {
         // The spec: return the Task right away; the client polls
         // `tasks/get`. The spawned dispatch keeps running.
-        let mut task = json!({
+        let task = json!({
             "kind": "task",
             "id": trace_id,
+            "contextId": context_id,
             "status": { "state": "working" },
         });
-        if let Some(ctx) = context_id {
-            task["contextId"] = json!(ctx);
-        }
         return rpc_ok(&req.id, task);
     }
 
     match handle.await {
         Ok(Ok(d)) => {
             let reply = reply_text(&d.result);
-            let mut msg = json!({
+            let msg = json!({
                 "kind": "message",
                 "role": "agent",
                 "messageId": uuid::Uuid::new_v4().to_string(),
                 "parts": [{ "kind": "text", "text": reply }],
                 // The task id, so a caller can follow up via tasks/get.
                 "taskId": d.trace_id,
+                "contextId": context_id,
             });
-            if let Some(ctx) = context_id {
-                msg["contextId"] = json!(ctx);
-            }
             rpc_ok(&req.id, msg)
         }
         Ok(Err(e)) => rpc_error(&req.id, INTERNAL_ERROR, e.to_string()),
@@ -445,6 +445,19 @@ async fn message_stream(
     let tool = state.config.default_tool.clone();
     let rpc_id = req.id.clone();
 
+    // A2A 0.3.0 requires `contextId` on Task / TaskStatusUpdateEvent /
+    // TaskArtifactUpdateEvent. Strict clients (Gemini Enterprise's a2a-python
+    // SDK) reject the whole stream if any frame omits it. Honor a
+    // client-supplied `message.contextId`; otherwise generate one and reuse it
+    // on every frame so the turn's events share one context.
+    let context_id = req
+        .params
+        .get("message")
+        .and_then(|m| m.get("contextId"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
     state.a2a.tasks.record(&trace_id, TaskState::Working);
     let events = match state
         .a2a
@@ -468,17 +481,20 @@ async fn message_stream(
     let initial = rpc(json!({
         "kind": "task",
         "id": task_id,
+        "contextId": context_id,
         "status": { "state": "working" },
     }));
 
     let artifact_id = uuid::Uuid::new_v4().to_string();
     let task_for_frames = trace_id.clone();
+    let ctx_for_frames = context_id.clone();
     let rpc_frames = rpc.clone();
     let frames = events.flat_map(move |ev| {
         let out: Vec<Value> = match ev {
             triton_core::stream::StreamEvent::Token(t) => vec![rpc_frames(json!({
                 "kind": "artifact-update",
                 "taskId": task_for_frames,
+                "contextId": ctx_for_frames,
                 "append": true,
                 "artifact": {
                     "artifactId": artifact_id,
@@ -493,6 +509,7 @@ async fn message_stream(
                     rpc_frames(json!({
                         "kind": "artifact-update",
                         "taskId": task_for_frames,
+                        "contextId": ctx_for_frames,
                         "lastChunk": true,
                         "artifact": {
                             "artifactId": artifact_id,
@@ -502,6 +519,7 @@ async fn message_stream(
                     rpc_frames(json!({
                         "kind": "status-update",
                         "taskId": task_for_frames,
+                        "contextId": ctx_for_frames,
                         "status": { "state": "completed" },
                         "final": true,
                     })),
@@ -517,6 +535,7 @@ async fn message_stream(
                 vec![rpc_frames(json!({
                     "kind": "status-update",
                     "taskId": task_for_frames,
+                    "contextId": ctx_for_frames,
                     "status": { "state": "failed", "message": {
                         "kind": "message", "role": "agent",
                         "messageId": uuid::Uuid::new_v4().to_string(),
