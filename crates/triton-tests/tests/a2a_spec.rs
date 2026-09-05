@@ -628,7 +628,8 @@ async fn message_stream_emits_task_artifact_final() {
         .iter()
         .find_map(|p| p["data"]["updateComponents"]["components"].as_array())
         .expect("an updateComponents message");
-    assert!(comps.iter().any(|c| c["component"] == "Card"));
-    assert!(comps.iter().any(|c| c["component"] == "Image"));
-    assert!(comps.iter().any(|c| c["component"] == "Button"));
+    // GE's composite (Material) catalog — real Material components.
+    assert!(comps.iter().any(|c| c["component"] == "MaterialCard"));
+    assert!(comps.iter().any(|c| c["component"] == "MaterialImage"));
+    assert!(comps.iter().any(|c| c["component"] == "MaterialButton"));
 }
