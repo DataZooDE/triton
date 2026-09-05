@@ -78,6 +78,31 @@ pub struct AzureConfig {
     /// Adapter-granted scopes for azure-authenticated senders.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Bot Framework `channelId` values permitted to assert an
+    /// Entra-shaped principal. Defaults to `["msteams"]`, which is
+    /// exactly the behaviour before this field existed — an operator
+    /// who says nothing keeps a Teams-only adapter.
+    ///
+    /// The gate itself is NOT optional and is not a formality: the AAD
+    /// fields are unsigned body metadata, trusted only because the
+    /// request is connector-authenticated AND arrived over a channel
+    /// this deployment chose to trust. A valid Bot Framework token for
+    /// this bot on some other channel must not inject an Entra-shaped
+    /// principal. Making the set explicit is what lets one deployment
+    /// serve Copilot Studio (`pva`), WebChat or M365 Copilot Chat
+    /// without deleting the gate.
+    ///
+    /// Not derived from JWKS `endorsements` — Microsoft's own binding
+    /// for `channelId` — because endorsements exist only on the Bot
+    /// Framework keyset, and a single-tenant bot (the type Microsoft
+    /// now requires for new registrations) is signed by the Entra
+    /// anchor, which publishes none.
+    #[serde(default = "default_allowed_channel_ids")]
+    pub allowed_channel_ids: Vec<String>,
+}
+
+fn default_allowed_channel_ids() -> Vec<String> {
+    vec!["msteams".to_string()]
 }
 
 /// How this adapter resolves an inbound sender to a `Principal`.
@@ -762,17 +787,21 @@ fn resolve_sender(
         IdentityMode::Azure(cfg) => {
             // The AAD identity fields are unsigned body metadata,
             // trusted only because the request is connector-
-            // authenticated AND arrived over the Teams channel. A
-            // valid Bot Framework token for this bot on another
-            // channel must NOT inject an Entra-shaped principal.
-            if activity.channel_id.as_deref() != Some("msteams") {
+            // authenticated AND arrived over a channel this deployment
+            // declared. A valid Bot Framework token for this bot on any
+            // other channel must NOT inject an Entra-shaped principal.
+            // An absent or empty `channelId` matches nothing and is
+            // therefore refused, never treated as a wildcard.
+            let channel = activity.channel_id.as_deref().unwrap_or_default();
+            if !cfg.allowed_channel_ids.iter().any(|c| c == channel) {
                 record_rejection(
                     adapter,
                     "-",
                     "-",
                     TritonError::Auth(format!(
-                        "azure identity requires channelId=msteams; got {:?}",
-                        activity.channel_id
+                        "channelId {channel:?} is not on this adapter's \
+                         allowed_channel_ids {:?}",
+                        cfg.allowed_channel_ids
                     )),
                 );
                 return Err((StatusCode::UNAUTHORIZED, "wrong channel").into_response());

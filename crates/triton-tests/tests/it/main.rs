@@ -74,6 +74,8 @@ mod metrics_endpoint;
 mod msteams;
 #[path = "../msteams_callback.rs"]
 mod msteams_callback;
+#[path = "../msteams_channels.rs"]
+mod msteams_channels;
 #[path = "../msteams_courier.rs"]
 mod msteams_courier;
 #[path = "../msteams_federated.rs"]
