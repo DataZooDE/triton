@@ -118,8 +118,11 @@ fn sign_button(tool: &str, args: Value) -> String {
         &args,
         b"correlation-key-for-test",
         1536,
-        "google_chat",
-        "acme",
+        triton_correlation::Binding {
+            platform: "google_chat",
+            tenant: "acme",
+            sender: "users/99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("encode correlation token")
@@ -521,8 +524,11 @@ async fn a_card_token_from_another_tenant_is_rejected() {
         &json!({ "message": "victim args" }),
         b"correlation-key-for-test",
         1536,
-        "google_chat",
-        "globex",
+        triton_correlation::Binding {
+            platform: "google_chat",
+            tenant: "globex",
+            sender: "users/99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("encode");
@@ -1608,8 +1614,11 @@ async fn async_courier_click_ack_is_click_shaped() {
         &json!({ "question": "top customers" }),
         b"correlation-key-for-test",
         512,
-        "google_chat",
-        "acme",
+        triton_correlation::Binding {
+            platform: "google_chat",
+            tenant: "acme",
+            sender: "users/99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("token");

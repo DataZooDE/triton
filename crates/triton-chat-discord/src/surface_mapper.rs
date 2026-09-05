@@ -119,15 +119,23 @@ pub fn try_render_surface(
     result: &Value,
     correlation_key: &[u8],
     tenant: &str,
+    // #287: the sender this surface is rendered FOR — folded into the
+    // derived signing key beside the tenant, so only they can redeem the
+    // components, at zero cost on the wire.
+    sender: &str,
 ) -> Option<Result<RenderedInteraction, RenderError>> {
     let surface = extract_surface(result).ok()?;
-    Some(render(&surface, correlation_key, tenant))
+    Some(render(&surface, correlation_key, tenant, sender))
 }
 
 pub fn render(
     surface: &Surface,
     correlation_key: &[u8],
     tenant: &str,
+    // #287: the sender this surface is rendered FOR — folded into the
+    // derived signing key beside the tenant, so only they can redeem the
+    // components, at zero cost on the wire.
+    sender: &str,
 ) -> Result<RenderedInteraction, RenderError> {
     let mut chunks: Vec<String> = Vec::new();
     let mut deferred_buttons = 0usize;
@@ -186,8 +194,11 @@ pub fn render(
                     args,
                     correlation_key,
                     triton_correlation::DISCORD_MAX_CUSTOM_ID,
-                    "discord",
-                    tenant,
+                    triton_correlation::Binding {
+                        platform: "discord",
+                        tenant,
+                        sender,
+                    },
                     Some(CARD_TOKEN_TTL_SECS),
                 ) {
                     Ok(token) => {
@@ -243,8 +254,11 @@ pub fn render(
                     &args,
                     correlation_key,
                     triton_correlation::DISCORD_MAX_CUSTOM_ID,
-                    "discord",
-                    tenant,
+                    triton_correlation::Binding {
+                        platform: "discord",
+                        tenant,
+                        sender,
+                    },
                     Some(CARD_TOKEN_TTL_SECS),
                 ) {
                     Ok(t) => t,
@@ -489,6 +503,10 @@ pub fn try_render_form_modal(
     result: &Value,
     correlation_key: &[u8],
     tenant: &str,
+    // #287: the sender this surface is rendered FOR — folded into the
+    // derived signing key beside the tenant, so only they can redeem the
+    // components, at zero cost on the wire.
+    sender: &str,
 ) -> Option<Result<Value, FormModalError>> {
     let surface = extract_surface(result).ok()?;
     if surface.components.len() != 1 {
@@ -509,6 +527,7 @@ pub fn try_render_form_modal(
         tool,
         correlation_key,
         tenant,
+        sender,
     ))
 }
 
@@ -551,6 +570,10 @@ fn build_modal_response(
     submit_tool: &str,
     correlation_key: &[u8],
     tenant: &str,
+    // #287: the sender this surface is rendered FOR — folded into the
+    // derived signing key beside the tenant, so only they can redeem the
+    // components, at zero cost on the wire.
+    sender: &str,
 ) -> Result<Value, FormModalError> {
     if fields.is_empty() {
         return Err(FormModalError::NoFields);
@@ -592,8 +615,11 @@ fn build_modal_response(
         &args,
         correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        tenant,
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant,
+            sender,
+        },
         Some(CARD_TOKEN_TTL_SECS),
     )
     .map_err(|_| FormModalError::TokenOversize)?;
@@ -680,7 +706,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         assert_eq!(r.content, "hello\n\n*footnote*");
         assert!(r.components.is_none());
     }
@@ -693,7 +719,7 @@ mod tests {
                 value: "a*b_c~d".into(),
             }],
         };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         // Each metacharacter gets a backslash prefix.
         assert!(r.content.contains(r"a\*b\_c\~d"));
     }
@@ -715,7 +741,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         let components = r.components.expect("components present");
         let rows = components.as_array().expect("array");
         assert_eq!(rows.len(), 1);
@@ -731,8 +757,11 @@ mod tests {
             token,
             TEST_KEY,
             triton_correlation::DISCORD_MAX_CUSTOM_ID,
-            "discord",
-            "acme",
+            triton_correlation::Binding {
+                platform: "discord",
+                tenant: "acme",
+                sender: "u1",
+            },
         )
         .expect("token verifies for its tenant");
         assert_eq!(tool, "narrate");
@@ -749,7 +778,7 @@ mod tests {
                 resource: None,
             }],
         };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         assert_eq!(r.content, BUTTON_ONLY_PLACEHOLDER);
         assert!(r.components.is_some());
     }
@@ -758,7 +787,7 @@ mod tests {
     fn empty_surface_is_a_render_error() {
         let s = Surface { components: vec![] };
         assert!(matches!(
-            render(&s, TEST_KEY, "acme"),
+            render(&s, TEST_KEY, "acme", "u1"),
             Err(RenderError::EmptyAfterRender)
         ));
     }
@@ -776,7 +805,7 @@ mod tests {
             })
             .collect();
         let s = Surface { components };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         let rows = r
             .components
             .expect("components")
@@ -803,7 +832,7 @@ mod tests {
             })
             .collect();
         let s = Surface { components };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         let rows = r
             .components
             .expect("components")
@@ -845,7 +874,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         // None of the tile content appears in the content — only
         // the leading Text/Narration components do.
         assert!(!r.content.contains("1234"));
@@ -884,7 +913,7 @@ mod tests {
         let s = Surface {
             components: vec![make_dash("first"), make_dash("second")],
         };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         let dash = r.dashboard.expect("first surfaced");
         assert_eq!(dash.title, "first");
         assert_eq!(r.deferred_dashboards, 1);
@@ -908,7 +937,7 @@ mod tests {
                 }],
             }],
         };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         assert!(r.content.is_empty());
         assert!(r.dashboard.is_some());
     }
@@ -957,7 +986,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         let rows = r
             .components
             .expect("components")
@@ -979,8 +1008,11 @@ mod tests {
             token,
             TEST_KEY,
             triton_correlation::DISCORD_MAX_CUSTOM_ID,
-            "discord",
-            "acme",
+            triton_correlation::Binding {
+                platform: "discord",
+                tenant: "acme",
+                sender: "u1",
+            },
         )
         .expect("verifies for its tenant");
         assert_eq!(tool, "narrate");
@@ -1014,7 +1046,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         assert_eq!(r.deferred_selections, 1);
         // No select menu shipped — the text chunk still goes out.
         assert!(
@@ -1037,7 +1069,7 @@ mod tests {
                 value: big,
             }],
         };
-        let r = render(&s, TEST_KEY, "acme").expect("renders");
+        let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
         assert!(r.truncated);
         assert!(r.content.len() <= DISCORD_CONTENT_MAX_BYTES);
         assert!(r.content.ends_with(TRUNCATION_SENTINEL));

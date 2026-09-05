@@ -70,8 +70,11 @@ fn token_minted_under(key: &str) -> String {
         &json!({ "subject": "alice" }),
         key.as_bytes(),
         triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
-        "telegram",
-        "acme",
+        triton_correlation::Binding {
+            platform: "telegram",
+            tenant: "acme",
+            sender: "42",
+        },
         None,
     )
     .expect("token fits")

@@ -242,8 +242,11 @@ async fn a_callback_token_from_another_tenant_is_rejected() {
         &json!({ "s": "victim" }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
-        "telegram",
-        "globex",
+        triton_correlation::Binding {
+            platform: "telegram",
+            tenant: "globex",
+            sender: "42",
+        },
         None,
     )
     .expect("token fits");
@@ -278,8 +281,11 @@ async fn stale_callback_rejected_with_phase_rejected() {
         &json!({ "s": "alice" }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
-        "telegram",
-        "acme",
+        triton_correlation::Binding {
+            platform: "telegram",
+            tenant: "acme",
+            sender: "42",
+        },
         None,
     )
     .expect("token fits");
@@ -343,8 +349,11 @@ async fn callback_without_message_date_fails_closed() {
         &json!({ "s": "alice" }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
-        "telegram",
-        "acme",
+        triton_correlation::Binding {
+            platform: "telegram",
+            tenant: "acme",
+            sender: "42",
+        },
         None,
     )
     .expect("token fits");

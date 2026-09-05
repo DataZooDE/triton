@@ -475,14 +475,19 @@ async fn handle_message_component(
         return (StatusCode::UNAUTHORIZED, "future-dated callback").into_response();
     }
 
-    // #250: verified against the CLICKER's tenant, so a component token
-    // minted into another tenant's channel cannot be replayed here.
+    // #250/#287: verified against the CLICKER's tenant AND the CLICKER.
+    // A Discord `custom_id` is visible to every member of the channel,
+    // so without the sender in the derivation a component is a
+    // capability held by the whole tenant.
     let (tool_name, mut args) = match triton_correlation::decode_bound_any(
         token,
         &adapter.correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        &claims.tenant,
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: &claims.tenant,
+            sender: &user_id,
+        },
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -635,6 +640,7 @@ async fn handle_message_component(
                 &dispatch.result,
                 adapter.correlation_key.signing(),
                 &principal_for_post.tenant,
+                &user_id,
             ) {
                 match form_result {
                     Ok(modal) => {
@@ -661,6 +667,7 @@ async fn handle_message_component(
                 &dispatch.result,
                 adapter.correlation_key.signing(),
                 &principal_for_post.tenant,
+                &user_id,
             ) {
                 Some(Ok(rendered)) => {
                     // #250: a component that would not fit the token
@@ -867,6 +874,7 @@ async fn handle_application_command(
                 &dispatch.result,
                 adapter.correlation_key.signing(),
                 &principal_for_post.tenant,
+                &user_id,
             ) {
                 match form_result {
                     Ok(modal) => {
@@ -893,6 +901,7 @@ async fn handle_application_command(
                 &dispatch.result,
                 adapter.correlation_key.signing(),
                 &principal_for_post.tenant,
+                &user_id,
             ) {
                 Some(Ok(rendered)) => {
                     // #250: a component that would not fit the token
@@ -1045,15 +1054,18 @@ async fn handle_modal_submit(
         return (StatusCode::BAD_REQUEST, "missing custom_id").into_response();
     };
 
-    // #250: verified against the SUBMITTER's tenant, like the button and
-    // select paths — a modal custom_id captured from another tenant's
-    // card must not be replayable here.
+    // #250/#287: verified against the SUBMITTER's tenant AND the
+    // SUBMITTER, like the button and select paths — a modal custom_id
+    // captured from another member's card must not be replayable here.
     let (tool_name, mut args) = match triton_correlation::decode_bound_any(
         token,
         &adapter.correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        &claims.tenant,
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: &claims.tenant,
+            sender: &user_id,
+        },
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -1182,6 +1194,7 @@ async fn handle_modal_submit(
                 &dispatch.result,
                 adapter.correlation_key.signing(),
                 &principal_for_post.tenant,
+                &user_id,
             ) {
                 Some(Ok(rendered)) => {
                     // #250: a component that would not fit the token

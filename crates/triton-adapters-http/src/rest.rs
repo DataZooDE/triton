@@ -283,6 +283,7 @@ async fn surface_render(
                 &PREVIEW_KEY,
                 // Preview only — see the discord arm.
                 "preview",
+                "preview",
             ) {
                 None => not_a2ui(),
                 Some(Err(_)) => empty("telegram"),
@@ -307,7 +308,9 @@ async fn surface_render(
                 &PREVIEW_KEY,
                 // Preview only: this endpoint renders a surface for the
                 // explorer and the tokens it mints are never dispatched,
-                // so the tenant is a placeholder like `PREVIEW_KEY`.
+                // so the tenant and sender are placeholders like
+                // `PREVIEW_KEY` itself.
+                "preview",
                 "preview",
             ) {
                 None => not_a2ui(),
@@ -380,6 +383,7 @@ async fn surface_render(
             &surface_input,
             &PREVIEW_KEY,
             // Preview only — see the discord arm.
+            "preview",
             "preview",
         ) {
             None => not_a2ui(),

@@ -103,9 +103,13 @@ pub fn try_render_surface(
     result: &Value,
     correlation_key: &[u8],
     tenant: &str,
+    // #287: the sender this surface is rendered FOR — folded into the
+    // derived signing key beside the tenant, so only they can redeem the
+    // interactive ids, at zero cost on the wire.
+    sender: &str,
 ) -> Option<Result<RenderedMessage, RenderError>> {
     let surface = extract_surface(result).ok()?;
-    Some(render(&surface, correlation_key, tenant))
+    Some(render(&surface, correlation_key, tenant, sender))
 }
 
 /// Render a [`Surface`] into a `RenderedMessage` or a
@@ -117,6 +121,10 @@ pub fn render(
     surface: &Surface,
     correlation_key: &[u8],
     tenant: &str,
+    // #287: the sender this surface is rendered FOR — folded into the
+    // derived signing key beside the tenant, so only they can redeem the
+    // interactive ids, at zero cost on the wire.
+    sender: &str,
 ) -> Result<RenderedMessage, RenderError> {
     let mut chunks: Vec<String> = Vec::new();
     let mut deferred_buttons = 0usize;
@@ -189,8 +197,11 @@ pub fn render(
                     args,
                     correlation_key,
                     triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
-                    "whatsapp",
-                    tenant,
+                    triton_correlation::Binding {
+                        platform: "whatsapp",
+                        tenant,
+                        sender,
+                    },
                     None,
                 ) {
                     Ok(token) => buttons.push(InteractiveChoice {
@@ -222,8 +233,11 @@ pub fn render(
                         &args,
                         correlation_key,
                         triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
-                        "whatsapp",
-                        tenant,
+                        triton_correlation::Binding {
+                            platform: "whatsapp",
+                            tenant,
+                            sender,
+                        },
                         None,
                     ) {
                         rows.push(InteractiveChoice {
@@ -601,7 +615,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, &KEY, "acme").expect("renders");
+        let r = render(&s, &KEY, "acme", "u1").expect("renders");
         assert_eq!(r.text, "hello\n\n_a footnote_");
         assert_eq!(r.deferred_buttons, 0);
         assert!(!r.truncated);
@@ -661,7 +675,7 @@ mod tests {
                 },
             ],
         };
-        let r = render(&s, &KEY, "acme").expect("renders");
+        let r = render(&s, &KEY, "acme", "u1").expect("renders");
         // None of the interactive components contribute to text.
         assert_eq!(r.text, "preamble");
         assert_eq!(r.deferred_buttons, 1);
@@ -695,7 +709,7 @@ mod tests {
         let s = Surface {
             components: vec![make_dash("first"), make_dash("second")],
         };
-        let r = render(&s, &KEY, "acme").expect("renders");
+        let r = render(&s, &KEY, "acme", "u1").expect("renders");
         let dash = r.dashboard.expect("first surfaced");
         assert_eq!(dash.title, "first");
         assert_eq!(r.deferred_dashboards, 1);
@@ -718,7 +732,7 @@ mod tests {
                 }],
             }],
         };
-        let r = render(&s, &KEY, "acme").expect("renders");
+        let r = render(&s, &KEY, "acme", "u1").expect("renders");
         assert!(r.text.is_empty());
         assert!(r.dashboard.is_some());
     }
@@ -727,7 +741,7 @@ mod tests {
     fn empty_surface_is_a_render_error() {
         let s = Surface { components: vec![] };
         assert!(matches!(
-            render(&s, &KEY, "acme"),
+            render(&s, &KEY, "acme", "u1"),
             Err(RenderError::EmptyAfterRender)
         ));
     }
@@ -747,7 +761,7 @@ mod tests {
                 resource: None,
             }],
         };
-        let r = render(&s, &KEY, "acme").expect("renders");
+        let r = render(&s, &KEY, "acme", "u1").expect("renders");
         let i = r.interactive.expect("interactive built");
         assert_eq!(i["type"], "button");
         assert!(i["body"]["text"].as_str().is_some_and(|s| !s.is_empty()));
@@ -778,7 +792,7 @@ mod tests {
                 button("d"),
             ],
         };
-        let r = render(&s, &KEY, "acme").expect("renders");
+        let r = render(&s, &KEY, "acme", "u1").expect("renders");
         let i = r.interactive.expect("interactive built");
         assert_eq!(i["action"]["buttons"].as_array().unwrap().len(), 3);
         assert_eq!(r.deferred_buttons, 1);
@@ -793,7 +807,7 @@ mod tests {
                 value: big,
             }],
         };
-        let r = render(&s, &KEY, "acme").expect("renders");
+        let r = render(&s, &KEY, "acme", "u1").expect("renders");
         assert!(r.truncated);
         assert!(r.text.len() <= WHATSAPP_TEXT_MAX_BYTES);
         assert!(r.text.ends_with(TRUNCATION_SENTINEL));
@@ -808,7 +822,7 @@ mod tests {
                 value: fourbyte.repeat(2000),
             }],
         };
-        let r = render(&s, &KEY, "acme").expect("renders");
+        let r = render(&s, &KEY, "acme", "u1").expect("renders");
         assert!(r.truncated);
         // The String type guarantees valid UTF-8; spot-check char
         // boundaries don't panic when iterated.
@@ -823,7 +837,7 @@ mod tests {
         let s = Surface {
             components: vec![Component::Narration { text: big }],
         };
-        let r = render(&s, &KEY, "acme").expect("renders");
+        let r = render(&s, &KEY, "acme", "u1").expect("renders");
         assert!(r.truncated);
         // The italic wrapper must remain matched: one opener + one
         // closer in the body. We tolerate raw text that itself

@@ -1625,3 +1625,28 @@ a trap the next developer should not have to step in.
   if key A's MAC passes and only the body is stale, trying key B and
   reporting its `BadSignature` tells an operator their rotation broke when
   in fact the token simply timed out.
+
+- **A tenant binding is not a sender binding, and in a group chat that is the
+  whole gap.** #250 bound correlation tokens to the tenant, which closed
+  cross-tenant replay and read as "the token is now bound". It was not:
+  `callback_data` in a Telegram group, a Discord `custom_id`, a Teams
+  `Action.Submit.data`, a Google Chat card action are all visible to every
+  member of the conversation, so a token bound only to the tenant is a
+  capability held by everyone in it. Any member could click another
+  member's button and have the tool run under their OWN principal against
+  the OTHER person's arguments.
+
+  Folding the sender into the same derived key costs nothing on the wire —
+  a bound token still fits Telegram's 64 bytes — and fails the SIGNATURE
+  rather than a comparison someone has to remember to make. Two details
+  worth keeping. The derivation label went `v1` → `v2`, so a pre-binding
+  token cannot collide with a bound one for any input. And `tenant` and
+  `sender` are both `&str` and adjacent: passed positionally, swapping them
+  compiles and yields a token bound to nothing anyone will ever present, so
+  they travel in a named `Binding` struct instead. The compiler cannot
+  catch a swap; a field name can.
+
+  The consequence to accept deliberately: in a shared space, only the
+  person who triggered a command can use its buttons. That is the point,
+  but it IS a behaviour change — a colleague can no longer click "Refresh"
+  on someone else's card.

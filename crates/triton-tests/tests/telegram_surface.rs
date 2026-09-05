@@ -306,8 +306,11 @@ async fn demo_selection_defers_when_any_option_overflows_cap() {
         refresh["callback_data"].as_str().unwrap(),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
-        "telegram",
-        "acme",
+        triton_correlation::Binding {
+            platform: "telegram",
+            tenant: "acme",
+            sender: "42",
+        },
     )
     .expect("Refresh token verifies for its tenant");
     assert_eq!(refresh_tool, "demo_panel");

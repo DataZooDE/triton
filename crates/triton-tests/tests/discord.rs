@@ -152,8 +152,11 @@ async fn button_click_dispatches_via_correlation_token() {
         &json!({ "subject": "bob" }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("token fits");
@@ -206,8 +209,11 @@ async fn button_click_dispatches_via_correlation_token() {
         nested_token,
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
     )
     .expect("verifies for its tenant");
     assert_eq!(tool, "narrate");
@@ -246,8 +252,11 @@ async fn forged_custom_id_token_rejected_at_inbound() {
         &json!({ "subject": "evil" }),
         b"wrong-correlation-key-32-bytes!!",
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("forged token fits");
@@ -294,8 +303,11 @@ async fn stale_message_timestamp_rejects_button_click() {
         &json!({ "subject": "bob" }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("token fits");
@@ -380,8 +392,11 @@ async fn burst_succeeds_then_excess_is_ratelimited() {
         &json!({ "subject": "bob" }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("token fits");
@@ -447,8 +462,11 @@ async fn a_modal_token_from_another_tenant_is_rejected() {
         &json!({ "message": Value::Null }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "globex",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "globex",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("encode");
@@ -499,8 +517,11 @@ async fn a_component_token_from_another_tenant_is_rejected() {
         &json!({ "subject": "victim" }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "globex",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "globex",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("encode");
@@ -547,8 +568,11 @@ async fn button_callback_with_values_is_rejected() {
         &json!({ "subject": "bob" }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("token fits");
@@ -596,8 +620,11 @@ async fn selection_callback_substitutes_picked_value_and_dispatches() {
         &json!({ "subject": serde_json::Value::Null }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("token fits");
@@ -653,8 +680,11 @@ async fn missing_message_timestamp_fails_closed() {
         &json!({ "subject": "bob" }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("token fits");
@@ -878,8 +908,11 @@ async fn slash_command_form_only_surface_opens_modal() {
         custom_id,
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
     )
     .expect("token verifies for its tenant");
     assert_eq!(tool, "echo");
@@ -916,8 +949,11 @@ async fn modal_submit_substitutes_values_and_dispatches() {
         &json!({ "message": Value::Null }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("token fits");
@@ -993,8 +1029,11 @@ async fn modal_submit_with_extra_field_rejected() {
         &json!({ "subject": Value::Null }),
         CORRELATION_KEY.as_bytes(),
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("token fits");
@@ -1051,8 +1090,11 @@ async fn modal_submit_with_forged_custom_id_rejected() {
         &json!({ "subject": Value::Null }),
         b"wrong-correlation-key-32-bytes!!",
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
-        "discord",
-        "acme",
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: "acme",
+            sender: "99",
+        },
         Some(7 * 24 * 3600),
     )
     .expect("forged token fits");
