@@ -517,6 +517,30 @@ const fn default_limit() -> usize {
     AUDIT_LIMIT_DEFAULT
 }
 
+/// Scope that grants the cross-tenant view of `/v1/audit` and
+/// `/v1/trace`. Without it a caller sees only their own tenant's rows.
+pub const AUDIT_READ_ALL_SCOPE: &str = "audit:read-all";
+
+/// Which audit rows this principal may read (#282).
+///
+/// An operator (holding [`AUDIT_READ_ALL_SCOPE`]) sees everything. Anyone
+/// else sees their own tenant only — and NOT the unattributed rows.
+///
+/// Unattributed rows (`tenant: "-"`) are the boundary rejections: they
+/// exist precisely because no principal was resolved, so there is no
+/// tenant to scope them by, and they are the rows most likely to name
+/// another tenant's sender or reply target. Operator-only is the
+/// fail-closed reading. The cost is real and worth stating: a
+/// tenant-scoped caller cannot see their own failed authentications,
+/// because at the moment of failure nothing knew they were theirs.
+fn audit_visibility(
+    principal: &triton_core::principal::Principal,
+) -> impl Fn(&triton_core::audit::AuditEntry) -> bool {
+    let operator = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE);
+    let tenant = principal.tenant.clone();
+    move |e| operator || e.tenant == tenant
+}
+
 /// `GET /v1/audit?limit=N&trace_id=X` — newest-first slice of the
 /// in-process audit ring buffer. Authenticated; this is operational
 /// metadata about every request the gateway has processed since
@@ -526,20 +550,27 @@ async fn audit_tail(
     Query(q): Query<AuditQuery>,
     parts: Parts,
 ) -> Response {
-    if let Err(e) = state.identity.verify(&parts).await {
-        state.dispatcher.record_rejection(
-            "v1/audit",
-            "rest",
-            "-",
-            "-",
-            &uuid::Uuid::new_v4().to_string(),
-            &e,
-        );
-        return error_response(&e, None);
-    }
+    // #282: the Principal was previously verified and then DISCARDED,
+    // so any authenticated caller read every tenant's rows. This is the
+    // one confidentiality surface no upstream contract can cover —
+    // Triton serves the data itself.
+    let principal = match state.identity.verify(&parts).await {
+        Ok(p) => p,
+        Err(e) => {
+            state.dispatcher.record_rejection(
+                "v1/audit",
+                "rest",
+                "-",
+                "-",
+                &uuid::Uuid::new_v4().to_string(),
+                &e,
+            );
+            return error_response(&e, None);
+        }
+    };
     let limit = q.limit.clamp(1, AUDIT_LIMIT_MAX);
     let trace_id = q.trace_id.as_deref().filter(|s| !s.is_empty());
-    let entries = AuditBuffer::recent(limit, trace_id);
+    let entries = AuditBuffer::recent_where(limit, trace_id, audit_visibility(&principal));
     Json(json!({
         "entries": entries,
         "limit": limit,
@@ -558,18 +589,26 @@ async fn trace_view(
     Path(trace_id): Path<String>,
     parts: Parts,
 ) -> Response {
-    if let Err(e) = state.identity.verify(&parts).await {
-        state.dispatcher.record_rejection(
-            "v1/trace",
-            "rest",
-            "-",
-            "-",
-            &uuid::Uuid::new_v4().to_string(),
-            &e,
-        );
-        return error_response(&e, None);
-    }
-    let mut entries = AuditBuffer::recent(AUDIT_LIMIT_MAX, Some(&trace_id));
+    // #282: same shape as /v1/audit — verified, then discarded.
+    let principal = match state.identity.verify(&parts).await {
+        Ok(p) => p,
+        Err(e) => {
+            state.dispatcher.record_rejection(
+                "v1/trace",
+                "rest",
+                "-",
+                "-",
+                &uuid::Uuid::new_v4().to_string(),
+                &e,
+            );
+            return error_response(&e, None);
+        }
+    };
+    let mut entries = AuditBuffer::recent_where(
+        AUDIT_LIMIT_MAX,
+        Some(&trace_id),
+        audit_visibility(&principal),
+    );
     entries.reverse(); // chronological for a timeline
     let bodies = triton_core::trace::captured(&trace_id);
     Json(json!({

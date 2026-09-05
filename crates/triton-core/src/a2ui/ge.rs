@@ -7,17 +7,22 @@
 //! the Explorer's Flutter renderer, which no shipping surface consumes. Gemini
 //! Enterprise renders the a2ui.org catalog format — a streamed message array
 //! (`createSurface` → `updateComponents`) of flat, id-referenced components
-//! drawn from the **basic catalog** — which is what this file produces.
+//! drawn from GE's **composite (Material) catalog** — which is what this file
+//! produces.
 //!
-//! Contract (github.com/a2ui-project/a2ui `specification/v0_9`, and the
-//! Gemini reference agent `wadave/agent-a2ui-demo`):
+//! Contract (github.com/a2ui-project/a2ui `specification/v0_9`, Google's GE
+//! A2UI component-gallery reference, and the a2ui-project GE sample):
 //!   - `data` is an ARRAY of messages, each stamped `"version":"v0.9"`.
 //!   - components use the flat discriminator `{"id","component":"…", …}`.
-//!   - a `Card` has ONE `child`; multiple children go through `Column`/`Row`.
-//!   - a `Button` label is a child `Text` referenced by id, and its `action`
-//!     is REQUIRED — we emit `{"event":{"name","context"}}` so a click posts
-//!     an A2UI `action` message back to the agent.
-//!   - there is no Chart component: a chart is an `Image` with a URL.
+//!   - we render with GE's **composite catalog** (Material Design components),
+//!     so the card is `MaterialCard`/`MaterialColumn`/`MaterialRow` and the
+//!     widgets are `MaterialButton`/`MaterialImage` — real Material, not plain
+//!     primitives. A `MaterialCard` takes a `children` LIST (not a single
+//!     `child`).
+//!   - a `MaterialButton` carries its `label` DIRECTLY (no child Text) plus a
+//!     `variant`/`color`; its `action` is REQUIRED — we emit
+//!     `{"event":{"name","context"}}` so a click posts an A2UI `action` back.
+//!   - there is no chart primitive we use: a chart is a `MaterialImage` URL.
 //!
 //! Input is the RAW surface JSON the agent produced (`{components:[…]}` with
 //! each component tagged by `kind`), not the typed [`super::Surface`], because
@@ -40,17 +45,20 @@ pub const EXTENSION_URI: &str = "https://a2ui.org/a2a-extension/a2ui/v0.9";
 /// perfectly-formed card shows as text). Verified against the a2ui SDK
 /// (`create_a2ui_part`) and Google's own GE integration notes.
 pub const MIME: &str = "application/json+a2ui";
-/// The basic component catalog id (declared in the card and in `createSurface`).
-pub const BASIC_CATALOG: &str = "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json";
-
-/// How many components Gemini Enterprise numbers BEFORE the ones in our
-/// `updateComponents` array. Observed on the wire: a button at 1-based array
-/// index `i` comes back on click as `sourceComponentId = "btn-(i+2)"` — GE
-/// renders `root` and `root-col` first (they occupy 1 and 2), so our array is
-/// offset by 2. This lets us PREDICT the id GE will echo for each button and
-/// map it back to the re-ask question (GE strips our name/context/id, so the
-/// predicted-id-per-surface map below is the only reliable channel).
-const GE_ID_OFFSET: usize = 2;
+/// The catalog id declared in the card and in `createSurface`.
+///
+/// Gemini Enterprise's own **composite catalog** (Material Design components +
+/// the basic primitives + GE-native ones), NOT the design-agnostic a2ui.org
+/// `basic` catalog. Using it lets the card render as real Material — themed
+/// `MaterialButton`/`MaterialText`/`MaterialCard` instead of plain primitives.
+/// (Authoritative id per Google's GE A2UI reference + the a2ui-project GE
+/// sample catalog's own `$id`.)
+pub const BASIC_CATALOG: &str =
+    "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json";
+/// Surface theme `primaryColor` (`^#[0-9a-fA-F]{6}$`) sent in `createSurface`.
+/// Gemini brand blue — the same `--pk-brand` the peacock `gemini.css` host theme
+/// gives the charts — so the Material card's primary accents match the chart.
+const THEME_PRIMARY_COLOR: &str = "#1a73e8";
 
 /// Fixed surfaceId prefix; a v4 UUID follows. The id is kept SHORT
 /// (`triton-answer-<uuid>`, 50 chars) on purpose: Gemini Enterprise TRUNCATES
@@ -59,10 +67,10 @@ const GE_ID_OFFSET: usize = 2;
 /// survive, so it keys the per-card re-ask table below.
 const SURFACE_PREFIX: &str = "triton-answer-";
 
-/// Bounded, process-wide map: `surfaceId` → { predicted GE button id → re-ask
-/// question }. GE strips name/context and renumbers ids on click, and truncates
-/// the surfaceId to the uuid — so the ONLY recoverable pair is
-/// `(surfaceId-uuid, GE btn-N)`, which this table maps back to the question.
+/// Bounded, process-wide map: `surfaceId` → { button id number → re-ask
+/// question }. GE strips name/context on click and truncates the surfaceId to
+/// the uuid, but PRESERVES the component id — so the recoverable pair is
+/// `(surfaceId-uuid, our btn-N)`, which this table maps back to the question.
 ///
 /// This is process-local, so `dz-agent-template` runs a single replica in lab
 /// (values-lab `replicaCount: 1`); a multi-replica deployment would need a
@@ -78,10 +86,6 @@ fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, Str
         return;
     }
     if let Ok(mut store) = SURFACE_QUESTIONS.lock() {
-        println!(
-            "A2UI_STORE_WRITE surface={surface_id} keys={:?}",
-            qmap.keys().copied().collect::<Vec<_>>()
-        );
         store.push((surface_id.to_string(), qmap));
         let overflow = store.len().saturating_sub(MAX_SURFACES);
         if overflow > 0 {
@@ -97,14 +101,7 @@ fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, Str
 pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<String> {
     let n: usize = source_component_id.rsplit('-').next()?.parse().ok()?;
     let store = SURFACE_QUESTIONS.lock().ok()?;
-    let all: Vec<&String> = store.iter().map(|(s, _)| s).collect();
     let hit = store.iter().rev().find(|(sid, _)| sid == surface_id);
-    println!(
-        "A2UI_STORE_READ surface={surface_id} comp={source_component_id} n={n} found={} size={} all={:?}",
-        hit.is_some(),
-        store.len(),
-        all
-    );
     hit.and_then(|(_, m)| m.get(&n).cloned())
 }
 
@@ -121,6 +118,10 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     // that hang under the top Column, in surface order.
     let mut flat: Vec<Value> = Vec::new();
     let mut root_children: Vec<String> = Vec::new();
+    // Buttons are collected here and laid out in a single horizontal Row (chips)
+    // rather than stacked full-width down the Column — matching the Teams/Chat
+    // action-chip row. (Sources are not in the card — see the `sources` arm.)
+    let mut button_ids: Vec<String> = Vec::new();
     // Predicted-GE-id → re-ask question, for this card's follow-up buttons.
     let mut qmap: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut n = 0usize;
@@ -138,14 +139,25 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
             // The card is the rich WIDGET — chart + actions + sources.
             "text" | "narration" => {}
             // Chart: the embedded agent stamps a signed public `image_url` on
-            // the report; the basic catalog has no chart, so it is an Image.
+            // the report; render it as a Material image (rounded, contained).
+            // MaterialImage needs an explicit size or it collapses to zero
+            // height (unlike the basic `Image`) — give it full width and a
+            // `contain` aspect ratio matching the peacock chart (≈16:9) so it
+            // scales responsively without cropping.
             "report" => {
                 if let Some(url) = c.get("image_url").and_then(Value::as_str) {
                     let cid = id("chart", &mut n);
-                    let mut img =
-                        json!({ "id": cid, "component": "Image", "url": url, "fit": "contain" });
+                    let mut img = json!({
+                        "id": cid,
+                        "component": "MaterialImage",
+                        "url": url,
+                        "fit": "contain",
+                        "width": "100%",
+                        "aspectRatio": "16/9",
+                        "roundedCorners": true,
+                    });
                     if let Some(t) = c.get("title").and_then(Value::as_str) {
-                        img["description"] = json!(t);
+                        img["alt"] = json!(t);
                     }
                     flat.push(img);
                     root_children.push(cid);
@@ -164,67 +176,68 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                     .and_then(|a| a.get("question").or_else(|| a.get("message")))
                     .and_then(Value::as_str)
                     .filter(|_| tool != "render_report");
-                let text_id = id("btn-text", &mut n);
+                // MaterialButton takes its `label` directly (no child Text), so
+                // one id per button. GE strips our event name/context and
+                // truncates the surfaceId to its uuid on click, but PRESERVES the
+                // component id — a click echoes `sourceComponentId` equal to the
+                // Button's own `id` (`btn-N`). `n` here is exactly that N, so key
+                // `N → question` for the inbound re-ask lookup (report/other
+                // buttons carry no question and are not recorded).
                 let btn_id = id("btn", &mut n);
-                flat.push(json!({ "id": text_id, "component": "Text", "text": label }));
-                // GE strips our event name/context and RENUMBERS component ids
-                // on click, so no per-button payload survives directly. But it
-                // echoes a deterministic `sourceComponentId` we can PREDICT: the
-                // button's 1-based index in this array + GE_ID_OFFSET. Record
-                // `predicted_ge_id → question` so the inbound handler can map a
-                // click back to the re-ask (report/other buttons carry none).
-                let predicted_ge_id = flat.len() + 1 + GE_ID_OFFSET;
                 if let Some(q) = question {
-                    qmap.insert(predicted_ge_id, q.to_string());
+                    qmap.insert(n, q.to_string());
                 }
+                // `raised` (filled, themed primary) for the main re-ask actions;
+                // `stroked` (outlined) for report/other buttons — a clear Material
+                // hierarchy. `color:primary` picks up the surface theme color.
+                let primary = question.is_some();
                 flat.push(json!({
-                    "id": btn_id,
-                    "component": "Button",
-                    "child": text_id,
-                    "variant": if c.get("primary").and_then(Value::as_bool) == Some(true) { "primary" } else { "default" },
+                    "id": btn_id.clone(),
+                    "component": "MaterialButton",
+                    "label": label,
+                    "variant": if primary { "raised" } else { "stroked" },
+                    "color": "primary",
                     "action": { "event": { "name": tool, "context": {} } },
                 }));
-                root_children.push(btn_id);
+                button_ids.push(btn_id);
             }
-            // Sources: GE's basic catalog has no link component and rejects a
-            // `functionCall: openUrl` Button action ("Validation failed for
-            // component 'Button'"), so render each source as a plain Text line
-            // ("Source: <label> — <url>"). Not clickable, but the reference is
-            // conveyed and the card validates. (http/https only; a ui:// MCP
-            // resource can't open in GE and is skipped.)
-            "sources" => {
-                if let Some(items) = c.get("items").and_then(Value::as_array) {
-                    for it in items {
-                        let label = it.get("label").and_then(Value::as_str).unwrap_or("Source");
-                        let Some(url) = it
-                            .get("resource")
-                            .and_then(Value::as_str)
-                            .filter(|u| u.starts_with("http"))
-                        else {
-                            continue;
-                        };
-                        let cid = id("src", &mut n);
-                        flat.push(json!({
-                            "id": cid,
-                            "component": "Text",
-                            "text": format!("Source: {label} — {url}"),
-                            "variant": "caption",
-                        }));
-                        root_children.push(cid);
-                    }
-                }
-            }
+            // Sources are NOT put in the card: GE's basic catalog has no link
+            // component and its Text excludes link markdown, so a card source
+            // could only be dead text. The spec-A2A text part (`reply_text`)
+            // instead appends them as clickable Markdown links in the prose
+            // bubble, which GE renders as real anchors. So drop `sources` here.
+            "sources" => {}
             _ => {}
         }
+    }
+
+    // Follow-up/report buttons → one horizontal Material Row (chips), not
+    // stacked full-width down the Column.
+    if !button_ids.is_empty() {
+        flat.push(json!({
+            "id": "btn-row",
+            "component": "MaterialRow",
+            "children": button_ids,
+            "justify": "start",
+            "align": "center",
+        }));
+        root_children.push("btn-row".to_string());
     }
 
     if root_children.is_empty() {
         return None;
     }
 
-    // Top: Card → Column(root_children).
-    flat.push(json!({ "id": "root-col", "component": "Column", "children": root_children }));
-    flat.push(json!({ "id": "root", "component": "Card", "child": "root-col" }));
+    // Top: MaterialCard(outlined) → MaterialColumn(root_children).
+    flat.push(
+        json!({ "id": "root-col", "component": "MaterialColumn", "children": root_children }),
+    );
+    flat.push(json!({
+        "id": "root",
+        "component": "MaterialCard",
+        "appearance": "outlined",
+        "children": ["root-col"],
+    }));
 
     // Short, unique surfaceId (GE truncates anything longer to the uuid), and
     // record this card's re-ask table under it for the click round-trip.
@@ -234,7 +247,21 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     Some(vec![
         json!({
             "version": "v0.9",
-            "createSurface": { "surfaceId": surface_id, "catalogId": BASIC_CATALOG },
+            "createSurface": {
+                "surfaceId": surface_id,
+                "catalogId": BASIC_CATALOG,
+                // v0.9 styling: `createSurface.theme` (which replaced v0.8's
+                // `styles`) carries theme params the Material renderer applies —
+                // GE uses `primaryColor` for primary buttons and active borders.
+                // We set the DataZoo/Gemini brand blue so the card's accents
+                // match the chart palette (peacock `gemini.css` `--pk-brand`),
+                // and name the agent beside the surface. Renderers ignore fields
+                // they don't use, so this is safe on every A2UI host.
+                "theme": {
+                    "primaryColor": THEME_PRIMARY_COLOR,
+                    "agentDisplayName": "DataZoo Agent",
+                },
+            },
         }),
         json!({
             "version": "v0.9",
@@ -283,67 +310,99 @@ mod tests {
         assert_eq!(msgs.len(), 2, "createSurface + updateComponents");
         assert_eq!(msgs[0]["version"], "v0.9");
         assert_eq!(msgs[0]["createSurface"]["catalogId"], BASIC_CATALOG);
+        // createSurface carries a v0.9 theme so GE styles the card (Material
+        // primary accents) with the brand color.
+        assert_eq!(
+            msgs[0]["createSurface"]["theme"]["primaryColor"],
+            THEME_PRIMARY_COLOR
+        );
         let comps = msgs[1]["updateComponents"]["components"]
             .as_array()
             .unwrap();
 
-        // Root is a Card whose single child is a Column.
+        // Root is a MaterialCard whose single child (a LIST) is a MaterialColumn.
         let root = find(comps, "root");
-        assert_eq!(root["component"], "Card");
-        let col = find(comps, root["child"].as_str().unwrap());
-        assert_eq!(col["component"], "Column");
+        assert_eq!(root["component"], "MaterialCard");
+        let col_id = root["children"][0].as_str().unwrap();
+        let col = find(comps, col_id);
+        assert_eq!(col["component"], "MaterialColumn");
 
-        // Exactly one Image, carrying the signed chart URL (charts = Image).
+        // Exactly one MaterialImage, carrying the signed chart URL.
         let img = comps
             .iter()
-            .find(|c| c["component"] == "Image")
+            .find(|c| c["component"] == "MaterialImage")
             .expect("image");
         assert_eq!(img["url"], "https://agent-lab.data-zoo.de/report/img/tok");
 
-        // The re-ask button renders with its label as a child Text. GE strips
-        // our name/context and renumbers ids on click, so the question is
-        // recovered via the per-surface table keyed by the PREDICTED GE id
-        // (`surfaceId` + `btn-<predicted>`), not by anything on the button.
+        // The re-ask MaterialButton carries its label directly (no child Text).
+        // GE strips our name/context on click but PRESERVES the component id, so
+        // the question is recovered via the per-surface table keyed by the
+        // button's own id number (`surfaceId` + `btn-N`).
         let btn = comps
             .iter()
-            .find(|c| c["component"] == "Button" && c["action"]["event"]["name"] == "assistant")
+            .find(|c| {
+                c["component"] == "MaterialButton" && c["action"]["event"]["name"] == "assistant"
+            })
             .expect("re-ask button");
-        let btn_text = find(comps, btn["child"].as_str().unwrap());
-        assert_eq!(btn_text["text"], "What does Initech buy?");
-        // The predicted GE id resolves to the question via `question_for`.
-        // This surface: chart=1, btn-text=2, button=3 (1-based array index),
-        // so GE echoes btn-(3+GE_ID_OFFSET) = btn-5 on click.
+        assert_eq!(btn["label"], "What does Initech buy?");
+        assert_eq!(btn["variant"], "raised");
+        assert_eq!(btn["color"], "primary");
+        // GE echoes the Button's own id on click. This surface: chart=1,
+        // button=2 (MaterialButton needs no child Text) — so `btn-2` resolves.
         let sid = msgs[0]["createSurface"]["surfaceId"].as_str().unwrap();
+        assert_eq!(btn["id"], "btn-2");
         assert_eq!(
-            question_for(sid, "btn-5").as_deref(),
+            question_for(sid, "btn-2").as_deref(),
             Some("What does Initech buy?"),
         );
         // A wrong id / unknown surface resolves to nothing.
         assert_eq!(question_for(sid, "btn-99"), None);
-        assert_eq!(question_for("nope", "btn-5"), None);
+        assert_eq!(question_for("nope", "btn-2"), None);
+
+        // Buttons are laid out in a single horizontal MaterialRow (chips), not
+        // stacked as direct Column children.
+        let row = find(comps, "btn-row");
+        assert_eq!(row["component"], "MaterialRow");
+        assert!(
+            row["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c == "btn-2"),
+            "button must live inside the Row: {row}"
+        );
+        assert_eq!(
+            col["children"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| *c == "btn-2"),
+            None,
+            "button must NOT be a direct Column child"
+        );
 
         // Prose is NOT duplicated inside the card (the bubble shows it).
         assert!(
-            !comps
-                .iter()
-                .any(|c| c["component"] == "Text" && c["text"] == "Initech leads at $2,500.75."),
+            !comps.iter().any(|c| {
+                (c["component"] == "Text" || c["component"] == "MaterialText")
+                    && c["text"] == "Initech leads at $2,500.75."
+            }),
             "card must not repeat the answer prose"
         );
 
-        // http source → plain Text line (GE rejects functionCall:openUrl);
-        // ui:// source is dropped. No Button carries a functionCall action.
-        let src = comps
-            .iter()
-            .find(|c| {
-                c["component"] == "Text" && c["text"].as_str().unwrap_or("").starts_with("Source:")
-            })
-            .expect("source text line");
+        // Sources are NOT in the card (GE can't hyperlink there); they ride the
+        // prose bubble as Markdown links via reply_text. So the card has no
+        // "sources" component and no source Text line at all.
         assert!(
-            src["text"]
-                .as_str()
-                .unwrap()
-                .contains("https://agent-lab.data-zoo.de/docs/tok"),
-            "{src}"
+            !comps.iter().any(|c| c["id"] == "sources"),
+            "card must not carry a sources component"
+        );
+        assert!(
+            !comps
+                .iter()
+                .any(|c| c["component"] == "Text"
+                    && c["text"].as_str().unwrap_or("").contains("Source")),
+            "card must not carry a source text line"
         );
         assert!(
             !comps

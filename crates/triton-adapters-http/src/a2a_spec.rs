@@ -617,6 +617,23 @@ async fn message_stream(
                 // Only include the full text if we did NOT stream it as
                 // deltas (else it duplicates). A2UI DataParts always ride the
                 // final artifact (deltas never carried them).
+                let mut frames = Vec::new();
+                // When the prose streamed as deltas, the clickable sources line
+                // (only in the final `reply`, which we skip to avoid a dupe)
+                // would be lost. Emit it as one more APPEND text delta — same
+                // shape as a token — so it lands in GE's bubble as real links.
+                if streamed_text && let Some(sources) = sources_markdown(&v) {
+                    frames.push(rpc_frames(json!({
+                        "kind": "artifact-update",
+                        "taskId": task_for_frames,
+                        "contextId": ctx_for_frames,
+                        "append": true,
+                        "artifact": {
+                            "artifactId": artifact_id,
+                            "parts": [{ "kind": "text", "text": format!("\n\n{sources}") }],
+                        },
+                    })));
+                }
                 let mut parts: Vec<Value> = Vec::new();
                 if !streamed_text {
                     parts.push(json!({ "kind": "text", "text": reply }));
@@ -624,7 +641,6 @@ async fn message_stream(
                 if let Some(msgs) = triton_core::a2ui::ge::build_messages(&v) {
                     parts.extend(triton_core::a2ui::ge::data_parts(msgs));
                 }
-                let mut frames = Vec::new();
                 if !parts.is_empty() {
                     frames.push(rpc_frames(json!({
                         "kind": "artifact-update",
@@ -686,6 +702,32 @@ async fn message_stream(
 /// tools answer with an A2UI surface; a spec-A2A caller asked for
 /// `text/plain`, so the surface's text is what it gets, and the whole
 /// JSON only as a last resort (better than an empty reply).
+/// Render a surface's `sources` as one clickable-Markdown-links line
+/// ("Sources: [a](url) · [b](url)"), or `None` if there are no http(s) sources.
+///
+/// The A2UI card (Gemini Enterprise) CANNOT hyperlink — its basic catalog has
+/// no link component and its Text excludes link markdown — so sources ride the
+/// prose bubble, where GE (and Copilot Studio / Gemini) render Markdown links as
+/// real anchors. A `ui://` MCP resource can't open and is skipped.
+fn sources_markdown(result: &Value) -> Option<String> {
+    let components = result.get("surface")?.get("components")?.as_array()?;
+    let links: Vec<String> = components
+        .iter()
+        .filter(|c| c.get("kind").and_then(Value::as_str) == Some("sources"))
+        .filter_map(|c| c.get("items").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|it| {
+            let url = it
+                .get("resource")
+                .and_then(Value::as_str)
+                .filter(|u| u.starts_with("http"))?;
+            let label = it.get("label").and_then(Value::as_str).unwrap_or("source");
+            Some(format!("[{label}]({url})"))
+        })
+        .collect();
+    (!links.is_empty()).then(|| format!("Sources: {}", links.join(" · ")))
+}
+
 fn reply_text(result: &Value) -> String {
     for key in ["text", "message", "answer"] {
         if let Some(s) = result.get(key).and_then(Value::as_str) {
@@ -731,6 +773,13 @@ fn reply_text(result: &Value) -> String {
                     joined.push_str("\n\n");
                 }
                 joined.push_str(&images);
+            }
+            // Sources as clickable Markdown links (see `sources_markdown`).
+            if let Some(sources) = sources_markdown(result) {
+                if !joined.is_empty() {
+                    joined.push_str("\n\n");
+                }
+                joined.push_str(&sources);
             }
             if !joined.is_empty() {
                 return joined;
@@ -861,5 +910,31 @@ mod reply_text_tests {
             ] }
         });
         assert_eq!(reply_text(&no_url), "US leads at $4,000.75.");
+    }
+
+    #[test]
+    fn reply_text_appends_sources_as_markdown_links() {
+        // http(s) sources become clickable Markdown links in the prose bubble
+        // (the GE card cannot hyperlink); a ui:// resource is skipped.
+        let result = serde_json::json!({
+            "surface": { "components": [
+                { "kind": "text", "value": "Initech leads." },
+                { "kind": "sources", "items": [
+                    { "label": "followups", "resource": "https://agent.example/docs/A" },
+                    { "label": "query", "resource": "https://agent.example/docs/B" },
+                    { "label": "ui-only", "resource": "ui://peacock/x" }
+                ] }
+            ] }
+        });
+        assert_eq!(
+            reply_text(&result),
+            "Initech leads.\n\nSources: [followups](https://agent.example/docs/A) · [query](https://agent.example/docs/B)"
+        );
+
+        // No sources → no trailing line.
+        let none = serde_json::json!({
+            "surface": { "components": [ { "kind": "text", "value": "Initech leads." } ] }
+        });
+        assert_eq!(reply_text(&none), "Initech leads.");
     }
 }
