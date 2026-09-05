@@ -245,6 +245,25 @@ impl AuditBuffer {
     /// Return the most recent `limit` entries (newest first),
     /// optionally filtered to entries whose `trace_id` matches.
     pub fn recent(limit: usize, trace_id: Option<&str>) -> Vec<AuditEntry> {
+        Self::recent_where(limit, trace_id, |_| true)
+    }
+
+    /// Newest-first slice, keeping only entries `visible` accepts.
+    ///
+    /// The predicate is applied BEFORE `limit` (#282). Filtering after
+    /// taking the window is the subtle version of the bug: a caller
+    /// whose traffic is a small share of a busy gateway asks for 50 rows,
+    /// gets the newest 50 across all tenants, keeps the two that are
+    /// theirs, and reads it as "no activity" rather than as a paging
+    /// artefact.
+    ///
+    /// The POLICY stays with the caller — this buffer owns recording,
+    /// not who may read what. It only guarantees the ordering.
+    pub fn recent_where(
+        limit: usize,
+        trace_id: Option<&str>,
+        visible: impl Fn(&AuditEntry) -> bool,
+    ) -> Vec<AuditEntry> {
         let buf = Self::global();
         let q = buf.inner.lock().unwrap_or_else(|e| e.into_inner());
         let it = q.iter().rev();
@@ -252,7 +271,11 @@ impl AuditBuffer {
             Some(t) => Box::new(it.filter(move |e| e.trace_id == t)),
             None => Box::new(it),
         };
-        filtered.take(limit).cloned().collect()
+        filtered
+            .filter(|e| visible(e))
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Reset for tests. Not exposed in production — the buffer is

@@ -18,6 +18,7 @@ dev-token = []
 capture = ["triton-core/capture"]
 
 [dependencies]
+subtle = "2"
 triton-core = { path = "../triton-core" }
 triton-identity = { path = "../triton-identity" }
 triton-manifest = { path = "../triton-manifest" }
