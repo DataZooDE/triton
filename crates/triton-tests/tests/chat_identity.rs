@@ -169,7 +169,10 @@ async fn an_identity_kind_the_adapter_does_not_implement_refuses_boot() {
         .env("TRITON_TELEGRAM_API_BASE", "http://127.0.0.1:1")
         .env("TRITON_TG_WEBHOOK_SECRET", "secret-resolved-from-vault")
         .env("TRITON_TG_BOT_TOKEN", "12345:token")
-        .env("TRITON_TG_CORRELATION_KEY", "32byte-correlation-key-for-test!")
+        .env(
+            "TRITON_TG_CORRELATION_KEY",
+            "32byte-correlation-key-for-test!",
+        )
         .env("TRITON_TG_SENDERS", "unused-under-azure")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
