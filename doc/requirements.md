@@ -367,6 +367,24 @@ on implementation details not pinned below.
   compromised principal sooner than its issuer's TTL.
   *(M-DENYLIST-1.)*
 
+- **FR-I-11 (v0.2, #289)** FR-I-7 identity resolution MUST have a single
+  owning module. Every adapter's `identity.table` MUST be validated at
+  ADAPTER CONSTRUCTION — each entry's `sub` and `tenant` subject to the
+  same rules as a resolver reply — and a table with any unusable entry
+  MUST refuse construction, naming the offending KEY. Adapters MUST
+  declare the `identity.kind` values they implement, and an undeclared
+  kind MUST refuse construction. A resolved principal MUST NOT be
+  obtainable without that validation having run; this is a property of
+  the type, not a call each adapter is asked to remember. The rule binds
+  EVERY adapter construction path, including the socket adapters
+  (`discord_gateway`, `whatsapp_web`) — the first implementation counted
+  the eight webhook adapters and left those two parsing a raw map, while
+  this row read `IMPL — PASS`.
+  Rationale: the rule previously guarded the `upstream` path in three
+  adapters and no path in the other five, because it had to be added
+  eight times and the eighth was skipped by omission.
+  *(M-IDENTITY-SEAM-1.)*
+
 ### 5.4 Upstream router (FR-U)
 
 - **FR-U-1** Triton MUST discover upstream agents by querying Consul
@@ -763,6 +781,7 @@ is the canonical mapping; the messenger paper's
 | M-MANIFEST-1      | FR-L-4 (closed-set boot validation)                    | PAPER — PASS        |
 | M-COVERAGE-1      | FR-L-5 (degrade rule coverage)                         | PAPER — PASS        |
 | M-SECRETS-1       | FR-L-6, NFR-S-5 (Vault credentials)                    | PAPER — PASS        |
+| M-IDENTITY-SEAM-1 | FR-I-11 (one owning module for FR-I-7 resolution)      | IMPL — PASS         |
 | M-DENYLIST-1      | FR-I-10 (operator principal revocation)                | IMPL — PASS         |
 | M-LOCALITY-1      | FR-I-9, NFR-S-6, C-11 (Signal + WhatsApp-bridge loopback refusal) | IMPL — PASS |
 | M-LOCALITY-1      | FR-I-9, NFR-S-6, C-11 (Signal + WhatsApp-bridge loopback refusal) | IMPL — PASS |

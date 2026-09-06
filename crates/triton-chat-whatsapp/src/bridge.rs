@@ -18,7 +18,6 @@
 //! bridge (NFR-S-4 / the C-11 model), so the manifest declares
 //! `signature: trusted_socket`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,7 +31,7 @@ use triton_manifest::{
 };
 use triton_secrets::SecretResolver;
 
-use crate::{BuildError, PROTOCOL, SenderClaims};
+use crate::{BuildError, PROTOCOL};
 
 const BACKOFF_INITIAL: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
@@ -69,7 +68,7 @@ impl BridgeAddr {
 pub struct WhatsAppBridgeAdapter {
     name: String,
     bridge_addr: BridgeAddr,
-    sender_table: HashMap<String, SenderClaims>,
+    sender_table: triton_chat_identity::SenderTable,
     /// Manifest `tool`: where plain inbound text dispatches (default
     /// `echo`). Commands (`/narrate` etc.) keep their special routes.
     inbound_tool: String,
@@ -111,12 +110,13 @@ impl WhatsAppBridgeAdapter {
                 adapter.inbound.signature
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
-            return Err(BuildError::Unsupported(format!(
-                "whatsapp bridge adapter requires `identity.kind: sender_table`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule.
+        triton_chat_identity::require_supported_kind(
+            "whatsapp_web",
+            &adapter.identity.kind,
+            &[IdentityKind::SenderTable],
+        )
+        .map_err(BuildError::Identity)?;
         let bridge_addr = BridgeAddr::parse(bridge_addr).map_err(BuildError::Unsupported)?;
 
         let table_field = adapter
@@ -128,8 +128,14 @@ impl WhatsAppBridgeAdapter {
             .resolve(table_field)
             .await
             .map_err(|e| BuildError::Resolve("identity.table", e))?;
-        let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+        // #289: this SOCKET adapter is a tenth construction path the
+        // first sweep missed — it counted the eight webhook adapters and
+        // the PR claimed 8 → 0 while two more parsed a raw HashMap. So a
+        // table with a whitespace tenant still booted here and that
+        // tenant still became a `PerTenantBuckets` key, in direct
+        // contradiction of FR-I-11 as the same PR words it.
+        let sender_table =
+            triton_chat_identity::SenderTable::parse(&table_json).map_err(BuildError::Identity)?;
 
         // FR-L-6: resolve correlation_key at boot so a bad ref fails
         // closed even though the bridge text path doesn't sign tokens.
