@@ -1105,7 +1105,16 @@ async fn handle_webhook(
                 // dropdown — an empty merge would clobber the button's own
                 // preset args (e.g. blank out its `question`). Only a value
                 // the user actually entered/selected overrides the preset.
-                let inputs = event.form_inputs();
+                // The open-doc pseudo-tool carries a signed `{skill, id}` that
+                // must NOT be overridable by card form inputs (a co-resident
+                // field literally named `skill`/`id` could otherwise redirect
+                // the document render). It has no user inputs anyway, so skip
+                // the merge entirely for it and trust only the signed args.
+                let inputs = if tool == surface_mapper::OPEN_DOC_TOOL {
+                    Vec::new()
+                } else {
+                    event.form_inputs()
+                };
                 let non_empty: Vec<(String, String)> =
                     inputs.into_iter().filter(|(_, v)| !v.is_empty()).collect();
                 if !non_empty.is_empty() {
