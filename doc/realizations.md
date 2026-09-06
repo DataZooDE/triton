@@ -1949,3 +1949,38 @@ reader does not have to re-derive that.
   bumps the label, whether or not the input changed.** A test pins the
   output shape (32-byte tag, master key absent) so the next such change
   fails a test rather than shipping silently.
+
+### The consumer's suite was green because it ran nothing (2026-09-06)
+
+The audit above found the control that shipped dead. The follow-up found
+why nothing downstream caught it: `datazoo-agent-template` and `heron`
+between them reported 69 test failures, all at one line —
+
+```
+vendor/triton/crates/triton-tests/src/lib.rs:556
+package ID specification `triton-bin` did not match any packages
+```
+
+Both vendor triton as a submodule and set `exclude = ["vendor"]` so
+cargo does not absorb the nested workspaces. The harness's staleness
+guard then ran a bare `cargo build -p triton-bin`, which inherits the
+CALLER's cwd and so resolved against the consumer's workspace, where no
+such package exists. Every spawned-binary test in both repos died before
+asserting anything. Their suites had been "failing for a known reason"
+long enough to stop being read — which is the same as running no
+integration tests at all, in exactly the deployment shape that runs in
+production.
+
+Two things to carry forward:
+
+- **A build command inside a library must name its own workspace.**
+  `--manifest-path <root>/Cargo.toml` and `--target-dir <root>/target`,
+  never a bare `-p`. Anything anchored on cwd is anchored on the caller.
+- **A block of failures with one shared cause is one bug, and it hides
+  the rest.** Before reading a downstream suite as "pre-existing", group
+  the panics: `... | grep 'panicked at' | sort | uniq -c`. 57 of 57 on a
+  single line is not flakiness, it is a suite that never ran.
+
+The harness now also honours `TRITON_BIN` (spawn exactly this binary)
+and builds one itself when the workspace has none, so a consumer that
+has never built `triton-bin` gets a working suite rather than a panic.
