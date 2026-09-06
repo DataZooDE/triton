@@ -612,9 +612,11 @@ fn action_button(label: &str, token: &str, theme: &CardChrome, click_function: &
 }
 
 /// A source "Open" button that opens a Chat **dialog**: like [`action_button`]
-/// but with `interaction: "DIALOG"`, so the click's `CARD_CLICKED` reply is a
-/// modal dialog card rather than a message. Reuses the same signed token +
-/// click function.
+/// but with `interaction: "OPEN_DIALOG"`, so the click's `CARD_CLICKED` reply
+/// is a modal dialog card rather than a message. Reuses the same signed token +
+/// click function. (The enum is `OPEN_DIALOG` — `DIALOG` is the *response*
+/// `actionResponse.type`, NOT the button interaction; using `DIALOG` here makes
+/// Google Chat reject the whole card with HTTP 400 and drop the reply.)
 fn dialog_button(label: &str, token: &str, theme: &CardChrome, click_function: &str) -> Value {
     let color = theme.brand_color.as_deref().and_then(hex_to_color);
     let mut btn = serde_json::json!({
@@ -623,7 +625,7 @@ fn dialog_button(label: &str, token: &str, theme: &CardChrome, click_function: &
         "onClick": {
             "action": {
                 "function": click_function,
-                "interaction": "DIALOG",
+                "interaction": "OPEN_DIALOG",
                 "parameters": [
                     { "key": BUTTON_TOKEN_PARAM, "value": token },
                     { "key": BUTTON_LABEL_PARAM, "value": label }
@@ -1661,7 +1663,9 @@ mod tests {
             &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
         assert_eq!(btn["text"], "Open: account · beverages");
         // A DIALOG interaction, carrying the signed token.
-        assert_eq!(btn["onClick"]["action"]["interaction"], "DIALOG");
+        // MUST be OPEN_DIALOG (the button interaction enum); "DIALOG" is only
+        // the response actionResponse.type and makes Chat 400 the card.
+        assert_eq!(btn["onClick"]["action"]["interaction"], "OPEN_DIALOG");
         assert_eq!(btn["onClick"]["action"]["parameters"][0]["value"], "TOKEN");
     }
 
