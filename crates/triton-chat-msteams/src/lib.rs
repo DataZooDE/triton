@@ -31,7 +31,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, OutboundKind, SignatureScheme};
 use triton_secrets::{ResolveError, SecretResolver};
@@ -683,6 +683,12 @@ async fn handle_webhook(
             )
             .await
         }
+        // A source "Open" button (task/fetch): render the cited document and
+        // return it as a task-module dialog card. Fast (a peacock render, not
+        // an LLM turn), so it rides the invoke's own HTTP response.
+        Some("invoke") if activity.name.as_deref() == Some("task/fetch") => {
+            handle_task_fetch(&adapter, &activity).await
+        }
         Some("message") => {
             if let Some(value) = activity.value.clone() {
                 return handle_callback(
@@ -909,6 +915,116 @@ async fn dispatch_message(
         conversation_type,
     )
     .await
+}
+
+/// Deep-search a `render_report` result for the document render's structured
+/// content: the object carrying an `instances` or `document` key. Robust to
+/// the exact nesting (top level, or under `structuredContent`).
+fn find_document_structured(v: &Value) -> Option<&Value> {
+    match v {
+        Value::Object(m) => {
+            if m.contains_key("instances") || m.contains_key("document") {
+                return Some(v);
+            }
+            m.values().find_map(find_document_structured)
+        }
+        Value::Array(a) => a.iter().find_map(find_document_structured),
+        _ => None,
+    }
+}
+
+/// `task/fetch` (a source "Open" button): decode the signed open-doc token,
+/// render the peacock `document` report for its `(skill, id)`, and return the
+/// document as a `task/continue` dialog card. The webhook JWT is already
+/// verified; the HMAC token authorises the specific (skill, id).
+async fn handle_task_fetch(adapter: &Arc<MsTeamsAdapter>, activity: &Activity) -> Response {
+    let sender = match resolve_sender(adapter, activity) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    if let Some(resp) = check_tenant_limit(adapter, &sender.sub, &sender.tenant) {
+        return resp;
+    }
+    let token = activity
+        .value
+        .as_ref()
+        .and_then(|v| v.get("data"))
+        .and_then(|d| d.get(surface_mapper::TOKEN_DATA_KEY))
+        .and_then(Value::as_str);
+    let Some(token) = token else {
+        return (StatusCode::BAD_REQUEST, "missing action").into_response();
+    };
+    let (tool_name, args) = match triton_correlation::decode_with_cap(
+        token,
+        &adapter.correlation_key,
+        surface_mapper::MSTEAMS_CORRELATION_CAP,
+    ) {
+        Ok(p) => p,
+        Err(_) => {
+            record_rejection(
+                adapter,
+                &sender.sub,
+                &sender.tenant,
+                TritonError::Auth("task/fetch correlation token invalid".into()),
+            );
+            return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        }
+    };
+    let skill = args
+        .get("skill")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let id = args.get("id").and_then(Value::as_str).unwrap_or_default();
+    if tool_name != surface_mapper::OPEN_DOC_TOOL || skill.is_empty() || id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "unexpected action").into_response();
+    }
+
+    let title = format!("{skill} \u{b7} {id}");
+    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let principal_for_post = principal.clone();
+    let started = std::time::Instant::now();
+    let result = adapter
+        .dispatcher
+        .invoke(
+            "render_report",
+            json!({ "report_id": "document", "params": { "skill": skill, "id": id } }),
+            principal,
+            PROTOCOL,
+        )
+        .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    let card = match &result {
+        Ok(dispatch) => {
+            let structured = find_document_structured(&dispatch.result)
+                .cloned()
+                .unwrap_or(Value::Null);
+            surface_mapper::build_document_dialog_card(&structured)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, class = %e.class(), "msteams task/fetch render failed");
+            // A minimal card so the dialog shows a message instead of failing.
+            json!({
+                "type": "AdaptiveCard",
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "version": "1.4",
+                "body": [ { "type": "TextBlock", "wrap": true,
+                    "text": "This document is unavailable right now." } ],
+            })
+        }
+    };
+    adapter.dispatcher.record_post(
+        surface_mapper::OPEN_DOC_TOOL,
+        PROTOCOL,
+        &principal_for_post,
+        latency_ms,
+        Ok((200, PostOutcome::Posted, None)),
+    );
+    (
+        StatusCode::OK,
+        axum::Json(surface_mapper::task_continue_response(&title, card)),
+    )
+        .into_response()
 }
 
 /// Handle a card callback: verify the signed correlation token, merge
