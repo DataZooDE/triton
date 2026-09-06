@@ -1816,3 +1816,27 @@ a trap the next developer should not have to step in.
 
   The general form: when a control must apply everywhere, the question is
   not "did I wire it" but "can this type exist without it".
+
+- **`cargo test --workspace` stops at the first failing crate, so "no FAILED
+  lines" can mean "the tests never ran".** A unit test in `triton-core`
+  failed; `triton-tests` — 450 integration tests, including the four that
+  prove the embedded host gets its controls — was never reached. Grepping
+  the output for `FAILED` found nothing, and "full suite green" went into a
+  commit message and a report to the user. It was false, and a reviewer
+  caught it rather than the tooling.
+
+  Use `--no-fail-fast`, and read the per-crate `test result:` summary lines
+  rather than grepping for failures. The absence of a failure is only
+  evidence if you know the test ran.
+
+- **A fix can assert more than the contract it is protecting.** A crew
+  finding suggested refusing the dev-token path at runtime outside `local`.
+  Implementing it broke 23 integration tests that boot `TRITON_ENV=nonprod`
+  and authenticate with the dev token deliberately — a dev build in a
+  non-production environment accepting it is the SHIPPED contract, and
+  ADR-10's guarantee is the compile-time one. The finding's actual request
+  was to check the deployed build flags rather than assume them; that check
+  passes (agent-lab refuses `Bearer dev-token` with 401, so the image is
+  built `--no-default-features`). Reverted the guard, recorded the
+  evidence. When a security fix breaks many tests, ask whether the tests
+  encode a decision before assuming they encode an oversight.

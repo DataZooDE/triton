@@ -300,8 +300,15 @@ pub fn parse_denied_principals(raw: &str) -> HashSet<(String, String)> {
             // could silently revoke a different one across a customer
             // boundary — the exact failure tenant-qualification exists to
             // prevent.
+            // Exactly ONE separator. `acme/al/ice` is ambiguous — it
+            // could mean tenant `acme/al` + sub `ice`, or tenant `acme` +
+            // sub `al/ice` — and guessing either way can revoke a
+            // different principal across a customer boundary. Checking
+            // `!tenant.contains('/')` after `split_once` cannot catch
+            // this: the tenant is everything BEFORE the first separator,
+            // so it never contains one.
             Some((tenant, sub))
-                if !tenant.is_empty() && !sub.is_empty() && !tenant.contains('/') =>
+                if !tenant.is_empty() && !sub.is_empty() && entry.matches('/').count() == 1 =>
             {
                 Some((tenant.to_string(), sub.to_string()))
             }

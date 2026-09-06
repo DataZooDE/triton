@@ -215,6 +215,9 @@ pub struct Settings {
     /// fires ONLY for a missing `env://` secret, never for any other
     /// build error.
     pub optional_adapters: Vec<String>,
+    /// #287: raw `tenant/sub` list from `--denied-principals`/env; parsed
+    /// by `DispatchControls::deny`.
+    pub denied_principals: String,
 }
 
 impl Settings {
@@ -650,13 +653,16 @@ struct Cli {
     /// customer boundary.
     ///
     /// Empty/unset (the default) denies nobody.
-    /// Declared here so `--help` documents it and a CLI flag still works;
-    /// the VALUE is read by `Dispatcher::new` itself (#287), not plumbed
-    /// through `Settings`. A revocation lever that each host has to wire
-    /// is one an embedded host silently does not have — which is exactly
-    /// what happened, and what live verification on agent-lab caught.
+    /// #287: comma-separated `tenant/sub` principals to revoke.
+    ///
+    /// Plumbed through `Settings` and applied ON TOP of what
+    /// `controls_from_env` read, so the CLI flag wins as factor III
+    /// requires. It was previously declared here and never mapped, so
+    /// `--help` advertised a lever that revoked nobody: clap READS the
+    /// variable into this struct but never writes it back to the process
+    /// environment, so an operator using the flag mid-incident got a
+    /// healthy pod and zero revocation.
     #[arg(long, env = "TRITON_DENIED_PRINCIPALS", default_value = "")]
-    #[allow(dead_code)]
     denied_principals: String,
 }
 
@@ -693,6 +699,7 @@ impl From<Cli> for Settings {
                 .collect(),
             egress_allowed_suffixes: parse_egress_suffixes(&c.egress_allowed_suffixes),
             optional_adapters: parse_optional_adapters(&c.optional_adapters),
+            denied_principals: c.denied_principals,
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
             stream_idle_timeout: Duration::from_millis(c.stream_idle_timeout_ms),
             stream_max_duration: Duration::from_millis(c.stream_max_duration_ms),

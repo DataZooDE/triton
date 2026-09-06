@@ -26,6 +26,7 @@ use triton_core::dispatcher::DispatchControls;
 use triton_core::error::TritonError;
 use triton_core::principal::{Principal, ToolPrincipal};
 use triton_core::{Dispatcher, Tool, ToolRegistry};
+use triton_embed::controls_from_env;
 
 /// Deliberately unique: `Dispatcher::new` reads the process environment,
 /// and these tests share a process with several hundred others. A tenant
@@ -75,7 +76,7 @@ async fn an_embedded_host_revokes_without_wiring_anything() {
         );
     }
     // Exactly what agent-core does — no `.with_denied_principals(...)`.
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
 
     let denied = dispatcher
         .invoke(
@@ -139,7 +140,7 @@ async fn the_embedded_streaming_entry_point_revokes_too() {
             format!("{REVOKED_TENANT}/{REVOKED_SUB}"),
         );
     }
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
     let denied = dispatcher
         .invoke_streaming(
             "echo",
@@ -196,7 +197,7 @@ async fn an_embedded_host_honours_the_pairing_restriction() {
     unsafe {
         std::env::set_var("TRITON_PAIRING_TOOLS", "pair");
     }
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
 
     // `echo` is not the pairing tool, so a pairing-only principal cannot
     // reach it. Before this, they could reach anything.
@@ -231,7 +232,7 @@ async fn an_embedded_host_can_set_the_rejection_window() {
     unsafe {
         std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "0");
     }
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
     assert_eq!(
         dispatcher.reject_window_secs(),
         0,
@@ -240,7 +241,7 @@ async fn an_embedded_host_can_set_the_rejection_window() {
     unsafe {
         std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "120");
     }
-    let tuned = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
+    let tuned = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
     assert_eq!(tuned.reject_window_secs(), 120);
 
     // A junk value falls back to the default rather than failing boot:
@@ -248,7 +249,7 @@ async fn an_embedded_host_can_set_the_rejection_window() {
     unsafe {
         std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "not-a-number");
     }
-    let fallback = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
+    let fallback = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
     assert_eq!(
         fallback.reject_window_secs(),
         triton_core::dispatcher::DEFAULT_REJECT_WINDOW.as_secs()

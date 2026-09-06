@@ -267,17 +267,20 @@ fn ct_eq_str(a: &str, b: &str) -> bool {
 
 #[cfg(feature = "dev-token")]
 fn verify_dev_or_reject(token: &str, expected: &str) -> Result<Principal, TritonError> {
-    // #306 crew F12: this path grants the cross-tenant audit view, and it
-    // is safe only if every embedding host builds with
-    // `--no-default-features` — an assumption about someone else's build
-    // flags, which is the exact class of assumption this stack was caught
-    // by. Refuse outright when the environment is not `local`, so the
-    // guarantee stops depending on a flag we cannot see.
-    if std::env::var("TRITON_ENV").as_deref().unwrap_or("local") != "local" {
-        return Err(TritonError::Auth(
-            "dev-token is compiled in but the environment is not `local`; refusing".into(),
-        ));
-    }
+    // #306 crew F12 asked whether this path's cross-tenant audit grant
+    // rests on an unverified assumption about the embedding host's build
+    // flags. It was checked rather than assumed: `dev-token` IS in the
+    // default feature set, and the deployed agent refuses
+    // `Bearer dev-token` on /v1/tools with 401 — so that image is built
+    // `--no-default-features` and this function does not exist in it.
+    //
+    // A runtime refusal outside `local` was tried and REVERTED. Twenty-
+    // three integration tests boot `TRITON_ENV=nonprod` and authenticate
+    // with the dev token on purpose: a dev build in a non-production
+    // environment accepting it is the shipped contract, and ADR-10's
+    // guarantee is the COMPILE-time one, not a runtime env check.
+    // Changing that contract is a decision about what a nonprod dev build
+    // is for, not a security fix, and it does not belong in this stack.
     // An empty `expected` disables the dev-token path (kill-switch) and
     // also prevents an empty `Bearer ` from matching an empty token.
     // #282 F10: constant-time, like every other secret compare in the

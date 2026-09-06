@@ -554,8 +554,13 @@ fn audit_operators() -> std::collections::HashSet<(String, String)> {
     )
 }
 
-fn audit_visibility(
+fn audit_visibility_in(
     principal: &triton_core::principal::Principal,
+    // The RESOLVED environment (`Dispatcher::env`), not the process
+    // variable: clap reads `TRITON_ENV` into `Settings` but never sets
+    // it, so `--env prod` would look local here and hand the
+    // cross-tenant view to the `audit:read-all` claim alone.
+    env: &str,
 ) -> impl Fn(&triton_core::audit::AuditEntry) -> bool {
     // BOTH the scope the issuer can mint AND membership of a list only
     // the deployment can write — see `audit_operators`.
@@ -571,7 +576,7 @@ fn audit_visibility(
     // dev-token path is already gated (ADR-10 / factor X) — otherwise
     // every local dev loop needs an env var to see its own audit trail.
     let claims_scope = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE);
-    let is_local = std::env::var("TRITON_ENV").as_deref().unwrap_or("local") == "local";
+    let is_local = env == "local";
     let named =
         is_local || audit_operators().contains(&(principal.tenant.clone(), principal.sub.clone()));
     let operator = claims_scope && named;
@@ -621,7 +626,11 @@ async fn audit_tail(
     }
     let limit = q.limit.clamp(1, AUDIT_LIMIT_MAX);
     let trace_id = q.trace_id.as_deref().filter(|s| !s.is_empty());
-    let entries = AuditBuffer::recent_where(limit, trace_id, audit_visibility(&principal));
+    let entries = AuditBuffer::recent_where(
+        limit,
+        trace_id,
+        audit_visibility_in(&principal, state.dispatcher.env()),
+    );
     Json(json!({
         "entries": entries,
         "limit": limit,
@@ -685,7 +694,7 @@ async fn trace_view(
     let mut entries = AuditBuffer::recent_where(
         AUDIT_LIMIT_MAX,
         Some(&trace_id),
-        audit_visibility(&principal),
+        audit_visibility_in(&principal, state.dispatcher.env()),
     );
     entries.reverse(); // chronological for a timeline
     let bodies = if bodies_visible(&entries) {
@@ -952,7 +961,7 @@ fn http_status_for(e: &TritonError) -> StatusCode {
 
 #[cfg(test)]
 mod trace_scope_tests {
-    use super::{AUDIT_READ_ALL_SCOPE, audit_visibility, bodies_visible};
+    use super::{AUDIT_READ_ALL_SCOPE, audit_visibility_in, bodies_visible};
     use triton_core::audit::{AuditEntry, AuditPhase};
     use triton_core::principal::Principal;
 
@@ -1005,20 +1014,40 @@ mod trace_scope_tests {
         assert!(bodies_visible(&[entry("acme")]), "own trace ⇒ bodies");
     }
 
+    /// Outside `local` the `audit:read-all` claim alone is NOT enough:
+    /// that namespace belongs to the issuer. The deployment must also
+    /// name the principal in `TRITON_AUDIT_OPERATORS`.
+    ///
+    /// This is the test that would have caught reading `TRITON_ENV` from
+    /// the process instead of the resolved value — a `--env prod`
+    /// deployment leaves the variable unset and looked local.
+    #[test]
+    fn outside_local_the_scope_claim_alone_grants_nothing() {
+        let op = principal("acme", &[AUDIT_READ_ALL_SCOPE]);
+        let visible = audit_visibility_in(&op, "prod");
+        assert!(
+            !visible(&entry("globex")),
+            "an issuer-minted scope must not grant the cross-tenant view \
+             in a real deployment"
+        );
+        // Their own tenant is unaffected — this is not a lockout.
+        assert!(visible(&entry("acme")));
+    }
+
     /// A shared marker is not a tenant, so it must not match another
     /// caller carrying the same marker.
     #[test]
     fn a_reserved_tenant_matches_nothing_but_an_operator() {
         for marker in ["-", "pairing", ""] {
             let p = principal(marker, &["chat"]);
-            let can_see = audit_visibility(&p);
+            let can_see = audit_visibility_in(&p, "local");
             assert!(
                 !can_see(&entry(marker)),
                 "`{marker}` is a shared marker, not a tenant — two callers \
                  carrying it are both unattributed, not tenant-mates"
             );
             let op = principal(marker, &[AUDIT_READ_ALL_SCOPE]);
-            let operator = audit_visibility(&op);
+            let operator = audit_visibility_in(&op, "local");
             assert!(
                 operator(&entry(marker)),
                 "the operator grant must still restore the view"
@@ -1026,7 +1055,7 @@ mod trace_scope_tests {
         }
         // A real tenant still matches itself.
         let pa = principal("acme", &["chat"]);
-        let acme = audit_visibility(&pa);
+        let acme = audit_visibility_in(&pa, "local");
         assert!(acme(&entry("acme")));
         assert!(!acme(&entry("globex")));
     }

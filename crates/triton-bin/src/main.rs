@@ -210,7 +210,13 @@ async fn main() -> std::io::Result<()> {
     // tools layered on top — the manifest is the richer source (it knows
     // WHICH adapter named the tool) and `restrict_scope` replaces rather
     // than merges, because widening an allow-set is the unsafe direction.
-    let controls = triton_embed::controls_from_env().restrict_scope("pairing", pairing_tools);
+    // `.deny` EXTENDS, so the flag adds to the environment rather than
+    // replacing it — a deny-set merges in the safe direction. That is
+    // also what makes `CLI > env` (factor III) harmless here: neither
+    // source can silently drop the other's revocations.
+    let controls = triton_embed::controls_from_env()
+        .deny(&settings.denied_principals)
+        .restrict_scope("pairing", pairing_tools);
     let mut dispatcher =
         Dispatcher::new(registry, settings.env.clone(), controls).with_metrics(metrics.clone());
 
