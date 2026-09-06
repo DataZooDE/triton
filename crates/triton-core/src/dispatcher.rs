@@ -167,7 +167,7 @@ pub struct Dispatcher {
 ///
 /// Making it a parameter turns that omission into a compile error naming
 /// the field, and turns "deny nobody" into a reviewable
-/// [`DispatchControls::none()`] at the call site rather than an absence
+/// [`DispatchControls::unenforced()`] at the call site rather than an absence
 /// nobody can see. It also keeps `triton-core` env-free: [`from_env`]
 /// lives in the host layer, so this crate never reads a variable.
 ///
@@ -191,16 +191,24 @@ pub struct DispatchControls {
 
 impl Default for DispatchControls {
     fn default() -> Self {
-        Self::none()
+        Self::unenforced()
     }
 }
 
 impl DispatchControls {
     /// Deny nobody, restrict nothing, coalesce at the default window.
     ///
-    /// Named rather than derived so a call site that means "no controls"
-    /// says so, and a reviewer can tell it from a forgotten argument.
-    pub fn none() -> Self {
+    /// Named `unenforced` rather than `none` because `none()` reads like
+    /// a harmless default and is the one-token way to silence the
+    /// required-parameter compile error — this repo's own tests took
+    /// that shortcut four times, which is the strongest available
+    /// evidence about what a host under time pressure will do. A
+    /// reviewer seeing `unenforced()` in a production wiring has been
+    /// told something; one seeing `none()` has not.
+    ///
+    /// `DeploymentConfig::from_env` warns when a non-`local` host builds
+    /// these.
+    pub fn unenforced() -> Self {
         Self {
             denied_principals: HashSet::new(),
             scope_restrictions: HashMap::new(),
@@ -212,22 +220,30 @@ impl DispatchControls {
     ///
     /// Entries without a tenant qualifier, or with a `/` in the tenant,
     /// are dropped with a warning — see [`parse_denied_principals`].
-    pub fn deny(mut self, entries: &str) -> Self {
+    pub fn extend_denied_principals(mut self, entries: &str) -> Self {
         self.denied_principals
             .extend(parse_denied_principals(entries));
         self
     }
 
-    /// Restrict a scope to a set of tools.
+    /// Whether anything is actually enforced. A host reports this at
+    /// boot so an unenforced production deployment is visible.
+    pub fn is_enforcing(&self) -> bool {
+        !self.denied_principals.is_empty() || !self.scope_restrictions.is_empty()
+    }
+
+    /// Restrict a scope to a set of tools, REPLACING any existing
+    /// restriction for that scope.
     ///
-    /// REPLACES any existing restriction for that scope rather than
-    /// merging. A scope restriction is an ALLOW-set inside a gate, so a
+    /// The name says `replace` and its neighbour says `extend` because
+    /// they are adjacent methods with opposite merge semantics, and a
+    /// reader should not have to reach the doc comment to find that out. A scope restriction is an ALLOW-set inside a gate, so a
     /// merge can only WIDEN what a restricted principal reaches — a
     /// stale environment entry would silently keep another adapter's
     /// enrolment tool reachable by every un-enrolled sender. (Its
     /// neighbour `denied_principals` is a DENY-set, where merging is the
     /// safe direction, which is why that one extends.)
-    pub fn restrict_scope(
+    pub fn replace_scope_restriction(
         mut self,
         scope: impl Into<String>,
         tools: impl IntoIterator<Item = String>,
@@ -261,35 +277,20 @@ impl DispatchControls {
     }
 }
 
-/// Announce the controls actually in force, AFTER the host has finished
-/// building. Call it once, last.
-///
-/// This is not in `new()` on purpose. Announcing there reports what the
-/// environment supplied, which is not what a host that also calls the
-/// builders is enforcing — and a control that misreports itself is worse
-/// than one that is silent, because an operator acts on the report.
-pub fn announce_controls(dispatcher: &Dispatcher) {
-    let mut denied: Vec<String> = dispatcher.denied_principals().collect();
-    if !denied.is_empty() {
-        // Say it HERE, not in a host's `main`. The whole point of #287's
-        // follow-up is that this control reaches hosts that do not run
-        // our `main` — and a lever an operator cannot see is engaged is
-        // one they will not trust, or worse, will assume is engaged when
-        // a typo dropped every entry. Verified on agent-lab: the
-        // refusals worked and nothing announced them.
-        denied.sort_unstable();
-        eprintln!(
-            "WARN denylist active: {} principal(s) revoked — every dispatch, \
-             proactive send and audit read of theirs is refused 403 (#287): {}",
-            denied.len(),
-            denied.join(", ")
-        );
-    }
-}
-
 /// The parse itself, separated so it can be tested without the process
 /// environment (which several hundred tests share).
 pub fn parse_denied_principals(raw: &str) -> HashSet<(String, String)> {
+    parse_principal_set(raw, "denylist")
+}
+
+/// Parse a comma-separated `tenant/sub` list, naming `what` in any
+/// warning.
+///
+/// `what` exists because the audit-operator list used to borrow the
+/// denylist parser, so a malformed operator entry printed
+/// `WARN denylist entry ... ignored` and sent the reader hunting through
+/// the wrong variable.
+pub fn parse_principal_set(raw: &str, what: &str) -> HashSet<(String, String)> {
     raw.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -320,9 +321,9 @@ pub fn parse_denied_principals(raw: &str) -> HashSet<(String, String)> {
                 // the failure mode is an operator believing they revoked
                 // someone when they did not.
                 eprintln!(
-                    "WARN denylist entry `{entry}` ignored: expected `tenant/sub` \
-                     with no `/` in the tenant (a bare subject would deny that \
-                     name in EVERY tenant, so it is refused rather than guessed)"
+                    "WARN {what} entry `{entry}` ignored: expected `tenant/sub` with \
+                     exactly one `/` (a bare subject would match that name in EVERY \
+                     tenant, so it is refused rather than guessed)"
                 );
                 None
             }
@@ -357,22 +358,8 @@ impl Dispatcher {
             // host cannot get a dispatcher without deciding. They used to
             // be builder methods, and the deployment that actually runs
             // called none of them — it booted healthy and revoked nobody.
-            // Omission is now a compile error naming the field.
-            //
-            // (was: read HERE, not in whichever host remembers to wire
-            // it. `triton-bin` did wire it — and the deployment that
-            // actually runs does not use `triton-bin`. `triton-embed`
-            // hosts call this constructor directly (dz-agent-template
-            // does, in three separate places), so the denylist deployed,
-            // the pod booted, and nothing was revoked.
-            //
-            // This crate is otherwise env-free on purpose, and
-            // `with_rejection_window`'s doc says so. That rule was
-            // written for a TUNING parameter. A revocation lever is not
-            // tuning: its entire value is that it applies everywhere, and
-            // a security control each call site must remember to opt into
-            // is a suggestion, not a control. The exception is deliberate
-            // and this is the only one.
+            // Omission is now a compile error naming the field, and this
+            // crate reads no environment: `triton-config` does.
             denied: controls.denied_principals,
             scope_restrictions: controls.scope_restrictions,
         }
@@ -385,6 +372,8 @@ impl Dispatcher {
             return Ok(());
         }
         // "Holds a restricted scope AT ALL", not "holds exactly one".
+        // The doc on `replace_scope_restriction` says the same; keep them
+        // in step if either changes.
         // The old test meant any adapter granting a second scope beside
         // `pairing` disabled the restriction entirely and silently — the
         // invariant lived in one adapter's construction site rather than
@@ -411,6 +400,12 @@ impl Dispatcher {
     /// set — those differed, which is how this whole seam came up.
     pub fn reject_window_secs(&self) -> u64 {
         self.reject_window.window().as_secs()
+    }
+
+    /// Whether this dispatcher enforces anything. Reported at boot so an
+    /// unenforced production deployment is visible rather than assumed.
+    pub fn is_enforcing(&self) -> bool {
+        !self.denied.is_empty() || !self.scope_restrictions.is_empty()
     }
 
     /// The tools a principal holding `scope` may invoke. Empty when the
@@ -1367,7 +1362,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             Arc::new(ToolRegistry::new()),
             "test",
-            DispatchControls::none(),
+            DispatchControls::unenforced(),
         )
         .with_upstream(Arc::new(SurfaceUpstream));
         let dispatch = dispatcher
@@ -1389,7 +1384,7 @@ mod tests {
         let dispatcher = Dispatcher::new(
             Arc::new(ToolRegistry::new()),
             "test",
-            DispatchControls::none(),
+            DispatchControls::unenforced(),
         );
         let result = dispatcher
             .invoke("nope", json!({}), test_principal(), "rest")
@@ -1458,7 +1453,8 @@ mod tests {
         use futures::StreamExt as _;
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(StreamingTool));
-        let dispatcher = Dispatcher::new(Arc::new(registry), "test", DispatchControls::none());
+        let dispatcher =
+            Dispatcher::new(Arc::new(registry), "test", DispatchControls::unenforced());
         let stream = dispatcher
             .invoke_streaming("streamer", json!({}), test_principal(), "rest", None)
             .await
@@ -1478,7 +1474,8 @@ mod tests {
         use futures::StreamExt as _;
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(BufferedTool));
-        let dispatcher = Dispatcher::new(Arc::new(registry), "test", DispatchControls::none());
+        let dispatcher =
+            Dispatcher::new(Arc::new(registry), "test", DispatchControls::unenforced());
         let stream = dispatcher
             .invoke_streaming("buffered", json!({}), test_principal(), "rest", None)
             .await

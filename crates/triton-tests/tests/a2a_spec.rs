@@ -70,7 +70,7 @@ async fn serve(opts: EmbedOpts) -> String {
     let dispatcher = Arc::new(Dispatcher::new(
         Arc::new(reg),
         "test".to_string(),
-        DispatchControls::none(),
+        DispatchControls::unenforced(),
     ));
     let app = router(dispatcher, &opts);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -381,7 +381,7 @@ async fn slow_spec_host() -> (TestIssuer, String) {
     let dispatcher = Arc::new(Dispatcher::new(
         Arc::new(reg),
         "test".to_string(),
-        DispatchControls::none(),
+        DispatchControls::unenforced(),
     ));
     let opts = EmbedOpts::dev().oidc(iss.issuer_url(), AUD, None).spec_a2a(
         "DataZoo Agent",

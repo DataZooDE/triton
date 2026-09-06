@@ -22,11 +22,11 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use triton_config::DeploymentConfig;
 use triton_core::dispatcher::DispatchControls;
 use triton_core::error::TritonError;
 use triton_core::principal::{Principal, ToolPrincipal};
 use triton_core::{Dispatcher, Tool, ToolRegistry};
-use triton_embed::controls_from_env;
 
 /// Deliberately unique: `Dispatcher::new` reads the process environment,
 /// and these tests share a process with several hundred others. A tenant
@@ -76,7 +76,11 @@ async fn an_embedded_host_revokes_without_wiring_anything() {
         );
     }
     // Exactly what agent-core does — no `.with_denied_principals(...)`.
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
+    let dispatcher = Dispatcher::new(
+        Arc::new(registry()),
+        "test",
+        DeploymentConfig::from_env().controls,
+    );
 
     let denied = dispatcher
         .invoke(
@@ -140,7 +144,11 @@ async fn the_embedded_streaming_entry_point_revokes_too() {
             format!("{REVOKED_TENANT}/{REVOKED_SUB}"),
         );
     }
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
+    let dispatcher = Dispatcher::new(
+        Arc::new(registry()),
+        "test",
+        DeploymentConfig::from_env().controls,
+    );
     let denied = dispatcher
         .invoke_streaming(
             "echo",
@@ -197,7 +205,11 @@ async fn an_embedded_host_honours_the_pairing_restriction() {
     unsafe {
         std::env::set_var("TRITON_PAIRING_TOOLS", "pair");
     }
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
+    let dispatcher = Dispatcher::new(
+        Arc::new(registry()),
+        "test",
+        DeploymentConfig::from_env().controls,
+    );
 
     // `echo` is not the pairing tool, so a pairing-only principal cannot
     // reach it. Before this, they could reach anything.
@@ -232,7 +244,11 @@ async fn an_embedded_host_can_set_the_rejection_window() {
     unsafe {
         std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "0");
     }
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
+    let dispatcher = Dispatcher::new(
+        Arc::new(registry()),
+        "test",
+        DeploymentConfig::from_env().controls,
+    );
     assert_eq!(
         dispatcher.reject_window_secs(),
         0,
@@ -241,7 +257,11 @@ async fn an_embedded_host_can_set_the_rejection_window() {
     unsafe {
         std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "120");
     }
-    let tuned = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
+    let tuned = Dispatcher::new(
+        Arc::new(registry()),
+        "test",
+        DeploymentConfig::from_env().controls,
+    );
     assert_eq!(tuned.reject_window_secs(), 120);
 
     // A junk value falls back to the default rather than failing boot:
@@ -249,7 +269,11 @@ async fn an_embedded_host_can_set_the_rejection_window() {
     unsafe {
         std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "not-a-number");
     }
-    let fallback = Dispatcher::new(Arc::new(registry()), "test", controls_from_env());
+    let fallback = Dispatcher::new(
+        Arc::new(registry()),
+        "test",
+        DeploymentConfig::from_env().controls,
+    );
     assert_eq!(
         fallback.reject_window_secs(),
         triton_core::dispatcher::DEFAULT_REJECT_WINDOW.as_secs()
@@ -342,9 +366,9 @@ async fn an_active_denylist_announces_itself() {
 /// revoke MORE.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn denylist_sources_compose_by_revoking_more_never_less() {
-    let controls = DispatchControls::none()
-        .deny("env-tenant/env-sub")
-        .deny("code-tenant/code-sub");
+    let controls = DispatchControls::unenforced()
+        .extend_denied_principals("env-tenant/env-sub")
+        .extend_denied_principals("code-tenant/code-sub");
     let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls);
 
     for (tenant, sub) in [("env-tenant", "env-sub"), ("code-tenant", "code-sub")] {
@@ -364,9 +388,9 @@ async fn denylist_sources_compose_by_revoking_more_never_less() {
 /// reaches, which is why `restrict_scope` REPLACES and says so.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_scope_restriction_replaces_rather_than_widening() {
-    let controls = DispatchControls::none()
-        .restrict_scope("pairing", ["stale_env_tool".to_string()])
-        .restrict_scope("pairing", ["echo".to_string()]);
+    let controls = DispatchControls::unenforced()
+        .replace_scope_restriction("pairing", ["stale_env_tool".to_string()])
+        .replace_scope_restriction("pairing", ["echo".to_string()]);
     let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls);
 
     // The later source won outright: `echo` is reachable...

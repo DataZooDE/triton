@@ -210,34 +210,32 @@ async fn main() -> std::io::Result<()> {
     // tools layered on top — the manifest is the richer source (it knows
     // WHICH adapter named the tool) and `restrict_scope` replaces rather
     // than merges, because widening an allow-set is the unsafe direction.
-    // `.deny` EXTENDS, so the flag adds to the environment rather than
-    // replacing it — a deny-set merges in the safe direction. That is
-    // also what makes `CLI > env` (factor III) harmless here: neither
-    // source can silently drop the other's revocations.
-    let controls = triton_embed::controls_from_env()
-        .deny(&settings.denied_principals)
-        .restrict_scope("pairing", pairing_tools);
+    // `extend_denied_principals` adds to what the environment supplied
+    // rather than replacing it — a deny-set merges in the safe direction,
+    // so `CLI > env` (factor III) cannot drop a revocation either way.
+    // The pairing restriction is the opposite: an allow-set, where the
+    // manifest REPLACES the environment because merging could only widen
+    // what an un-enrolled sender reaches.
+    let triton_config::DeploymentConfig {
+        controls,
+        audit_operators,
+    } = triton_config::DeploymentConfig::from_env();
+    let controls = controls
+        .extend_denied_principals(&settings.denied_principals)
+        .replace_scope_restriction("pairing", pairing_tools);
     let mut dispatcher =
         Dispatcher::new(registry, settings.env.clone(), controls).with_metrics(metrics.clone());
 
-    // #287: announce what is ENFORCED, once every builder above has run.
-    // Announcing inside `Dispatcher::new` reported what the environment
-    // supplied, which is not the same set — and a control that
-    // misreports itself is worse than a silent one, because an operator
-    // acts on the report.
-    triton_core::dispatcher::announce_controls(&dispatcher);
-    // #306 crew F6: the cross-tenant audit view needs the `audit:read-all`
-    // scope AND membership of this list. Outside `local` an unset list
-    // means nobody holds it — say so, because the symptom (an operator
-    // seeing only their own rows) does not name its cause.
-    if settings.env != "local" && std::env::var("TRITON_AUDIT_OPERATORS").is_err() {
-        tracing::warn!(
-            "TRITON_AUDIT_OPERATORS is unset: NOBODY holds the cross-tenant view of \
-             /v1/audit or /v1/trace. The `audit:read-all` scope alone no longer grants \
-             it, because that claim namespace belongs to the issuer rather than to this \
-             deployment. Set it to a comma-separated list of `tenant/sub`."
-        );
-    }
+    // One announcement, one place, for whichever host is running
+    // (#306 crew F6) — announcing from a host's `main` is how the
+    // revocation lever came to be enforced on one surface and reported
+    // on another.
+    triton_config::announce(
+        &settings.env,
+        &audit_operators,
+        dispatcher.denied_principals(),
+        dispatcher.is_enforcing(),
+    );
 
     // Static-upstream OIDC signer: when a signing key + issuer + JWKS are all
     // configured, Triton mints a per-call RS256 JWT to agents (workload→workload
@@ -467,6 +465,8 @@ async fn main() -> std::io::Result<()> {
         manifest: manifest_arc,
         metrics: metrics.clone(),
         oidc_signer: static_signer.clone(),
+        // Parsed once at boot, not per request (#306 crew F7).
+        audit_operators: Arc::new(audit_operators.clone()),
     };
     let a2a_state = A2aState {
         dispatcher: dispatcher.clone(),

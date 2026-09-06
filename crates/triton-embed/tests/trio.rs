@@ -32,7 +32,7 @@ async fn boot() -> String {
     let dispatcher = Arc::new(Dispatcher::new(
         Arc::new(reg),
         "test",
-        DispatchControls::none(),
+        DispatchControls::unenforced(),
     ));
     let app = router(dispatcher, &EmbedOpts::dev());
 
@@ -236,7 +236,7 @@ async fn capture_does_not_buffer_an_sse_response() {
         Dispatcher::new(
             Arc::new(ToolRegistry::new()),
             "test",
-            DispatchControls::none(),
+            DispatchControls::unenforced(),
         )
         .with_upstream(Arc::new(SlowStreamUpstream)),
     );

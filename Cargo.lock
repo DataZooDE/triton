@@ -2481,8 +2481,8 @@ dependencies = [
  "triton-chat-telegram",
  "triton-chat-twilio",
  "triton-chat-whatsapp",
+ "triton-config",
  "triton-core",
- "triton-embed",
  "triton-identity",
  "triton-manifest",
  "triton-rasterizer",
@@ -2691,6 +2691,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "triton-config"
+version = "0.0.1"
+dependencies = [
+ "triton-core",
+]
+
+[[package]]
 name = "triton-core"
 version = "0.0.1"
 dependencies = [
@@ -2731,6 +2738,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "triton-adapters-http",
+ "triton-config",
  "triton-core",
  "triton-identity",
 ]
@@ -2815,6 +2823,7 @@ dependencies = [
  "sha2",
  "tiny-skia 0.11.4",
  "tokio",
+ "triton-config",
  "triton-core",
  "triton-correlation",
  "triton-embed",

@@ -48,7 +48,7 @@ async fn boot(opts: EmbedOpts) -> String {
     let dispatcher = Arc::new(Dispatcher::new(
         Arc::new(reg),
         "test",
-        DispatchControls::none(),
+        DispatchControls::unenforced(),
     ));
     let app = router(dispatcher, &opts);
 

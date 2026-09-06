@@ -60,7 +60,7 @@ async fn serve(opts: EmbedOpts) -> String {
     let dispatcher = Arc::new(Dispatcher::new(
         Arc::new(reg),
         "test".to_string(),
-        DispatchControls::none(),
+        DispatchControls::unenforced(),
     ));
     let app = router(dispatcher, &opts);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

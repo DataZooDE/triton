@@ -96,6 +96,11 @@ pub struct RestState {
     /// `TRITON_METRICS_PORT`; the REST route here is the
     /// authenticated CORS-friendly path the explorer uses.
     pub metrics: Arc<triton_core::Metrics>,
+    /// #306 crew F6/F7: principals the DEPLOYMENT names as operators,
+    /// parsed once at boot. Read per request previously, which re-parsed
+    /// the environment on every `/v1/audit` call and printed a
+    /// denylist-branded warning for a malformed audit entry.
+    pub audit_operators: Arc<std::collections::HashSet<(String, String)>>,
     /// OIDC signer for static-upstream dispatch. When set, Triton acts as the
     /// issuer for the JWTs it mints to agents: it serves discovery + JWKS at the
     /// `/.well-known/*` routes below so agents verify those tokens. `None`
@@ -533,29 +538,10 @@ pub const AUDIT_READ_ALL_SCOPE: &str = "audit:read-all";
 /// fail-closed reading. The cost is real and worth stating: a
 /// tenant-scoped caller cannot see their own failed authentications,
 /// because at the moment of failure nothing knew they were theirs.
-/// Operators named by the deployment, as `tenant/sub`, read from
-/// `TRITON_AUDIT_OPERATORS` where the REST state is built.
-///
-/// #306 crew F6: the grant used to rest solely on `AUDIT_READ_ALL_SCOPE`
-/// appearing in `principal.scopes`, which comes from the token's `scp` /
-/// `scope` claim — a namespace the ISSUER owns, not Triton. On any issuer
-/// where a client can request a scope or an admin can add one (Keycloak
-/// optional scopes, an Entra app registration, a second configured pair),
-/// a caller could grant themselves the cross-tenant view of every
-/// tenant's audit trail.
-///
-/// The scope is still required, so nothing an operator has today breaks;
-/// it is no longer SUFFICIENT. Same reasoning that justified reading the
-/// denylist from the environment: authorization for the most sensitive
-/// read surface belongs to the deployment, not to a claim.
-fn audit_operators() -> std::collections::HashSet<(String, String)> {
-    triton_core::dispatcher::parse_denied_principals(
-        &std::env::var("TRITON_AUDIT_OPERATORS").unwrap_or_default(),
-    )
-}
-
 fn audit_visibility_in(
     principal: &triton_core::principal::Principal,
+    // Operators the DEPLOYMENT named — not a claim the issuer can mint.
+    operators: &std::collections::HashSet<(String, String)>,
     // The RESOLVED environment (`Dispatcher::env`), not the process
     // variable: clap reads `TRITON_ENV` into `Settings` but never sets
     // it, so `--env prod` would look local here and hand the
@@ -577,8 +563,7 @@ fn audit_visibility_in(
     // every local dev loop needs an env var to see its own audit trail.
     let claims_scope = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE);
     let is_local = env == "local";
-    let named =
-        is_local || audit_operators().contains(&(principal.tenant.clone(), principal.sub.clone()));
+    let named = is_local || operators.contains(&(principal.tenant.clone(), principal.sub.clone()));
     let operator = claims_scope && named;
     let tenant = principal.tenant.clone();
     // A reserved tenant is a shared marker, not a tenant: `-` is what
@@ -629,7 +614,7 @@ async fn audit_tail(
     let entries = AuditBuffer::recent_where(
         limit,
         trace_id,
-        audit_visibility_in(&principal, state.dispatcher.env()),
+        audit_visibility_in(&principal, &state.audit_operators, state.dispatcher.env()),
     );
     Json(json!({
         "entries": entries,
@@ -694,7 +679,7 @@ async fn trace_view(
     let mut entries = AuditBuffer::recent_where(
         AUDIT_LIMIT_MAX,
         Some(&trace_id),
-        audit_visibility_in(&principal, state.dispatcher.env()),
+        audit_visibility_in(&principal, &state.audit_operators, state.dispatcher.env()),
     );
     entries.reverse(); // chronological for a timeline
     let bodies = if bodies_visible(&entries) {
@@ -990,6 +975,11 @@ mod trace_scope_tests {
         }
     }
 
+    /// No operators named — the deployment granted nobody.
+    fn no_operators() -> std::collections::HashSet<(String, String)> {
+        std::collections::HashSet::new()
+    }
+
     fn principal(tenant: &str, scopes: &[&str]) -> Principal {
         Principal {
             sub: "caller".into(),
@@ -1024,7 +1014,9 @@ mod trace_scope_tests {
     #[test]
     fn outside_local_the_scope_claim_alone_grants_nothing() {
         let op = principal("acme", &[AUDIT_READ_ALL_SCOPE]);
-        let visible = audit_visibility_in(&op, "prod");
+        // No named operators: the deployment granted nobody.
+        let ops = no_operators();
+        let visible = audit_visibility_in(&op, &ops, "prod");
         assert!(
             !visible(&entry("globex")),
             "an issuer-minted scope must not grant the cross-tenant view \
@@ -1040,14 +1032,15 @@ mod trace_scope_tests {
     fn a_reserved_tenant_matches_nothing_but_an_operator() {
         for marker in ["-", "pairing", ""] {
             let p = principal(marker, &["chat"]);
-            let can_see = audit_visibility_in(&p, "local");
+            let ops = no_operators();
+            let can_see = audit_visibility_in(&p, &ops, "local");
             assert!(
                 !can_see(&entry(marker)),
                 "`{marker}` is a shared marker, not a tenant — two callers \
                  carrying it are both unattributed, not tenant-mates"
             );
             let op = principal(marker, &[AUDIT_READ_ALL_SCOPE]);
-            let operator = audit_visibility_in(&op, "local");
+            let operator = audit_visibility_in(&op, &ops, "local");
             assert!(
                 operator(&entry(marker)),
                 "the operator grant must still restore the view"
@@ -1055,7 +1048,8 @@ mod trace_scope_tests {
         }
         // A real tenant still matches itself.
         let pa = principal("acme", &["chat"]);
-        let acme = audit_visibility_in(&pa, "local");
+        let ops2 = no_operators();
+        let acme = audit_visibility_in(&pa, &ops2, "local");
         assert!(acme(&entry("acme")));
         assert!(!acme(&entry("globex")));
     }

@@ -1748,8 +1748,13 @@ a trap the next developer should not have to step in.
   Only the live probe caught it. The unit and integration tests could not:
   they all instantiate the surface that had the wiring.
 
-  The fix is to read the environment inside `Dispatcher::new`, which breaks
-  this crate's env-free rule on purpose. That rule was written for a TUNING
+  The first fix read the environment inside `Dispatcher::new`, breaking
+  this crate's env-free rule. A reviewer pointed out the better shape and
+  it is what shipped: the controls are a REQUIRED constructor parameter
+  (`DispatchControls`), read by `triton-config` in the host layer. Same
+  guarantee, no rule broken — and omission became a compile error rather
+  than a runtime absence. The original reasoning below still holds for
+  WHY the control had to reach every host; only the mechanism changed. That rule was written for a TUNING
   parameter (`with_rejection_window` says so in its own doc). A revocation
   lever is not tuning — its entire value is that it applies everywhere — and
   a security control each call site must remember to opt into is a

@@ -13,6 +13,7 @@ triton-bin's wiring as a library (issue #75, Mode 1).
 """
 
 [dependencies]
+triton-config = { path = "../triton-config" }
 triton-core = { path = "../triton-core" }
 # default-features = false so `--no-default-features` on this crate also
 # disables dev-token downstream (ADR-10: never in release).

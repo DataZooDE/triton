@@ -23,8 +23,8 @@ dev-token = [
 
 [dependencies]
 base64 = "0.22"
+triton-config = { path = "../triton-config" }
 triton-core = { path = "../triton-core" }
-triton-embed = { path = "../triton-embed", default-features = false }
 triton-identity = { path = "../triton-identity" }
 triton-upstream = { path = "../triton-upstream" }
 triton-manifest = { path = "../triton-manifest" }

@@ -25,6 +25,7 @@ futures = { workspace = true }
 libc = "0.2"
 triton-manifest = { path = "../triton-manifest" }
 triton-correlation = { path = "../triton-correlation" }
+triton-config = { path = "../triton-config" }
 triton-core = { path = "../triton-core" }
 triton-rasterizer = { path = "../triton-rasterizer" }
 # Decode the rasterizer's PNG output to assert rendered text ink (#135).
