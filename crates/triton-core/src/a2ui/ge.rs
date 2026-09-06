@@ -62,10 +62,11 @@ pub const BASIC_CATALOG: &str =
 const THEME_PRIMARY_COLOR: &str = "#1a73e8";
 
 /// Sentinel stored as a source button's re-ask "question": clicking the button
-/// opens the cited document in a Canvas side panel rather than dispatching a
-/// turn to the agent. [`question_for`] returns this string like any re-ask; the
-/// A2A layer detects it via [`open_doc`] and replies with
-/// [`build_document_canvas`] instead of running the agent. The prefix is a
+/// opens the cited document inline rather than dispatching a turn to the agent.
+/// [`question_for`] returns this string like any re-ask; the A2A layer detects
+/// it via [`open_doc`] and replies with the document surface
+/// ([`build_document_material`], or [`build_document_canvas`] under
+/// [`doc_iframe_enabled`]) instead of running the agent. The prefix is a
 /// control char so it can never collide with a question a user could type.
 const DOC_OPEN_SENTINEL: &str = "\u{1}a2ui-open-doc\u{1}";
 
