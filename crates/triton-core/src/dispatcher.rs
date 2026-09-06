@@ -308,10 +308,16 @@ pub fn parse_principal_set(raw: &str, what: &str) -> HashSet<(String, String)> {
             // `!tenant.contains('/')` after `split_once` cannot catch
             // this: the tenant is everything BEFORE the first separator,
             // so it never contains one.
+            // Both halves trimmed. `acme / alice` is what a human types,
+            // and an untrimmed half matches no principal — so the only
+            // same-day revocation lever would report success and revoke
+            // nobody. (#306 crew F4.)
             Some((tenant, sub))
-                if !tenant.is_empty() && !sub.is_empty() && entry.matches('/').count() == 1 =>
+                if !tenant.trim().is_empty()
+                    && !sub.trim().is_empty()
+                    && entry.matches('/').count() == 1 =>
             {
-                Some((tenant.to_string(), sub.to_string()))
+                Some((tenant.trim().to_string(), sub.trim().to_string()))
             }
             _ => {
                 // This crate has no tracing dependency; the audit emitter
@@ -1302,6 +1308,14 @@ mod tests {
         // principal could silently revoke another across a customer
         // boundary.
         assert!(parse_denied_principals("acme/al/ice").is_empty());
+        // Both halves trimmed: `acme / alice` is what a human types, and
+        // an untrimmed half matches no principal — the lever would report
+        // success and revoke nobody (#306 crew F4).
+        let spaced = parse_denied_principals("acme / alice");
+        assert!(
+            spaced.contains(&("acme".into(), "alice".into())),
+            "a spaced entry must revoke the same principal: {spaced:?}"
+        );
         // A bare subject is DROPPED, not widened to every tenant.
         assert!(parse_denied_principals("alice").is_empty());
         assert!(parse_denied_principals("/alice").is_empty());

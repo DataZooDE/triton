@@ -295,6 +295,8 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         dispatcher,
         tasks: InMemoryTaskStore::new(),
         identity,
+        // #306 crew F1: `tasks/get` scopes on a trace id.
+        audit_operators: Arc::new(triton_config::DeploymentConfig::from_env().audit_operators),
     };
 
     // The spec-A2A JSON-RPC route answers at the A2A BASE path itself

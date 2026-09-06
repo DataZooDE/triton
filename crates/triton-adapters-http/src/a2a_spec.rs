@@ -316,7 +316,7 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
     let mut resp = match req.method.as_str() {
         "message/send" => message_send(state, principal, req).await,
         "message/stream" => message_stream(state, principal, req).await,
-        "tasks/get" => tasks_get(state, req),
+        "tasks/get" => tasks_get(state, req, &principal),
         // Named explicitly so a caller learns which methods exist rather
         // than only that this one does not.
         other => rpc_error(
@@ -799,10 +799,39 @@ fn reply_text(result: &Value) -> String {
     result.to_string()
 }
 
-fn tasks_get(state: SpecState, req: RpcRequest) -> Response {
+fn tasks_get(
+    state: SpecState,
+    req: RpcRequest,
+    principal: &triton_core::principal::Principal,
+) -> Response {
     let Some(id) = req.params.get("id").and_then(Value::as_str) else {
         return rpc_error(&req.id, INVALID_PARAMS, "params.id is required");
     };
+    // #306 crew F1: a task id IS a trace_id, and the store keyed on it
+    // alone — so naming another tenant's id returned their dispatch
+    // answer. That is the same pivot `/v1/trace` closes, one surface
+    // over, and it needed no out-of-band knowledge: ids come back in
+    // every `message/send` reply.
+    //
+    // The rule is `/v1/trace`'s, deliberately: the caller must have at
+    // least one VISIBLE audit entry for this trace, which means a step of
+    // it ran under their tenant. Reusing it rather than recording an
+    // owner on `TaskEntry` keeps one answer to "may this caller see this
+    // trace" instead of two that can drift — and it covers tasks created
+    // through either face of the adapter without touching seven
+    // `record_entry` call sites.
+    if !crate::rest::may_read_trace(principal, &state.a2a.audit_operators, state.a2a.env(), id) {
+        // NOT_FOUND rather than a refusal: ids must stay unenumerable, so
+        // "someone else's task" and "no such task" have to look identical.
+        return rpc_error(&req.id, TASK_NOT_FOUND, "task not found");
+    }
+    if let Err(e) = state
+        .a2a
+        .dispatcher
+        .deny_if_revoked(principal, "tasks/get", "a2a")
+    {
+        return rpc_error(&req.id, INTERNAL_ERROR, e.to_string());
+    }
     match state.a2a.tasks.entry(id) {
         Some(entry) => {
             let st = entry.state.unwrap_or(TaskState::Submitted);
