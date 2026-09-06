@@ -287,6 +287,23 @@ struct ResolverReply {
     tenant: String,
 }
 
+/// Validate one entry of an adapter-SPECIFIC identity table.
+///
+/// `self_enrol`'s `fallback_table` has a different shape from
+/// `sender_table` — no `sub`, because the subject is always the platform
+/// sender id — so it cannot go through [`SenderTable::parse`]. The table
+/// shape is adapter-specific; the RULE is not, and this is where it
+/// lives so the two cannot drift apart.
+///
+/// Pass the table KEY as the subject: under `self_enrol` that is exactly
+/// what the principal's `sub` becomes.
+pub fn validate_table_entry(key: &str, sub: &str, tenant: &str) -> Result<(), IdentityError> {
+    validate_resolved(sub, tenant).map_err(|e| IdentityError::TableEntry {
+        key: key.to_string(),
+        reason: e.to_string(),
+    })
+}
+
 /// Refuse an `identity.kind` the adapter does not implement.
 ///
 /// This replaces the ad-hoc `other => return Err(...)` arm each adapter
