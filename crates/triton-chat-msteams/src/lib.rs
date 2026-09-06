@@ -147,6 +147,11 @@ pub struct MsTeamsAdapter {
     /// single-claimant — the path is fixed and `Router::merge` panics on
     /// an overlap, so triton-bin refuses a second claimant.
     canonical_path: bool,
+    /// Agent-multiplexing router (host-provided, #315). When `Some`, an inbound
+    /// message and a `__use_agent` chooser click route through it to pick WHICH
+    /// agent handles the turn, overriding `inbound_tool`. `None` ⇒ legacy
+    /// single-tool `route_command(text, &inbound_tool)`.
+    router: Option<Arc<dyn triton_chat_routing::AgentRouter>>,
 }
 
 impl MsTeamsAdapter {
@@ -404,7 +409,15 @@ impl MsTeamsAdapter {
             per_tenant_limit,
             courier,
             canonical_path,
+            router: None,
         })
+    }
+
+    /// Attach the agent-multiplexing router (host-provided). Call before
+    /// wrapping the adapter in an `Arc`. Absent ⇒ legacy single-tool routing.
+    pub fn with_router(mut self, router: Arc<dyn triton_chat_routing::AgentRouter>) -> Self {
+        self.router = Some(router);
+        self
     }
 
     /// Whether this adapter claims the canonical `/api/messages` path
@@ -898,12 +911,98 @@ async fn dispatch_message(
     // closing `</at>` (with whitespace trimmed) is what we route as
     // the command.
     let stripped = strip_mention_prefix(text);
-    let (tool_name, args) = route_command(stripped, &adapter.inbound_tool);
 
     let conversation_type = activity
         .conversation
         .as_ref()
         .and_then(|c| c.conversation_type.clone());
+
+    // Agent multiplexing (host-provided router, #315). Route by text to pick
+    // the agent; a chooser / info / deny reply is POSTed here, a Dispatch runs
+    // the picked agent. `None` router ⇒ legacy single-tool routing below.
+    let (tool_name, args) = if let Some(router) = adapter.router.clone() {
+        let key =
+            triton_chat_routing::ConvKey::msteams(conversation_id.clone(), "", sender.sub.clone());
+        let ctx = triton_chat_routing::RouteCtx {
+            key,
+            text: stripped,
+            tenant: &sender.tenant,
+            caller_sub: &sender.sub,
+            pick: None,
+        };
+        match router.route(ctx).await {
+            triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
+                route_command(&text, &agent_id)
+            }
+            triton_chat_routing::RouteOutcome::Chooser {
+                candidates,
+                pending_text,
+                ..
+            } => {
+                let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+                let chrome = fetch_chrome(adapter, &principal).await;
+                let signed: Vec<(String, String)> = candidates
+                    .iter()
+                    .filter_map(|a| {
+                        let payload = serde_json::json!({ "id": a.id, "msg": pending_text });
+                        triton_correlation::encode_with_cap(
+                            triton_chat_routing::USE_AGENT_TOOL,
+                            &payload,
+                            &adapter.correlation_key,
+                            surface_mapper::MSTEAMS_CORRELATION_CAP,
+                        )
+                        .ok()
+                        .map(|tok| (a.display.clone(), tok))
+                    })
+                    .collect();
+                let prompt = "Which agent should handle this? Pick one below, or type \
+                              `/use <name>` any time (`/agents` to list, `/whoami` to check).";
+                let card = surface_mapper::build_agent_chooser(prompt, &signed, &chrome);
+                let body = surface_mapper::build_card_activity_body(
+                    &recipient_id,
+                    &conversation_id,
+                    &sender.from_id,
+                    card,
+                );
+                post_reply(
+                    adapter,
+                    verified,
+                    triton_chat_routing::USE_AGENT_TOOL,
+                    &principal,
+                    &conversation_id,
+                    body,
+                    0,
+                )
+                .await;
+                return StatusCode::OK.into_response();
+            }
+            triton_chat_routing::RouteOutcome::Info { text }
+            | triton_chat_routing::RouteOutcome::Deny { message: text } => {
+                let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+                let msg = surface_mapper::RenderedMessage::text_only(text);
+                let body = surface_mapper::build_activity_body(
+                    &recipient_id,
+                    &conversation_id,
+                    &sender.from_id,
+                    &msg,
+                );
+                post_reply(
+                    adapter,
+                    verified,
+                    triton_chat_routing::USE_AGENT_TOOL,
+                    &principal,
+                    &conversation_id,
+                    body,
+                    0,
+                )
+                .await;
+                return StatusCode::OK.into_response();
+            }
+        }
+    } else {
+        route_command(stripped, &adapter.inbound_tool)
+    };
+
     dispatch_and_post_reply(
         adapter,
         verified,
@@ -1063,7 +1162,7 @@ async fn handle_callback(
     // Verify the HMAC BEFORE trusting the tool/args. A forged or
     // tampered token — even on an authenticated webhook — is refused
     // and audited as `error:auth`, never re-dispatched.
-    let (tool_name, mut args) = match triton_correlation::decode_with_cap(
+    let (mut tool_name, mut args) = match triton_correlation::decode_with_cap(
         &token,
         &adapter.correlation_key,
         surface_mapper::MSTEAMS_CORRELATION_CAP,
@@ -1086,6 +1185,64 @@ async fn handle_callback(
     // preset button also submits the (blank) sibling inputs; an empty
     // merge would clobber the button's own preset args.
     merge_inputs(&mut args, inputs);
+
+    // Agent multiplexing (#315): a `__use_agent` chooser click confirms a pick.
+    // The router binds the agent and replays the buffered message; the picked
+    // agent then runs through the normal Execute path below. A denied pick
+    // answers the invoke directly.
+    if tool_name == triton_chat_routing::USE_AGENT_TOOL
+        && let Some(router) = adapter.router.clone()
+    {
+        let id = args
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let msg = args
+            .get("msg")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let conversation_id = activity
+            .conversation
+            .as_ref()
+            .map(|c| c.id.clone())
+            .unwrap_or_default();
+        let key = triton_chat_routing::ConvKey::msteams(conversation_id, "", sender.sub.clone());
+        let ctx = triton_chat_routing::RouteCtx {
+            key,
+            text: &msg,
+            tenant: &sender.tenant,
+            caller_sub: &sender.sub,
+            pick: Some((id, msg.clone())),
+        };
+        match router.route(ctx).await {
+            triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
+                let (t, a) = route_command(&text, &agent_id);
+                tool_name = t;
+                args = a;
+            }
+            triton_chat_routing::RouteOutcome::Info { text }
+            | triton_chat_routing::RouteOutcome::Deny { message: text } => {
+                return (
+                    StatusCode::OK,
+                    axum::Json(surface_mapper::invoke_message_response(&text)),
+                )
+                    .into_response();
+            }
+            // A pick that resolves to another chooser is degenerate; surface it
+            // as a hint rather than dispatching the sentinel tool.
+            triton_chat_routing::RouteOutcome::Chooser { .. } => {
+                return (
+                    StatusCode::OK,
+                    axum::Json(surface_mapper::invoke_message_response(
+                        "That agent isn't available — type `/agents` to see the list.",
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     let conversation_type = activity
         .conversation

@@ -946,6 +946,44 @@ pub fn build_interactive_card(
     wrap_message(message, workspace_addon)
 }
 
+/// Build the agent-chooser card: a lead prompt plus one button per candidate
+/// agent. Each `(label, token)` renders an [`action_button`] carrying a signed
+/// `triton_chat_routing::USE_AGENT_TOOL` token (`{id, msg}`), so a tap re-enters the webhook
+/// as a normal `CARD_CLICKED` and the router binds the pick and replays the
+/// buffered message. Same `click_endpoint`/envelope rules as
+/// [`build_interactive_card`].
+pub fn build_agent_chooser(
+    prompt: &str,
+    buttons: &[(String, String)],
+    workspace_addon: bool,
+    theme: &CardChrome,
+    click_endpoint: Option<&str>,
+) -> Value {
+    let click_function: &str = click_endpoint.unwrap_or(BUTTON_ACTION_FUNCTION);
+    let btns: Vec<Value> = buttons
+        .iter()
+        .map(|(label, token)| action_button(label, token, theme, click_function))
+        .collect();
+    let mut sections: Vec<Value> = Vec::new();
+    if let Some(banner) = logo_banner_section(theme) {
+        sections.push(banner);
+    }
+    sections.push(serde_json::json!({
+        "widgets": [ { "buttonList": { "buttons": btns } } ]
+    }));
+    let mut card = serde_json::json!({ "sections": sections });
+    if let Some(header) = card_header(theme) {
+        card["header"] = header;
+    }
+    let mut message = serde_json::json!({
+        "cardsV2": [ { "cardId": "agent-chooser", "card": card } ]
+    });
+    if !prompt.is_empty() {
+        message["text"] = serde_json::json!(prompt);
+    }
+    wrap_message(message, workspace_addon)
+}
+
 /// A Cards v2 reply carrying a single upstream-rendered chart image (served at
 /// a signed `…/img/{token}` URL) plus optional lead text. Used for a
 /// `render_report` result whose own components (kpi/vega/table) this adapter
@@ -982,6 +1020,41 @@ pub fn image_reply_card(
 mod tests {
     use super::*;
     use triton_core::a2ui::{Component, Surface};
+
+    #[test]
+    fn agent_chooser_card_carries_signed_buttons() {
+        let chrome = CardChrome::default();
+        let buttons = vec![
+            ("Sales".to_string(), "tokA".to_string()),
+            ("Supplier Risk".to_string(), "tokB".to_string()),
+        ];
+        let body = build_agent_chooser("Pick one", &buttons, false, &chrome, None);
+        // Classic (non-add-on) → bare message with cardsV2 + lead text.
+        assert_eq!(body["text"], "Pick one");
+        let btns = &body["cardsV2"][0]["card"]["sections"];
+        let json = body.to_string();
+        assert!(json.contains("Sales") && json.contains("Supplier Risk"));
+        assert!(json.contains("tokA") && json.contains("tokB"));
+        assert!(json.contains(BUTTON_TOKEN_PARAM));
+        assert!(btns.is_array());
+    }
+
+    #[test]
+    fn agent_chooser_wraps_for_workspace_addon() {
+        let body = build_agent_chooser(
+            "Pick",
+            &[("A".to_string(), "t".to_string())],
+            true,
+            &CardChrome::default(),
+            Some("https://host/dz/webhook"),
+        );
+        // Add-on envelope: hostAppDataAction → chatDataAction → createMessageAction.
+        assert!(body["hostAppDataAction"]["chatDataAction"]["createMessageAction"]["message"]
+            ["cardsV2"]
+            .is_array());
+        // The click function is the webhook URL, not the bare action name.
+        assert!(body.to_string().contains("https://host/dz/webhook"));
+    }
 
     #[test]
     fn passthrough_text_and_narration() {

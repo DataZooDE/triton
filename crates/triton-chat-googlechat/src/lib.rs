@@ -332,6 +332,12 @@ pub struct GoogleChatAdapter {
     /// Outbound HTTP client for the courier POST (built once at boot
     /// with the configured courier timeout).
     http: reqwest::Client,
+    /// Agent-multiplexing router (host-provided). When `Some`, an inbound
+    /// MESSAGE and a `__use_agent` chooser click are routed through it to pick
+    /// WHICH agent handles the turn (switch / sticky / chooser / entitlement),
+    /// overriding `inbound_tool`. When `None`, the legacy single-tool
+    /// `route_command(text, &inbound_tool)` path is used unchanged.
+    router: Option<Arc<dyn triton_chat_routing::AgentRouter>>,
 }
 
 impl GoogleChatAdapter {
@@ -539,7 +545,15 @@ impl GoogleChatAdapter {
             courier,
             outbound,
             http,
+            router: None,
         })
+    }
+
+    /// Attach the agent-multiplexing router (host-provided). Call before
+    /// wrapping the adapter in an `Arc`. Absent ⇒ legacy single-tool routing.
+    pub fn with_router(mut self, router: Arc<dyn triton_chat_routing::AgentRouter>) -> Self {
+        self.router = Some(router);
+        self
     }
 
     /// Mount the inbound webhook at `/<adapter-name>/webhook`.
@@ -1038,6 +1052,11 @@ async fn handle_webhook(
     // Captured for the courier ack below: a button click must be answered
     // with a click-shaped body, not a message-shaped one.
     let is_card_click = event.kind == "CARD_CLICKED";
+    // Agent multiplexing: a MESSAGE routes by its raw text through the
+    // host router (when wired); `routing_text` carries that text past the
+    // match, which consumes `event.message`.
+    let was_message = event.kind == "MESSAGE";
+    let mut routing_text: Option<String> = None;
     let (sender_name, tool_name, args, action_echo): (String, String, Value, Option<String>) =
         match event.kind.as_str() {
             "MESSAGE" => {
@@ -1065,6 +1084,7 @@ async fn handle_webhook(
                     .and_then(|s| s.name.as_deref())
                     .unwrap_or("")
                     .to_string();
+                routing_text = Some(text.to_string());
                 let (tool, args) = route_command(text, &adapter.inbound_tool);
                 (sender, tool, args, None)
             }
@@ -1172,6 +1192,10 @@ async fn handle_webhook(
             }
         };
     let sender_name = sender_name.as_str();
+    // Mutable: the agent-multiplexing router may override which agent (tool)
+    // handles this turn once the caller identity is resolved below.
+    let mut tool_name = tool_name;
+    let mut args = args;
 
     // FR-I-7 sender resolution → (sub, scopes, tenant).
     let (sub, scopes, tenant) = match &adapter.identity {
@@ -1277,6 +1301,104 @@ async fn handle_webhook(
             axum::Json(surface_mapper::dialog_response(card, workspace_addon)),
         )
             .into_response();
+    }
+
+    // Agent multiplexing (host-provided router, #315). A MESSAGE routes by its
+    // text; a `__use_agent` chooser click confirms a pick. A chooser / info /
+    // deny reply is fast (no LLM) and answers synchronously here, before the
+    // courier; a Dispatch overrides (tool_name, args) and falls through to the
+    // normal dispatch path. `None` router ⇒ legacy single-tool routing.
+    if let Some(router) = adapter.router.clone() {
+        let pick = (tool_name == triton_chat_routing::USE_AGENT_TOOL).then(|| {
+            (
+                args.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                args.get("msg")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        });
+        if was_message || pick.is_some() {
+            let space = space_name.clone().unwrap_or_default();
+            let key = triton_chat_routing::ConvKey::googlechat(space, "", sub.clone());
+            let text_for_route = routing_text.clone().unwrap_or_default();
+            let ctx = triton_chat_routing::RouteCtx {
+                key,
+                text: &text_for_route,
+                tenant: &tenant,
+                caller_sub: &sub,
+                pick,
+            };
+            match router.route(ctx).await {
+                triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
+                    let (t, a) = route_command(&text, &agent_id);
+                    tool_name = t;
+                    args = a;
+                }
+                triton_chat_routing::RouteOutcome::Chooser {
+                    candidates,
+                    pending_text,
+                    ..
+                } => {
+                    let chrome = match adapter
+                        .dispatcher
+                        .invoke(
+                            "get_theme",
+                            serde_json::json!({}),
+                            principal.clone(),
+                            PROTOCOL,
+                        )
+                        .await
+                    {
+                        Ok(t) => surface_mapper::CardChrome::from_get_theme(&t.result),
+                        Err(_) => surface_mapper::CardChrome::default(),
+                    };
+                    let signed: Vec<(String, String)> = candidates
+                        .iter()
+                        .filter_map(|a| {
+                            let payload = serde_json::json!({ "id": a.id, "msg": pending_text });
+                            triton_correlation::encode_with_cap(
+                                triton_chat_routing::USE_AGENT_TOOL,
+                                &payload,
+                                &adapter.correlation_key,
+                                CARD_CORRELATION_CAP,
+                            )
+                            .ok()
+                            .map(|tok| (a.display.clone(), tok))
+                        })
+                        .collect();
+                    let base = public_base(&headers);
+                    let click_endpoint = base
+                        .as_deref()
+                        .map(|b| format!("{}/{}/webhook", b.trim_end_matches('/'), adapter.name));
+                    let prompt = "Which agent should handle this? Pick one below, or type \
+                                  `/use <name>` any time (`/agents` to list, `/whoami` to check).";
+                    let body = surface_mapper::build_agent_chooser(
+                        prompt,
+                        &signed,
+                        workspace_addon,
+                        &chrome,
+                        click_endpoint.as_deref(),
+                    );
+                    adapter.dispatcher.record_post(
+                        triton_chat_routing::USE_AGENT_TOOL,
+                        PROTOCOL,
+                        &principal_for_post,
+                        0,
+                        Ok((200, PostOutcome::Posted, None)),
+                    );
+                    return (StatusCode::OK, axum::Json(body)).into_response();
+                }
+                triton_chat_routing::RouteOutcome::Info { text }
+                | triton_chat_routing::RouteOutcome::Deny { message: text } => {
+                    let body = surface_mapper::text_reply_body(&text, workspace_addon);
+                    return (StatusCode::OK, axum::Json(body)).into_response();
+                }
+            }
+        }
     }
 
     // #164 T1a: async reply courier. Google Chat's webhook is
