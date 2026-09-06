@@ -249,3 +249,114 @@ fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+// ── Crew review of #306: four confirmed defects in the above ────────────
+
+/// F1. `entries` went through `audit_visibility`; `bodies` did not.
+///
+/// The pivot needs no out-of-band knowledge: read your OWN `/v1/audit`,
+/// lift any `trace_id` from it, and `/v1/trace/{id}` returned the bodies
+/// for the whole trace — which can span the identity-resolver dispatch
+/// running under `tenant: "system"`. One hop, inside the product's own
+/// UI flow.
+///
+/// LIMIT, stated rather than implied: this drives the real endpoint but
+/// can only prove the ENTRIES half. `bodies` is populated only with the
+/// dev `capture` feature, which the integration-test binary does not
+/// compile in, so the assertion below passes whether or not the fix is
+/// present. The gate itself is pinned by
+/// `rest::trace_scope_tests::bodies_follow_the_entries_beside_them`.
+/// Both halves exist because neither alone is honest: the unit test
+/// cannot show the handler calls the gate, and this cannot show the gate
+/// works.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trace_bodies_are_scoped_like_the_entries_beside_them() {
+    let issuer = TestIssuer::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer)).await;
+
+    let acme = token_for(&issuer, "alice", "acme", "chat");
+    let globex = token_for(&issuer, "bob", "globex", "chat");
+    dispatch_as(&proc, &globex, "globex-secret-payload").await;
+
+    // globex reads its own row to get a real trace_id — this is the
+    // attacker's starting position, not a contrivance.
+    let rows = audit_entries(&proc, &globex, "?limit=50").await;
+    let trace_id = rows
+        .iter()
+        .find_map(|r| r["trace_id"].as_str())
+        .expect("globex has a trace of its own")
+        .to_string();
+
+    let seen = |body: &Value| -> (usize, usize) {
+        (
+            body["entries"].as_array().map_or(0, Vec::len),
+            body["bodies"].as_array().map_or(0, Vec::len),
+        )
+    };
+
+    let foreign: Value = reqwest::Client::new()
+        .get(proc.rest_url(&format!("/v1/trace/{trace_id}")))
+        .bearer_auth(&acme)
+        .send()
+        .await
+        .expect("GET /v1/trace")
+        .json()
+        .await
+        .expect("decode");
+    let (entries, bodies) = seen(&foreign);
+    assert_eq!(entries, 0, "acme must see none of globex's entries");
+    assert_eq!(
+        bodies, 0,
+        "…and none of its bodies either. NOTE this holds trivially without \
+         the `capture` feature — see the doc comment; the gate is unit-tested"
+    );
+
+    // The other half: globex still gets its own trace. A filter that
+    // returns nothing to anyone is not a filter.
+    let own: Value = reqwest::Client::new()
+        .get(proc.rest_url(&format!("/v1/trace/{trace_id}")))
+        .bearer_auth(&globex)
+        .send()
+        .await
+        .expect("GET /v1/trace")
+        .json()
+        .await
+        .expect("decode");
+    assert!(
+        seen(&own).0 > 0,
+        "globex must still read its own trace: {own}"
+    );
+}
+
+/// F2. Tenant scoping is an EQUALITY test, and the live callers all
+/// carry a shared marker rather than a tenant.
+///
+/// A single-tenant OIDC caller with no `tenant` claim resolves to `-`,
+/// as does every opaque Google access-token caller; every un-enrolled
+/// chat sender carries `pairing`. Two callers holding `-` are not in the
+/// same tenant — they are both unattributed — so matching on it hands
+/// one every other unattributed caller's rows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_marker_tenant_matches_nobody_elses_rows() {
+    let issuer = TestIssuer::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer)).await;
+
+    // Two DIFFERENT people, both resolving to the sentinel tenant.
+    let one = token_for(&issuer, "someone@data-zoo.de", "-", "chat");
+    let two = token_for(&issuer, "another@data-zoo.de", "-", "chat");
+    dispatch_as(&proc, &one, "first-callers-message").await;
+
+    let rows = audit_entries(&proc, &two, "?limit=100").await;
+    assert!(
+        !rows.iter().any(|r| r["who"] == "someone@data-zoo.de"),
+        "a `-` caller must not read another `-` caller's rows: {rows:?}"
+    );
+
+    // An operator still sees everything — the grant is what restores it.
+    let op = token_for(&issuer, "ops", "-", "audit:read-all");
+    let all = audit_entries(&proc, &op, "?limit=100").await;
+    assert!(
+        all.iter().any(|r| r["who"] == "someone@data-zoo.de"),
+        "the operator scope must still restore the cross-tenant view"
+    );
+}

@@ -354,6 +354,12 @@ pub async fn serve(reg: ToolRegistry, opts: EmbedOpts) -> anyhow::Result<()> {
 /// Like [`serve`], but for a pre-built [`Dispatcher`] (e.g. one wired with
 /// `.with_upstream(...)`).
 pub async fn serve_dispatcher(dispatcher: Arc<Dispatcher>, opts: EmbedOpts) -> anyhow::Result<()> {
+    // #287: report the controls in force before accepting traffic. An
+    // embedded host that builds its own router instead of calling this
+    // must call `announce_controls` itself — the runbook says to check
+    // for this line, and its absence must mean "not engaged", never
+    // "engaged but nobody said so".
+    triton_core::dispatcher::announce_controls(&dispatcher);
     let addr = SocketAddr::new(opts.host, opts.port);
     let app = router(dispatcher, &opts);
     let listener = tokio::net::TcpListener::bind(addr).await?;

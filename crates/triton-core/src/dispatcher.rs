@@ -215,7 +215,18 @@ fn denied_principals_from_env() -> std::collections::HashSet<String> {
         Ok(v) => v,
         Err(_) => return std::collections::HashSet::new(),
     };
-    let denied = parse_denied_principals(&raw);
+    parse_denied_principals(&raw)
+}
+
+/// Announce the controls actually in force, AFTER the host has finished
+/// building. Call it once, last.
+///
+/// This is not in `new()` on purpose. Announcing there reports what the
+/// environment supplied, which is not what a host that also calls the
+/// builders is enforcing — and a control that misreports itself is worse
+/// than one that is silent, because an operator acts on the report.
+pub fn announce_controls(dispatcher: &Dispatcher) {
+    let mut denied: Vec<&str> = dispatcher.denied_principals().collect();
     if !denied.is_empty() {
         // Say it HERE, not in a host's `main`. The whole point of #287's
         // follow-up is that this control reaches hosts that do not run
@@ -223,16 +234,14 @@ fn denied_principals_from_env() -> std::collections::HashSet<String> {
         // one they will not trust, or worse, will assume is engaged when
         // a typo dropped every entry. Verified on agent-lab: the
         // refusals worked and nothing announced them.
-        let mut names: Vec<&str> = denied.iter().map(String::as_str).collect();
-        names.sort_unstable();
+        denied.sort_unstable();
         eprintln!(
-            "WARN TRITON_DENIED_PRINCIPALS active: {} principal(s) revoked \
-             — every dispatch of theirs is refused 403 (#287): {}",
-            names.len(),
-            names.join(", ")
+            "WARN denylist active: {} principal(s) revoked — every dispatch, \
+             proactive send and audit read of theirs is refused 403 (#287): {}",
+            denied.len(),
+            denied.join(", ")
         );
     }
-    denied
 }
 
 /// The parse itself, separated so it can be tested without the process
@@ -382,15 +391,25 @@ impl Dispatcher {
     /// This is a kill switch, not an authorization system. It answers
     /// "this principal is compromised, stop it now" and nothing else;
     /// per-tool permission is `can_invoke`'s job.
-    /// Overrides whatever the environment supplied. Hosts that configure
-    /// the set explicitly (and tests) use this; nobody needs to call it
-    /// for `TRITON_DENIED_PRINCIPALS` to take effect.
+    /// ADDS to whatever the environment supplied — it does not replace it.
+    ///
+    /// It used to replace, and that was a defect: the boot announcement
+    /// fires when the environment is read, so a host calling this would
+    /// log one denylist and enforce another. A revocation lever that
+    /// misreports itself is worse than one that says nothing, and the
+    /// runbook's "read the accepted count back" check depends on the
+    /// announcement being true.
+    ///
+    /// Extending is also the fail-closed direction here: a denylist is a
+    /// DENY-set, so a merge can only revoke more, never less. (Its
+    /// sibling `with_scope_restriction` guards an ALLOW-set, where the
+    /// same merge would widen — which is why that one replaces.)
     pub fn with_denied_principals<I, S>(mut self, denied: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.denied = denied.into_iter().map(Into::into).collect();
+        self.denied.extend(denied.into_iter().map(Into::into));
         self
     }
 
@@ -403,6 +422,30 @@ impl Dispatcher {
         }
         self.denied
             .contains(&format!("{}/{}", principal.tenant, principal.sub))
+    }
+
+    /// Refuse a revoked principal on a surface that does NOT dispatch.
+    ///
+    /// `/v1/outbound` couriers a message without invoking a tool;
+    /// `/v1/audit` and `/v1/trace` read the buffer. None of them reach
+    /// `invoke`, so none of them saw the denylist — a revoked caller kept
+    /// proactive push and read access to operational metadata, which is
+    /// most of what a compromised caller would want. The docs said "every
+    /// protocol at once"; this is what makes that true.
+    ///
+    /// `Ok(())` when the principal is fine. The `Err` is already audited
+    /// through the same path a refused dispatch takes, so the caller just
+    /// maps it to a response.
+    pub fn deny_if_revoked(
+        &self,
+        principal: &Principal,
+        surface: &str,
+        protocol: &str,
+    ) -> Result<(), TritonError> {
+        if self.is_denied(principal) {
+            return Err(self.deny(surface, protocol, principal));
+        }
+        Ok(())
     }
 
     /// The refusal, audited through the same `fail` path every other

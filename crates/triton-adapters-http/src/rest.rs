@@ -538,7 +538,14 @@ fn audit_visibility(
 ) -> impl Fn(&triton_core::audit::AuditEntry) -> bool {
     let operator = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE);
     let tenant = principal.tenant.clone();
-    move |e| operator || e.tenant == tenant
+    // A reserved tenant is a shared marker, not a tenant: `-` is what
+    // nearly every live OIDC caller carries and `pairing` is what every
+    // un-enrolled chat sender shares. Comparing them for equality would
+    // hand one caller every other unattributed caller's rows — which is
+    // most of the buffer, including the boundary rejections that name
+    // other tenants' senders. They match nothing but an operator.
+    let scopable = !triton_core::principal::is_reserved_tenant(&tenant);
+    move |e| operator || (scopable && e.tenant == tenant)
 }
 
 /// `GET /v1/audit?limit=N&trace_id=X` — newest-first slice of the
@@ -568,6 +575,12 @@ async fn audit_tail(
             return error_response(&e, None);
         }
     };
+    if let Err(e) = state
+        .dispatcher
+        .deny_if_revoked(&principal, "v1/audit", "rest")
+    {
+        return error_response(&e, Some(&principal.trace_id));
+    }
     let limit = q.limit.clamp(1, AUDIT_LIMIT_MAX);
     let trace_id = q.trace_id.as_deref().filter(|s| !s.is_empty());
     let entries = AuditBuffer::recent_where(limit, trace_id, audit_visibility(&principal));
@@ -577,6 +590,27 @@ async fn audit_tail(
         "trace_id": trace_id,
     }))
     .into_response()
+}
+
+/// May this caller see the captured bodies for a trace?
+///
+/// The capture store keys on `trace_id` alone and carries no tenant, so
+/// it cannot be filtered per entry. The tenant-scoped `entries` are the
+/// proxy: non-empty means at least one audited step of this trace ran
+/// under the caller's tenant, which is what entitles them to the rest of
+/// it. Empty means the trace is somebody else's.
+///
+/// Without this the pivot was one hop and needed no out-of-band
+/// knowledge — read your own `/v1/audit`, lift any `trace_id`, and
+/// receive the whole trace's bodies, including the identity-resolver
+/// dispatch that runs under `tenant: "system"`.
+///
+/// Separated from the handler so it is testable: `bodies` is only ever
+/// populated when the dev `capture` feature is compiled in, which the
+/// integration-test binary does not enable, so an end-to-end test cannot
+/// tell this fix from its absence.
+fn bodies_visible(entries: &[triton_core::audit::AuditEntry]) -> bool {
+    !entries.is_empty()
 }
 
 /// `GET /v1/trace/{trace_id}` — the one communication as a timeline: all
@@ -604,13 +638,23 @@ async fn trace_view(
             return error_response(&e, None);
         }
     };
+    if let Err(e) = state
+        .dispatcher
+        .deny_if_revoked(&principal, "v1/trace", "rest")
+    {
+        return error_response(&e, Some(&principal.trace_id));
+    }
     let mut entries = AuditBuffer::recent_where(
         AUDIT_LIMIT_MAX,
         Some(&trace_id),
         audit_visibility(&principal),
     );
     entries.reverse(); // chronological for a timeline
-    let bodies = triton_core::trace::captured(&trace_id);
+    let bodies = if bodies_visible(&entries) {
+        triton_core::trace::captured(&trace_id)
+    } else {
+        Vec::new()
+    };
     Json(json!({
         "trace_id": trace_id,
         "entries": entries,
@@ -866,4 +910,86 @@ fn http_status_for(e: &TritonError) -> StatusCode {
     // TritonError::http_status() is the single source of truth shared
     // with A2A and the dispatcher audit (architecture §8.3).
     StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
+#[cfg(test)]
+mod trace_scope_tests {
+    use super::{AUDIT_READ_ALL_SCOPE, audit_visibility, bodies_visible};
+    use triton_core::audit::{AuditEntry, AuditPhase};
+    use triton_core::principal::Principal;
+
+    fn entry(tenant: &str) -> AuditEntry {
+        AuditEntry {
+            kind: "audit",
+            phase: AuditPhase::Dispatch,
+            when: "2026-09-06T00:00:00Z".into(),
+            who: "someone".into(),
+            what: "echo".into(),
+            env: "test".into(),
+            result: "ok".into(),
+            protocol: "rest".into(),
+            tool: "echo".into(),
+            subject: "someone".into(),
+            tenant: tenant.into(),
+            latency_ms: 0,
+            status: 200,
+            status_label: None,
+            status_detail: None,
+            error_detail: None,
+            ttfb_ms: None,
+            sender_ref: None,
+            suppressed: None,
+            trace_id: "t-1".into(),
+        }
+    }
+
+    fn principal(tenant: &str, scopes: &[&str]) -> Principal {
+        Principal {
+            sub: "caller".into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            groups: Vec::new(),
+            tenant: tenant.into(),
+            raw_token: String::new(),
+            trace_id: "t".into(),
+            sender_ref: None,
+        }
+    }
+
+    /// The gate the handler applies to `bodies`. It is unit-tested rather
+    /// than driven end-to-end because `bodies` is only populated with the
+    /// dev `capture` feature, which the integration-test binary does not
+    /// compile in — an end-to-end assertion there passes whether or not
+    /// the fix is present, which is how the first version of this test
+    /// was written and why it proved nothing.
+    #[test]
+    fn bodies_follow_the_entries_beside_them() {
+        assert!(!bodies_visible(&[]), "no visible entries ⇒ no bodies");
+        assert!(bodies_visible(&[entry("acme")]), "own trace ⇒ bodies");
+    }
+
+    /// A shared marker is not a tenant, so it must not match another
+    /// caller carrying the same marker.
+    #[test]
+    fn a_reserved_tenant_matches_nothing_but_an_operator() {
+        for marker in ["-", "pairing", ""] {
+            let p = principal(marker, &["chat"]);
+            let can_see = audit_visibility(&p);
+            assert!(
+                !can_see(&entry(marker)),
+                "`{marker}` is a shared marker, not a tenant — two callers \
+                 carrying it are both unattributed, not tenant-mates"
+            );
+            let op = principal(marker, &[AUDIT_READ_ALL_SCOPE]);
+            let operator = audit_visibility(&op);
+            assert!(
+                operator(&entry(marker)),
+                "the operator grant must still restore the view"
+            );
+        }
+        // A real tenant still matches itself.
+        let pa = principal("acme", &["chat"]);
+        let acme = audit_visibility(&pa);
+        assert!(acme(&entry("acme")));
+        assert!(!acme(&entry("globex")));
+    }
 }

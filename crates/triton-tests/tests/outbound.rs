@@ -482,3 +482,53 @@ async fn outbound_buttons_are_minted_for_the_recipients_tenant() {
          forged token"
     );
 }
+
+/// Crew review of #306, F3. `/v1/outbound` never reaches the dispatcher —
+/// it goes verify → scope → rate limit → courier — so it never saw the
+/// #287 denylist. A revoked principal kept PROACTIVE PUSH, which is most
+/// of what a compromised caller would want, while the runbook told an
+/// operator the refusal covered "every protocol at once".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revoked_principal_cannot_push_proactively() {
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let issuer = TestIssuer::start().await;
+    let mut env = env_for(&issuer, &whatsapp);
+    // `token_with_aud` mints sub `carl-agent` in tenant `acme`.
+    env.insert(
+        "TRITON_DENIED_PRINCIPALS".to_string(),
+        "acme/carl-agent".to_string(),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    let before = whatsapp.captured().len();
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(token_with_aud(&issuer, OUTBOUND_AUDIENCE))
+        // KNOWN_WA_ID, not an arbitrary number: this recipient IS in the
+        // adapter's sender table and in `carl-agent`'s tenant, so
+        // `courier.authorize` would accept it. The denylist has to be the
+        // only thing that can refuse — an unauthorized recipient makes
+        // the test pass for the wrong reason, which is exactly what the
+        // first draft of it did.
+        .json(&json!({
+            "adapter": "whatsapp",
+            "to": KNOWN_WA_ID,
+            "result": { "echo": "should never be delivered" },
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+
+    assert_eq!(
+        resp.status(),
+        403,
+        "a revoked principal must be refused — authenticated, then revoked"
+    );
+    // The status is not the property that matters; delivery is.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        whatsapp.captured().len(),
+        before,
+        "nothing may reach the courier"
+    );
+}

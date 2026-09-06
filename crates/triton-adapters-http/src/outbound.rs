@@ -105,6 +105,18 @@ async fn outbound_send(
         }
     };
 
+    // 1b. #287: revocation runs BEFORE any authorization question. A
+    //     revoked principal must not be able to push proactively — that
+    //     is most of what a compromised caller would want, and this
+    //     surface never reaches the dispatcher, so it never saw the
+    //     denylist.
+    if let Err(e) = state
+        .dispatcher
+        .deny_if_revoked(&principal, "v1/outbound", "rest")
+    {
+        return error_response(&e, Some(&principal.trace_id));
+    }
+
     // 2. Authz layer 1 (#113): the token must carry the outbound
     //    capability scope, not just the audience.
     if !principal

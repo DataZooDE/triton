@@ -208,10 +208,6 @@ async fn main() -> std::io::Result<()> {
     // pairing tools, which the environment cannot express as richly.
     let mut dispatcher =
         Dispatcher::new(registry, settings.env.clone()).with_metrics(metrics.clone());
-    // #287: the denylist is read AND announced by `Dispatcher::new`, so
-    // an embedded host gets both. Nothing to report here — a second
-    // warning from this binary alone would be the kind of surface-
-    // specific behaviour the fix exists to remove.
     if !pairing_tools.is_empty() {
         tracing::info!(
             tools = ?pairing_tools,
@@ -219,6 +215,13 @@ async fn main() -> std::io::Result<()> {
         );
         dispatcher = dispatcher.with_scope_restriction("pairing", pairing_tools);
     }
+
+    // #287: announce what is ENFORCED, once every builder above has run.
+    // Announcing inside `Dispatcher::new` reported what the environment
+    // supplied, which is not the same set — and a control that
+    // misreports itself is worse than a silent one, because an operator
+    // acts on the report.
+    triton_core::dispatcher::announce_controls(&dispatcher);
 
     // Static-upstream OIDC signer: when a signing key + issuer + JWKS are all
     // configured, Triton mints a per-call RS256 JWT to agents (workload→workload

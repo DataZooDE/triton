@@ -1769,3 +1769,36 @@ a trap the next developer should not have to step in.
   and the two sources MERGE rather than compete — `with_scope_restriction`
   extends instead of replacing, because a host adding the manifest's tools
   should not silently drop the environment's.
+
+- **A merge is fail-closed for a deny-set and fail-open for an allow-set, and
+  the two live one method apart.** `with_denied_principals` and
+  `with_scope_restriction` look like siblings and were written to behave the
+  same way. They must not. A denylist is a DENY-set: merging the
+  environment's entries with a host's can only revoke more, which is the
+  safe direction, and replacing silently drops revocations. A scope
+  restriction is an ALLOW-set inside a gate: merging can only widen what a
+  restricted principal reaches, so a stale `TRITON_PAIRING_TOOLS` left in a
+  values file keeps another adapter's enrolment tool reachable forever.
+  Same shape, opposite correct answer. Ask which direction the set fails
+  before choosing.
+
+- **Announcing a control from where it is READ reports the wrong set.** The
+  denylist boot warning fired inside `Dispatcher::new`, i.e. when the
+  environment was parsed — before any builder call could add to it. A host
+  that pinned a principal in code logged one set and enforced another, which
+  is worse than silence: the runbook tells an operator to read the count
+  back, so a wrong count is a control that lies at exactly the moment it is
+  being checked. Announce from where the thing is FINISHED being built, not
+  from where its config is read.
+
+- **A test that drives the real endpoint can still prove nothing.** Two of
+  the four tests written for this review passed with their fix reverted.
+  One asserted a 403 on `/v1/outbound` for a revoked principal — but used a
+  recipient outside the adapter's sender table, so `courier.authorize`
+  refused it anyway and the denylist was never consulted. The other asserted
+  empty `bodies` on `/v1/trace`, which is true unconditionally because the
+  dev `capture` feature is off in the test binary. Both looked like strong
+  end-to-end tests. Mutation is the only thing that told them apart from
+  real ones, and where a feature flag makes an end-to-end assertion
+  structurally vacuous, the honest move is to extract the gate, unit-test
+  it, and say in the integration test's doc comment what it does not cover.

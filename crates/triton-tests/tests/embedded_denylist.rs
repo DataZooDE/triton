@@ -305,8 +305,14 @@ async fn an_active_denylist_announces_itself() {
         String::from_utf8_lossy(&done.stderr)
     );
     assert!(
-        log.contains("TRITON_DENIED_PRINCIPALS active") && log.contains("acme/alice"),
+        log.contains("denylist active") && log.contains("acme/alice"),
         "an active denylist must announce itself and name who it revoked; got:\n{log}"
+    );
+    assert!(
+        log.contains("proactive send and audit read"),
+        "the announcement must describe what is ACTUALLY refused — it said \
+         \"every dispatch\" while /v1/outbound and the audit reads bypassed \
+         the check entirely; got:\n{log}"
     );
     assert!(
         log.contains("1 principal"),
@@ -317,4 +323,67 @@ async fn an_active_denylist_announces_itself() {
         log.contains("entry `bare-subject` ignored"),
         "and the dropped entry must be named; got:\n{log}"
     );
+}
+
+/// Crew review of #306, F13. `with_denied_principals` used to REPLACE the
+/// environment's set while the boot announcement fired inside `new()` —
+/// before any override. A host calling the builder logged one denylist
+/// and enforced another.
+///
+/// That re-created the exact failure the env exception exists to prevent,
+/// one method away, and worse: it looked verified. The runbook's whole
+/// "read the accepted count back" check depends on the announcement being
+/// true.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_builder_adds_to_the_environments_denylist_rather_than_replacing_it() {
+    unsafe {
+        std::env::set_var(
+            "TRITON_DENIED_PRINCIPALS",
+            format!("{REVOKED_TENANT}/{REVOKED_SUB}"),
+        );
+    }
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test")
+        .with_denied_principals(["other-tenant/pinned-in-code".to_string()]);
+
+    // The environment's entry must survive the builder call.
+    let from_env = dispatcher
+        .invoke(
+            "echo",
+            json!({}),
+            principal(REVOKED_TENANT, REVOKED_SUB),
+            "rest",
+        )
+        .await;
+    assert!(
+        matches!(from_env, Err(TritonError::Forbidden(_))),
+        "the env-supplied revocation must survive a builder call — \
+         otherwise the boot announcement describes a set nobody enforces"
+    );
+
+    // …and so must the one pinned in code.
+    let from_code = dispatcher
+        .invoke(
+            "echo",
+            json!({}),
+            principal("other-tenant", "pinned-in-code"),
+            "rest",
+        )
+        .await;
+    assert!(
+        matches!(from_code, Err(TritonError::Forbidden(_))),
+        "the explicitly wired revocation must apply too"
+    );
+
+    // A denylist is a DENY-set, so merging can only revoke more, never
+    // less — the fail-closed direction. (Its sibling guards an ALLOW-set,
+    // where the same merge would widen, which is why that one replaces.)
+    assert_eq!(
+        dispatcher.denied_principals().count(),
+        2,
+        "both sources are in force, and the announcement reports both"
+    );
+
+    unsafe {
+        std::env::remove_var("TRITON_DENIED_PRINCIPALS");
+    }
 }

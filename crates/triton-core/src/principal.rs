@@ -83,6 +83,28 @@ pub const MAX_RESOLVED_FIELD_LEN: usize = 128;
 /// is deliberately not applied — see `static_upstream`'s
 /// `validate_signed_field`, which keeps the same rule as defence in
 /// depth at mint time.
+/// Tenants that are NOT a tenant: shared markers many unrelated callers
+/// carry at once.
+///
+/// `-` is what a single-tenant OIDC caller with no `tenant` claim gets,
+/// and what every opaque Google access-token caller gets — so on the live
+/// deployment it is nearly every human. `pairing` is the bucket every
+/// un-enrolled chat sender shares. An empty tenant is the same thing
+/// spelled differently.
+///
+/// They matter because tenant-scoping is an EQUALITY test. Two callers
+/// carrying `-` are not in the same tenant; they are both unattributed,
+/// and treating that as a match hands one caller the other's rows. Any
+/// scoping decision must therefore refuse to match on these rather than
+/// comparing them.
+pub const RESERVED_TENANTS: &[&str] = &["-", "pairing", ""];
+
+/// True when `tenant` is a shared marker rather than a real tenant, and
+/// so must never satisfy a scoping equality check.
+pub fn is_reserved_tenant(tenant: &str) -> bool {
+    RESERVED_TENANTS.contains(&tenant.trim())
+}
+
 pub fn validate_resolved(sub: &str, tenant: &str) -> Result<(), crate::error::TritonError> {
     for (field, value) in [("sub", sub), ("tenant", tenant)] {
         if value.trim().is_empty() {
