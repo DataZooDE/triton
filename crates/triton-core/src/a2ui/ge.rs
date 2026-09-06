@@ -62,19 +62,20 @@ pub const BASIC_CATALOG: &str =
 const THEME_PRIMARY_COLOR: &str = "#1a73e8";
 
 /// Sentinel stored as a source button's re-ask "question": clicking the button
-/// opens the cited document in a Canvas side panel rather than dispatching a
-/// turn to the agent. [`question_for`] returns this string like any re-ask; the
-/// A2A layer detects it via [`open_doc`] and replies with
-/// [`build_document_canvas`] instead of running the agent. The prefix is a
+/// opens the cited document inline rather than dispatching a turn to the agent.
+/// [`question_for`] returns this string like any re-ask; the A2A layer detects
+/// it via [`open_doc`] and replies with the document surface
+/// ([`build_document_material`], or [`build_document_canvas`] under
+/// [`doc_iframe_enabled`]) instead of running the agent. The prefix is a
 /// control char so it can never collide with a question a user could type.
 const DOC_OPEN_SENTINEL: &str = "\u{1}a2ui-open-doc\u{1}";
 
 /// Feature flag (`TRITON_GE_DOC_CANVAS`): emit in-card "Open source" buttons
-/// that render the cited document in a GE **Canvas** side panel (an `IFrameUrl`
-/// to the signed `/docs` page). OFF by default — the `IFrameUrl` host must
-/// first be on GE's widget allowlist, otherwise the panel shows a security
-/// error. When off, `sources` stay a no-op here and ride the prose bubble as
-/// Markdown links (`reply_text`), exactly as before.
+/// that open the cited document inline in GE. OFF by default; when off,
+/// `sources` stay a no-op here and ride the prose bubble as Markdown links
+/// (`reply_text`), exactly as before. The RENDERING a click produces is the
+/// **native Material** document view ([`build_document_material`], GA
+/// composite-catalog widgets, no allowlist) unless [`doc_iframe_enabled`].
 pub fn doc_canvas_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -84,14 +85,57 @@ pub fn doc_canvas_enabled() -> bool {
     })
 }
 
-/// If `text` is a source-open sentinel (produced by a card source button and
-/// round-tripped through [`question_for`]), return `(label, url)` for the
-/// document to open. `None` for an ordinary re-ask or text turn.
-pub fn open_doc(text: &str) -> Option<(&str, &str)> {
+/// Feature flag (`TRITON_GE_DOC_IFRAME`): opt into the richer **Canvas side
+/// panel + `IFrameUrl`** rendering (the exact Material `/docs` page) instead of
+/// the native-Material default. OFF by default because `IFrameUrl`/`Canvas` are
+/// composite-catalog components Google has not documented, and the `IFrameUrl`
+/// host must be on GE's widget allowlist (a Google-side request) or the panel
+/// shows a security error. Turn on ONLY once that allowlist is confirmed.
+pub fn doc_iframe_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("TRITON_GE_DOC_IFRAME")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+/// A source's document reference, recovered from the open-doc sentinel a card
+/// button round-tripped through [`question_for`]. `skill`/`id` drive the
+/// native Material render (a `render_report(document,…)` dispatch); `url` is
+/// the signed `/docs` page for the iframe variant. All borrow from the input.
+pub struct OpenDocRef<'a> {
+    pub label: &'a str,
+    pub skill: &'a str,
+    pub id: &'a str,
+    pub url: &'a str,
+}
+
+/// Parse the open-doc sentinel (`label \u1 skill \u1 id \u1 url`). `None` for
+/// an ordinary re-ask or text turn, or when neither a `(skill,id)` pair nor a
+/// `url` is recoverable (nothing to open).
+pub fn open_doc(text: &str) -> Option<OpenDocRef<'_>> {
     let rest = text.strip_prefix(DOC_OPEN_SENTINEL)?;
-    let (label, url) = rest.split_once('\u{1}')?;
-    let url = url.trim();
-    (!url.is_empty()).then_some((label, url))
+    let mut parts = rest.splitn(4, '\u{1}');
+    let label = parts.next().unwrap_or("");
+    let skill = parts.next().unwrap_or("");
+    let id = parts.next().unwrap_or("");
+    let url = parts.next().unwrap_or("").trim();
+    let has_ref = (!skill.is_empty() && !id.is_empty()) || !url.is_empty();
+    has_ref.then_some(OpenDocRef {
+        label,
+        skill,
+        id,
+        url,
+    })
+}
+
+/// Split a source's `"skill \u{b7} id"` label (report.rs) back into its parts.
+fn split_skill_id(label: &str) -> (&str, &str) {
+    match label.split_once(" \u{b7} ") {
+        Some((s, i)) => (s.trim(), i.trim()),
+        None => ("", ""),
+    }
 }
 
 /// Fixed surfaceId prefix; a v4 UUID follows. The id is kept SHORT
@@ -304,10 +348,16 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                         continue;
                     };
                     let label = it.get("label").and_then(Value::as_str).unwrap_or("source");
+                    let (skill, doc_id) = split_skill_id(label);
                     let btn_id = id("btn", &mut n);
                     // Round-trip payload: the click resolves to this sentinel,
-                    // which the A2A layer turns into a Canvas (no agent turn).
-                    qmap.insert(n, format!("{DOC_OPEN_SENTINEL}{label}\u{1}{url}"));
+                    // which the A2A layer renders (native Material by default,
+                    // or the /docs iframe when TRITON_GE_DOC_IFRAME) — no agent
+                    // turn. Carries skill/id (for the render dispatch) + url.
+                    qmap.insert(
+                        n,
+                        format!("{DOC_OPEN_SENTINEL}{label}\u{1}{skill}\u{1}{doc_id}\u{1}{url}"),
+                    );
                     // Outlined (not filled) so a source reads as a secondary,
                     // link-like action, distinct from the solid follow-ups.
                     flat.push(json!({
@@ -415,6 +465,146 @@ pub fn build_document_canvas(url: &str, title: &str) -> Vec<Value> {
             "cardIcon": "description",
         }),
     ];
+    vec![
+        json!({
+            "version": "v0.9",
+            "createSurface": {
+                "surfaceId": surface_id,
+                "catalogId": BASIC_CATALOG,
+                "theme": {
+                    "primaryColor": THEME_PRIMARY_COLOR,
+                    "agentDisplayName": "DataZoo Agent",
+                },
+            },
+        }),
+        json!({
+            "version": "v0.9",
+            "updateComponents": { "surfaceId": surface_id, "components": flat },
+        }),
+    ]
+}
+
+/// Build the document as a **native Material** surface (a `MaterialCard` reply
+/// in the chat stream) from a peacock `document` render's `structuredContent`:
+/// a title, a `MaterialTable` of frontmatter facts, the markdown body as
+/// `MaterialText`, and the event timeline. Uses ONLY the documented, GA
+/// Material components — no `IFrameUrl`, no allowlist — so it renders in any
+/// A2UI-GA tenant. `title` falls back to the instance id.
+pub fn build_document_material(structured: &Value, title: &str) -> Vec<Value> {
+    let inst = structured
+        .get("instances")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next());
+    let heading = if title.is_empty() {
+        inst.and_then(|i| i.get("id").and_then(Value::as_str))
+            .unwrap_or("Document")
+    } else {
+        title
+    };
+
+    let mut flat: Vec<Value> = Vec::new();
+    let mut children: Vec<String> = Vec::new();
+    let mut n = 0usize;
+    let mut add = |flat: &mut Vec<Value>, children: &mut Vec<String>, comp: Value| {
+        n += 1;
+        let cid = format!("d-{n}");
+        let mut c = comp;
+        c["id"] = json!(cid);
+        flat.push(c);
+        children.push(cid);
+    };
+
+    add(
+        &mut flat,
+        &mut children,
+        json!({ "component": "MaterialText", "text": heading, "usageHint": "h3" }),
+    );
+
+    if let Some(inst) = inst {
+        // Facts → a 2-column MaterialTable (rows are string-keyed objects).
+        if let Some(facts) = inst.get("facts").and_then(Value::as_array) {
+            let rows: Vec<Value> = facts
+                .iter()
+                .filter_map(|f| {
+                    let k = f.get("key").and_then(Value::as_str)?;
+                    let v = f.get("value").and_then(Value::as_str)?;
+                    Some(json!({ "field": k, "value": v }))
+                })
+                .collect();
+            if !rows.is_empty() {
+                add(
+                    &mut flat,
+                    &mut children,
+                    json!({
+                        "component": "MaterialTable",
+                        "columns": [
+                            { "header": "Field", "field": "field" },
+                            { "header": "Value", "field": "value" },
+                        ],
+                        "rows": rows,
+                    }),
+                );
+            }
+        }
+        // Markdown body → MaterialText (GE renders plain text; still readable).
+        if let Some(md) = inst.get("markdown").and_then(Value::as_str)
+            && !md.trim().is_empty()
+        {
+            add(
+                &mut flat,
+                &mut children,
+                json!({ "component": "MaterialText", "text": md, "usageHint": "body" }),
+            );
+        }
+        // Timeline → a heading + one MaterialText line per event.
+        if let Some(events) = inst.get("events").and_then(Value::as_array)
+            && !events.is_empty()
+        {
+            add(
+                &mut flat,
+                &mut children,
+                json!({ "component": "MaterialText", "text": "Activity", "usageHint": "subtitle2" }),
+            );
+            for e in events {
+                let at = e.get("at").and_then(Value::as_str).unwrap_or("");
+                let src = e.get("source").and_then(Value::as_str).unwrap_or("");
+                let ttl = e.get("title").and_then(Value::as_str).unwrap_or("");
+                let meta = [at, src]
+                    .iter()
+                    .filter(|s| !s.is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" \u{b7} ");
+                let line = if meta.is_empty() {
+                    ttl.to_string()
+                } else {
+                    format!("{ttl} — {meta}")
+                };
+                add(
+                    &mut flat,
+                    &mut children,
+                    json!({ "component": "MaterialText", "text": line, "usageHint": "caption" }),
+                );
+            }
+        }
+    }
+
+    if children.len() == 1 {
+        // Only the heading — nothing resolved; say so rather than a bare title.
+        add(
+            &mut flat,
+            &mut children,
+            json!({ "component": "MaterialText", "text": "This document is unavailable right now.", "usageHint": "body" }),
+        );
+    }
+
+    flat.push(json!({ "id": "root-col", "component": "MaterialColumn", "children": children }));
+    flat.push(json!({
+        "id": "root", "component": "MaterialCard", "appearance": "outlined",
+        "children": ["root-col"],
+    }));
+
+    let surface_id = format!("{SURFACE_PREFIX}{}", uuid::Uuid::new_v4());
     vec![
         json!({
             "version": "v0.9",
@@ -650,14 +840,47 @@ mod tests {
     #[test]
     fn open_doc_round_trips_the_sentinel() {
         // What a source button stores in the re-ask table, and what the A2A
-        // layer parses back out of the resolved question.
-        let stored = format!("{DOC_OPEN_SENTINEL}Beverages GmbH\u{1}https://x/docs/tok");
-        assert_eq!(
-            open_doc(&stored),
-            Some(("Beverages GmbH", "https://x/docs/tok"))
+        // layer parses back out: label, skill, id (for the native render) + url.
+        let stored = format!(
+            "{DOC_OPEN_SENTINEL}account \u{b7} beverages\u{1}account\u{1}beverages\u{1}https://x/docs/tok"
         );
+        let doc = open_doc(&stored).expect("parses");
+        assert_eq!(doc.label, "account \u{b7} beverages");
+        assert_eq!(doc.skill, "account");
+        assert_eq!(doc.id, "beverages");
+        assert_eq!(doc.url, "https://x/docs/tok");
         // An ordinary re-ask question is not an open-doc sentinel.
-        assert_eq!(open_doc("What does Initech buy?"), None);
+        assert!(open_doc("What does Initech buy?").is_none());
+    }
+
+    #[test]
+    fn build_document_material_uses_native_widgets() {
+        // The allowlist-free GE render: MaterialCard/Table/Text, no IFrameUrl.
+        let structured = json!({
+            "document": { "skill": "account", "id": "beverages" },
+            "instances": { "self": {
+                "id": "beverages", "skill": "account",
+                "facts": [ { "key": "name", "value": "Beverages GmbH" } ],
+                "markdown": "Renewal at risk.",
+                "events": [ { "title": "Flagged", "at": "2026-09-01", "source": "analyst" } ],
+            } },
+        });
+        let msgs = build_document_material(&structured, "account \u{b7} beverages");
+        let comps = msgs[1]["updateComponents"]["components"]
+            .as_array()
+            .unwrap();
+        assert_eq!(find(comps, "root")["component"], "MaterialCard");
+        assert!(comps.iter().any(|c| c["component"] == "MaterialTable"
+            && c["rows"][0]["field"] == "name"
+            && c["rows"][0]["value"] == "Beverages GmbH"));
+        assert!(
+            comps
+                .iter()
+                .any(|c| c["component"] == "MaterialText" && c["text"] == "Renewal at risk.")
+        );
+        // No IFrameUrl / Canvas — this is the documented-widget path.
+        assert!(!comps.iter().any(|c| c["component"] == "IFrameUrl"));
+        assert!(!comps.iter().any(|c| c["component"] == "Canvas"));
     }
 
     #[test]

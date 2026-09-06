@@ -446,14 +446,16 @@ async fn message_send(
     let tool = state.config.default_tool.clone();
 
     // A GE source button click resolves to an open-doc sentinel (not a real
-    // turn): reply directly with the Canvas side-panel surface — no agent
-    // dispatch, the /docs URL is already signed and in hand.
-    if let Some((label, url)) = triton_core::a2ui::ge::open_doc(&text) {
+    // agent turn): reply directly with the document surface — native Material
+    // by default (a render_report(document) dispatch), or the /docs iframe
+    // when TRITON_GE_DOC_IFRAME.
+    if let Some(doc) = triton_core::a2ui::ge::open_doc(&text) {
+        let parts = doc_open_parts(&state.a2a.dispatcher, &principal, &doc).await;
         let msg = json!({
             "kind": "message",
             "role": "agent",
             "messageId": uuid::Uuid::new_v4().to_string(),
-            "parts": doc_canvas_parts(label, url),
+            "parts": parts,
             "contextId": context_id,
         });
         return rpc_ok(&req.id, msg);
@@ -575,10 +577,11 @@ async fn message_stream(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // A GE source button click (open-doc sentinel): emit a one-shot SSE — a
-    // working task, the Canvas surface as a final artifact, and a completed
-    // status — with no agent dispatch. Same short-circuit as message/send,
-    // shaped as the stream frames GE expects.
-    if let Some((label, url)) = triton_core::a2ui::ge::open_doc(&text) {
+    // working task, the document surface as a final artifact, and a completed
+    // status. Native Material by default (a render_report(document) dispatch),
+    // or the /docs iframe when TRITON_GE_DOC_IFRAME.
+    if let Some(doc) = triton_core::a2ui::ge::open_doc(&text) {
+        let parts = doc_open_parts(&state.a2a.dispatcher, &principal, &doc).await;
         state.a2a.tasks.record_entry(
             &trace_id,
             TaskState::Completed,
@@ -596,7 +599,7 @@ async fn message_stream(
             rpc(json!({
                 "kind": "artifact-update", "taskId": trace_id, "contextId": context_id,
                 "lastChunk": true,
-                "artifact": { "artifactId": artifact_id, "parts": doc_canvas_parts(label, url) },
+                "artifact": { "artifactId": artifact_id, "parts": parts },
             })),
             rpc(json!({
                 "kind": "status-update", "taskId": trace_id, "contextId": context_id,
@@ -885,15 +888,61 @@ async fn inject_report_vega(
 /// no link component and its Text excludes link markdown — so sources ride the
 /// prose bubble, where GE (and Copilot Studio / Gemini) render Markdown links as
 /// real anchors. A `ui://` MCP resource can't open and is skipped.
-/// The agent Message `parts` for a source-open Canvas: a short text part (for
-/// text-only clients) + the A2UI Canvas DataParts (GE opens the side panel).
-fn doc_canvas_parts(label: &str, url: &str) -> Vec<Value> {
-    let msgs = triton_core::a2ui::ge::build_document_canvas(url, label);
+/// Deep-search a `render_report` result for the document render's structured
+/// content: the object carrying an `instances` or `document` key. Robust to
+/// the exact nesting (top level, or under `structuredContent`).
+fn find_document_structured(v: &Value) -> Option<&Value> {
+    match v {
+        Value::Object(m) => {
+            if m.contains_key("instances") || m.contains_key("document") {
+                return Some(v);
+            }
+            m.values().find_map(find_document_structured)
+        }
+        Value::Array(a) => a.iter().find_map(find_document_structured),
+        _ => None,
+    }
+}
+
+/// The agent Message `parts` for a source "Open" click. Default: render the
+/// peacock `document` report as a **native Material** surface (GA widgets, no
+/// allowlist). When `TRITON_GE_DOC_IFRAME` is set and a signed `/docs` URL is
+/// present: the Canvas side-panel + `IFrameUrl` variant. A short text part
+/// leads for text-only clients.
+async fn doc_open_parts(
+    dispatcher: &Dispatcher,
+    principal: &triton_core::Principal,
+    doc: &triton_core::a2ui::ge::OpenDocRef<'_>,
+) -> Vec<Value> {
+    use triton_core::a2ui::ge;
+    let msgs = if ge::doc_iframe_enabled() && !doc.url.is_empty() {
+        ge::build_document_canvas(doc.url, doc.label)
+    } else if !doc.skill.is_empty() && !doc.id.is_empty() {
+        // Native Material render: dispatch the peacock `document` report and
+        // map its structuredContent to Material components.
+        let args =
+            json!({ "report_id": "document", "params": { "skill": doc.skill, "id": doc.id } });
+        let structured = match dispatcher
+            .invoke("render_report", args, principal.clone(), "a2a")
+            .await
+        {
+            Ok(rep) => find_document_structured(&rep.result)
+                .cloned()
+                .unwrap_or(Value::Null),
+            Err(_) => Value::Null,
+        };
+        ge::build_document_material(&structured, doc.label)
+    } else if !doc.url.is_empty() {
+        // No skill/id to render natively — last resort is the iframe page.
+        ge::build_document_canvas(doc.url, doc.label)
+    } else {
+        return vec![json!({ "kind": "text", "text": "This document is unavailable." })];
+    };
     let mut parts = vec![json!({
         "kind": "text",
-        "text": format!("Opening “{label}” in the side panel."),
+        "text": format!("Opening “{}”.", doc.label),
     })];
-    parts.extend(triton_core::a2ui::ge::data_parts(msgs));
+    parts.extend(ge::data_parts(msgs));
     parts
 }
 
@@ -1127,33 +1176,20 @@ mod reply_text_tests {
     }
 
     #[test]
-    fn doc_canvas_parts_carry_text_and_the_canvas_dataparts() {
-        // A source-open reply: one text part (text-only clients) + the A2UI
-        // Canvas DataParts (GE opens the /docs page in the side panel).
-        let parts = doc_canvas_parts("Beverages GmbH", "https://agent.example/docs/tok");
-        assert_eq!(parts[0]["kind"], "text");
-        assert!(
-            parts[0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Beverages GmbH")
-        );
-        // The rest are A2UI DataParts (createSurface + updateComponents), each
-        // an object with the GE mime.
-        let data: Vec<&Value> = parts.iter().filter(|p| p["kind"] == "data").collect();
-        assert_eq!(data.len(), 2, "createSurface + updateComponents");
-        assert!(data.iter().all(|p| p["data"].is_object()));
-        // The updateComponents part carries the Canvas root + the IFrameUrl.
-        let comps = data
-            .iter()
-            .find_map(|p| p["data"]["updateComponents"]["components"].as_array())
-            .expect("updateComponents");
-        assert!(comps.iter().any(|c| c["component"] == "Canvas"));
-        assert!(
-            comps
-                .iter()
-                .any(|c| c["component"] == "IFrameUrl"
-                    && c["url"] == "https://agent.example/docs/tok")
-        );
+    fn find_document_structured_locates_the_render_payload() {
+        // A render_report(document) result nests structuredContent; the helper
+        // finds the object carrying instances/document at any depth.
+        let result = serde_json::json!({
+            "content": [{ "type": "text", "text": "…" }],
+            "structuredContent": {
+                "document": { "skill": "account", "id": "beverages" },
+                "instances": { "self": { "facts": [] } },
+            },
+            "_meta": { "ui": {} },
+        });
+        let found = find_document_structured(&result).expect("finds it");
+        assert_eq!(found["document"]["id"], "beverages");
+        // A result with neither key yields None.
+        assert!(find_document_structured(&serde_json::json!({ "rows": [] })).is_none());
     }
 }
