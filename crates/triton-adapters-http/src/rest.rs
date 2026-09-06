@@ -645,6 +645,40 @@ fn bodies_visible(entries: &[triton_core::audit::AuditEntry]) -> bool {
     !entries.is_empty()
 }
 
+/// May this caller read anything keyed on `trace_id`?
+///
+/// The one answer to that question, shared by `/v1/trace` and spec-A2A's
+/// `tasks/get` — whose task ids ARE trace ids. Two implementations of
+/// this rule would drift, and the second surface is how the first one's
+/// fix got bypassed.
+pub fn may_read_trace(
+    principal: &triton_core::principal::Principal,
+    operators: &std::collections::HashSet<(String, String)>,
+    env: &str,
+    trace_id: &str,
+) -> bool {
+    // Deliberately NOT `audit_visibility_in`. That answers "may this
+    // caller BROWSE the tail", where a reserved tenant must match
+    // nothing — two callers holding `-` are both unattributed, not
+    // tenant-mates. This answers "is this specific trace THEIRS", and
+    // there the subject is the precise key: a caller's own dispatches
+    // carry their `sub` whatever their tenant resolves to.
+    //
+    // Using the browse predicate here would lock every `-` caller out of
+    // their OWN task — which is nearly every live caller, since a
+    // single-tenant OIDC token with no `tenant` claim resolves to `-`.
+    let tenant_scopable = !triton_core::principal::is_reserved_tenant(&principal.tenant);
+    let sub = principal.sub.clone();
+    let tenant = principal.tenant.clone();
+    let operator = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE)
+        && (env == "local"
+            || operators.contains(&(principal.tenant.clone(), principal.sub.clone())));
+    let visible = AuditBuffer::recent_where(AUDIT_LIMIT_MAX, Some(trace_id), move |e| {
+        operator || e.subject == sub || (tenant_scopable && e.tenant == tenant)
+    });
+    bodies_visible(&visible)
+}
+
 /// `GET /v1/trace/{trace_id}` — the one communication as a timeline: all
 /// audit phases for `trace_id` in chronological order (inbound → dispatch
 /// → upstream → post). Authenticated like `/v1/audit`. The `bodies` field
@@ -682,7 +716,12 @@ async fn trace_view(
         audit_visibility_in(&principal, &state.audit_operators, state.dispatcher.env()),
     );
     entries.reverse(); // chronological for a timeline
-    let bodies = if bodies_visible(&entries) {
+    let bodies = if may_read_trace(
+        &principal,
+        &state.audit_operators,
+        state.dispatcher.env(),
+        &trace_id,
+    ) {
         triton_core::trace::captured(&trace_id)
     } else {
         Vec::new()

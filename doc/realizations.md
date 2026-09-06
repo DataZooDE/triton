@@ -1845,3 +1845,30 @@ a trap the next developer should not have to step in.
   built `--no-default-features`). Reverted the guard, recorded the
   evidence. When a security fix breaks many tests, ask whether the tests
   encode a decision before assuming they encode an oversight.
+
+- **"No FAILED lines" is not "no failures", twice over.** First
+  `cargo test --workspace` stops at the first failing crate, so a broken
+  unit test hides 450 integration tests. Then, even with `--no-fail-fast`,
+  grepping for `^test .* FAILED` misses a failure whose output happens to
+  be formatted differently — it reported 0 while one test was red.
+
+  The only honest check is to read the per-crate summary lines and add
+  them up:
+
+  ```sh
+  cargo test --workspace --no-fail-fast 2>&1 \
+    | grep -E '^test result:' | awk '{p+=$4; f+=$6} END {print p" passed, "f" failed"}'
+  ```
+
+  Both mistakes produced a confident "full suite green" in this session.
+  A verification you cannot state as a number is not a verification.
+
+- **Scoping a browse and scoping one record are different questions.** The
+  audit tail asks "may this caller browse", where a reserved pseudo-tenant
+  (`-`, `pairing`) must match NOTHING — two callers holding `-` are both
+  unattributed, not tenant-mates. A trace or task read asks "is this
+  specific record theirs", and there the SUBJECT is the precise key: a
+  caller's own dispatches carry their `sub` whatever their tenant resolves
+  to. Reusing the browse predicate for the record read locked every `-`
+  caller out of their own task — which is nearly every live caller. One
+  predicate looked like reuse and was a category error.

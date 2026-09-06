@@ -89,8 +89,19 @@ pub fn announce(
     if !denied.is_empty() {
         denied.sort_unstable();
         eprintln!(
-            "WARN denylist active: {} principal(s) revoked — every dispatch, \
-             proactive send and audit read of theirs is refused 403 (#287): {}",
+            // The wording names the surfaces actually covered. It used
+            // to say "every dispatch, proactive send and audit read",
+            // which overstated it: `deny_if_revoked` guards /v1/outbound,
+            // /v1/audit, /v1/trace and tasks/get, while /v1/tools,
+            // /v1/manifest, /v1/metrics, /v1/surface/render and the MCP
+            // listing arms verify a principal and do not consult the
+            // denylist. An operator mid-incident must not believe more is
+            // closed than is. (#306 crew F2.)
+            "WARN denylist active: {} principal(s) revoked — every tool DISPATCH \
+             is refused 403, as are /v1/outbound, /v1/audit, /v1/trace and \
+             a2a tasks/get. Read-only listings (/v1/tools, /v1/manifest, \
+             /v1/metrics, /v1/surface/render, MCP tools/list) still answer a \
+             revoked principal (#287): {}",
             denied.len(),
             denied.join(", ")
         );

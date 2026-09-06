@@ -334,11 +334,20 @@ async fn an_active_denylist_announces_itself() {
         log.contains("denylist active") && log.contains("acme/alice"),
         "an active denylist must announce itself and name who it revoked; got:\n{log}"
     );
+    // The announcement must describe what is ACTUALLY refused, and the
+    // wording has been wrong in both directions: it first claimed only
+    // "every dispatch" while /v1/outbound bypassed the check, then
+    // claimed dispatches + sends + audit reads while /v1/tools,
+    // /v1/manifest and the MCP listings still answered a revoked caller.
+    // An operator mid-incident must not believe more is closed than is.
     assert!(
-        log.contains("proactive send and audit read"),
-        "the announcement must describe what is ACTUALLY refused — it said \
-         \"every dispatch\" while /v1/outbound and the audit reads bypassed \
-         the check entirely; got:\n{log}"
+        log.contains("/v1/outbound") && log.contains("tasks/get"),
+        "the announcement must NAME the guarded surfaces; got:\n{log}"
+    );
+    assert!(
+        log.contains("still answer") && log.contains("/v1/tools"),
+        "…and must name the ones that still answer a revoked principal, \
+         because overstating coverage is the failure mode here; got:\n{log}"
     );
     assert!(
         log.contains("1 principal"),

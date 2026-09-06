@@ -472,6 +472,8 @@ async fn main() -> std::io::Result<()> {
         dispatcher: dispatcher.clone(),
         tasks: InMemoryTaskStore::new(),
         identity: identity.clone(),
+        // #306 crew F1: `tasks/get` scopes on a trace id.
+        audit_operators: Arc::new(audit_operators.clone()),
     };
     let mcp_state = McpState {
         dispatcher: dispatcher.clone(),
