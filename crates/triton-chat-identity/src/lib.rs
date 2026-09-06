@@ -54,10 +54,15 @@ pub struct SenderClaims {
 /// hold a `Resolved` that was never checked.
 #[derive(Debug, Clone)]
 pub struct Resolved {
-    pub sub: String,
-    pub scopes: Vec<String>,
-    pub groups: Vec<String>,
-    pub tenant: String,
+    // PRIVATE, not just the constructor. Sealing construction while
+    // leaving the fields `pub` means an adapter can validate a principal
+    // and then overwrite `tenant` with anything — the invariant would
+    // hold for exactly as long as nobody wanted to change a value
+    // (#306 crew F6).
+    sub: String,
+    scopes: Vec<String>,
+    groups: Vec<String>,
+    tenant: String,
     /// Private, and that is the whole mechanism.
     ///
     /// With four public fields and a public `From<&SenderClaims>`, any
@@ -76,6 +81,28 @@ pub struct Resolved {
 struct Validated;
 
 impl Resolved {
+    pub fn sub(&self) -> &str {
+        &self.sub
+    }
+    pub fn scopes(&self) -> &[String] {
+        &self.scopes
+    }
+    pub fn groups(&self) -> &[String] {
+        &self.groups
+    }
+    pub fn tenant(&self) -> &str {
+        &self.tenant
+    }
+
+    /// Consume into `(sub, scopes, groups, tenant)`.
+    ///
+    /// The exit from the validated type, and it is one-way on purpose:
+    /// what a caller does with the parts afterwards is their business,
+    /// but they cannot hand a `Resolved` back that was never checked.
+    pub fn into_parts(self) -> (String, Vec<String>, Vec<String>, String) {
+        (self.sub, self.scopes, self.groups, self.tenant)
+    }
+
     /// The only way to build a [`Resolved`], and it validates.
     ///
     /// Adapters do not call this — [`SenderTable`] and
@@ -347,8 +374,8 @@ mod tests {
         .expect("parses");
         assert_eq!(t.len(), 2);
         let r = t.resolve("42").expect("alice is in the table");
-        assert_eq!(r.sub, "alice");
-        assert_eq!(r.tenant, "acme");
+        assert_eq!(r.sub(), "alice");
+        assert_eq!(r.tenant(), "acme");
         assert!(t.resolve("99").is_none());
     }
 
@@ -357,7 +384,7 @@ mod tests {
         // Most adapters' tables have never carried `groups`. Making it
         // required would break every one of them at boot.
         let t = SenderTable::parse(r#"{"42":{"sub":"a","tenant":"acme"}}"#).expect("parses");
-        assert!(t.resolve("42").unwrap().groups.is_empty());
+        assert!(t.resolve("42").unwrap().groups().is_empty());
     }
 
     #[test]

@@ -893,6 +893,27 @@ fn resolve_sender(
             // other channel must NOT inject an Entra-shaped principal.
             // An absent or empty `channelId` matches nothing and is
             // therefore refused, never treated as a wildcard.
+            //
+            // #306 crew F3 asked for this assertion to be CORROBORATED
+            // against the verified `serviceUrl` host, turning a body
+            // claim into a transport-backed one. That is the right idea
+            // and it is NOT implemented, deliberately:
+            //
+            // Nothing in this repo documents Microsoft's channel →
+            // serviceUrl-host mapping, and the msteams adapter is live on
+            // agent-lab. A guessed mapping that is too narrow refuses
+            // real Teams traffic; too wide and it corroborates nothing.
+            // The same over-reach already bit this stack once (a runtime
+            // dev-token guard broke 23 tests encoding a deliberate
+            // contract), so the bar here is evidence, not plausibility.
+            //
+            // To close it: capture the `serviceUrl` values Microsoft
+            // actually sends for each channel this deployment serves —
+            // they are already in the audit trail — and pin the mapping
+            // to observed hosts. Until then the gate rests on connector
+            // authentication plus the boot-time refusal of
+            // client-chosen-id channels, which is what #250 established
+            // and what the endorsement model supports.
             let channel = activity.channel_id.as_deref().unwrap_or_default();
             // `allowed_channel_ids` was lowercased at build time; fold the
             // inbound too so the gate cannot turn on Microsoft's casing.

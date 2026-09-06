@@ -237,6 +237,21 @@ impl EmbedOpts {
 /// rejected while `/healthz` keeps answering. `/v1/runtime` reports the
 /// issuer precisely so that state is visible rather than inferred.
 pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
+    // #306 crew F7: `router` is a public entry point — an embedding host
+    // that merges its own routes (dz-agent-template does) calls this and
+    // never `serve_dispatcher`, so announcing only there left exactly the
+    // hosts this stack was built for silent. Announced once per process:
+    // a host that builds two routers should not warn twice.
+    static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+    ANNOUNCED.call_once(|| {
+        let cfg = triton_config::DeploymentConfig::from_env();
+        triton_config::announce(
+            &opts.env,
+            &cfg.audit_operators,
+            dispatcher.denied_principals(),
+            dispatcher.is_enforcing(),
+        );
+    });
     let mut identity = IdentityProvider::with_verifiers(opts.oidc.clone(), false);
     if let Some(g) = &opts.google_access {
         identity = identity.with_google_access(g.clone());
@@ -368,14 +383,9 @@ pub async fn serve_dispatcher(dispatcher: Arc<Dispatcher>, opts: EmbedOpts) -> a
     // must call `announce_controls` itself — the runbook says to check
     // for this line, and its absence must mean "not engaged", never
     // "engaged but nobody said so".
-    // One place, for whichever host is running (#306 crew F6).
-    let cfg = triton_config::DeploymentConfig::from_env();
-    triton_config::announce(
-        &opts.env,
-        &cfg.audit_operators,
-        dispatcher.denied_principals(),
-        dispatcher.is_enforcing(),
-    );
+    // The announcement lives in `router` (#306 crew F7), which this
+    // calls — a host that merges its own routes reaches `router` and
+    // never gets here, and announcing in both would say it twice.
     let addr = SocketAddr::new(opts.host, opts.port);
     let app = router(dispatcher, &opts);
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -176,10 +176,18 @@ fn dashboard_image_url(
 ) -> Option<String> {
     let base = base?;
     let (title, tiles) = dashboard;
+    // #306 crew F8: an expiry, like the render_report image token beside
+    // it. Without one this URL is a forever-capability: the image route
+    // is deliberately unauthenticated (Google fetches card images
+    // anonymously), so the signed token IS the authorization and an
+    // unbounded one stays redeemable until the correlation key rotates.
     let spec = serde_json::json!({
-        "title": title,
-        "tiles": tiles.iter().map(|(l, v)| serde_json::json!({ "label": l, "value": v }))
-            .collect::<Vec<_>>(),
+        "s": {
+            "title": title,
+            "tiles": tiles.iter().map(|(l, v)| serde_json::json!({ "label": l, "value": v }))
+                .collect::<Vec<_>>(),
+        },
+        "exp": unix_now() + IMG_TOKEN_TTL_SECS,
     });
     let token = triton_correlation::encode_with_cap(
         DASHBOARD_MARKER,
@@ -653,7 +661,21 @@ async fn serve_dashboard_png(
     if marker != DASHBOARD_MARKER {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
-    let req: triton_rasterizer::DashboardRequest = match serde_json::from_value(spec) {
+    // #306 crew F8: same expiry check as the render_report branch above.
+    // A missing `exp` is REFUSED, not treated as "never expires" — the
+    // field is covered by the MAC, so its absence means a pre-expiry
+    // token, and those are exactly the unbounded ones.
+    if spec
+        .get("exp")
+        .and_then(Value::as_u64)
+        .is_none_or(|exp| exp < unix_now())
+    {
+        return (StatusCode::GONE, "image link expired").into_response();
+    }
+    let Some(inner) = spec.get("s").cloned() else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    let req: triton_rasterizer::DashboardRequest = match serde_json::from_value(inner) {
         Ok(r) => r,
         Err(_) => return (StatusCode::BAD_REQUEST, "bad spec").into_response(),
     };

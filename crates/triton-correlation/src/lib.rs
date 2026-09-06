@@ -547,10 +547,21 @@ impl KeyRing {
 
     /// A ring of exactly one key — the shape every caller had before
     /// rotation existed, and what tests mint under.
-    pub fn single(key: impl Into<Vec<u8>>) -> Self {
-        Self {
-            keys: vec![key.into()],
+    ///
+    /// Honours the same [`MIN_KEY_LEN`] floor as [`parse`]: an invariant
+    /// that holds on one constructor and not its sibling is not an
+    /// invariant, and this is the constructor a test reaches for first.
+    ///
+    /// [`parse`]: KeyRing::parse
+    pub fn single(key: impl Into<Vec<u8>>) -> Result<Self, KeyRingError> {
+        let key = key.into();
+        if key.len() < MIN_KEY_LEN {
+            return Err(KeyRingError::TooShort {
+                len: key.len(),
+                min: MIN_KEY_LEN,
+            });
         }
+        Ok(Self { keys: vec![key] })
     }
 
     /// The key new tokens are signed with: the first on the ring.
@@ -704,6 +715,15 @@ mod tests {
     /// ring whose first fragment signs. Against an 8-byte truncated HMAC
     /// a short fragment is brute-forceable offline from one observed
     /// token — so this must fail the DEPLOY, not sign quietly.
+    /// The floor must hold on BOTH constructors. `single` is what a test
+    /// reaches for first, and an invariant enforced on one path is a
+    /// suggestion (#306 crew F5).
+    #[test]
+    fn the_key_length_floor_holds_on_single_too() {
+        assert!(KeyRing::single(b"short".to_vec()).is_err());
+        assert!(KeyRing::single(b"a-new-correlation-key-32-bytes!!".to_vec()).is_ok());
+    }
+
     #[test]
     fn a_short_key_refuses_rather_than_signing_weakly() {
         // The realistic shape: a passphrase with a comma in it.
@@ -798,7 +818,7 @@ mod tests {
             .is_ok()
         );
 
-        let after = KeyRing::single(NEW);
+        let after = KeyRing::single(NEW).expect("NEW is long enough");
         assert!(
             matches!(
                 decode_bound_any(

@@ -365,12 +365,20 @@ async fn dashboard_image_route_returns_a_png() {
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&jwks)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
+    // #306 crew F8: the dashboard token now carries an expiry, like its
+    // render_report sibling. The image route is deliberately
+    // unauthenticated (Google fetches card images anonymously), so the
+    // signed token IS the authorization and an unbounded one stays
+    // redeemable until the correlation key rotates.
     let spec = json!({
-        "title": "Stock at risk (€)",
-        "tiles": [
-            { "label": "Alpine Metals AG", "value": "€2.19M" },
-            { "label": "Catalonia Carbon", "value": "€1.79M" }
-        ]
+        "s": {
+            "title": "Stock at risk (€)",
+            "tiles": [
+                { "label": "Alpine Metals AG", "value": "€2.19M" },
+                { "label": "Catalonia Carbon", "value": "€1.79M" }
+            ]
+        },
+        "exp": unix_now() + 3600,
     });
     let token = triton_correlation::encode_with_cap(
         "__dashboard_png",

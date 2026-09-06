@@ -906,7 +906,8 @@ async fn resolve_sender(
     // Telegram does not forward RBAC groups today; `resolved.groups` is
     // dropped here rather than silently widening what a resolver can
     // grant. Changing that is a decision, not a refactor.
-    Ok((resolved.sub, resolved.scopes, resolved.tenant))
+    let (sub, scopes, _groups, tenant) = resolved.into_parts();
+    Ok((sub, scopes, tenant))
 }
 
 /// Process one parsed Telegram update through the callback / identity
