@@ -375,7 +375,11 @@ on implementation details not pinned below.
   declare the `identity.kind` values they implement, and an undeclared
   kind MUST refuse construction. A resolved principal MUST NOT be
   obtainable without that validation having run; this is a property of
-  the type, not a call each adapter is asked to remember.
+  the type, not a call each adapter is asked to remember. The rule binds
+  EVERY adapter construction path, including the socket adapters
+  (`discord_gateway`, `whatsapp_web`) — the first implementation counted
+  the eight webhook adapters and left those two parsing a raw map, while
+  this row read `IMPL — PASS`.
   Rationale: the rule previously guarded the `upstream` path in three
   adapters and no path in the other five, because it had to be added
   eight times and the eighth was skipped by omission.

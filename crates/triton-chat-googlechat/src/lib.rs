@@ -492,11 +492,11 @@ impl GoogleChatAdapter {
                 IdentityMode::Upstream(up)
             }
             // Guarded above; unreachable for other kinds.
-            other => {
-                return Err(BuildError::Unsupported(format!(
-                    "google_chat adapter supports `identity.kind: sender_table` or `self_enrol`; got {other:?}"
-                )));
-            }
+            // `require_supported_kind` above already refused everything
+            // else; this arm exists only to satisfy the match. It used to
+            // restate the rule in wording that had already drifted — the
+            // message omitted `upstream`, which the adapter does support.
+            other => unreachable!("identity.kind {other:?} was refused at boot"),
         };
 
         // `correlation_key` signs the HMAC tokens on rendered buttons

@@ -68,9 +68,12 @@ use triton_secrets::{ResolveError, SecretResolver};
 pub const PROTOCOL: &str = "messenger:whatsapp";
 const HEADER_SIGNATURE: &str = "X-Hub-Signature-256";
 
-/// Per-WhatsApp-user claims resolved from the `sender_table`. The
-/// table is keyed by the sender's `wa_id` (E.164 without leading
-/// Per-`wa_id` claims resolved from the `sender_table`.
+/// Per-WhatsApp-user claims resolved from the `sender_table`.
+///
+/// The table is keyed by the sender's `wa_id` — E.164 WITHOUT a leading
+/// `+`, as Meta sends it in `messages[i].from`. That is the fact a
+/// mechanical sweep spliced out of this comment, and it is exactly what
+/// distinguishes Meta's key from Twilio's `whatsapp:+49…` form.
 ///
 /// #289: re-exported from `triton-chat-identity`, which owns the FR-I-7
 /// seam. It was a private copy here, and in seven other adapters.

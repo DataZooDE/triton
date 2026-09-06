@@ -103,6 +103,23 @@ fn boot_adapter(adapter: &str, table: &str) -> (Option<i32>, String) {
                 ("TRITON_MSTEAMS_CORRELATION_KEY", "msteams-correlation-key!"),
             ],
         ),
+        // The SOCKET adapters — the two the first sweep missed, because
+        // it counted the eight webhook adapters and there are ten
+        // construction paths (#306 crew review of #308, F1).
+        "whatsapp_web" => (
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/manifest-whatsapp-bridge-locality.yaml")
+                .display()
+                .to_string(),
+            "TRITON_WHATSAPP_SENDER_TABLE",
+            vec![
+                ("TRITON_WHATSAPP_BRIDGE_ADDR", "unix:///var/run/wa.sock"),
+                (
+                    "TRITON_WHATSAPP_CORRELATION_KEY",
+                    "a-correlation-key-32-bytes-long!",
+                ),
+            ],
+        ),
         other => panic!("no boot fixture wired for `{other}`"),
     };
     let mut cmd = std::process::Command::new(locate_triton_binary());
@@ -132,49 +149,6 @@ fn boot_adapter(adapter: &str, table: &str) -> (Option<i32>, String) {
         .spawn()
         .expect("spawn triton");
     let pid = out.id();
-    std::thread::sleep(std::time::Duration::from_millis(700));
-    unsafe {
-        libc::kill(pid as i32, libc::SIGTERM);
-    }
-    let done = out.wait_with_output().expect("wait");
-    (
-        done.status.code(),
-        format!(
-            "{}{}",
-            String::from_utf8_lossy(&done.stdout),
-            String::from_utf8_lossy(&done.stderr)
-        ),
-    )
-}
-
-#[allow(dead_code)]
-fn boot_with_sender_table_unused(table: &str) -> (Option<i32>, String) {
-    let out = std::process::Command::new(locate_triton_binary())
-        .env("TRITON_HOST", "127.0.0.1")
-        .env("TRITON_MCP_PORT", "0")
-        .env("TRITON_A2A_PORT", "0")
-        .env("TRITON_REST_PORT", "0")
-        .env("TRITON_METRICS_PORT", "0")
-        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
-        .env("TRITON_ENV", "local")
-        .env("TRITON_MANIFEST_PATH", manifest_path())
-        .env("TRITON_TELEGRAM_API_BASE", "http://127.0.0.1:1")
-        .env("TRITON_TG_WEBHOOK_SECRET", "secret-resolved-from-vault")
-        .env("TRITON_TG_BOT_TOKEN", "12345:token")
-        .env(
-            "TRITON_TG_CORRELATION_KEY",
-            "32byte-correlation-key-for-test!",
-        )
-        .env("TRITON_TG_SENDERS", table)
-        // Nothing to serve; the adapter either wires or refuses, and
-        // either way we want the process to finish on its own.
-        .env("TRITON_DRAIN_DEADLINE_SECS", "0")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn triton");
-    let pid = out.id();
-    // A successful boot runs forever; give it a moment, then stop it.
     std::thread::sleep(std::time::Duration::from_millis(700));
     unsafe {
         libc::kill(pid as i32, libc::SIGTERM);
@@ -345,7 +319,7 @@ async fn whatsapp_still_boots_on_a_well_formed_table() {
     );
 }
 
-// ── discord, signal, twilio ─────────────────────────────────────────────
+// ── discord ─────────────────────────────────────────────────────────────
 //
 // The table-only adapters. They never had an `IdentityMode` at all — just
 // a bare `HashMap<String, SenderClaims>` parsed straight from JSON — which
@@ -416,5 +390,44 @@ async fn msteams_still_boots_on_a_well_formed_table() {
     assert!(
         !log.contains("identity.table entry"),
         "a valid Teams-shaped table must not trip the validator; got:\n{log}"
+    );
+}
+
+/// The WhatsApp Web BRIDGE — a socket adapter, and one of the two
+/// construction paths the first #289 sweep missed.
+///
+/// It counted the eight webhook adapters; there are ten. So this path
+/// still parsed a raw `HashMap` and still accepted a table FR-I-11 says
+/// must refuse the deploy, while `requirements.md` in the same PR marked
+/// M-IDENTITY-SEAM-1 as `IMPL — PASS`. A traceability row claiming PASS
+/// for a rule two live paths do not implement is the same failure #288
+/// was about.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_whatsapp_bridge_refuses_a_table_it_cannot_use_safely() {
+    let (code, log) = boot_adapter(
+        "whatsapp_web",
+        r#"{"4915112345678":{"sub":"alice","scopes":[],"tenant":"ac me"}}"#,
+    );
+    assert_eq!(
+        code,
+        Some(2),
+        "a whitespace tenant must refuse boot;\n{log}"
+    );
+    assert!(
+        log.contains("identity.table entry"),
+        "the refusal must come from the shared entry validator, not a \
+         per-adapter copy; got:\n{log}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_whatsapp_bridge_still_boots_on_a_well_formed_table() {
+    let (_, log) = boot_adapter(
+        "whatsapp_web",
+        r#"{"4915112345678":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
+    );
+    assert!(
+        !log.contains("identity.table entry"),
+        "a valid table must not trip the validator; got:\n{log}"
     );
 }

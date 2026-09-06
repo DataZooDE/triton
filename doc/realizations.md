@@ -1872,3 +1872,17 @@ a trap the next developer should not have to step in.
   to. Reusing the browse predicate for the record read locked every `-`
   caller out of their own task — which is nearly every live caller. One
   predicate looked like reuse and was a category error.
+
+- **"Eight adapters" was a count of the wrong thing.** The #289 extraction
+  swept the eight webhook adapters and reported `local SenderClaims
+  definitions 8 → 0`. There are TEN construction paths: `discord_gateway`
+  and `whatsapp_web` are socket adapters built in `gateway.rs` and
+  `bridge.rs`, and both kept parsing a raw `HashMap`. So two live paths
+  still accepted a table FR-I-11 says must refuse the deploy, while
+  `requirements.md` in the same PR marked the row `IMPL — PASS`.
+
+  That is #288's lesson repeating inside the fix for a different issue: a
+  traceability row claiming PASS for a rule the code does not implement
+  everywhere is worse than no row. When counting call sites for a sweep,
+  count the CONSTRUCTORS (`grep 'fn from_manifest'`), not the crates or
+  the adapter names — an adapter can have two.
