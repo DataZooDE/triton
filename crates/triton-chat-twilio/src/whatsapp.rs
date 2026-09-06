@@ -58,7 +58,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use serde::Deserialize;
 use triton_core::{Dispatcher, OutboundCourier, OutboundRequest, Principal, TritonError};
 use triton_manifest::{
     Adapter, AdapterKind, IdentityKind, SignatureScheme, TemplateCategory, TemplateDecl,
@@ -80,15 +79,11 @@ const OUTBOUND_TOOL: &str = "outbound";
 /// the sender's E.164 number WITH the leading `+` (Twilio's `From` is
 /// `whatsapp:+<E.164>`; we strip the `whatsapp:` prefix but keep the `+`
 /// — unlike Meta's `wa_id`, which drops it).
-#[derive(Debug, Clone, Deserialize)]
-pub struct SenderClaims {
-    pub sub: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    #[serde(default)]
-    pub groups: Vec<String>,
-    pub tenant: String,
-}
+/// #289: re-exported from `triton-chat-identity`, which owns the
+/// FR-I-7 seam. It was a private copy here, and in seven other
+/// adapters — and a rule added to one copy is a rule missing from
+/// the rest.
+pub use triton_chat_identity::SenderClaims;
 
 pub struct TwilioWhatsAppAdapter {
     name: String,
@@ -120,7 +115,7 @@ pub struct TwilioWhatsAppAdapter {
     /// Twilio WhatsApp sender, `whatsapp:+<E.164>` (manifest
     /// `outbound.from`).
     from: String,
-    sender_table: HashMap<String, SenderClaims>,
+    sender_table: triton_chat_identity::SenderTable,
     inbound_tool: String,
     dispatcher: Arc<Dispatcher>,
     courier: TwilioCourierClient,
@@ -135,6 +130,10 @@ pub struct TwilioWhatsAppAdapter {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #289: FR-I-7 resolution now lives in `triton-chat-identity`;
+    /// its refusals surface here unchanged.
+    #[error("identity: {0}")]
+    Identity(#[source] triton_chat_identity::IdentityError),
     #[error("adapter is not declared `kind: twilio_whatsapp`")]
     WrongKind,
     #[error("twilio_whatsapp PR-T2 limitation: {0}")]
@@ -164,12 +163,13 @@ impl TwilioWhatsAppAdapter {
                 adapter.inbound.signature
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
-            return Err(BuildError::Unsupported(format!(
-                "twilio_whatsapp adapter (PR-T2) supports only `identity.kind: sender_table`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule.
+        triton_chat_identity::require_supported_kind(
+            "twilio_whatsapp",
+            &adapter.identity.kind,
+            &[IdentityKind::SenderTable],
+        )
+        .map_err(BuildError::Identity)?;
 
         let auth_token = resolve(
             resolver,
@@ -226,8 +226,12 @@ impl TwilioWhatsAppAdapter {
             .resolve(table_field)
             .await
             .map_err(|e| BuildError::Resolve("identity.table", e))?;
-        let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+        // #289: `parse` validates every entry's `sub` and `tenant` here,
+        // at boot. The table used to go straight from JSON into a HashMap:
+        // a tenant carrying whitespace became a `PerTenantBuckets` map key
+        // and a signed upstream claim, and nothing ever refused it.
+        let sender_table =
+            triton_chat_identity::SenderTable::parse(&table_json).map_err(BuildError::Identity)?;
 
         let courier = TwilioCourierClient::new(courier_config).map_err(BuildError::Unsupported)?;
 
