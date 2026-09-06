@@ -21,7 +21,7 @@
 //! `TextBlock`s render their content as-is.
 
 use serde_json::{Value, json};
-use triton_core::a2ui::{Component, FormFieldKind, Surface, extract_surface};
+use triton_core::a2ui::{Component, FormFieldKind, SourceItem, Surface, extract_surface};
 
 /// The Adaptive Card chrome (branded header) — fetched per reply from the
 /// report upstream's `get_theme` tool. Peacock owns ALL theming (one CSS of
@@ -220,6 +220,12 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             // bot messages and card TextBlocks. Anything else (ui://
             // internal refs) stays a plain label rather than a dead link.
             Component::Sources { items } => {
+                // With the dialog feature on, sources become Open buttons
+                // (see `interactive_from_result`), so drop the text line to
+                // avoid showing each source twice.
+                if doc_dialog_enabled() {
+                    continue;
+                }
                 if !items.is_empty() {
                     let rendered: Vec<String> = items
                         .iter()
@@ -369,6 +375,37 @@ pub const ACTION_VERB: &str = "agentAction";
 /// `data` object (and thus in the callback's `value`).
 pub const TOKEN_DATA_KEY: &str = "ct";
 
+/// The pseudo-tool a source's open-doc token addresses. Not a registered
+/// tool: the `task/fetch` handler recognises it and dispatches the peacock
+/// `document` render, returning the doc as a dialog card. Signed like any
+/// control so the callback trusts its `{skill, id}`.
+pub const OPEN_DOC_TOOL: &str = "__open_doc";
+
+/// Feature flag (`TRITON_MSTEAMS_DOC_DIALOG`): render each https source as an
+/// **Open** action that opens the cited document in a Teams **task-module
+/// dialog** (an Adaptive Card), instead of a Markdown link in the card text.
+/// OFF by default so the behaviour is unchanged until verified live; when on,
+/// the text "Sources:" line is suppressed (the buttons replace it).
+pub fn doc_dialog_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("TRITON_MSTEAMS_DOC_DIALOG")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+/// Parse `(skill, id)` out of a source item's signed `/docs` URL when the
+/// dialog feature is on. We key the open-doc token on skill/id (not the URL)
+/// so the dialog re-renders the live document; the label is carried too.
+fn source_skill_id(item: &SourceItem) -> Option<(String, String)> {
+    // The producer labels sources "skill · id" (report.rs); recover the pair
+    // from the label, which is stable regardless of the signed-URL internals.
+    let (skill, id) = item.label.split_once(" \u{b7} ")?;
+    let (skill, id) = (skill.trim(), id.trim());
+    (!skill.is_empty() && !id.is_empty()).then(|| (skill.to_owned(), id.to_owned()))
+}
+
 /// The Adaptive Card attachment content type (Bot Framework).
 pub const ADAPTIVE_CARD_CONTENT_TYPE: &str = "application/vnd.microsoft.card.adaptive";
 
@@ -426,6 +463,14 @@ pub enum InteractiveSpec {
         fields: Vec<FormFieldSpec>,
         tool: String,
     },
+    /// A cited source → open the document in a task-module **dialog**. Its
+    /// token signs `(OPEN_DOC_TOOL, {skill, id})`; the `task/fetch` handler
+    /// re-renders the document and returns it as a dialog card.
+    OpenDoc {
+        label: String,
+        skill: String,
+        id: String,
+    },
 }
 
 impl InteractiveSpec {
@@ -435,6 +480,7 @@ impl InteractiveSpec {
             InteractiveSpec::Button { tool, .. }
             | InteractiveSpec::Selection { tool, .. }
             | InteractiveSpec::Form { tool, .. } => tool,
+            InteractiveSpec::OpenDoc { .. } => OPEN_DOC_TOOL,
         }
     }
 
@@ -447,6 +493,7 @@ impl InteractiveSpec {
     pub fn base_args(&self) -> Value {
         match self {
             InteractiveSpec::Button { args, .. } => args.clone(),
+            InteractiveSpec::OpenDoc { skill, id, .. } => json!({ "skill": skill, "id": id }),
             _ => json!({}),
         }
     }
@@ -460,7 +507,7 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
     let Ok(surface) = extract_surface(result) else {
         return Vec::new();
     };
-    surface
+    let mut specs: Vec<InteractiveSpec> = surface
         .components
         .iter()
         .filter_map(|c| match c {
@@ -506,7 +553,29 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
             }),
             _ => None,
         })
-        .collect()
+        .collect();
+    // Sources → Open-doc dialog buttons (one per https source), only when the
+    // dialog feature is on. Each carries the (skill, id) recovered from the
+    // producer's "skill · id" label; the `task/fetch` handler re-renders it.
+    if doc_dialog_enabled() {
+        for c in &surface.components {
+            if let Component::Sources { items } = c {
+                for it in items {
+                    if !it.resource.starts_with("https://") {
+                        continue;
+                    }
+                    if let Some((skill, id)) = source_skill_id(it) {
+                        specs.push(InteractiveSpec::OpenDoc {
+                            label: it.label.clone(),
+                            skill,
+                            id,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    specs
 }
 
 /// A `Dashboard` lifted off a surface for Adaptive Card rendering: its
@@ -555,6 +624,117 @@ fn execute_action(title: &str, token: &str) -> Value {
         "verb": ACTION_VERB,
         "title": title,
         "data": { TOKEN_DATA_KEY: token },
+    })
+}
+
+/// One `Action.Submit` that opens a Teams **task-module dialog**. The
+/// `msteams.type = "task/fetch"` marker makes Teams send a `task/fetch`
+/// invoke carrying `data` (with our signed `ct` token) instead of a normal
+/// submit; the bot answers with a `task/continue` card (the document view).
+fn task_fetch_action(title: &str, token: &str) -> Value {
+    json!({
+        "type": "Action.Submit",
+        "title": title,
+        "data": { "msteams": { "type": "task/fetch" }, TOKEN_DATA_KEY: token },
+    })
+}
+
+/// Build the document **dialog card** from a peacock `document` render's
+/// `structuredContent` — the first instance's facts (FactSet), markdown body
+/// (a wrapped TextBlock, Teams' markdown subset), and event timeline
+/// (FactSet). A plain AC 1.4 card (no chart), suitable as a `task/continue`
+/// body.
+pub fn build_document_dialog_card(structured: &Value) -> Value {
+    let mut body: Vec<Value> = Vec::new();
+    // The first instance the document composed (facts/markdown/events).
+    let inst = structured
+        .get("instances")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next());
+
+    // Title: the instance id, falling back to the document identity.
+    let title = inst
+        .and_then(|i| i.get("id").and_then(Value::as_str))
+        .or_else(|| {
+            structured
+                .get("document")
+                .and_then(|d| d.get("id"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("Document");
+    body.push(json!({
+        "type": "TextBlock", "text": title, "weight": "Bolder",
+        "size": "Large", "wrap": true,
+    }));
+
+    if let Some(inst) = inst {
+        // Facts → FactSet.
+        if let Some(facts) = inst.get("facts").and_then(Value::as_array) {
+            let fs: Vec<Value> = facts
+                .iter()
+                .filter_map(|f| {
+                    let k = f.get("key").and_then(Value::as_str)?;
+                    let v = f.get("value").and_then(Value::as_str)?;
+                    Some(json!({ "title": k, "value": v }))
+                })
+                .collect();
+            if !fs.is_empty() {
+                body.push(json!({ "type": "FactSet", "facts": fs }));
+            }
+        }
+        // Markdown body → a wrapped TextBlock (Teams renders a markdown subset).
+        if let Some(md) = inst.get("markdown").and_then(Value::as_str)
+            && !md.trim().is_empty()
+        {
+            body.push(json!({ "type": "TextBlock", "text": md, "wrap": true }));
+        }
+        // Timeline → a small FactSet of "when · who → title".
+        if let Some(events) = inst.get("events").and_then(Value::as_array)
+            && !events.is_empty()
+        {
+            body.push(json!({
+                "type": "TextBlock", "text": "Activity", "weight": "Bolder", "wrap": true,
+            }));
+            let tl: Vec<Value> = events
+                .iter()
+                .map(|e| {
+                    let at = e.get("at").and_then(Value::as_str).unwrap_or("");
+                    let src = e.get("source").and_then(Value::as_str).unwrap_or("");
+                    let title = e.get("title").and_then(Value::as_str).unwrap_or("");
+                    let meta = [at, src]
+                        .iter()
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" \u{b7} ");
+                    json!({ "title": meta, "value": title })
+                })
+                .collect();
+            body.push(json!({ "type": "FactSet", "facts": tl }));
+        }
+    }
+
+    json!({
+        "type": "AdaptiveCard",
+        "$schema": ADAPTIVE_CARD_SCHEMA,
+        "version": ADAPTIVE_CARD_VERSION,
+        "body": body,
+    })
+}
+
+/// The `task/fetch` invoke response: a `task/continue` envelope carrying the
+/// document dialog `card` (Teams opens it as a modal).
+pub fn task_continue_response(title: &str, card: Value) -> Value {
+    json!({
+        "task": {
+            "type": "continue",
+            "value": {
+                "title": title,
+                "width": "medium",
+                "height": "medium",
+                "card": { "contentType": ADAPTIVE_CARD_CONTENT_TYPE, "content": card },
+            },
+        },
     })
 }
 
@@ -715,6 +895,9 @@ pub fn build_adaptive_card(
         match spec {
             InteractiveSpec::Button { label, .. } => {
                 actions.push(execute_action(label, token));
+            }
+            InteractiveSpec::OpenDoc { label, .. } => {
+                actions.push(task_fetch_action(&format!("Open: {label}"), token));
             }
             InteractiveSpec::Selection {
                 prompt,
@@ -1281,5 +1464,83 @@ mod tests {
         );
         let plain = build_adaptive_card("p", None, &[], Some("u"), None, &CardChrome::default());
         assert_eq!(plain["version"], "1.4");
+    }
+
+    #[test]
+    fn open_doc_spec_signs_the_document_ref() {
+        // The OpenDoc control signs (OPEN_DOC_TOOL, {skill, id}) via the same
+        // generic path as every other control, so the task/fetch handler
+        // recovers the document ref from the token.
+        let spec = InteractiveSpec::OpenDoc {
+            label: "account · beverages".into(),
+            skill: "account".into(),
+            id: "beverages".into(),
+        };
+        assert_eq!(spec.tool(), OPEN_DOC_TOOL);
+        assert_eq!(
+            spec.base_args(),
+            json!({ "skill": "account", "id": "beverages" })
+        );
+    }
+
+    #[test]
+    fn open_doc_action_is_a_task_fetch_submit() {
+        let spec = InteractiveSpec::OpenDoc {
+            label: "account · beverages".into(),
+            skill: "account".into(),
+            id: "beverages".into(),
+        };
+        let card = build_adaptive_card(
+            "answer",
+            None,
+            &[(spec, "TOKEN".into())],
+            None,
+            None,
+            &CardChrome::default(),
+        );
+        let action = &card["actions"][0];
+        assert_eq!(action["type"], "Action.Submit");
+        assert_eq!(action["data"]["msteams"]["type"], "task/fetch");
+        assert_eq!(action["data"][TOKEN_DATA_KEY], "TOKEN");
+        assert_eq!(action["title"], "Open: account · beverages");
+    }
+
+    #[test]
+    fn document_dialog_card_renders_facts_markdown_and_timeline() {
+        let structured = json!({
+            "document": { "skill": "account", "id": "beverages" },
+            "instances": { "self": {
+                "id": "beverages", "skill": "account",
+                "facts": [ { "key": "name", "value": "Beverages GmbH" },
+                           { "key": "status", "value": "Follow up" } ],
+                "markdown": "Renewal at risk.",
+                "events": [ { "title": "Flagged", "at": "2026-09-01", "source": "analyst", "body": "" } ],
+            } },
+        });
+        let card = build_document_dialog_card(&structured);
+        assert_eq!(card["version"], "1.4");
+        let body = card["body"].as_array().unwrap();
+        // Title, a FactSet (facts), the markdown TextBlock, an "Activity"
+        // heading, and a FactSet (timeline).
+        assert!(body.iter().any(|b| b["type"] == "FactSet"
+            && b["facts"][0]["title"] == "name"
+            && b["facts"][0]["value"] == "Beverages GmbH"));
+        assert!(
+            body.iter()
+                .any(|b| b["type"] == "TextBlock" && b["text"] == "Renewal at risk.")
+        );
+        assert!(
+            body.iter()
+                .any(|b| b["type"] == "TextBlock" && b["text"] == "Activity")
+        );
+
+        // The task/continue envelope wraps the card for the dialog.
+        let resp = task_continue_response("account · beverages", card);
+        assert_eq!(resp["task"]["type"], "continue");
+        assert_eq!(resp["task"]["value"]["title"], "account · beverages");
+        assert_eq!(
+            resp["task"]["value"]["card"]["contentType"],
+            ADAPTIVE_CARD_CONTENT_TYPE
+        );
     }
 }
