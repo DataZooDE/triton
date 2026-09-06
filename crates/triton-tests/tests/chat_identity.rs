@@ -19,6 +19,11 @@
 
 use std::path::PathBuf;
 
+/// A valid Ed25519 verifying key in hex. Generated once and pinned:
+/// these tests are about the sender TABLE, and the signature key only
+/// has to be well-formed enough to get past its own check.
+const DISCORD_PK: &str = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+
 fn manifest_path() -> String {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures/manifest-vault-resolver.yaml")
@@ -64,6 +69,24 @@ fn boot_adapter(adapter: &str, table: &str) -> (Option<i32>, String) {
                 (
                     "TRITON_WA_CORRELATION_KEY",
                     "whatsapp-correlation-key-for-test",
+                ),
+            ],
+        ),
+        "discord" => (
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/manifest-discord-test.yaml")
+                .display()
+                .to_string(),
+            "TRITON_DISCORD_SENDERS",
+            vec![
+                // A REAL Ed25519 public key: the adapter checks it before
+                // it ever looks at the table, so a placeholder here would
+                // make every case below pass for the wrong reason.
+                ("TRITON_DISCORD_PUBLIC_KEY", DISCORD_PK),
+                ("TRITON_DISCORD_BOT_TOKEN", "discord-bot-token-for-test"),
+                (
+                    "TRITON_DISCORD_CORRELATION_KEY",
+                    "discord-correlation-key!!",
                 ),
             ],
         ),
@@ -306,5 +329,42 @@ async fn whatsapp_still_boots_on_a_well_formed_table() {
     assert!(
         log.contains("whatsapp") && !log.contains("identity.table entry"),
         "a valid table must wire the adapter; got:\n{log}"
+    );
+}
+
+// ── discord, signal, twilio ─────────────────────────────────────────────
+//
+// The table-only adapters. They never had an `IdentityMode` at all — just
+// a bare `HashMap<String, SenderClaims>` parsed straight from JSON — which
+// is precisely why the validation never reached them.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discord_refuses_a_sender_table_it_cannot_use_safely() {
+    let (code, log) = boot_adapter(
+        "discord",
+        r#"{"99":{"sub":"bob","scopes":[],"tenant":"ac me"}}"#,
+    );
+    assert_eq!(
+        code,
+        Some(2),
+        "a whitespace tenant must refuse boot;\n{log}"
+    );
+    assert!(
+        log.contains("identity.table entry") && log.contains("99"),
+        "the refusal must name the offending ENTRY — an operator is looking \
+         at a JSON object, and the sub may itself be the unprintable thing \
+         that failed; got:\n{log}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discord_still_boots_on_a_well_formed_table() {
+    let (_, log) = boot_adapter(
+        "discord",
+        r#"{"99":{"sub":"bob","scopes":["chat"],"tenant":"acme"}}"#,
+    );
+    assert!(
+        !log.contains("identity.table entry"),
+        "a valid table must not trip the entry validator; got:\n{log}"
     );
 }
