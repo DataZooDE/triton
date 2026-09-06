@@ -215,7 +215,24 @@ fn denied_principals_from_env() -> std::collections::HashSet<String> {
         Ok(v) => v,
         Err(_) => return std::collections::HashSet::new(),
     };
-    parse_denied_principals(&raw)
+    let denied = parse_denied_principals(&raw);
+    if !denied.is_empty() {
+        // Say it HERE, not in a host's `main`. The whole point of #287's
+        // follow-up is that this control reaches hosts that do not run
+        // our `main` — and a lever an operator cannot see is engaged is
+        // one they will not trust, or worse, will assume is engaged when
+        // a typo dropped every entry. Verified on agent-lab: the
+        // refusals worked and nothing announced them.
+        let mut names: Vec<&str> = denied.iter().map(String::as_str).collect();
+        names.sort_unstable();
+        eprintln!(
+            "WARN TRITON_DENIED_PRINCIPALS active: {} principal(s) revoked \
+             — every dispatch of theirs is refused 403 (#287): {}",
+            names.len(),
+            names.join(", ")
+        );
+    }
+    denied
 }
 
 /// The parse itself, separated so it can be tested without the process

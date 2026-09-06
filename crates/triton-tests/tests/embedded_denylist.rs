@@ -256,3 +256,65 @@ async fn an_embedded_host_can_set_the_rejection_window() {
         std::env::remove_var("TRITON_AUDIT_REJECT_WINDOW_SECS");
     }
 }
+
+/// An operator must be able to SEE the lever is engaged.
+///
+/// Verified on agent-lab the hard way: the revocation worked and nothing
+/// announced it, because the boot warning lived in `triton-bin`'s main
+/// and an embedded host does not run that. A control you cannot confirm
+/// is engaged is one you will not trust — or worse, will assume is
+/// engaged when a typo dropped every entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_active_denylist_announces_itself() {
+    let bin = {
+        let mut here = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        loop {
+            let cand = here.join("target/debug/triton");
+            if cand.exists() {
+                break cand;
+            }
+            assert!(here.pop(), "triton binary not found");
+        }
+    };
+    // Drive the real process so this covers what a deployment sees, and
+    // include a bare entry: the count must reflect what was ACCEPTED, or
+    // the log reassures an operator about a revocation that never
+    // happened.
+    let out = std::process::Command::new(bin)
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_ENV", "local")
+        .env("TRITON_DENIED_PRINCIPALS", "acme/alice, bare-subject")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn triton");
+    let pid = out.id();
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    let done = out.wait_with_output().expect("wait");
+    let log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&done.stdout),
+        String::from_utf8_lossy(&done.stderr)
+    );
+    assert!(
+        log.contains("TRITON_DENIED_PRINCIPALS active") && log.contains("acme/alice"),
+        "an active denylist must announce itself and name who it revoked; got:\n{log}"
+    );
+    assert!(
+        log.contains("1 principal"),
+        "the count must be what was ACCEPTED, not what was typed — the bare \
+         entry was dropped; got:\n{log}"
+    );
+    assert!(
+        log.contains("entry `bare-subject` ignored"),
+        "and the dropped entry must be named; got:\n{log}"
+    );
+}

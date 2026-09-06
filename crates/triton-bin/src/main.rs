@@ -208,18 +208,10 @@ async fn main() -> std::io::Result<()> {
     // pairing tools, which the environment cannot express as richly.
     let mut dispatcher =
         Dispatcher::new(registry, settings.env.clone()).with_metrics(metrics.clone());
-    // #287: the denylist is read by `Dispatcher::new` itself, so it
-    // applies to embedded hosts too — this only REPORTS it, so an
-    // operator can see the lever is engaged without knowing to look.
-    let denied: Vec<&str> = dispatcher.denied_principals().collect();
-    if !denied.is_empty() {
-        tracing::warn!(
-            denied = ?denied,
-            count = denied.len(),
-            "TRITON_DENIED_PRINCIPALS active: these principals are revoked \
-             and every dispatch of theirs is refused (#287)",
-        );
-    }
+    // #287: the denylist is read AND announced by `Dispatcher::new`, so
+    // an embedded host gets both. Nothing to report here — a second
+    // warning from this binary alone would be the kind of surface-
+    // specific behaviour the fix exists to remove.
     if !pairing_tools.is_empty() {
         tracing::info!(
             tools = ?pairing_tools,
