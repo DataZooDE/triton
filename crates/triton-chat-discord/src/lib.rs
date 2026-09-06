@@ -89,19 +89,17 @@ const CALLBACK_TTL_SECS: u32 = 300;
 /// (Codex PR 23 concern).
 const CALLBACK_FUTURE_SKEW_SECS: u32 = 60;
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SenderClaims {
-    pub sub: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    pub tenant: String,
-}
+/// #289: re-exported from `triton-chat-identity`, which owns the
+/// FR-I-7 seam. It was a private copy here, and in seven other
+/// adapters — and a rule added to one copy is a rule missing from
+/// the rest.
+pub use triton_chat_identity::SenderClaims;
 
 pub struct DiscordAdapter {
     name: String,
     verifying_key: VerifyingKey,
     correlation_key: triton_correlation::KeyRing,
-    sender_table: HashMap<String, SenderClaims>,
+    sender_table: triton_chat_identity::SenderTable,
     dispatcher: Arc<Dispatcher>,
     rate_limit: triton_core::ratelimit::TokenBucket,
     /// PR 28: per-tenant rate limit (NFR-P-3 second tier).
@@ -131,12 +129,13 @@ impl DiscordAdapter {
                 adapter.inbound.signature
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
-            return Err(BuildError::Unsupported(format!(
-                "discord adapter requires `identity.kind: sender_table`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule.
+        triton_chat_identity::require_supported_kind(
+            "discord",
+            &adapter.identity.kind,
+            &[IdentityKind::SenderTable],
+        )
+        .map_err(BuildError::Identity)?;
 
         let pk_field = adapter
             .inbound
@@ -177,8 +176,12 @@ impl DiscordAdapter {
             .resolve(table_field)
             .await
             .map_err(|e| BuildError::Resolve("identity.table", e))?;
-        let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+        // #289: `parse` validates every entry's `sub` and `tenant` here,
+        // at boot. The table used to go straight from JSON into a HashMap:
+        // a tenant carrying whitespace became a `PerTenantBuckets` map key
+        // and a signed upstream claim, and nothing ever refused it.
+        let sender_table =
+            triton_chat_identity::SenderTable::parse(&table_json).map_err(BuildError::Identity)?;
 
         // #287: a comma-separated RING — signed with the first key,
         // verified against all — so the key can be rotated without
@@ -229,6 +232,10 @@ impl DiscordAdapter {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #289: FR-I-7 resolution now lives in `triton-chat-identity`;
+    /// its refusals surface here unchanged.
+    #[error("identity: {0}")]
+    Identity(#[source] triton_chat_identity::IdentityError),
     /// #287: the resolved `correlation_key` secret is a
     /// comma-separated ring; nothing usable survived parsing it.
     #[error("correlation_key: {0}")]

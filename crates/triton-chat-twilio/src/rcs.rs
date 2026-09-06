@@ -36,7 +36,6 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
-use serde::Deserialize;
 use triton_core::{Dispatcher, OutboundCourier, OutboundRequest, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
 use triton_secrets::{ResolveError, SecretResolver};
@@ -52,15 +51,11 @@ const OUTBOUND_TOOL: &str = "outbound";
 /// Per-RCS-sender claims resolved from the `sender_table`. Keyed by the
 /// sender's E.164 number WITH the leading `+` (Twilio's `From` is
 /// `rcs:+<E.164>`; we strip the `rcs:` prefix but keep the `+`).
-#[derive(Debug, Clone, Deserialize)]
-pub struct SenderClaims {
-    pub sub: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    #[serde(default)]
-    pub groups: Vec<String>,
-    pub tenant: String,
-}
+/// #289: re-exported from `triton-chat-identity`, which owns the
+/// FR-I-7 seam. It was a private copy here, and in seven other
+/// adapters — and a rule added to one copy is a rule missing from
+/// the rest.
+pub use triton_chat_identity::SenderClaims;
 
 pub struct TwilioRcsAdapter {
     name: String,
@@ -80,7 +75,7 @@ pub struct TwilioRcsAdapter {
     /// Twilio RCS Sender/Agent id, `rcs:<agent-id>` (manifest
     /// `outbound.from`) — NOT a phone number.
     from: String,
-    sender_table: HashMap<String, SenderClaims>,
+    sender_table: triton_chat_identity::SenderTable,
     inbound_tool: String,
     dispatcher: Arc<Dispatcher>,
     courier: TwilioCourierClient,
@@ -90,6 +85,10 @@ pub struct TwilioRcsAdapter {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #289: FR-I-7 resolution now lives in `triton-chat-identity`;
+    /// its refusals surface here unchanged.
+    #[error("identity: {0}")]
+    Identity(#[source] triton_chat_identity::IdentityError),
     #[error("adapter is not declared `kind: twilio_rcs`")]
     WrongKind,
     #[error("twilio_rcs limitation: {0}")]
@@ -119,12 +118,13 @@ impl TwilioRcsAdapter {
                 adapter.inbound.signature
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
-            return Err(BuildError::Unsupported(format!(
-                "twilio_rcs adapter supports only `identity.kind: sender_table`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule.
+        triton_chat_identity::require_supported_kind(
+            "twilio_rcs",
+            &adapter.identity.kind,
+            &[IdentityKind::SenderTable],
+        )
+        .map_err(BuildError::Identity)?;
 
         let auth_token = resolve(
             resolver,
@@ -166,8 +166,12 @@ impl TwilioRcsAdapter {
             .resolve(table_field)
             .await
             .map_err(|e| BuildError::Resolve("identity.table", e))?;
-        let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+        // #289: `parse` validates every entry's `sub` and `tenant` here,
+        // at boot. The table used to go straight from JSON into a HashMap:
+        // a tenant carrying whitespace became a `PerTenantBuckets` map key
+        // and a signed upstream claim, and nothing ever refused it.
+        let sender_table =
+            triton_chat_identity::SenderTable::parse(&table_json).map_err(BuildError::Identity)?;
 
         let courier = TwilioCourierClient::new(courier_config).map_err(BuildError::Unsupported)?;
 
