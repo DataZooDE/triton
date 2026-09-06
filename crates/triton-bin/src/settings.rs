@@ -215,8 +215,6 @@ pub struct Settings {
     /// fires ONLY for a missing `env://` secret, never for any other
     /// build error.
     pub optional_adapters: Vec<String>,
-    /// #287: revoked principals as `tenant/sub`. Empty ⇒ nobody.
-    pub denied_principals: Vec<String>,
 }
 
 impl Settings {
@@ -652,7 +650,13 @@ struct Cli {
     /// customer boundary.
     ///
     /// Empty/unset (the default) denies nobody.
+    /// Declared here so `--help` documents it and a CLI flag still works;
+    /// the VALUE is read by `Dispatcher::new` itself (#287), not plumbed
+    /// through `Settings`. A revocation lever that each host has to wire
+    /// is one an embedded host silently does not have — which is exactly
+    /// what happened, and what live verification on agent-lab caught.
     #[arg(long, env = "TRITON_DENIED_PRINCIPALS", default_value = "")]
+    #[allow(dead_code)]
     denied_principals: String,
 }
 
@@ -689,7 +693,6 @@ impl From<Cli> for Settings {
                 .collect(),
             egress_allowed_suffixes: parse_egress_suffixes(&c.egress_allowed_suffixes),
             optional_adapters: parse_optional_adapters(&c.optional_adapters),
-            denied_principals: parse_denied_principals(&c.denied_principals),
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
             stream_idle_timeout: Duration::from_millis(c.stream_idle_timeout_ms),
             stream_max_duration: Duration::from_millis(c.stream_max_duration_ms),
@@ -769,33 +772,6 @@ fn parse_egress_suffixes(raw: &str) -> Vec<String> {
     }
 }
 
-/// Parse `TRITON_DENIED_PRINCIPALS` into the revocation set (#287).
-/// Comma-separated `tenant/sub` entries; trimmed, blanks dropped.
-///
-/// An entry WITHOUT a `/` is dropped with a warning rather than being
-/// treated as a bare `sub`. Silently accepting `alice` would deny that
-/// name in every tenant — and an operator racing an incident is exactly
-/// who would type it. Better to say nothing was revoked, loudly, than
-/// to revoke more than was asked.
-fn parse_denied_principals(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .filter_map(|entry| match entry.split_once('/') {
-            Some((tenant, sub)) if !tenant.is_empty() && !sub.is_empty() => Some(entry.to_string()),
-            _ => {
-                tracing::warn!(
-                    entry = %entry,
-                    "TRITON_DENIED_PRINCIPALS entry ignored: expected `tenant/sub` \
-                     (a bare subject would deny that name in EVERY tenant, so it \
-                     is refused rather than guessed)",
-                );
-                None
-            }
-        })
-        .collect()
-}
-
 /// Parse `TRITON_OPTIONAL_ADAPTERS` into the set of adapter names whose
 /// build may be skipped on a missing `env://` secret. Comma-separated;
 /// entries are trimmed, blanks dropped, and lowercased so the match in
@@ -811,7 +787,7 @@ fn parse_optional_adapters(raw: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_denied_principals, parse_egress_suffixes, parse_optional_adapters};
+    use super::{parse_egress_suffixes, parse_optional_adapters};
 
     #[test]
     fn egress_suffixes_default_to_tailnet_when_empty() {
@@ -840,30 +816,6 @@ mod tests {
         assert!(parse_optional_adapters("").is_empty());
         assert!(parse_optional_adapters("   ").is_empty());
         assert!(parse_optional_adapters(" , ,").is_empty());
-    }
-
-    #[test]
-    fn denied_principals_require_a_tenant_qualifier() {
-        assert_eq!(
-            parse_denied_principals("acme/alice, globex/bob "),
-            vec!["acme/alice".to_string(), "globex/bob".to_string()],
-        );
-        // A bare subject is DROPPED, not widened to every tenant.
-        assert!(parse_denied_principals("alice").is_empty());
-        assert!(parse_denied_principals("/alice").is_empty());
-        assert!(parse_denied_principals("acme/").is_empty());
-        // A mixed list keeps the well-formed entries and drops the rest.
-        assert_eq!(
-            parse_denied_principals("alice,acme/bob"),
-            vec!["acme/bob".to_string()],
-        );
-    }
-
-    #[test]
-    fn an_empty_denylist_is_the_default() {
-        assert!(parse_denied_principals("").is_empty());
-        assert!(parse_denied_principals("  ").is_empty());
-        assert!(parse_denied_principals(" , ,").is_empty());
     }
 
     #[test]

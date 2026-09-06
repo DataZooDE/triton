@@ -209,15 +209,15 @@ async fn main() -> std::io::Result<()> {
         .unwrap_or_default();
     let mut dispatcher = Dispatcher::new(registry, settings.env.clone())
         .with_metrics(metrics.clone())
-        .with_rejection_window(reject_window)
-        // #287: the operator's revocation lever. Logged at boot below so
-        // a live denylist is visible in the startup line rather than
-        // being something you have to know to go looking for.
-        .with_denied_principals(settings.denied_principals.clone());
-    if !settings.denied_principals.is_empty() {
+        .with_rejection_window(reject_window);
+    // #287: the denylist is read by `Dispatcher::new` itself, so it
+    // applies to embedded hosts too — this only REPORTS it, so an
+    // operator can see the lever is engaged without knowing to look.
+    let denied: Vec<&str> = dispatcher.denied_principals().collect();
+    if !denied.is_empty() {
         tracing::warn!(
-            denied = ?settings.denied_principals,
-            count = settings.denied_principals.len(),
+            denied = ?denied,
+            count = denied.len(),
             "TRITON_DENIED_PRINCIPALS active: these principals are revoked \
              and every dispatch of theirs is refused (#287)",
         );

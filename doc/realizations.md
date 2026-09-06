@@ -1735,3 +1735,26 @@ a trap the next developer should not have to step in.
   for. This bites integration tests specifically — a mutation inside a
   crate the test binary links (`triton-correlation`, say) does rebuild,
   so the habit works everywhere else and fails silently right here.
+
+- **A control wired in `main.rs` does not exist for anyone who does not run
+  your `main.rs`.** `TRITON_DENIED_PRINCIPALS` (#287) was plumbed through
+  `triton-bin`'s `Settings` and applied with a builder call. It worked, and
+  every test proved it worked, because every test drove the standalone
+  binary. The deployment that actually runs does not use that binary:
+  `dz-agent-template` embeds triton and calls `Dispatcher::new` directly, in
+  three separate places. So the denylist deployed, the pod booted, and
+  nothing was revoked — silently, with a healthy `/healthz`.
+
+  Only the live probe caught it. The unit and integration tests could not:
+  they all instantiate the surface that had the wiring.
+
+  The fix is to read the environment inside `Dispatcher::new`, which breaks
+  this crate's env-free rule on purpose. That rule was written for a TUNING
+  parameter (`with_rejection_window` says so in its own doc). A revocation
+  lever is not tuning — its entire value is that it applies everywhere — and
+  a security control each call site must remember to opt into is a
+  suggestion, not a control. It is the same "available vs unskippable"
+  argument #289 makes about `validate_resolved`, and I got it wrong in my
+  own change one PR later. When adding a control, ask which surfaces
+  construct the thing it guards, not which surface you happened to be
+  editing.
