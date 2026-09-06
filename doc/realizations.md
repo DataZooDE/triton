@@ -1934,3 +1934,18 @@ One thing left alone: `TRITON_GOOGLE_CHAT_PUBLIC_BASE` is read per
 request inside the adapter. It is a base URL for image links, not an
 authorization value, so it is outside this rule — noted so the next
 reader does not have to re-derive that.
+
+- **A versioned label only records what you remember to bump.** The
+  correlation-token derivation carries
+  `triton/correlation/tenant-key/vN`, whose stated job is that rotating it
+  invalidates every outstanding token. `v1 → v2` did that deliberately
+  when the sender joined the derivation INPUT. Then a later fix dropped
+  the master key that had been appended to the derived OUTPUT — same
+  effect, every live token invalidated, and the label still said `v2`.
+
+  An invalidation with no record of itself is the worst of both: users
+  lose their buttons and the git history offers no reason. The rule now
+  written on the constant: **any change to what the function returns
+  bumps the label, whether or not the input changed.** A test pins the
+  output shape (32-byte tag, master key absent) so the next such change
+  fails a test rather than shipping silently.

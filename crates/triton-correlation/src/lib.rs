@@ -449,7 +449,19 @@ fn tenant_key(key: &[u8], b: Binding<'_>) -> Vec<u8> {
 /// decoration: it guarantees a v1 token cannot collide with a v2 one for
 /// any input, so the deploy that adds sender binding cannot leave a
 /// pre-binding token verifying by accident.
-const DERIVATION_LABEL: &[u8] = b"triton/correlation/tenant-key/v2";
+///
+/// `v3` (#306 crew F10) dropped the master key that used to be appended
+/// to the derived output. That changed what this function RETURNS, and
+/// therefore invalidated every outstanding token — with no label bump to
+/// say so. The effect was identical to a rotation and the record showed
+/// none.
+///
+/// Hence the rule this constant now carries: **any change to what
+/// `tenant_key` returns bumps this label, whether or not the INPUT
+/// changed.** The label exists to make invalidation explicit and
+/// greppable; a derivation that changes underneath a fixed label is an
+/// invalidation nobody can find afterwards.
+const DERIVATION_LABEL: &[u8] = b"triton/correlation/tenant-key/v3";
 
 /// `None` when the clock is before the epoch (a machine mid-NTP-sync,
 /// say). Callers treat that as "cannot decide" and refuse: mapping it to
@@ -1113,6 +1125,29 @@ mod bound_tests {
                 Err(DecodeError::BadSignature)
             ),
             "a sibling in the same tenant must fail the SIGNATURE, not a comparison",
+        );
+    }
+
+    /// The label must change whenever the OUTPUT does, not only when the
+    /// input does. #306 crew F10 dropped the appended master key, which
+    /// invalidated every live token while the label still said `v2` — an
+    /// invalidation with no record of itself.
+    #[test]
+    fn the_label_is_part_of_the_derived_output() {
+        let k = tenant_key(
+            KEY,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+        );
+        // A 32-byte HMAC tag and nothing appended: if this grows, the
+        // master key is back in the output and every derived key leaks it.
+        assert_eq!(k.len(), 32, "the derived key is the tag alone");
+        assert!(
+            !k.windows(KEY.len()).any(|w| w == KEY),
+            "the master key must not appear in a derived key"
         );
     }
 
