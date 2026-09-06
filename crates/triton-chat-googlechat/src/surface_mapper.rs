@@ -19,7 +19,7 @@
 
 use regex::Regex;
 use serde_json::Value;
-use triton_core::a2ui::{Component, FormFieldKind, Surface, extract_surface};
+use triton_core::a2ui::{Component, FormFieldKind, SourceItem, Surface, extract_surface};
 
 /// The chat-card chrome (header title/logo, brand button colour) — fetched
 /// per reply from the report upstream's `get_theme` tool. Peacock owns ALL
@@ -129,6 +129,12 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             // Anything else (ui:// internal refs) stays a plain label
             // rather than a dead link.
             Component::Sources { items } => {
+                // With the dialog feature on, sources become Open buttons
+                // (see `interactive_from_result`); drop the text line so a
+                // source isn't shown twice.
+                if doc_dialog_enabled() {
+                    continue;
+                }
                 if !items.is_empty() {
                     let rendered: Vec<String> = items
                         .iter()
@@ -342,6 +348,35 @@ pub fn build_inline_response(msg: &RenderedMessage, workspace_addon: bool) -> Va
 pub const BUTTON_ACTION_FUNCTION: &str = "agent_action";
 /// Parameter key carrying the signed correlation token.
 pub const BUTTON_TOKEN_PARAM: &str = "ct";
+
+/// The pseudo-tool a source's open-doc token addresses. Not a registered
+/// tool: the `CARD_CLICKED` handler recognises it and returns the cited
+/// document as a Chat **dialog** instead of dispatching. Signed like any
+/// control so the callback trusts its `{skill, id}`.
+pub const OPEN_DOC_TOOL: &str = "__open_doc";
+
+/// Feature flag (`TRITON_GOOGLE_CHAT_DOC_DIALOG`): render each https source as
+/// an **Open** button that shows the cited document in a Chat **dialog** (a
+/// modal card), instead of a `<url|label>` link in the message text. OFF by
+/// default; when on, the text "Sources:" line is suppressed (the buttons
+/// replace it).
+pub fn doc_dialog_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("TRITON_GOOGLE_CHAT_DOC_DIALOG")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+/// Recover `(skill, id)` from a source item's producer label ("skill · id",
+/// report.rs), so the dialog re-renders the live document by id rather than
+/// scraping the signed URL.
+fn source_skill_id(item: &SourceItem) -> Option<(String, String)> {
+    let (skill, id) = item.label.split_once(" \u{b7} ")?;
+    let (skill, id) = (skill.trim(), id.trim());
+    (!skill.is_empty() && !id.is_empty()).then(|| (skill.to_owned(), id.to_owned()))
+}
 /// Parameter key carrying the button's display label, echoed back on the
 /// `CARD_CLICKED` event so the reply can show WHICH button was tapped
 /// (Google Chat doesn't render a click as a user message). Display-only,
@@ -387,6 +422,14 @@ pub enum InteractiveSpec {
         fields: Vec<FormFieldSpec>,
         tool: String,
     },
+    /// A cited source → open the document in a Chat **dialog**. Its token
+    /// signs `(OPEN_DOC_TOOL, {skill, id})`; the `CARD_CLICKED` handler
+    /// re-renders the document and returns it as a dialog card.
+    OpenDoc {
+        label: String,
+        skill: String,
+        id: String,
+    },
 }
 
 impl InteractiveSpec {
@@ -396,6 +439,7 @@ impl InteractiveSpec {
             InteractiveSpec::Button { tool, .. }
             | InteractiveSpec::Selection { tool, .. }
             | InteractiveSpec::Form { tool, .. } => tool,
+            InteractiveSpec::OpenDoc { .. } => OPEN_DOC_TOOL,
         }
     }
 
@@ -408,6 +452,9 @@ impl InteractiveSpec {
     pub fn base_args(&self) -> Value {
         match self {
             InteractiveSpec::Button { args, .. } => args.clone(),
+            InteractiveSpec::OpenDoc { skill, id, .. } => {
+                serde_json::json!({ "skill": skill, "id": id })
+            }
             _ => serde_json::json!({}),
         }
     }
@@ -420,7 +467,7 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
     let Ok(surface) = extract_surface(result) else {
         return Vec::new();
     };
-    surface
+    let mut specs: Vec<InteractiveSpec> = surface
         .components
         .iter()
         .filter_map(|c| match c {
@@ -465,7 +512,29 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
             }),
             _ => None,
         })
-        .collect()
+        .collect();
+    // Sources → Open-doc dialog buttons (one per https source), only when the
+    // dialog feature is on. Each carries the (skill, id) from the producer's
+    // "skill · id" label; the CARD_CLICKED handler re-renders it as a dialog.
+    if doc_dialog_enabled() {
+        for c in &surface.components {
+            if let Component::Sources { items } = c {
+                for it in items {
+                    if !it.resource.starts_with("https://") {
+                        continue;
+                    }
+                    if let Some((skill, id)) = source_skill_id(it) {
+                        specs.push(InteractiveSpec::OpenDoc {
+                            label: it.label.clone(),
+                            skill,
+                            id,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    specs
 }
 
 /// Parse `#RRGGBB` into a Cards v2 `color` object (RGBA floats in 0..=1).
@@ -540,6 +609,120 @@ fn action_button(label: &str, token: &str, theme: &CardChrome, click_function: &
         btn["color"] = c;
     }
     btn
+}
+
+/// A source "Open" button that opens a Chat **dialog**: like [`action_button`]
+/// but with `interaction: "DIALOG"`, so the click's `CARD_CLICKED` reply is a
+/// modal dialog card rather than a message. Reuses the same signed token +
+/// click function.
+fn dialog_button(label: &str, token: &str, theme: &CardChrome, click_function: &str) -> Value {
+    let color = theme.brand_color.as_deref().and_then(hex_to_color);
+    let mut btn = serde_json::json!({
+        "text": label,
+        "type": if color.is_some() { "FILLED" } else { "FILLED_TONAL" },
+        "onClick": {
+            "action": {
+                "function": click_function,
+                "interaction": "DIALOG",
+                "parameters": [
+                    { "key": BUTTON_TOKEN_PARAM, "value": token },
+                    { "key": BUTTON_LABEL_PARAM, "value": label }
+                ]
+            }
+        }
+    });
+    if let Some(c) = color {
+        btn["color"] = c;
+    }
+    btn
+}
+
+/// Build the document **dialog** card body (a `GoogleAppsCardV1` card) from a
+/// peacock `document` render's `structuredContent`: the first instance's facts
+/// (a `decoratedText` per fact), the markdown body (normalised to Chat text),
+/// and the event timeline. Google Chat allows no iframe and only its text
+/// subset, so this is native widgets only.
+pub fn build_document_dialog(structured: &Value) -> Value {
+    let inst = structured
+        .get("instances")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next());
+    let title = inst
+        .and_then(|i| i.get("id").and_then(Value::as_str))
+        .or_else(|| {
+            structured
+                .get("document")
+                .and_then(|d| d.get("id"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("Document");
+
+    let mut widgets: Vec<Value> = Vec::new();
+    if let Some(inst) = inst {
+        if let Some(facts) = inst.get("facts").and_then(Value::as_array) {
+            for f in facts {
+                if let (Some(k), Some(v)) = (
+                    f.get("key").and_then(Value::as_str),
+                    f.get("value").and_then(Value::as_str),
+                ) {
+                    widgets.push(serde_json::json!({
+                        "decoratedText": { "topLabel": k, "text": v, "wrapText": true }
+                    }));
+                }
+            }
+        }
+        if let Some(md) = inst.get("markdown").and_then(Value::as_str)
+            && !md.trim().is_empty()
+        {
+            widgets.push(serde_json::json!({
+                "textParagraph": { "text": to_google_chat(md) }
+            }));
+        }
+        if let Some(events) = inst.get("events").and_then(Value::as_array)
+            && !events.is_empty()
+        {
+            let lines: Vec<String> = events
+                .iter()
+                .map(|e| {
+                    let at = e.get("at").and_then(Value::as_str).unwrap_or("");
+                    let src = e.get("source").and_then(Value::as_str).unwrap_or("");
+                    let ttl = e.get("title").and_then(Value::as_str).unwrap_or("");
+                    let meta = [at, src]
+                        .iter()
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" \u{b7} ");
+                    if meta.is_empty() {
+                        format!("• {ttl}")
+                    } else {
+                        format!("• *{ttl}* — {meta}")
+                    }
+                })
+                .collect();
+            widgets.push(serde_json::json!({
+                "textParagraph": { "text": format!("*Activity*\n{}", lines.join("\n")) }
+            }));
+        }
+    }
+    if widgets.is_empty() {
+        widgets.push(serde_json::json!({
+            "textParagraph": { "text": "This document is unavailable right now." }
+        }));
+    }
+    serde_json::json!({
+        "sections": [ { "header": title, "widgets": widgets } ]
+    })
+}
+
+/// The `CARD_CLICKED` response that opens `card` as a Chat modal dialog.
+pub fn dialog_response(card: Value) -> Value {
+    serde_json::json!({
+        "actionResponse": {
+            "type": "DIALOG",
+            "dialogAction": { "dialog": { "body": card } },
+        }
+    })
 }
 
 /// A `Dashboard` lifted off a surface for Cards v2 rendering: its title
@@ -638,6 +821,14 @@ pub fn build_interactive_card(
         match spec {
             InteractiveSpec::Button { label, .. } => {
                 pending.push(action_button(label, token, theme, click_function));
+            }
+            InteractiveSpec::OpenDoc { label, .. } => {
+                pending.push(dialog_button(
+                    &format!("Open: {label}"),
+                    token,
+                    theme,
+                    click_function,
+                ));
             }
             InteractiveSpec::Selection {
                 prompt,
@@ -1443,5 +1634,72 @@ mod tests {
         let btn =
             &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
         assert_eq!(btn["onClick"]["action"]["function"], BUTTON_ACTION_FUNCTION);
+    }
+
+    #[test]
+    fn open_doc_spec_signs_the_ref_and_renders_a_dialog_button() {
+        let spec = InteractiveSpec::OpenDoc {
+            label: "account · beverages".into(),
+            skill: "account".into(),
+            id: "beverages".into(),
+        };
+        assert_eq!(spec.tool(), OPEN_DOC_TOOL);
+        assert_eq!(
+            spec.base_args(),
+            serde_json::json!({ "skill": "account", "id": "beverages" })
+        );
+        let body = build_interactive_card(
+            "answer",
+            None,
+            None,
+            &[(spec, "TOKEN".into())],
+            false,
+            &CardChrome::default(),
+            None,
+        );
+        let btn =
+            &body["cardsV2"][0]["card"]["sections"][0]["widgets"][0]["buttonList"]["buttons"][0];
+        assert_eq!(btn["text"], "Open: account · beverages");
+        // A DIALOG interaction, carrying the signed token.
+        assert_eq!(btn["onClick"]["action"]["interaction"], "DIALOG");
+        assert_eq!(btn["onClick"]["action"]["parameters"][0]["value"], "TOKEN");
+    }
+
+    #[test]
+    fn document_dialog_renders_facts_markdown_timeline_and_wraps() {
+        let structured = serde_json::json!({
+            "document": { "skill": "account", "id": "beverages" },
+            "instances": { "self": {
+                "id": "beverages", "skill": "account",
+                "facts": [ { "key": "name", "value": "Beverages GmbH" } ],
+                "markdown": "Renewal at risk.",
+                "events": [ { "title": "Flagged", "at": "2026-09-01", "source": "analyst" } ],
+            } },
+        });
+        let card = build_document_dialog(&structured);
+        let widgets = card["sections"][0]["widgets"].as_array().unwrap();
+        assert_eq!(card["sections"][0]["header"], "beverages");
+        assert!(
+            widgets
+                .iter()
+                .any(|w| w["decoratedText"]["topLabel"] == "name"
+                    && w["decoratedText"]["text"] == "Beverages GmbH")
+        );
+        assert!(
+            widgets
+                .iter()
+                .any(|w| w["textParagraph"]["text"] == "Renewal at risk.")
+        );
+        assert!(widgets.iter().any(|w| {
+            w["textParagraph"]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("*Activity*")
+        }));
+
+        // The DIALOG response envelope wraps the card body.
+        let resp = dialog_response(card);
+        assert_eq!(resp["actionResponse"]["type"], "DIALOG");
+        assert!(resp["actionResponse"]["dialogAction"]["dialog"]["body"]["sections"].is_array());
     }
 }
