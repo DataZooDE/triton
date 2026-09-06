@@ -831,6 +831,22 @@ struct GoogleChatSender {
     name: Option<String>,
 }
 
+/// Deep-search a `render_report` result for the document render's structured
+/// content: the object carrying an `instances` or `document` key. Robust to
+/// the exact nesting (top level, or under `structuredContent`).
+fn find_document_structured(v: &Value) -> Option<&Value> {
+    match v {
+        Value::Object(m) => {
+            if m.contains_key("instances") || m.contains_key("document") {
+                return Some(v);
+            }
+            m.values().find_map(find_document_structured)
+        }
+        Value::Array(a) => a.iter().find_map(find_document_structured),
+        _ => None,
+    }
+}
+
 /// Google delivers a Chat app's interaction events in one of **two**
 /// request shapes, and which one an app gets is decided permanently when
 /// the app is created — the "build this as a Google Workspace add-on"
@@ -1209,6 +1225,50 @@ async fn handle_webhook(
         trace_id: uuid::Uuid::new_v4().to_string(),
     };
     let principal_for_post = principal.clone();
+
+    // A source "Open" button (open-doc token): render the cited document and
+    // return it as a Chat DIALOG. This MUST be synchronous (a dialog can only
+    // ride the click's own response, never the courier), and it's fast (a
+    // peacock render, not an LLM turn), so it returns here before the courier.
+    if tool_name == surface_mapper::OPEN_DOC_TOOL {
+        let skill = args
+            .get("skill")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let id = args.get("id").and_then(Value::as_str).unwrap_or_default();
+        let card = if skill.is_empty() || id.is_empty() {
+            surface_mapper::build_document_dialog(&Value::Null)
+        } else {
+            let rargs = serde_json::json!({
+                "report_id": "document", "params": { "skill": skill, "id": id }
+            });
+            match adapter
+                .dispatcher
+                .invoke("render_report", rargs, principal, PROTOCOL)
+                .await
+            {
+                Ok(d) => surface_mapper::build_document_dialog(
+                    find_document_structured(&d.result).unwrap_or(&Value::Null),
+                ),
+                Err(e) => {
+                    tracing::warn!(error = %e, "google_chat open-doc render failed");
+                    surface_mapper::build_document_dialog(&Value::Null)
+                }
+            }
+        };
+        adapter.dispatcher.record_post(
+            surface_mapper::OPEN_DOC_TOOL,
+            PROTOCOL,
+            &principal_for_post,
+            0,
+            Ok((200, PostOutcome::Posted, None)),
+        );
+        return (
+            StatusCode::OK,
+            axum::Json(surface_mapper::dialog_response(card)),
+        )
+            .into_response();
+    }
 
     // #164 T1a: async reply courier. Google Chat's webhook is
     // synchronous with a ~30s deadline while live-LLM dispatches run
