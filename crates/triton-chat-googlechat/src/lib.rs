@@ -1274,7 +1274,7 @@ async fn handle_webhook(
         );
         return (
             StatusCode::OK,
-            axum::Json(surface_mapper::dialog_response(card)),
+            axum::Json(surface_mapper::dialog_response(card, workspace_addon)),
         )
             .into_response();
     }
