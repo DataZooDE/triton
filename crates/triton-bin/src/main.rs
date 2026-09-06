@@ -186,11 +186,6 @@ async fn main() -> std::io::Result<()> {
     // buffer an operator tails. `0` disables coalescing; a junk value
     // falls back to the default rather than failing boot — this knob
     // must never be the reason a gateway won't start.
-    let reject_window = std::env::var("TRITON_AUDIT_REJECT_WINDOW_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or(triton_core::dispatcher::DEFAULT_REJECT_WINDOW);
     // #284: a `self_enrol` adapter may name the ONE tool an un-enrolled
     // sender is allowed to reach. Triton already mints those senders a
     // restricted `pairing` principal and then forgets the restriction;
@@ -207,9 +202,12 @@ async fn main() -> std::io::Result<()> {
                 .collect()
         })
         .unwrap_or_default();
-    let mut dispatcher = Dispatcher::new(registry, settings.env.clone())
-        .with_metrics(metrics.clone())
-        .with_rejection_window(reject_window);
+    // #249/#284/#287: the reject window, the pairing restriction and the
+    // denylist are all read by `Dispatcher::new` itself, so an embedded
+    // host gets them too. This wiring only ADDS the manifest-derived
+    // pairing tools, which the environment cannot express as richly.
+    let mut dispatcher =
+        Dispatcher::new(registry, settings.env.clone()).with_metrics(metrics.clone());
     // #287: the denylist is read by `Dispatcher::new` itself, so it
     // applies to embedded hosts too — this only REPORTS it, so an
     // operator can see the lever is engaged without knowing to look.
@@ -225,7 +223,7 @@ async fn main() -> std::io::Result<()> {
     if !pairing_tools.is_empty() {
         tracing::info!(
             tools = ?pairing_tools,
-            "self_enrol pairing restriction active: a principal holding only the `pairing` scope may invoke these tools and nothing else"
+            "self_enrol pairing restriction active (from the manifest): a principal holding only the `pairing` scope may invoke these tools and nothing else"
         );
         dispatcher = dispatcher.with_scope_restriction("pairing", pairing_tools);
     }

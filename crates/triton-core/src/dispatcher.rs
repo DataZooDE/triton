@@ -155,6 +155,50 @@ pub struct Dispatcher {
     scope_restrictions: std::collections::HashMap<String, std::collections::HashSet<String>>,
 }
 
+/// Read `TRITON_AUDIT_REJECT_WINDOW_SECS` (#249).
+///
+/// A junk value falls back to the default rather than failing boot: this
+/// knob must never be the reason a gateway will not start. `0` disables
+/// coalescing, so every rejection is audited.
+fn reject_window_from_env() -> Duration {
+    std::env::var("TRITON_AUDIT_REJECT_WINDOW_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(DEFAULT_REJECT_WINDOW)
+}
+
+/// Read `TRITON_PAIRING_TOOLS` into the `pairing` scope restriction (#284).
+///
+/// The standalone binary derives this from the manifest, which is richer
+/// and stays authoritative there — it knows WHICH adapter named the tool.
+/// An embedded host builds its `Adapter` values in code and never hands
+/// them to a loader, so it needs a way to declare the same restriction
+/// without one; this is it, and the two sources merge rather than
+/// compete (`with_scope_restriction` adds to whatever the environment
+/// supplied).
+///
+/// Empty or unset restricts nothing, which keeps the gate default-allow:
+/// Triton authenticates and propagates, leaving authorization to the
+/// resource owner. What it must not do is make an authorization
+/// distinction — minting an un-enrolled sender a `pairing` principal —
+/// and then discard it.
+fn pairing_restriction_from_env()
+-> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    let tools: std::collections::HashSet<String> = std::env::var("TRITON_PAIRING_TOOLS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect();
+    let mut out = std::collections::HashMap::new();
+    if !tools.is_empty() {
+        out.insert("pairing".to_string(), tools);
+    }
+    out
+}
+
 /// Read and parse `TRITON_DENIED_PRINCIPALS` (#287).
 ///
 /// Comma-separated `tenant/sub` entries; trimmed, blanks dropped. An
@@ -218,7 +262,11 @@ impl Dispatcher {
             env: env.into(),
             upstream: None,
             metrics: Arc::new(Metrics::new()),
-            reject_window: crate::ratelimit::RejectionWindow::new(DEFAULT_REJECT_WINDOW),
+            // #249/#284, same reasoning as the denylist below: a control
+            // wired in one host's `main` does not exist for the hosts
+            // that build a dispatcher themselves, and `triton-embed`
+            // hosts do exactly that.
+            reject_window: crate::ratelimit::RejectionWindow::new(reject_window_from_env()),
             // #287: read HERE, not in whichever host remembers to wire
             // it. `triton-bin` did wire it — and the deployment that
             // actually runs does not use `triton-bin`. `triton-embed`
@@ -234,7 +282,7 @@ impl Dispatcher {
             // is a suggestion, not a control. The exception is deliberate
             // and this is the only one.
             denied: denied_principals_from_env(),
-            scope_restrictions: std::collections::HashMap::new(),
+            scope_restrictions: pairing_restriction_from_env(),
         }
     }
 
@@ -257,8 +305,13 @@ impl Dispatcher {
         scope: impl Into<String>,
         tools: impl IntoIterator<Item = String>,
     ) -> Self {
+        // Extend rather than replace: `TRITON_PAIRING_TOOLS` may already
+        // have supplied some, and a host adding the manifest's should not
+        // silently drop the environment's.
         self.scope_restrictions
-            .insert(scope.into(), tools.into_iter().collect());
+            .entry(scope.into())
+            .or_default()
+            .extend(tools);
         self
     }
 
@@ -276,6 +329,13 @@ impl Dispatcher {
             ))),
             _ => Ok(()),
         }
+    }
+
+    /// The coalescing window actually in force, in seconds. A host
+    /// reports what it is RUNNING with rather than what it believes it
+    /// set — those differed, which is how this whole seam came up.
+    pub fn reject_window_secs(&self) -> u64 {
+        self.reject_window.window().as_secs()
     }
 
     /// The principals this dispatcher refuses, as `tenant/sub`. Exposed
