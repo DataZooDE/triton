@@ -115,11 +115,20 @@ pub fn announce(
         );
     }
     if env_name != "local" && !enforcing {
+        // States the FACT and lists both causes without picking one.
+        // The first wording said "more often a host that forgot to pass
+        // DeploymentConfig::from_env()" — and the first deployment it
+        // ran on had passed it correctly, so the warning accused the
+        // right code of the wrong thing. A warning that misdiagnoses
+        // sends its reader to the wrong file, which is worse than the
+        // silence it replaced.
         eprintln!(
-            "WARN dispatcher built with UNENFORCED controls in env `{env_name}`: no \
-             principal is revoked and no scope is restricted. That is a valid \
-             configuration and may be intended — but in a non-local deployment it is \
-             more often a host that forgot to pass DeploymentConfig::from_env()."
+            "WARN no dispatch controls are in force in env `{env_name}`: no principal \
+             is revoked and no scope is restricted. Either nothing is configured \
+             (TRITON_DENIED_PRINCIPALS and TRITON_PAIRING_TOOLS are both unset — \
+             expected on a deployment that has had no incident), or this host built \
+             its dispatcher without passing DeploymentConfig::from_env(). The env \
+             vars tell you which."
         );
     }
 }
