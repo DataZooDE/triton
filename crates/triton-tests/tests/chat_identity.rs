@@ -40,6 +40,79 @@ fn locate_triton_binary() -> PathBuf {
 /// Boot with the given `TRITON_TG_SENDERS` table and return everything
 /// the process wrote plus its exit code.
 fn boot_with_sender_table(table: &str) -> (Option<i32>, String) {
+    boot_adapter("telegram", table)
+}
+
+/// The same boot, parameterised by adapter. #289 migrates one adapter per
+/// commit onto `triton-chat-identity`; each one gets the identical three
+/// assertions from this runner rather than a copy of it, which is the
+/// same argument the crate itself makes.
+fn boot_adapter(adapter: &str, table: &str) -> (Option<i32>, String) {
+    let (manifest, table_var, extra): (String, &str, Vec<(&str, &str)>) = match adapter {
+        "telegram" => (manifest_path(), "TRITON_TG_SENDERS", vec![]),
+        "whatsapp" => (
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/manifest-whatsapp-env-secrets.yaml")
+                .display()
+                .to_string(),
+            "TRITON_WA_SENDER_TABLE",
+            vec![
+                ("TRITON_WA_APP_SECRET", "meta-app-secret-for-test"),
+                ("TRITON_WA_VERIFY_TOKEN", "meta-verify-token-for-test"),
+                ("TRITON_WA_ACCESS_TOKEN", "whatsapp-access-token-for-test"),
+                ("TRITON_WA_PHONE_NUMBER_ID", "100200300"),
+                (
+                    "TRITON_WA_CORRELATION_KEY",
+                    "whatsapp-correlation-key-for-test",
+                ),
+            ],
+        ),
+        other => panic!("no boot fixture wired for `{other}`"),
+    };
+    let mut cmd = std::process::Command::new(locate_triton_binary());
+    cmd.env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        .env("TRITON_ENV", "local")
+        .env("TRITON_MANIFEST_PATH", manifest)
+        .env("TRITON_TELEGRAM_API_BASE", "http://127.0.0.1:1")
+        .env("TRITON_TG_WEBHOOK_SECRET", "secret-resolved-from-vault")
+        .env("TRITON_TG_BOT_TOKEN", "12345:token")
+        .env(
+            "TRITON_TG_CORRELATION_KEY",
+            "32byte-correlation-key-for-test!",
+        )
+        .env(table_var, table)
+        .env("TRITON_DRAIN_DEADLINE_SECS", "0");
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    let out = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn triton");
+    let pid = out.id();
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+    let done = out.wait_with_output().expect("wait");
+    (
+        done.status.code(),
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&done.stdout),
+            String::from_utf8_lossy(&done.stderr)
+        ),
+    )
+}
+
+#[allow(dead_code)]
+fn boot_with_sender_table_unused(table: &str) -> (Option<i32>, String) {
     let out = std::process::Command::new(locate_triton_binary())
         .env("TRITON_HOST", "127.0.0.1")
         .env("TRITON_MCP_PORT", "0")
@@ -193,5 +266,45 @@ async fn an_identity_kind_the_adapter_does_not_implement_refuses_boot() {
     assert!(
         log.contains("SenderTable") && log.contains("Upstream"),
         "…and what IS supported; got:\n{log}"
+    );
+}
+
+// ── whatsapp ────────────────────────────────────────────────────────────
+//
+// The second adapter onto the shared seam. The assertions are identical to
+// telegram's on purpose: the claim #289 makes is that one rule now holds
+// everywhere, and a per-adapter variant of the test would quietly let that
+// stop being true.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whatsapp_refuses_a_sender_table_it_cannot_use_safely() {
+    for (label, table) in [
+        (
+            "whitespace in tenant",
+            r#"{"491701234567":{"sub":"alice","scopes":[],"tenant":"ac me"}}"#,
+        ),
+        (
+            "control character in sub",
+            r#"{"491701234567":{"sub":"al\nice","scopes":[],"tenant":"acme"}}"#,
+        ),
+        (
+            "empty tenant",
+            r#"{"491701234567":{"sub":"alice","scopes":[],"tenant":""}}"#,
+        ),
+    ] {
+        let (code, log) = boot_adapter("whatsapp", table);
+        assert_eq!(code, Some(2), "{label} must refuse boot;\n{log}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whatsapp_still_boots_on_a_well_formed_table() {
+    let (_, log) = boot_adapter(
+        "whatsapp",
+        r#"{"491701234567":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
+    );
+    assert!(
+        log.contains("whatsapp") && !log.contains("identity.table entry"),
+        "a valid table must wire the adapter; got:\n{log}"
     );
 }
