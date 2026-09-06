@@ -1886,3 +1886,51 @@ a trap the next developer should not have to step in.
   everywhere is worse than no row. When counting call sites for a sweep,
   count the CONSTRUCTORS (`grep 'fn from_manifest'`), not the crates or
   the adapter names — an adapter can have two.
+
+## 9. The embedded-surface audit (2026-09-06)
+
+A deliberate sweep after two "the sweep missed a path" findings in two
+review rounds. The rule that came out of it, and the one to use next
+time: **count the CONSTRUCTORS, not the crates.**
+
+`grep -l 'fn from_manifest' crates/triton-chat-*/src/` returns ELEVEN
+files across nine crates, plus `triton-chat-email`'s courier — twelve
+identity-bearing construction paths. The #289 sweep counted eight
+adapters, which is the number of chat platforms, not the number of places
+a sender table is parsed. Three separate corrections were needed before
+the count was right: the two socket adapters (`discord_gateway`,
+`whatsapp_web`) and then email.
+
+What the audit found, in order of severity:
+
+- **`triton-chat-email` parsed `identity.table` unvalidated** — the
+  twelfth path, with its own `RecipientClaims` shape. Lower severity than
+  the others and worth stating precisely: its tenant is COMPARED against
+  the caller's, never minted into a principal, so a malformed entry fails
+  closed. But it fails closed silently, and an operator debugs a refused
+  delivery rather than a table typo. Now validated at boot.
+
+- **A test whose NAME asserted a property it did not check.**
+  `the_tool_listing_is_scoped_too` asserted only that `/v1/tools` returns
+  200 and an array, while its name and doc comment said the
+  discarded-principal leak had been fixed there. It had not:
+  `list_tools` calls `descriptors_all()`, which is deployment-wide. A
+  test like that is worse than no test — it makes an unfixed thing look
+  covered, which is how a traceability row comes to read PASS for a rule
+  the code never implemented. Renamed to what it actually covers.
+
+- **Four handlers still verify a principal and drop it** —
+  `metrics_view`, `surface_render`, `manifest_view`, `list_tools`. Known,
+  deliberate, and now NAMED in the boot warning rather than covered by an
+  overstated claim of "every dispatch, proactive send and audit read".
+
+What the audit confirmed as clean: every `TRITON_*` authorization value
+is read in one place (`triton-config`); no `Dispatcher` can be built
+without deciding its controls; and the four dispatch entry points plus
+`/v1/outbound`, the two audit reads and `tasks/get` all consult the
+denylist.
+
+One thing left alone: `TRITON_GOOGLE_CHAT_PUBLIC_BASE` is read per
+request inside the adapter. It is a base URL for image links, not an
+authorization value, so it is outside this rule — noted so the next
+reader does not have to re-derive that.

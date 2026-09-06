@@ -2527,6 +2527,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "triton-chat-identity",
  "triton-core",
  "triton-manifest",
  "triton-secrets",

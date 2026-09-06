@@ -185,9 +185,23 @@ async fn unattributed_rejections_are_operator_only() {
     );
 }
 
-/// `/v1/tools` had the same discarded-principal shape.
+/// `/v1/tools` is NOT tenant-scoped, and this test does not claim it is.
+///
+/// It was called `the_tool_listing_is_scoped_too` with a doc line saying
+/// it "had the same discarded-principal shape" — while asserting only
+/// that the response is 200 and `tools` is an array. A test whose NAME
+/// asserts a security property it does not check is worse than no test:
+/// it makes an unfixed thing look covered, which is exactly how a
+/// traceability row comes to read PASS for a rule the code never
+/// implemented.
+///
+/// What is actually true: `list_tools` verifies the caller and then calls
+/// `descriptors_all()`, which is deployment-wide. There is no per-tenant
+/// tool set to scope BY today, so the honest position is that the
+/// listing is authenticated but not scoped — and the boot warning names
+/// it among the surfaces a revoked principal can still read.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_tool_listing_is_scoped_too() {
+async fn the_tool_listing_is_authenticated_but_not_tenant_scoped() {
     let issuer = TestIssuer::start().await;
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer)).await;
     let acme = token_for(&issuer, "alice", "acme", "chat");
