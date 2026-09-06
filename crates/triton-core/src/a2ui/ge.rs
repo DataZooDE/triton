@@ -61,6 +61,39 @@ pub const BASIC_CATALOG: &str =
 /// gives the charts — so the Material card's primary accents match the chart.
 const THEME_PRIMARY_COLOR: &str = "#1a73e8";
 
+/// Sentinel stored as a source button's re-ask "question": clicking the button
+/// opens the cited document in a Canvas side panel rather than dispatching a
+/// turn to the agent. [`question_for`] returns this string like any re-ask; the
+/// A2A layer detects it via [`open_doc`] and replies with
+/// [`build_document_canvas`] instead of running the agent. The prefix is a
+/// control char so it can never collide with a question a user could type.
+const DOC_OPEN_SENTINEL: &str = "\u{1}a2ui-open-doc\u{1}";
+
+/// Feature flag (`TRITON_GE_DOC_CANVAS`): emit in-card "Open source" buttons
+/// that render the cited document in a GE **Canvas** side panel (an `IFrameUrl`
+/// to the signed `/docs` page). OFF by default — the `IFrameUrl` host must
+/// first be on GE's widget allowlist, otherwise the panel shows a security
+/// error. When off, `sources` stay a no-op here and ride the prose bubble as
+/// Markdown links (`reply_text`), exactly as before.
+pub fn doc_canvas_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("TRITON_GE_DOC_CANVAS")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+/// If `text` is a source-open sentinel (produced by a card source button and
+/// round-tripped through [`question_for`]), return `(label, url)` for the
+/// document to open. `None` for an ordinary re-ask or text turn.
+pub fn open_doc(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix(DOC_OPEN_SENTINEL)?;
+    let (label, url) = rest.split_once('\u{1}')?;
+    let url = url.trim();
+    (!url.is_empty()).then_some((label, url))
+}
+
 /// Fixed surfaceId prefix; a v4 UUID follows. The id is kept SHORT
 /// (`triton-answer-<uuid>`, 50 chars) on purpose: Gemini Enterprise TRUNCATES
 /// the surfaceId to the uuid on a button click (observed on the wire — a longer
@@ -248,12 +281,46 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                 }));
                 button_ids.push(btn_id);
             }
-            // Sources are NOT put in the card: GE's basic catalog has no link
-            // component and its Text excludes link markdown, so a card source
-            // could only be dead text. The spec-A2A text part (`reply_text`)
-            // instead appends them as clickable Markdown links in the prose
-            // bubble, which GE renders as real anchors. So drop `sources` here.
-            "sources" => {}
+            // Sources: with the Canvas feature OFF (default) they ride the
+            // prose bubble as Markdown links (`reply_text`) — GE's basic
+            // catalog can't hyperlink in-card, so this stays a no-op. With it
+            // ON (allowlist arranged), each https source becomes an OUTLINED
+            // "Open" button; clicking it opens the signed `/docs` page in a
+            // Canvas side panel via the [`open_doc`] round-trip (keyed by the
+            // button's own id, same machinery as a re-ask).
+            "sources" => {
+                if !doc_canvas_enabled() {
+                    continue;
+                }
+                let Some(items) = c.get("items").and_then(Value::as_array) else {
+                    continue;
+                };
+                for it in items {
+                    let Some(url) = it
+                        .get("resource")
+                        .and_then(Value::as_str)
+                        .filter(|u| u.starts_with("https://"))
+                    else {
+                        continue;
+                    };
+                    let label = it.get("label").and_then(Value::as_str).unwrap_or("source");
+                    let btn_id = id("btn", &mut n);
+                    // Round-trip payload: the click resolves to this sentinel,
+                    // which the A2A layer turns into a Canvas (no agent turn).
+                    qmap.insert(n, format!("{DOC_OPEN_SENTINEL}{label}\u{1}{url}"));
+                    // Outlined (not filled) so a source reads as a secondary,
+                    // link-like action, distinct from the solid follow-ups.
+                    flat.push(json!({
+                        "id": btn_id.clone(),
+                        "component": "MaterialButton",
+                        "label": format!("Open: {label}"),
+                        "variant": "outlined",
+                        "color": "primary",
+                        "action": { "event": { "name": "open_doc", "context": {} } },
+                    }));
+                    button_ids.push(btn_id);
+                }
+            }
             _ => {}
         }
     }
@@ -318,6 +385,53 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
             "updateComponents": { "surfaceId": surface_id, "components": flat },
         }),
     ])
+}
+
+/// Build a **Canvas-rooted** A2UI surface that shows `url` (the signed,
+/// Material-themed `/docs` page) in Gemini Enterprise's resizable **side
+/// panel**. `Canvas` MUST be the surface root (GE renders a compact opener
+/// card in the chat stream that opens the panel — `autoOpen` opens it
+/// immediately). The `IFrameUrl` host must be on GE's widget allowlist, which
+/// is why the source buttons that reach here are gated by
+/// [`doc_canvas_enabled`]. Returns the `createSurface` + `updateComponents`
+/// message pair, ready for [`data_parts`].
+pub fn build_document_canvas(url: &str, title: &str) -> Vec<Value> {
+    let surface_id = format!("{SURFACE_PREFIX}{}", uuid::Uuid::new_v4());
+    let flat = vec![
+        json!({
+            "id": "doc-frame",
+            "component": "IFrameUrl",
+            "url": url,
+            "title": title,
+            "height": 640,
+        }),
+        json!({
+            "id": "root",
+            "component": "Canvas",
+            "children": ["doc-frame"],
+            "autoOpen": true,
+            "cardTitle": title,
+            "cardDescription": "Open the source document",
+            "cardIcon": "description",
+        }),
+    ];
+    vec![
+        json!({
+            "version": "v0.9",
+            "createSurface": {
+                "surfaceId": surface_id,
+                "catalogId": BASIC_CATALOG,
+                "theme": {
+                    "primaryColor": THEME_PRIMARY_COLOR,
+                    "agentDisplayName": "DataZoo Agent",
+                },
+            },
+        }),
+        json!({
+            "version": "v0.9",
+            "updateComponents": { "surfaceId": surface_id, "components": flat },
+        }),
+    ]
 }
 
 /// Wrap each A2UI message as its OWN A2A `DataPart`.
@@ -509,6 +623,62 @@ mod tests {
             { "kind": "report", "report_id": "x" }
         ] } }))
             .is_none()
+        );
+    }
+
+    #[test]
+    fn build_document_canvas_is_canvas_rooted_with_an_iframe() {
+        let msgs =
+            build_document_canvas("https://agent-lab.data-zoo.de/docs/tok", "Beverages GmbH");
+        assert_eq!(msgs.len(), 2, "createSurface + updateComponents");
+        assert_eq!(msgs[0]["createSurface"]["catalogId"], BASIC_CATALOG);
+        let comps = msgs[1]["updateComponents"]["components"]
+            .as_array()
+            .unwrap();
+        // Root MUST be the Canvas (GE requires it as the surface root), and it
+        // holds the IFrameUrl pointing at the signed /docs page.
+        let root = find(comps, "root");
+        assert_eq!(root["component"], "Canvas");
+        assert_eq!(root["autoOpen"], true);
+        assert_eq!(root["cardTitle"], "Beverages GmbH");
+        let child = root["children"][0].as_str().unwrap();
+        let frame = find(comps, child);
+        assert_eq!(frame["component"], "IFrameUrl");
+        assert_eq!(frame["url"], "https://agent-lab.data-zoo.de/docs/tok");
+    }
+
+    #[test]
+    fn open_doc_round_trips_the_sentinel() {
+        // What a source button stores in the re-ask table, and what the A2A
+        // layer parses back out of the resolved question.
+        let stored = format!("{DOC_OPEN_SENTINEL}Beverages GmbH\u{1}https://x/docs/tok");
+        assert_eq!(
+            open_doc(&stored),
+            Some(("Beverages GmbH", "https://x/docs/tok"))
+        );
+        // An ordinary re-ask question is not an open-doc sentinel.
+        assert_eq!(open_doc("What does Initech buy?"), None);
+    }
+
+    #[test]
+    fn sources_stay_out_of_the_card_when_the_canvas_flag_is_off() {
+        // Default (flag off): a sources-only surface renders nothing in-card —
+        // sources ride the prose bubble as Markdown links, unchanged. The
+        // flag-ON rendering (source → outlined Open button → Canvas) is
+        // verified live in the GE UI (the OnceLock-cached env flag can't be
+        // toggled per-test in a shared process).
+        let result = json!({ "surface": { "components": [
+            { "kind": "sources", "items": [
+                { "label": "sales-by-customer", "resource": "https://agent-lab.data-zoo.de/docs/tok" }
+            ] }
+        ] } });
+        assert!(
+            !doc_canvas_enabled(),
+            "flag defaults off in the test process"
+        );
+        assert!(
+            build_messages(&result).is_none(),
+            "with the canvas flag off, a sources-only surface renders nothing in-card"
         );
     }
 

@@ -445,6 +445,20 @@ async fn message_send(
     let trace_id = principal.trace_id.clone();
     let tool = state.config.default_tool.clone();
 
+    // A GE source button click resolves to an open-doc sentinel (not a real
+    // turn): reply directly with the Canvas side-panel surface — no agent
+    // dispatch, the /docs URL is already signed and in hand.
+    if let Some((label, url)) = triton_core::a2ui::ge::open_doc(&text) {
+        let msg = json!({
+            "kind": "message",
+            "role": "agent",
+            "messageId": uuid::Uuid::new_v4().to_string(),
+            "parts": doc_canvas_parts(label, url),
+            "contextId": context_id,
+        });
+        return rpc_ok(&req.id, msg);
+    }
+
     // #635 P6 — disconnect-safe by construction: the dispatch runs in a
     // SPAWNED task that records its terminal state (and the clamped
     // reply) into the store from inside itself. The handler merely
@@ -559,6 +573,47 @@ async fn message_stream(
         .and_then(Value::as_str)
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+
+    // A GE source button click (open-doc sentinel): emit a one-shot SSE — a
+    // working task, the Canvas surface as a final artifact, and a completed
+    // status — with no agent dispatch. Same short-circuit as message/send,
+    // shaped as the stream frames GE expects.
+    if let Some((label, url)) = triton_core::a2ui::ge::open_doc(&text) {
+        state.a2a.tasks.record_entry(
+            &trace_id,
+            TaskState::Completed,
+            Some("opened source document"),
+            None,
+        );
+        let rpc_id = req.id.clone();
+        let rpc = move |result: Value| serde_json::json!({ "jsonrpc": "2.0", "id": rpc_id.clone(), "result": result });
+        let artifact_id = uuid::Uuid::new_v4().to_string();
+        let frames = vec![
+            rpc(json!({
+                "kind": "task", "id": trace_id, "contextId": context_id,
+                "status": { "state": "working" },
+            })),
+            rpc(json!({
+                "kind": "artifact-update", "taskId": trace_id, "contextId": context_id,
+                "lastChunk": true,
+                "artifact": { "artifactId": artifact_id, "parts": doc_canvas_parts(label, url) },
+            })),
+            rpc(json!({
+                "kind": "status-update", "taskId": trace_id, "contextId": context_id,
+                "status": { "state": "completed" }, "final": true,
+            })),
+        ];
+        let sse = futures::stream::iter(frames).map(|v| {
+            Ok::<axum::response::sse::Event, std::convert::Infallible>(
+                axum::response::sse::Event::default().data(v.to_string()),
+            )
+        });
+        return axum::response::Sse::new(sse)
+            .keep_alive(
+                axum::response::sse::KeepAlive::new().interval(std::time::Duration::from_secs(15)),
+            )
+            .into_response();
+    }
 
     state.a2a.tasks.record(&trace_id, TaskState::Working);
     // Kept for the terminal report→VegaChart expansion (invoke_streaming
@@ -830,6 +885,18 @@ async fn inject_report_vega(
 /// no link component and its Text excludes link markdown — so sources ride the
 /// prose bubble, where GE (and Copilot Studio / Gemini) render Markdown links as
 /// real anchors. A `ui://` MCP resource can't open and is skipped.
+/// The agent Message `parts` for a source-open Canvas: a short text part (for
+/// text-only clients) + the A2UI Canvas DataParts (GE opens the side panel).
+fn doc_canvas_parts(label: &str, url: &str) -> Vec<Value> {
+    let msgs = triton_core::a2ui::ge::build_document_canvas(url, label);
+    let mut parts = vec![json!({
+        "kind": "text",
+        "text": format!("Opening “{label}” in the side panel."),
+    })];
+    parts.extend(triton_core::a2ui::ge::data_parts(msgs));
+    parts
+}
+
 fn sources_markdown(result: &Value) -> Option<String> {
     let components = result.get("surface")?.get("components")?.as_array()?;
     let links: Vec<String> = components
@@ -1057,5 +1124,36 @@ mod reply_text_tests {
             "surface": { "components": [ { "kind": "text", "value": "Initech leads." } ] }
         });
         assert_eq!(reply_text(&none), "Initech leads.");
+    }
+
+    #[test]
+    fn doc_canvas_parts_carry_text_and_the_canvas_dataparts() {
+        // A source-open reply: one text part (text-only clients) + the A2UI
+        // Canvas DataParts (GE opens the /docs page in the side panel).
+        let parts = doc_canvas_parts("Beverages GmbH", "https://agent.example/docs/tok");
+        assert_eq!(parts[0]["kind"], "text");
+        assert!(
+            parts[0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Beverages GmbH")
+        );
+        // The rest are A2UI DataParts (createSurface + updateComponents), each
+        // an object with the GE mime.
+        let data: Vec<&Value> = parts.iter().filter(|p| p["kind"] == "data").collect();
+        assert_eq!(data.len(), 2, "createSurface + updateComponents");
+        assert!(data.iter().all(|p| p["data"].is_object()));
+        // The updateComponents part carries the Canvas root + the IFrameUrl.
+        let comps = data
+            .iter()
+            .find_map(|p| p["data"]["updateComponents"]["components"].as_array())
+            .expect("updateComponents");
+        assert!(comps.iter().any(|c| c["component"] == "Canvas"));
+        assert!(
+            comps
+                .iter()
+                .any(|c| c["component"] == "IFrameUrl"
+                    && c["url"] == "https://agent.example/docs/tok")
+        );
     }
 }
