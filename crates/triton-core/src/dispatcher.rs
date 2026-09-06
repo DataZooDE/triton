@@ -155,6 +155,51 @@ pub struct Dispatcher {
     scope_restrictions: std::collections::HashMap<String, std::collections::HashSet<String>>,
 }
 
+/// Read and parse `TRITON_DENIED_PRINCIPALS` (#287).
+///
+/// Comma-separated `tenant/sub` entries; trimmed, blanks dropped. An
+/// entry WITHOUT a `/` is dropped with a warning rather than treated as
+/// a bare `sub`: `alice` exists in every tenant, and the person typing
+/// the short form is by definition in a hurry. Better to revoke nobody,
+/// loudly, than to revoke more than was asked.
+///
+/// Unset or empty denies nobody, which has to be the default — an
+/// operator who never sets this must not discover it by having their
+/// gateway refuse everyone.
+fn denied_principals_from_env() -> std::collections::HashSet<String> {
+    let raw = match std::env::var("TRITON_DENIED_PRINCIPALS") {
+        Ok(v) => v,
+        Err(_) => return std::collections::HashSet::new(),
+    };
+    parse_denied_principals(&raw)
+}
+
+/// The parse itself, separated so it can be tested without the process
+/// environment (which several hundred tests share).
+pub fn parse_denied_principals(raw: &str) -> std::collections::HashSet<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|entry| match entry.split_once('/') {
+            Some((tenant, sub)) if !tenant.is_empty() && !sub.is_empty() => Some(entry.to_string()),
+            _ => {
+                // This crate has no tracing dependency; the audit emitter
+                // is its logging surface and this is boot-time operator
+                // feedback, not an audit event. stderr is the honest
+                // channel for it — and it MUST be said out loud, because
+                // the failure mode is an operator believing they revoked
+                // someone when they did not.
+                eprintln!(
+                    "WARN TRITON_DENIED_PRINCIPALS entry `{entry}` ignored: expected \
+                     `tenant/sub` (a bare subject would deny that name in EVERY \
+                     tenant, so it is refused rather than guessed)"
+                );
+                None
+            }
+        })
+        .collect()
+}
+
 /// The synthetic `subject` an adapter passes when it refused an inbound
 /// before any Principal existed (see [`Dispatcher::record_rejection`]).
 /// This is what distinguishes the anonymous flood that gets coalesced
@@ -174,7 +219,21 @@ impl Dispatcher {
             upstream: None,
             metrics: Arc::new(Metrics::new()),
             reject_window: crate::ratelimit::RejectionWindow::new(DEFAULT_REJECT_WINDOW),
-            denied: std::collections::HashSet::new(),
+            // #287: read HERE, not in whichever host remembers to wire
+            // it. `triton-bin` did wire it — and the deployment that
+            // actually runs does not use `triton-bin`. `triton-embed`
+            // hosts call this constructor directly (dz-agent-template
+            // does, in three separate places), so the denylist deployed,
+            // the pod booted, and nothing was revoked.
+            //
+            // This crate is otherwise env-free on purpose, and
+            // `with_rejection_window`'s doc says so. That rule was
+            // written for a TUNING parameter. A revocation lever is not
+            // tuning: its entire value is that it applies everywhere, and
+            // a security control each call site must remember to opt into
+            // is a suggestion, not a control. The exception is deliberate
+            // and this is the only one.
+            denied: denied_principals_from_env(),
             scope_restrictions: std::collections::HashMap::new(),
         }
     }
@@ -219,6 +278,13 @@ impl Dispatcher {
         }
     }
 
+    /// The principals this dispatcher refuses, as `tenant/sub`. Exposed
+    /// so a host can log an active denylist at boot — an operator should
+    /// be able to see the lever is engaged without knowing to look.
+    pub fn denied_principals(&self) -> impl Iterator<Item = &str> {
+        self.denied.iter().map(String::as_str)
+    }
+
     /// #287: revoke a set of principals, named `tenant/sub`.
     ///
     /// Every secret here is boot-time-only and every token runs to its
@@ -239,6 +305,9 @@ impl Dispatcher {
     /// This is a kill switch, not an authorization system. It answers
     /// "this principal is compromised, stop it now" and nothing else;
     /// per-tool permission is `can_invoke`'s job.
+    /// Overrides whatever the environment supplied. Hosts that configure
+    /// the set explicitly (and tests) use this; nobody needs to call it
+    /// for `TRITON_DENIED_PRINCIPALS` to take effect.
     pub fn with_denied_principals<I, S>(mut self, denied: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -1071,6 +1140,30 @@ pub fn envelope(dispatch: &Dispatch) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_denied_principals;
+
+    #[test]
+    fn denied_principals_require_a_tenant_qualifier() {
+        let d = parse_denied_principals("acme/alice, globex/bob ");
+        assert!(d.contains("acme/alice") && d.contains("globex/bob"));
+        assert_eq!(d.len(), 2);
+        // A bare subject is DROPPED, not widened to every tenant.
+        assert!(parse_denied_principals("alice").is_empty());
+        assert!(parse_denied_principals("/alice").is_empty());
+        assert!(parse_denied_principals("acme/").is_empty());
+        // A mixed list keeps the well-formed entries and drops the rest.
+        let mixed = parse_denied_principals("alice,acme/bob");
+        assert_eq!(mixed.len(), 1);
+        assert!(mixed.contains("acme/bob"));
+    }
+
+    #[test]
+    fn an_empty_denylist_is_the_default() {
+        assert!(parse_denied_principals("").is_empty());
+        assert!(parse_denied_principals("  ").is_empty());
+        assert!(parse_denied_principals(" , ,").is_empty());
+    }
+
     use super::*;
 
     /// An upstream that returns a surface, like a real agent.
