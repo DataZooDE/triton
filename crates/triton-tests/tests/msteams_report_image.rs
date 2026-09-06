@@ -212,12 +212,14 @@ async fn report_component_renders_a_chart_image_served_by_the_img_route() {
         bytes.len()
     );
 
-    // The render happened on FETCH, not at reply time: the report
-    // upstream saw exactly one call, and it came after the card.
+    // render_report is dispatched twice for a report reply now: once at reply
+    // time to probe for a native Vega chart (interactive charts need the data
+    // in the card — this fake report has none, so the card falls back to the
+    // signed Image above), and once by the img route on fetch.
     assert_eq!(
         report.hits(),
-        1,
-        "render_report is dispatched once, by the img route"
+        2,
+        "reply-time native-chart probe + img-route fetch"
     );
 }
 

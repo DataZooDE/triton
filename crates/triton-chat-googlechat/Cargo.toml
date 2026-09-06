@@ -13,6 +13,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 triton-chat-identity = { path = "../triton-chat-identity" }
 triton-core = { path = "../triton-core" }
 triton-correlation = { path = "../triton-correlation" }
+triton-chat-routing = { path = "../triton-chat-routing" }
 triton-manifest = { path = "../triton-manifest" }
 triton-rasterizer = { path = "../triton-rasterizer" }
 triton-secrets = { path = "../triton-secrets" }

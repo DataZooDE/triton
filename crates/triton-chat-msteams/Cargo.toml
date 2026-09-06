@@ -16,6 +16,7 @@ futures = { workspace = true }
 triton-chat-identity = { path = "../triton-chat-identity" }
 triton-core = { path = "../triton-core" }
 triton-correlation = { path = "../triton-correlation" }
+triton-chat-routing = { path = "../triton-chat-routing" }
 triton-manifest = { path = "../triton-manifest" }
 triton-secrets = { path = "../triton-secrets" }
 axum = { workspace = true }

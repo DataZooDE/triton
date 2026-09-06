@@ -30,7 +30,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, OutboundKind, SignatureScheme};
 use triton_secrets::{ResolveError, SecretResolver};
@@ -187,6 +187,11 @@ pub struct MsTeamsAdapter {
     /// single-claimant — the path is fixed and `Router::merge` panics on
     /// an overlap, so triton-bin refuses a second claimant.
     canonical_path: bool,
+    /// Agent-multiplexing router (host-provided, #315). When `Some`, an inbound
+    /// message and a `__use_agent` chooser click route through it to pick WHICH
+    /// agent handles the turn, overriding `inbound_tool`. `None` ⇒ legacy
+    /// single-tool `route_command(text, &inbound_tool)`.
+    router: Option<Arc<dyn triton_chat_routing::AgentRouter>>,
 }
 
 impl MsTeamsAdapter {
@@ -524,7 +529,15 @@ impl MsTeamsAdapter {
             per_tenant_limit,
             courier,
             canonical_path,
+            router: None,
         })
+    }
+
+    /// Attach the agent-multiplexing router (host-provided). Call before
+    /// wrapping the adapter in an `Arc`. Absent ⇒ legacy single-tool routing.
+    pub fn with_router(mut self, router: Arc<dyn triton_chat_routing::AgentRouter>) -> Self {
+        self.router = Some(router);
+        self
     }
 
     /// Whether this adapter claims the canonical `/api/messages` path
@@ -811,6 +824,12 @@ async fn handle_webhook(
             )
             .await
         }
+        // A source "Open" button (task/fetch): render the cited document and
+        // return it as a task-module dialog card. Fast (a peacock render, not
+        // an LLM turn), so it rides the invoke's own HTTP response.
+        Some("invoke") if activity.name.as_deref() == Some("task/fetch") => {
+            handle_task_fetch(&adapter, &activity).await
+        }
         Some("message") => {
             if let Some(value) = activity.value.clone() {
                 return handle_callback(
@@ -1058,12 +1077,107 @@ async fn dispatch_message(
     // closing `</at>` (with whitespace trimmed) is what we route as
     // the command.
     let stripped = strip_mention_prefix(text);
-    let (tool_name, args) = route_command(stripped, &adapter.inbound_tool);
 
     let conversation_type = activity
         .conversation
         .as_ref()
         .and_then(|c| c.conversation_type.clone());
+
+    // Agent multiplexing (host-provided router, #315). Route by text to pick
+    // the agent; a chooser / info / deny reply is POSTed here, a Dispatch runs
+    // the picked agent. `None` router ⇒ legacy single-tool routing below.
+    let (tool_name, args) = if let Some(router) = adapter.router.clone() {
+        let key =
+            triton_chat_routing::ConvKey::msteams(conversation_id.clone(), "", sender.sub.clone());
+        let ctx = triton_chat_routing::RouteCtx {
+            key,
+            text: stripped,
+            tenant: &sender.tenant,
+            caller_sub: &sender.sub,
+            pick: None,
+        };
+        match router.route(ctx).await {
+            triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
+                route_command(&text, &agent_id)
+            }
+            triton_chat_routing::RouteOutcome::Chooser {
+                candidates,
+                pending_text,
+                ..
+            } => {
+                let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+                let chrome = fetch_chrome(adapter, &principal).await;
+                let signed: Vec<(String, String)> = candidates
+                    .iter()
+                    .filter_map(|a| {
+                        let payload = serde_json::json!({ "id": a.id, "msg": pending_text });
+                        // Bound like every other card token (#250/#287):
+                        // the chooser lands in a channel every member can
+                        // see, so it is a capability for the CLICKER.
+                        triton_correlation::encode_bound(
+                            triton_chat_routing::USE_AGENT_TOOL,
+                            &payload,
+                            adapter.correlation_key.signing(),
+                            surface_mapper::MSTEAMS_CORRELATION_CAP,
+                            triton_correlation::Binding {
+                                platform: "msteams",
+                                tenant: &sender.tenant,
+                                sender: &sender.from_id,
+                            },
+                            Some(CARD_TOKEN_TTL_SECS),
+                        )
+                        .ok()
+                        .map(|tok| (a.display.clone(), tok))
+                    })
+                    .collect();
+                let prompt = "Which agent should handle this? Pick one below, or type \
+                              `/use <name>` any time (`/agents` to list, `/whoami` to check).";
+                let card = surface_mapper::build_agent_chooser(prompt, &signed, &chrome);
+                let body = surface_mapper::build_card_activity_body(
+                    &recipient_id,
+                    &conversation_id,
+                    &sender.from_id,
+                    card,
+                );
+                post_reply(
+                    adapter,
+                    verified,
+                    triton_chat_routing::USE_AGENT_TOOL,
+                    &principal,
+                    &conversation_id,
+                    body,
+                    0,
+                )
+                .await;
+                return StatusCode::OK.into_response();
+            }
+            triton_chat_routing::RouteOutcome::Info { text }
+            | triton_chat_routing::RouteOutcome::Deny { message: text } => {
+                let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+                let msg = surface_mapper::RenderedMessage::text_only(text);
+                let body = surface_mapper::build_activity_body(
+                    &recipient_id,
+                    &conversation_id,
+                    &sender.from_id,
+                    &msg,
+                );
+                post_reply(
+                    adapter,
+                    verified,
+                    triton_chat_routing::USE_AGENT_TOOL,
+                    &principal,
+                    &conversation_id,
+                    body,
+                    0,
+                )
+                .await;
+                return StatusCode::OK.into_response();
+            }
+        }
+    } else {
+        route_command(stripped, &adapter.inbound_tool)
+    };
+
     dispatch_and_post_reply(
         adapter,
         verified,
@@ -1075,6 +1189,124 @@ async fn dispatch_message(
         conversation_type,
     )
     .await
+}
+
+/// Deep-search a `render_report` result for the document render's structured
+/// content: the object carrying an `instances` or `document` key. Robust to
+/// the exact nesting (top level, or under `structuredContent`).
+fn find_document_structured(v: &Value) -> Option<&Value> {
+    match v {
+        Value::Object(m) => {
+            if m.contains_key("instances") || m.contains_key("document") {
+                return Some(v);
+            }
+            m.values().find_map(find_document_structured)
+        }
+        Value::Array(a) => a.iter().find_map(find_document_structured),
+        _ => None,
+    }
+}
+
+/// `task/fetch` (a source "Open" button): decode the signed open-doc token,
+/// render the peacock `document` report for its `(skill, id)`, and return the
+/// document as a `task/continue` dialog card. The webhook JWT is already
+/// verified; the HMAC token authorises the specific (skill, id).
+async fn handle_task_fetch(adapter: &Arc<MsTeamsAdapter>, activity: &Activity) -> Response {
+    let sender = match resolve_sender(adapter, activity) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    if let Some(resp) = check_tenant_limit(adapter, &sender.sub, &sender.tenant) {
+        return resp;
+    }
+    let token = activity
+        .value
+        .as_ref()
+        .and_then(|v| v.get("data"))
+        .and_then(|d| d.get(surface_mapper::TOKEN_DATA_KEY))
+        .and_then(Value::as_str);
+    let Some(token) = token else {
+        return (StatusCode::BAD_REQUEST, "missing action").into_response();
+    };
+    // #250/#287: the OpenDoc token was minted bound to (tenant, sender)
+    // in `render_card_content`; verify it against the SENDER of this
+    // `task/fetch`, not merely against the key.
+    let (tool_name, args) = match triton_correlation::decode_bound_any(
+        token,
+        &adapter.correlation_key,
+        surface_mapper::MSTEAMS_CORRELATION_CAP,
+        triton_correlation::Binding {
+            platform: "msteams",
+            tenant: &sender.tenant,
+            sender: &sender.from_id,
+        },
+    ) {
+        Ok(p) => p,
+        Err(_) => {
+            record_rejection(
+                adapter,
+                &sender.sub,
+                &sender.tenant,
+                TritonError::Auth("task/fetch correlation token invalid".into()),
+            );
+            return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+        }
+    };
+    let skill = args
+        .get("skill")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let id = args.get("id").and_then(Value::as_str).unwrap_or_default();
+    if tool_name != surface_mapper::OPEN_DOC_TOOL || skill.is_empty() || id.is_empty() {
+        return (StatusCode::BAD_REQUEST, "unexpected action").into_response();
+    }
+
+    let title = format!("{skill} \u{b7} {id}");
+    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let principal_for_post = principal.clone();
+    let started = std::time::Instant::now();
+    let result = adapter
+        .dispatcher
+        .invoke(
+            "render_report",
+            json!({ "report_id": "document", "params": { "skill": skill, "id": id } }),
+            principal,
+            PROTOCOL,
+        )
+        .await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    let card = match &result {
+        Ok(dispatch) => {
+            let structured = find_document_structured(&dispatch.result)
+                .cloned()
+                .unwrap_or(Value::Null);
+            surface_mapper::build_document_dialog_card(&structured)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, class = %e.class(), "msteams task/fetch render failed");
+            // A minimal card so the dialog shows a message instead of failing.
+            json!({
+                "type": "AdaptiveCard",
+                "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                "version": "1.4",
+                "body": [ { "type": "TextBlock", "wrap": true,
+                    "text": "This document is unavailable right now." } ],
+            })
+        }
+    };
+    adapter.dispatcher.record_post(
+        surface_mapper::OPEN_DOC_TOOL,
+        PROTOCOL,
+        &principal_for_post,
+        latency_ms,
+        Ok((200, PostOutcome::Posted, None)),
+    );
+    (
+        StatusCode::OK,
+        axum::Json(surface_mapper::task_continue_response(&title, card)),
+    )
+        .into_response()
 }
 
 /// Handle a card callback: verify the signed correlation token, merge
@@ -1117,7 +1349,7 @@ async fn handle_callback(
     // An `Action.Submit.data` token travels in a card that every member
     // of a Teams channel can see, so without the sender in the
     // derivation the card is a capability held by the whole tenant.
-    let (tool_name, mut args) = match triton_correlation::decode_bound_any(
+    let (mut tool_name, mut args) = match triton_correlation::decode_bound_any(
         &token,
         &adapter.correlation_key,
         surface_mapper::MSTEAMS_CORRELATION_CAP,
@@ -1145,6 +1377,64 @@ async fn handle_callback(
     // preset button also submits the (blank) sibling inputs; an empty
     // merge would clobber the button's own preset args.
     merge_inputs(&mut args, inputs);
+
+    // Agent multiplexing (#315): a `__use_agent` chooser click confirms a pick.
+    // The router binds the agent and replays the buffered message; the picked
+    // agent then runs through the normal Execute path below. A denied pick
+    // answers the invoke directly.
+    if tool_name == triton_chat_routing::USE_AGENT_TOOL
+        && let Some(router) = adapter.router.clone()
+    {
+        let id = args
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let msg = args
+            .get("msg")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let conversation_id = activity
+            .conversation
+            .as_ref()
+            .map(|c| c.id.clone())
+            .unwrap_or_default();
+        let key = triton_chat_routing::ConvKey::msteams(conversation_id, "", sender.sub.clone());
+        let ctx = triton_chat_routing::RouteCtx {
+            key,
+            text: &msg,
+            tenant: &sender.tenant,
+            caller_sub: &sender.sub,
+            pick: Some((id, msg.clone())),
+        };
+        match router.route(ctx).await {
+            triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
+                let (t, a) = route_command(&text, &agent_id);
+                tool_name = t;
+                args = a;
+            }
+            triton_chat_routing::RouteOutcome::Info { text }
+            | triton_chat_routing::RouteOutcome::Deny { message: text } => {
+                return (
+                    StatusCode::OK,
+                    axum::Json(surface_mapper::invoke_message_response(&text)),
+                )
+                    .into_response();
+            }
+            // A pick that resolves to another chooser is degenerate; surface it
+            // as a hint rather than dispatching the sentinel tool.
+            triton_chat_routing::RouteOutcome::Chooser { .. } => {
+                return (
+                    StatusCode::OK,
+                    axum::Json(surface_mapper::invoke_message_response(
+                        "That agent isn't available — type `/agents` to see the list.",
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    }
 
     let conversation_type = activity
         .conversation
@@ -1303,9 +1593,11 @@ async fn dispatch_and_post_reply(
                 &sender.from_id,
                 &dispatch.result,
                 image_hint,
+                &principal_for_post,
                 &chrome,
                 &sender.tenant,
-            );
+            )
+            .await;
             post_reply(
                 adapter,
                 verified,
@@ -1362,10 +1654,18 @@ async fn dispatch_and_refresh_card(
             let image_url =
                 image_hint.or_else(|| reply_image_url(adapter, &dispatch.result, &sender.tenant));
             let chrome = fetch_chrome(adapter, &principal_for_post).await;
+            let chart = report_vega_chart(
+                adapter,
+                &dispatch.result,
+                &principal_for_post,
+                image_url.as_deref(),
+            )
+            .await;
             let response_body = match render_card_content(
                 adapter,
                 &dispatch.result,
                 image_url.as_deref(),
+                chart.as_ref(),
                 &chrome,
                 &sender.tenant,
                 &sender.from_id,
@@ -1590,13 +1890,14 @@ async fn serve_report_png(
 /// Adaptive Card when the surface carries interactive controls or a
 /// dashboard, otherwise the plain-text Activity.
 #[allow(clippy::too_many_arguments)]
-fn build_reply_body(
+async fn build_reply_body(
     adapter: &MsTeamsAdapter,
     bot_id: &str,
     conversation_id: &str,
     recipient_id: &str,
     result: &Value,
     image_hint: Option<String>,
+    principal: &triton_core::Principal,
     chrome: &surface_mapper::CardChrome,
     tenant: &str,
 ) -> Value {
@@ -1605,10 +1906,14 @@ fn build_reply_body(
     // component to lift a spec from — the caller minted the URL from
     // the invoked args instead.
     let image_url = image_hint.or_else(|| reply_image_url(adapter, result, tenant));
+    // Native interactive chart (Teams) from peacock's Vega spec, falling back
+    // to the PNG image.
+    let chart = report_vega_chart(adapter, result, principal, image_url.as_deref()).await;
     if let Some(card) = render_card_content(
         adapter,
         result,
         image_url.as_deref(),
+        chart.as_ref(),
         chrome,
         tenant,
         recipient_id,
@@ -1629,6 +1934,7 @@ fn render_card_content(
     adapter: &MsTeamsAdapter,
     result: &Value,
     image_url: Option<&str>,
+    chart: Option<&Value>,
     chrome: &surface_mapper::CardChrome,
     tenant: &str,
     // #287: the card's recipient. Folded into the derived signing key
@@ -1681,8 +1987,66 @@ fn render_card_content(
         dashboard.as_ref(),
         &signed,
         image_url,
+        chart,
         chrome,
     ))
+}
+
+/// Deep-search a `render_report` result for a Vega-Lite spec (peacock exposes
+/// them at `_meta.vega_specs`; also handles a `{kind:vega,spec}` component and
+/// JSON-string-wrapped MCP content).
+fn find_vega_spec(v: &Value) -> Option<Value> {
+    match v {
+        Value::Object(m) => {
+            if m.get("kind").and_then(Value::as_str) == Some("vega")
+                && let Some(spec) = m.get("spec").filter(|s| s.is_object())
+            {
+                return Some(spec.clone());
+            }
+            if let Some(spec) = m
+                .get("vega_specs")
+                .and_then(Value::as_array)
+                .and_then(|a| a.iter().find(|s| s.is_object()))
+            {
+                return Some(spec.clone());
+            }
+            m.values().find_map(find_vega_spec)
+        }
+        Value::Array(a) => a.iter().find_map(find_vega_spec),
+        Value::String(s) if s.trim_start().starts_with(['{', '[']) => {
+            serde_json::from_str::<Value>(s)
+                .ok()
+                .and_then(|p| find_vega_spec(&p))
+        }
+        _ => None,
+    }
+}
+
+/// Build a native Teams Adaptive Card chart element for a result's inline
+/// report: dispatch `render_report` to peacock, extract its Vega-Lite spec, and
+/// map it to a `Chart.*` element (with the PNG as `fallback`). `None` when there
+/// is no report, peacock is unreachable, or the report has no chart — the card
+/// then shows the static image.
+async fn report_vega_chart(
+    adapter: &MsTeamsAdapter,
+    result: &Value,
+    principal: &triton_core::Principal,
+    fallback_image_url: Option<&str>,
+) -> Option<Value> {
+    let (report_id, args) = surface_mapper::report_from_result(result)?;
+    let mut rargs = if args.is_object() {
+        args
+    } else {
+        serde_json::json!({})
+    };
+    rargs["report_id"] = serde_json::json!(report_id);
+    let rep = adapter
+        .dispatcher
+        .invoke("render_report", rargs, principal.clone(), PROTOCOL)
+        .await
+        .ok()?;
+    let spec = find_vega_spec(&rep.result)?;
+    surface_mapper::chart_from_vega(&spec, fallback_image_url)
 }
 
 /// Render a non-interactive result to the plain-text [`RenderedMessage`]
@@ -1999,9 +2363,11 @@ async fn courier_deliver(
                 &sender.from_id,
                 &result_value,
                 image_hint,
+                &principal_for_post,
                 &chrome,
                 &sender.tenant,
             )
+            .await
         }
         Err(e) => {
             tracing::warn!(error = %e, class = %e.class(), "msteams courier dispatch failed");

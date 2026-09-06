@@ -21,7 +21,7 @@
 //! `TextBlock`s render their content as-is.
 
 use serde_json::{Value, json};
-use triton_core::a2ui::{Component, FormFieldKind, Surface, extract_surface};
+use triton_core::a2ui::{Component, FormFieldKind, SourceItem, Surface, extract_surface};
 
 /// The Adaptive Card chrome (branded header) — fetched per reply from the
 /// report upstream's `get_theme` tool. Peacock owns ALL theming (one CSS of
@@ -220,6 +220,12 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             // bot messages and card TextBlocks. Anything else (ui://
             // internal refs) stays a plain label rather than a dead link.
             Component::Sources { items } => {
+                // With the dialog feature on, sources become Open buttons
+                // (see `interactive_from_result`), so drop the text line to
+                // avoid showing each source twice.
+                if doc_dialog_enabled() {
+                    continue;
+                }
                 if !items.is_empty() {
                     let rendered: Vec<String> = items
                         .iter()
@@ -369,6 +375,37 @@ pub const ACTION_VERB: &str = "agentAction";
 /// `data` object (and thus in the callback's `value`).
 pub const TOKEN_DATA_KEY: &str = "ct";
 
+/// The pseudo-tool a source's open-doc token addresses. Not a registered
+/// tool: the `task/fetch` handler recognises it and dispatches the peacock
+/// `document` render, returning the doc as a dialog card. Signed like any
+/// control so the callback trusts its `{skill, id}`.
+pub const OPEN_DOC_TOOL: &str = "__open_doc";
+
+/// Feature flag (`TRITON_MSTEAMS_DOC_DIALOG`): render each https source as an
+/// **Open** action that opens the cited document in a Teams **task-module
+/// dialog** (an Adaptive Card), instead of a Markdown link in the card text.
+/// OFF by default so the behaviour is unchanged until verified live; when on,
+/// the text "Sources:" line is suppressed (the buttons replace it).
+pub fn doc_dialog_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("TRITON_MSTEAMS_DOC_DIALOG")
+            .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+/// Parse `(skill, id)` out of a source item's signed `/docs` URL when the
+/// dialog feature is on. We key the open-doc token on skill/id (not the URL)
+/// so the dialog re-renders the live document; the label is carried too.
+fn source_skill_id(item: &SourceItem) -> Option<(String, String)> {
+    // The producer labels sources "skill · id" (report.rs); recover the pair
+    // from the label, which is stable regardless of the signed-URL internals.
+    let (skill, id) = item.label.split_once(" \u{b7} ")?;
+    let (skill, id) = (skill.trim(), id.trim());
+    (!skill.is_empty() && !id.is_empty()).then(|| (skill.to_owned(), id.to_owned()))
+}
+
 /// The Adaptive Card attachment content type (Bot Framework).
 pub const ADAPTIVE_CARD_CONTENT_TYPE: &str = "application/vnd.microsoft.card.adaptive";
 
@@ -381,6 +418,11 @@ const ADAPTIVE_CARD_SCHEMA: &str = "http://adaptivecards.io/schemas/adaptive-car
 /// card — a downgrade on exactly the non-Teams surfaces this ingress
 /// serves (triton#247 crew review F2).
 const ADAPTIVE_CARD_VERSION: &str = "1.4";
+/// Bumped floor used ONLY on cards that carry a native `Chart.*` element, which
+/// requires Adaptive Card 1.5. Paired with a `fallbackText` so pre-1.5 hosts
+/// degrade to readable prose, and with the chart element's own `fallback` Image
+/// so 1.5 hosts without chart support show the PNG.
+const CHART_CARD_VERSION: &str = "1.5";
 
 /// One form field to render as an Adaptive Card `Input.*` widget.
 #[derive(Debug, Clone)]
@@ -421,6 +463,14 @@ pub enum InteractiveSpec {
         fields: Vec<FormFieldSpec>,
         tool: String,
     },
+    /// A cited source → open the document in a task-module **dialog**. Its
+    /// token signs `(OPEN_DOC_TOOL, {skill, id})`; the `task/fetch` handler
+    /// re-renders the document and returns it as a dialog card.
+    OpenDoc {
+        label: String,
+        skill: String,
+        id: String,
+    },
 }
 
 impl InteractiveSpec {
@@ -430,6 +480,7 @@ impl InteractiveSpec {
             InteractiveSpec::Button { tool, .. }
             | InteractiveSpec::Selection { tool, .. }
             | InteractiveSpec::Form { tool, .. } => tool,
+            InteractiveSpec::OpenDoc { .. } => OPEN_DOC_TOOL,
         }
     }
 
@@ -442,6 +493,7 @@ impl InteractiveSpec {
     pub fn base_args(&self) -> Value {
         match self {
             InteractiveSpec::Button { args, .. } => args.clone(),
+            InteractiveSpec::OpenDoc { skill, id, .. } => json!({ "skill": skill, "id": id }),
             _ => json!({}),
         }
     }
@@ -455,7 +507,7 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
     let Ok(surface) = extract_surface(result) else {
         return Vec::new();
     };
-    surface
+    let mut specs: Vec<InteractiveSpec> = surface
         .components
         .iter()
         .filter_map(|c| match c {
@@ -501,7 +553,29 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
             }),
             _ => None,
         })
-        .collect()
+        .collect();
+    // Sources → Open-doc dialog buttons (one per https source), only when the
+    // dialog feature is on. Each carries the (skill, id) recovered from the
+    // producer's "skill · id" label; the `task/fetch` handler re-renders it.
+    if doc_dialog_enabled() {
+        for c in &surface.components {
+            if let Component::Sources { items } = c {
+                for it in items {
+                    if !it.resource.starts_with("https://") {
+                        continue;
+                    }
+                    if let Some((skill, id)) = source_skill_id(it) {
+                        specs.push(InteractiveSpec::OpenDoc {
+                            label: it.label.clone(),
+                            skill,
+                            id,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    specs
 }
 
 /// A `Dashboard` lifted off a surface for Adaptive Card rendering: its
@@ -553,6 +627,117 @@ fn execute_action(title: &str, token: &str) -> Value {
     })
 }
 
+/// One `Action.Submit` that opens a Teams **task-module dialog**. The
+/// `msteams.type = "task/fetch"` marker makes Teams send a `task/fetch`
+/// invoke carrying `data` (with our signed `ct` token) instead of a normal
+/// submit; the bot answers with a `task/continue` card (the document view).
+fn task_fetch_action(title: &str, token: &str) -> Value {
+    json!({
+        "type": "Action.Submit",
+        "title": title,
+        "data": { "msteams": { "type": "task/fetch" }, TOKEN_DATA_KEY: token },
+    })
+}
+
+/// Build the document **dialog card** from a peacock `document` render's
+/// `structuredContent` — the first instance's facts (FactSet), markdown body
+/// (a wrapped TextBlock, Teams' markdown subset), and event timeline
+/// (FactSet). A plain AC 1.4 card (no chart), suitable as a `task/continue`
+/// body.
+pub fn build_document_dialog_card(structured: &Value) -> Value {
+    let mut body: Vec<Value> = Vec::new();
+    // The first instance the document composed (facts/markdown/events).
+    let inst = structured
+        .get("instances")
+        .and_then(Value::as_object)
+        .and_then(|m| m.values().next());
+
+    // Title: the instance id, falling back to the document identity.
+    let title = inst
+        .and_then(|i| i.get("id").and_then(Value::as_str))
+        .or_else(|| {
+            structured
+                .get("document")
+                .and_then(|d| d.get("id"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or("Document");
+    body.push(json!({
+        "type": "TextBlock", "text": title, "weight": "Bolder",
+        "size": "Large", "wrap": true,
+    }));
+
+    if let Some(inst) = inst {
+        // Facts → FactSet.
+        if let Some(facts) = inst.get("facts").and_then(Value::as_array) {
+            let fs: Vec<Value> = facts
+                .iter()
+                .filter_map(|f| {
+                    let k = f.get("key").and_then(Value::as_str)?;
+                    let v = f.get("value").and_then(Value::as_str)?;
+                    Some(json!({ "title": k, "value": v }))
+                })
+                .collect();
+            if !fs.is_empty() {
+                body.push(json!({ "type": "FactSet", "facts": fs }));
+            }
+        }
+        // Markdown body → a wrapped TextBlock (Teams renders a markdown subset).
+        if let Some(md) = inst.get("markdown").and_then(Value::as_str)
+            && !md.trim().is_empty()
+        {
+            body.push(json!({ "type": "TextBlock", "text": md, "wrap": true }));
+        }
+        // Timeline → a small FactSet of "when · who → title".
+        if let Some(events) = inst.get("events").and_then(Value::as_array)
+            && !events.is_empty()
+        {
+            body.push(json!({
+                "type": "TextBlock", "text": "Activity", "weight": "Bolder", "wrap": true,
+            }));
+            let tl: Vec<Value> = events
+                .iter()
+                .map(|e| {
+                    let at = e.get("at").and_then(Value::as_str).unwrap_or("");
+                    let src = e.get("source").and_then(Value::as_str).unwrap_or("");
+                    let title = e.get("title").and_then(Value::as_str).unwrap_or("");
+                    let meta = [at, src]
+                        .iter()
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(" \u{b7} ");
+                    json!({ "title": meta, "value": title })
+                })
+                .collect();
+            body.push(json!({ "type": "FactSet", "facts": tl }));
+        }
+    }
+
+    json!({
+        "type": "AdaptiveCard",
+        "$schema": ADAPTIVE_CARD_SCHEMA,
+        "version": ADAPTIVE_CARD_VERSION,
+        "body": body,
+    })
+}
+
+/// The `task/fetch` invoke response: a `task/continue` envelope carrying the
+/// document dialog `card` (Teams opens it as a modal).
+pub fn task_continue_response(title: &str, card: Value) -> Value {
+    json!({
+        "task": {
+            "type": "continue",
+            "value": {
+                "title": title,
+                "width": "medium",
+                "height": "medium",
+                "card": { "contentType": ADAPTIVE_CARD_CONTENT_TYPE, "content": card },
+            },
+        },
+    })
+}
+
 /// One Adaptive Card `Input.*` widget for a form field.
 fn input_widget(field: &FormFieldSpec) -> Value {
     match field.kind {
@@ -588,11 +773,126 @@ fn input_widget(field: &FormFieldSpec) -> Value {
 /// `chrome` is peacock's resolved theme (`get_theme`); a branded one
 /// leads the body with a header band. [`CardChrome::default`] renders
 /// byte-identically to the pre-theming card.
+/// Map peacock's Vega-Lite `spec` (inline `data.values` + `encoding`) to a
+/// Teams native Adaptive Card chart element — `Chart.VerticalBar` (single
+/// series) or `Chart.VerticalBar.Grouped` (an `encoding.color` series). Carries
+/// a `fallback` Image (the rasterized PNG) so hosts without chart support still
+/// show the chart. `None` when the spec has no usable rows/encoding.
+pub fn chart_from_vega(spec: &Value, fallback_image_url: Option<&str>) -> Option<Value> {
+    let rows = spec.get("data")?.get("values")?.as_array()?;
+    if rows.is_empty() {
+        return None;
+    }
+    let enc = spec.get("encoding")?;
+    let xf = enc.get("x")?.get("field")?.as_str()?;
+    let yf = enc.get("y")?.get("field")?.as_str()?;
+    let as_label = |v: &Value| match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    };
+    let as_num = |v: &Value| v.as_f64();
+    let title = spec.get("title").and_then(Value::as_str).unwrap_or("");
+    let fallback = fallback_image_url
+        .map(|u| json!({ "type": "Image", "url": u, "altText": "chart" }))
+        .unwrap_or_else(|| json!("drop"));
+    let color_field = enc
+        .get("color")
+        .and_then(|c| c.get("field"))
+        .and_then(Value::as_str);
+
+    if let Some(cf) = color_field {
+        // Grouped: one series per distinct color value, insertion-ordered.
+        let mut series: Vec<(String, Vec<Value>)> = Vec::new();
+        for r in rows {
+            let (Some(leg), Some(x), Some(y)) = (
+                r.get(cf).and_then(&as_label),
+                r.get(xf).and_then(&as_label),
+                r.get(yf).and_then(&as_num),
+            ) else {
+                continue;
+            };
+            let entry = match series.iter_mut().find(|(k, _)| *k == leg) {
+                Some(e) => &mut e.1,
+                None => {
+                    series.push((leg, Vec::new()));
+                    &mut series.last_mut().unwrap().1
+                }
+            };
+            entry.push(json!({ "x": x, "y": y }));
+        }
+        if series.is_empty() {
+            return None;
+        }
+        let data: Vec<Value> = series
+            .into_iter()
+            .map(|(legend, values)| json!({ "legend": legend, "values": values }))
+            .collect();
+        Some(json!({
+            "type": "Chart.VerticalBar.Grouped",
+            "title": title,
+            "colorSet": "categorical",
+            "data": data,
+            "fallback": fallback,
+        }))
+    } else {
+        let data: Vec<Value> = rows
+            .iter()
+            .filter_map(|r| {
+                Some(json!({ "x": r.get(xf).and_then(&as_label)?, "y": r.get(yf).and_then(&as_num)? }))
+            })
+            .collect();
+        if data.is_empty() {
+            return None;
+        }
+        Some(json!({
+            "type": "Chart.VerticalBar",
+            "title": title,
+            "colorSet": "categorical",
+            "data": data,
+            "fallback": fallback,
+        }))
+    }
+}
+
+/// Build the agent-chooser Adaptive Card: a lead prompt plus one
+/// `Action.Execute` per candidate agent. Each `(title, token)` carries a
+/// signed `triton_chat_routing::USE_AGENT_TOOL` token (`{id, msg}`); tapping it re-enters
+/// the webhook as an `adaptiveCard/action` invoke, where the router binds the
+/// pick and replays the buffered message. Plain AC 1.4 (no chart).
+pub fn build_agent_chooser(
+    prompt: &str,
+    buttons: &[(String, String)],
+    chrome: &CardChrome,
+) -> Value {
+    let mut body: Vec<Value> = Vec::new();
+    body.extend(header_container(chrome));
+    if !prompt.is_empty() {
+        body.push(json!({ "type": "TextBlock", "text": prompt, "wrap": true }));
+    }
+    let actions: Vec<Value> = buttons
+        .iter()
+        .map(|(title, token)| execute_action(title, token))
+        .collect();
+    let mut card = json!({
+        "type": "AdaptiveCard",
+        "$schema": ADAPTIVE_CARD_SCHEMA,
+        "version": ADAPTIVE_CARD_VERSION,
+        "body": body,
+    });
+    if !actions.is_empty() {
+        card["actions"] = Value::Array(actions);
+    }
+    card
+}
+
 pub fn build_adaptive_card(
     text: &str,
     dashboard: Option<&DashboardData>,
     signed: &[(InteractiveSpec, String)],
     image_url: Option<&str>,
+    chart: Option<&Value>,
     chrome: &CardChrome,
 ) -> Value {
     let mut body: Vec<Value> = Vec::new();
@@ -600,9 +900,12 @@ pub fn build_adaptive_card(
     if !text.is_empty() {
         body.push(json!({ "type": "TextBlock", "text": text, "wrap": true }));
     }
-    // The rendered chart (inline report / upstream PNG), served from the
-    // adapter's signed image route — Teams fetches it by URL (#635).
-    if let Some(url) = image_url {
+    // Chart: a NATIVE interactive Adaptive Card chart (Teams) when we have a
+    // Vega spec to map; it carries a `fallback` Image so chart-incapable hosts
+    // still show the rasterized PNG. Otherwise the plain signed-image PNG.
+    if let Some(chart) = chart {
+        body.push(chart.clone());
+    } else if let Some(url) = image_url {
         body.push(json!({ "type": "Image", "url": url, "altText": "chart" }));
     }
     if let Some((title, tiles)) = dashboard {
@@ -623,6 +926,9 @@ pub fn build_adaptive_card(
         match spec {
             InteractiveSpec::Button { label, .. } => {
                 actions.push(execute_action(label, token));
+            }
+            InteractiveSpec::OpenDoc { label, .. } => {
+                actions.push(task_fetch_action(&format!("Open: {label}"), token));
             }
             InteractiveSpec::Selection {
                 prompt,
@@ -673,12 +979,23 @@ pub fn build_adaptive_card(
         }
     }
 
+    // Native charts need AC 1.5; bump ONLY when a chart is present, and set a
+    // readable `fallbackText` so a host capped below 1.5 shows the prose rather
+    // than nothing. Chartless cards stay at the 1.4 floor (unchanged for every
+    // other surface this ingress serves).
+    let (version, chart_present) = match chart {
+        Some(_) => (CHART_CARD_VERSION, true),
+        None => (ADAPTIVE_CARD_VERSION, false),
+    };
     let mut card = json!({
         "type": "AdaptiveCard",
         "$schema": ADAPTIVE_CARD_SCHEMA,
-        "version": ADAPTIVE_CARD_VERSION,
+        "version": version,
         "body": body,
     });
+    if chart_present && !text.is_empty() {
+        card["fallbackText"] = json!(text);
+    }
     if !actions.is_empty() {
         card["actions"] = Value::Array(actions);
     }
@@ -732,6 +1049,25 @@ pub fn invoke_message_response(text: &str) -> Value {
 mod tests {
     use super::*;
     use triton_core::a2ui::{Component, Surface};
+
+    #[test]
+    fn agent_chooser_card_has_execute_actions() {
+        let buttons = vec![
+            ("Sales".to_string(), "tokA".to_string()),
+            ("Ops".to_string(), "tokB".to_string()),
+        ];
+        let card = build_agent_chooser("Pick one", &buttons, &CardChrome::default());
+        assert_eq!(card["type"], "AdaptiveCard");
+        assert_eq!(card["version"], ADAPTIVE_CARD_VERSION);
+        let actions = card["actions"].as_array().expect("actions");
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0]["type"], "Action.Execute");
+        assert_eq!(actions[0]["title"], "Sales");
+        assert_eq!(actions[0]["data"][TOKEN_DATA_KEY], "tokA");
+        assert_eq!(actions[1]["data"][TOKEN_DATA_KEY], "tokB");
+        // Lead prompt is a wrapped TextBlock in the body.
+        assert!(card.to_string().contains("Pick one"));
+    }
 
     #[test]
     fn passthrough_text_and_narration() {
@@ -843,8 +1179,14 @@ mod tests {
             },
             "TOKEN.MAC".to_string(),
         )];
-        let card =
-            build_adaptive_card("Hello, alice.", None, &signed, None, &CardChrome::default());
+        let card = build_adaptive_card(
+            "Hello, alice.",
+            None,
+            &signed,
+            None,
+            None,
+            &CardChrome::default(),
+        );
         assert_eq!(card["type"], "AdaptiveCard");
         // Text lands in a body TextBlock.
         assert_eq!(card["body"][0]["type"], "TextBlock");
@@ -892,7 +1234,7 @@ mod tests {
                 "FORM.MAC".to_string(),
             ),
         ];
-        let card = build_adaptive_card("", None, &signed, None, &CardChrome::default());
+        let card = build_adaptive_card("", None, &signed, None, None, &CardChrome::default());
         let body = card["body"].as_array().expect("body array");
         // Dropdown named after args_key.
         let choiceset = body
@@ -936,7 +1278,14 @@ mod tests {
         let dash = dashboard_from_result(&result).expect("dashboard lifted");
         assert_eq!(dash.0, "Stock at risk (€)");
         assert_eq!(dash.1.len(), 2);
-        let card = build_adaptive_card("top risk", Some(&dash), &[], None, &CardChrome::default());
+        let card = build_adaptive_card(
+            "top risk",
+            Some(&dash),
+            &[],
+            None,
+            None,
+            &CardChrome::default(),
+        );
         let body = card["body"].as_array().expect("body");
         let factset = body
             .iter()
@@ -950,7 +1299,7 @@ mod tests {
 
     #[test]
     fn card_activity_and_invoke_response_shapes() {
-        let card = build_adaptive_card("hi", None, &[], None, &CardChrome::default());
+        let card = build_adaptive_card("hi", None, &[], None, None, &CardChrome::default());
         let activity = build_card_activity_body("28:bot", "a:conv", "29:user", card.clone());
         assert_eq!(activity["type"], "message");
         assert_eq!(
@@ -1013,6 +1362,7 @@ mod tests {
             None,
             &[],
             Some("https://x/img/t"),
+            None,
             &CardChrome::default(),
         );
         let imgs: Vec<_> = card["body"]
@@ -1053,7 +1403,7 @@ mod tests {
             "brand_color": "#0f6cbd", "accent": "#22d3c5", "css": ":root {}",
         }));
         assert_eq!(chrome, CardChrome::default());
-        let card = build_adaptive_card("hi", None, &[], None, &chrome);
+        let card = build_adaptive_card("hi", None, &[], None, None, &chrome);
         assert_eq!(card["body"][0]["type"], "TextBlock");
         assert_eq!(card["body"][0]["text"], "hi");
     }
@@ -1068,7 +1418,7 @@ mod tests {
         assert_eq!(chrome.title, None, "empty string reads as unset");
         assert_eq!(chrome.logo_style, LogoStyle::Avatar, "junk style defaults");
         // A logo with no name still brands: the icon alone, no title row.
-        let card = build_adaptive_card("hi", None, &[], None, &chrome);
+        let card = build_adaptive_card("hi", None, &[], None, None, &chrome);
         let header = &card["body"][0];
         assert_eq!(header["type"], "Container");
         assert_eq!(header["items"][0]["type"], "Image");
@@ -1079,7 +1429,7 @@ mod tests {
     #[test]
     fn title_only_theme_renders_a_text_header() {
         let chrome = CardChrome::from_get_theme(&json!({ "title": "DataZoo Sales" }));
-        let card = build_adaptive_card("hi", None, &[], None, &chrome);
+        let card = build_adaptive_card("hi", None, &[], None, None, &chrome);
         let header = &card["body"][0];
         assert_eq!(header["type"], "Container");
         assert_eq!(header["style"], "emphasis");
@@ -1097,9 +1447,150 @@ mod tests {
         let chrome = CardChrome::from_get_theme(&json!({
             "title": "DataZoo Sales", "logo_style": "banner",
         }));
-        let card = build_adaptive_card("", None, &[], Some("https://x/img/t"), &chrome);
+        let card = build_adaptive_card("", None, &[], Some("https://x/img/t"), None, &chrome);
         assert_eq!(card["body"][0]["type"], "Container");
         assert_eq!(card["body"][1]["type"], "Image");
         assert_eq!(card["body"][1]["url"], "https://x/img/t");
+    }
+
+    #[test]
+    fn vega_maps_to_native_chart_with_image_fallback() {
+        // Single series → Chart.VerticalBar.
+        let single = json!({
+            "mark": "bar", "title": "Supplier reliability",
+            "data": { "values": [
+                { "s": "Nordwind", "pct": 88.9 },
+                { "s": "Baltic", "pct": 55.6 },
+            ] },
+            "encoding": { "x": { "field": "s" }, "y": { "field": "pct" } },
+        });
+        let c = chart_from_vega(&single, Some("https://x/img/t")).expect("chart");
+        assert_eq!(c["type"], "Chart.VerticalBar");
+        assert_eq!(c["data"][0]["x"], "Nordwind");
+        assert_eq!(c["data"][0]["y"], 88.9);
+        assert_eq!(c["fallback"]["type"], "Image"); // PNG fallback for non-chart hosts
+        assert_eq!(c["fallback"]["url"], "https://x/img/t");
+
+        // Multi-series (color) → grouped.
+        let multi = json!({
+            "mark": "bar",
+            "data": { "values": [
+                { "cust": "Initech", "cat": "widgets", "rev": 1500 },
+                { "cust": "Initech", "cat": "services", "rev": 600 },
+                { "cust": "Stark", "cat": "widgets", "rev": 1050 },
+            ] },
+            "encoding": { "x": { "field": "cust" }, "y": { "field": "rev" },
+                          "color": { "field": "cat" } },
+        });
+        let g = chart_from_vega(&multi, None).expect("grouped chart");
+        assert_eq!(g["type"], "Chart.VerticalBar.Grouped");
+        let legends: Vec<&str> = g["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["legend"].as_str().unwrap())
+            .collect();
+        assert_eq!(legends, vec!["widgets", "services"]);
+        assert_eq!(g["data"][0]["values"][0]["x"], "Initech");
+        assert_eq!(g["fallback"], "drop"); // no image → drop
+
+        // A card with a chart declares AC 1.5 + fallbackText; chartless stays 1.4.
+        let card = build_adaptive_card(
+            "prose",
+            None,
+            &[],
+            Some("u"),
+            Some(&c),
+            &CardChrome::default(),
+        );
+        assert_eq!(card["version"], "1.5");
+        assert_eq!(card["fallbackText"], "prose");
+        assert!(
+            card["body"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|b| b["type"] == "Chart.VerticalBar")
+        );
+        let plain = build_adaptive_card("p", None, &[], Some("u"), None, &CardChrome::default());
+        assert_eq!(plain["version"], "1.4");
+    }
+
+    #[test]
+    fn open_doc_spec_signs_the_document_ref() {
+        // The OpenDoc control signs (OPEN_DOC_TOOL, {skill, id}) via the same
+        // generic path as every other control, so the task/fetch handler
+        // recovers the document ref from the token.
+        let spec = InteractiveSpec::OpenDoc {
+            label: "account · beverages".into(),
+            skill: "account".into(),
+            id: "beverages".into(),
+        };
+        assert_eq!(spec.tool(), OPEN_DOC_TOOL);
+        assert_eq!(
+            spec.base_args(),
+            json!({ "skill": "account", "id": "beverages" })
+        );
+    }
+
+    #[test]
+    fn open_doc_action_is_a_task_fetch_submit() {
+        let spec = InteractiveSpec::OpenDoc {
+            label: "account · beverages".into(),
+            skill: "account".into(),
+            id: "beverages".into(),
+        };
+        let card = build_adaptive_card(
+            "answer",
+            None,
+            &[(spec, "TOKEN".into())],
+            None,
+            None,
+            &CardChrome::default(),
+        );
+        let action = &card["actions"][0];
+        assert_eq!(action["type"], "Action.Submit");
+        assert_eq!(action["data"]["msteams"]["type"], "task/fetch");
+        assert_eq!(action["data"][TOKEN_DATA_KEY], "TOKEN");
+        assert_eq!(action["title"], "Open: account · beverages");
+    }
+
+    #[test]
+    fn document_dialog_card_renders_facts_markdown_and_timeline() {
+        let structured = json!({
+            "document": { "skill": "account", "id": "beverages" },
+            "instances": { "self": {
+                "id": "beverages", "skill": "account",
+                "facts": [ { "key": "name", "value": "Beverages GmbH" },
+                           { "key": "status", "value": "Follow up" } ],
+                "markdown": "Renewal at risk.",
+                "events": [ { "title": "Flagged", "at": "2026-09-01", "source": "analyst", "body": "" } ],
+            } },
+        });
+        let card = build_document_dialog_card(&structured);
+        assert_eq!(card["version"], "1.4");
+        let body = card["body"].as_array().unwrap();
+        // Title, a FactSet (facts), the markdown TextBlock, an "Activity"
+        // heading, and a FactSet (timeline).
+        assert!(body.iter().any(|b| b["type"] == "FactSet"
+            && b["facts"][0]["title"] == "name"
+            && b["facts"][0]["value"] == "Beverages GmbH"));
+        assert!(
+            body.iter()
+                .any(|b| b["type"] == "TextBlock" && b["text"] == "Renewal at risk.")
+        );
+        assert!(
+            body.iter()
+                .any(|b| b["type"] == "TextBlock" && b["text"] == "Activity")
+        );
+
+        // The task/continue envelope wraps the card for the dialog.
+        let resp = task_continue_response("account · beverages", card);
+        assert_eq!(resp["task"]["type"], "continue");
+        assert_eq!(resp["task"]["value"]["title"], "account · beverages");
+        assert_eq!(
+            resp["task"]["value"]["card"]["contentType"],
+            ADAPTIVE_CARD_CONTENT_TYPE
+        );
     }
 }

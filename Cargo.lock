@@ -2560,6 +2560,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "triton-chat-identity",
+ "triton-chat-routing",
  "triton-core",
  "triton-correlation",
  "triton-manifest",
@@ -2600,12 +2601,23 @@ dependencies = [
  "tokio-util",
  "tracing",
  "triton-chat-identity",
+ "triton-chat-routing",
  "triton-core",
  "triton-correlation",
  "triton-manifest",
  "triton-secrets",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "triton-chat-routing"
+version = "0.0.1"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

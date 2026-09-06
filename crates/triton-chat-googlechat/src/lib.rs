@@ -330,6 +330,12 @@ pub struct GoogleChatAdapter {
     /// Outbound HTTP client for the courier POST (built once at boot
     /// with the configured courier timeout).
     http: reqwest::Client,
+    /// Agent-multiplexing router (host-provided). When `Some`, an inbound
+    /// MESSAGE and a `__use_agent` chooser click are routed through it to pick
+    /// WHICH agent handles the turn (switch / sticky / chooser / entitlement),
+    /// overriding `inbound_tool`. When `None`, the legacy single-tool
+    /// `route_command(text, &inbound_tool)` path is used unchanged.
+    router: Option<Arc<dyn triton_chat_routing::AgentRouter>>,
 }
 
 impl GoogleChatAdapter {
@@ -547,7 +553,15 @@ impl GoogleChatAdapter {
             courier,
             outbound,
             http,
+            router: None,
         })
+    }
+
+    /// Attach the agent-multiplexing router (host-provided). Call before
+    /// wrapping the adapter in an `Arc`. Absent ⇒ legacy single-tool routing.
+    pub fn with_router(mut self, router: Arc<dyn triton_chat_routing::AgentRouter>) -> Self {
+        self.router = Some(router);
+        self
     }
 
     /// Mount the inbound webhook at `/<adapter-name>/webhook`.
@@ -862,6 +876,22 @@ struct GoogleChatSender {
     name: Option<String>,
 }
 
+/// Deep-search a `render_report` result for the document render's structured
+/// content: the object carrying an `instances` or `document` key. Robust to
+/// the exact nesting (top level, or under `structuredContent`).
+fn find_document_structured(v: &Value) -> Option<&Value> {
+    match v {
+        Value::Object(m) => {
+            if m.contains_key("instances") || m.contains_key("document") {
+                return Some(v);
+            }
+            m.values().find_map(find_document_structured)
+        }
+        Value::Array(a) => a.iter().find_map(find_document_structured),
+        _ => None,
+    }
+}
+
 /// Google delivers a Chat app's interaction events in one of **two**
 /// request shapes, and which one an app gets is decided permanently when
 /// the app is created — the "build this as a Google Workspace add-on"
@@ -1053,6 +1083,11 @@ async fn handle_webhook(
     // Captured for the courier ack below: a button click must be answered
     // with a click-shaped body, not a message-shaped one.
     let is_card_click = event.kind == "CARD_CLICKED";
+    // Agent multiplexing: a MESSAGE routes by its raw text through the
+    // host router (when wired); `routing_text` carries that text past the
+    // match, which consumes `event.message`.
+    let was_message = event.kind == "MESSAGE";
+    let mut routing_text: Option<String> = None;
     // #250: captured now, because `event` is partially moved below and
     // the TENANT binding can only be verified once the sender is
     // resolved, further down.
@@ -1072,101 +1107,105 @@ async fn handle_webhook(
         Vec::new()
     };
     // `tool_name`/`args` are DEFERRED on the click path: the correlation
-    // token is bound to a tenant (#250), and the tenant is only known
-    // once the sender is resolved further down. Nothing between here and
-    // that point reads either, and the click path cannot dispatch until
-    // they are filled in from the VERIFIED token.
-    let (sender_name, mut tool_name, mut args, action_echo): (
-        String,
-        String,
-        Value,
-        Option<String>,
-    ) = match event.kind.as_str() {
-        "MESSAGE" => {
-            let Some(message) = event.message else {
-                record_rejection(
-                    &adapter,
-                    "-",
-                    "-",
-                    TritonError::Validation("MESSAGE event missing message body".into()),
+    // token that carries them is bound to (tenant, sender), and neither is
+    // known until sender resolution below. They are filled in from the
+    // VERIFIED token before any dispatch.
+    let (sender_name, tool_name, args, action_echo): (String, String, Value, Option<String>) =
+        match event.kind.as_str() {
+            "MESSAGE" => {
+                let Some(message) = event.message else {
+                    record_rejection(
+                        &adapter,
+                        "-",
+                        "-",
+                        TritonError::Validation("MESSAGE event missing message body".into()),
+                    );
+                    return (StatusCode::BAD_REQUEST, "missing message").into_response();
+                };
+                let Some(text) = message.text.as_deref().filter(|s| !s.is_empty()) else {
+                    // Empty text (Google sends these for image/attachments) —
+                    // out of scope; ack and ignore.
+                    return (
+                        StatusCode::OK,
+                        axum::Json(Value::Object(Default::default())),
+                    )
+                        .into_response();
+                };
+                let sender = message
+                    .sender
+                    .as_ref()
+                    .and_then(|s| s.name.as_deref())
+                    .unwrap_or("")
+                    .to_string();
+                routing_text = Some(text.to_string());
+                let (tool, args) = route_command(text, &adapter.inbound_tool);
+                (sender, tool, args, None)
+            }
+            "CARD_CLICKED" => {
+                // #250/#287: the token is NOT decoded here. It is a bearer
+                // capability bound to a tenant AND a sender, and neither is
+                // known until sender resolution further down — so decoding
+                // now would be verifying a binding against nothing. Capture
+                // and defer; the click cannot dispatch until the deferred
+                // decode fills `tool_name`/`args` from the VERIFIED token.
+                if card_token.is_none() {
+                    record_rejection(
+                        &adapter,
+                        "-",
+                        "-",
+                        TritonError::Validation("CARD_CLICKED missing correlation token".into()),
+                    );
+                    return (StatusCode::BAD_REQUEST, "missing action").into_response();
+                }
+                let echo = event.action_echo();
+                let sender = event
+                    .user
+                    .as_ref()
+                    .and_then(|u| u.name.as_deref())
+                    .unwrap_or("")
+                    .to_string();
+                // Placeholders. Nothing between here and the deferred
+                // decode reads either.
+                (sender, String::new(), Value::Null, echo)
+            }
+            "ADDED_TO_SPACE" => {
+                let sender = event
+                    .user
+                    .as_ref()
+                    .and_then(|u| u.name.as_deref())
+                    .unwrap_or("")
+                    .to_string();
+                (
+                    sender,
+                    "help".to_string(),
+                    Value::Object(Default::default()),
+                    None,
+                )
+            }
+            other => {
+                // Ack-and-ignore, but SAY SO. This arm silently absorbed
+                // every Workspace Add-on delivery for six days: a 200 is
+                // the one answer Google never retries, so an unhandled
+                // event kind that logs nothing is indistinguishable from a
+                // working app. One line here is the difference between a
+                // grep and an archaeology session.
+                println!(
+                    r#"{{"kind":"log","level":"warn","msg":"unhandled google chat event kind","channel":"{}","event_kind":"{}"}}"#,
+                    adapter.name.escape_default(),
+                    other.escape_default(),
                 );
-                return (StatusCode::BAD_REQUEST, "missing message").into_response();
-            };
-            let Some(text) = message.text.as_deref().filter(|s| !s.is_empty()) else {
-                // Empty text (Google sends these for image/attachments) —
-                // out of scope; ack and ignore.
                 return (
                     StatusCode::OK,
                     axum::Json(Value::Object(Default::default())),
                 )
                     .into_response();
-            };
-            let sender = message
-                .sender
-                .as_ref()
-                .and_then(|s| s.name.as_deref())
-                .unwrap_or("")
-                .to_string();
-            let (tool, args) = route_command(text, &adapter.inbound_tool);
-            (sender, tool, args, None)
-        }
-        "CARD_CLICKED" => {
-            if card_token.is_none() {
-                record_rejection(
-                    &adapter,
-                    "-",
-                    "-",
-                    TritonError::Validation("CARD_CLICKED missing correlation token".into()),
-                );
-                return (StatusCode::BAD_REQUEST, "missing action").into_response();
             }
-            let echo = event.action_echo();
-            let sender = event
-                .user
-                .as_ref()
-                .and_then(|u| u.name.as_deref())
-                .unwrap_or("")
-                .to_string();
-            // Tool and args come from the token, which cannot be
-            // verified until the tenant is known. Placeholders here;
-            // filled in from the verified token below, before any
-            // dispatch.
-            (sender, String::new(), Value::Null, echo)
-        }
-        "ADDED_TO_SPACE" => {
-            let sender = event
-                .user
-                .as_ref()
-                .and_then(|u| u.name.as_deref())
-                .unwrap_or("")
-                .to_string();
-            (
-                sender,
-                "help".to_string(),
-                Value::Object(Default::default()),
-                None,
-            )
-        }
-        other => {
-            // Ack-and-ignore, but SAY SO. This arm silently absorbed
-            // every Workspace Add-on delivery for six days: a 200 is
-            // the one answer Google never retries, so an unhandled
-            // event kind that logs nothing is indistinguishable from a
-            // working app. One line here is the difference between a
-            // grep and an archaeology session.
-            println!(
-                r#"{{"kind":"log","level":"warn","msg":"unhandled google chat event kind","channel":"{}","event_kind":"{}"}}"#,
-                adapter.name.escape_default(),
-                other.escape_default(),
-            );
-            return (
-                StatusCode::OK,
-                axum::Json(Value::Object(Default::default())),
-            )
-                .into_response();
-        }
-    };
+        };
     let sender_name = sender_name.as_str();
+    // Mutable: the agent-multiplexing router may override which agent (tool)
+    // handles this turn once the caller identity is resolved below.
+    let mut tool_name = tool_name;
+    let mut args = args;
 
     // FR-I-7 sender resolution → (sub, scopes, tenant).
     let (sub, scopes, tenant) = match &adapter.identity {
@@ -1297,6 +1336,157 @@ async fn handle_webhook(
             };
             for (k, v) in card_inputs {
                 map.insert(k, Value::String(v));
+            }
+        }
+    }
+    // A source "Open" button (open-doc token): render the cited document and
+    // return it as a Chat DIALOG. This MUST be synchronous (a dialog can only
+    // ride the click's own response, never the courier), and it's fast (a
+    // peacock render, not an LLM turn), so it returns here before the courier.
+    if tool_name == surface_mapper::OPEN_DOC_TOOL {
+        let skill = args
+            .get("skill")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let id = args.get("id").and_then(Value::as_str).unwrap_or_default();
+        let card = if skill.is_empty() || id.is_empty() {
+            surface_mapper::build_document_dialog(&Value::Null)
+        } else {
+            let rargs = serde_json::json!({
+                "report_id": "document", "params": { "skill": skill, "id": id }
+            });
+            match adapter
+                .dispatcher
+                .invoke("render_report", rargs, principal, PROTOCOL)
+                .await
+            {
+                Ok(d) => surface_mapper::build_document_dialog(
+                    find_document_structured(&d.result).unwrap_or(&Value::Null),
+                ),
+                Err(e) => {
+                    tracing::warn!(error = %e, "google_chat open-doc render failed");
+                    surface_mapper::build_document_dialog(&Value::Null)
+                }
+            }
+        };
+        adapter.dispatcher.record_post(
+            surface_mapper::OPEN_DOC_TOOL,
+            PROTOCOL,
+            &principal_for_post,
+            0,
+            Ok((200, PostOutcome::Posted, None)),
+        );
+        return (
+            StatusCode::OK,
+            axum::Json(surface_mapper::dialog_response(card, workspace_addon)),
+        )
+            .into_response();
+    }
+
+    // Agent multiplexing (host-provided router, #315). A MESSAGE routes by its
+    // text; a `__use_agent` chooser click confirms a pick. A chooser / info /
+    // deny reply is fast (no LLM) and answers synchronously here, before the
+    // courier; a Dispatch overrides (tool_name, args) and falls through to the
+    // normal dispatch path. `None` router ⇒ legacy single-tool routing.
+    if let Some(router) = adapter.router.clone() {
+        let pick = (tool_name == triton_chat_routing::USE_AGENT_TOOL).then(|| {
+            (
+                args.get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                args.get("msg")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        });
+        if was_message || pick.is_some() {
+            let space = space_name.clone().unwrap_or_default();
+            let key = triton_chat_routing::ConvKey::googlechat(space, "", sub.clone());
+            let text_for_route = routing_text.clone().unwrap_or_default();
+            let ctx = triton_chat_routing::RouteCtx {
+                key,
+                text: &text_for_route,
+                tenant: &tenant,
+                caller_sub: &sub,
+                pick,
+            };
+            match router.route(ctx).await {
+                triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
+                    let (t, a) = route_command(&text, &agent_id);
+                    tool_name = t;
+                    args = a;
+                }
+                triton_chat_routing::RouteOutcome::Chooser {
+                    candidates,
+                    pending_text,
+                    ..
+                } => {
+                    let chrome = match adapter
+                        .dispatcher
+                        .invoke(
+                            "get_theme",
+                            serde_json::json!({}),
+                            principal.clone(),
+                            PROTOCOL,
+                        )
+                        .await
+                    {
+                        Ok(t) => surface_mapper::CardChrome::from_get_theme(&t.result),
+                        Err(_) => surface_mapper::CardChrome::default(),
+                    };
+                    let signed: Vec<(String, String)> = candidates
+                        .iter()
+                        .filter_map(|a| {
+                            let payload = serde_json::json!({ "id": a.id, "msg": pending_text });
+                            // Same binding as every other card token
+                            // (#250/#287): the chooser is rendered into a
+                            // space every member can see, so the token is
+                            // a capability for the CLICKER, not the space.
+                            triton_correlation::encode_bound(
+                                triton_chat_routing::USE_AGENT_TOOL,
+                                &payload,
+                                adapter.correlation_key.signing(),
+                                CARD_CORRELATION_CAP,
+                                triton_correlation::Binding {
+                                    platform: "google_chat",
+                                    tenant: &principal.tenant,
+                                    sender: sender_name,
+                                },
+                                Some(CARD_TOKEN_TTL_SECS),
+                            )
+                            .ok()
+                            .map(|tok| (a.display.clone(), tok))
+                        })
+                        .collect();
+                    let base = public_base(&headers);
+                    let click_endpoint = base
+                        .as_deref()
+                        .map(|b| format!("{}/{}/webhook", b.trim_end_matches('/'), adapter.name));
+                    let prompt = "Which agent should handle this? Pick one below, or type \
+                                  `/use <name>` any time (`/agents` to list, `/whoami` to check).";
+                    let body = surface_mapper::build_agent_chooser(
+                        prompt,
+                        &signed,
+                        workspace_addon,
+                        &chrome,
+                        click_endpoint.as_deref(),
+                    );
+                    adapter.dispatcher.record_post(
+                        triton_chat_routing::USE_AGENT_TOOL,
+                        PROTOCOL,
+                        &principal_for_post,
+                        0,
+                        Ok((200, PostOutcome::Posted, None)),
+                    );
+                    return (StatusCode::OK, axum::Json(body)).into_response();
+                }
+                triton_chat_routing::RouteOutcome::Info { text }
+                | triton_chat_routing::RouteOutcome::Deny { message: text } => {
+                    let body = surface_mapper::text_reply_body(&text, workspace_addon);
+                    return (StatusCode::OK, axum::Json(body)).into_response();
+                }
             }
         }
     }

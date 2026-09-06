@@ -1,0 +1,21 @@
+[package]
+name = "triton-chat-routing"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Pure agent-multiplexing routing: given a caller-scoped agent catalog, an
+# incoming chat message and the conversation's current sticky binding, decide
+# WHICH agent handles the turn (switch / sticky / default / chooser) and what,
+# if anything, to persist. No I/O — the host owns the binding store (escurel,
+# async) and the per-platform command parsing (route_command).
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Only for the object-safe async `AgentRouter` seam (BoxFuture). The core
+# `resolve` logic stays pure/sync; the host implements `AgentRouter` because
+# reading the sticky binding is async (escurel).
+futures = { workspace = true }
