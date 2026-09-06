@@ -72,6 +72,8 @@ mod forward_principal;
 mod forwarded_auth;
 #[path = "../google_chat.rs"]
 mod google_chat;
+#[path = "../harness_from_a_consumer_workspace.rs"]
+mod harness_from_a_consumer_workspace;
 #[path = "../healthz.rs"]
 mod healthz;
 #[path = "../manifest.rs"]

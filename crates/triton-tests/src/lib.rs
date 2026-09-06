@@ -472,26 +472,108 @@ async fn tcp_connect_ok(addr: SocketAddr) -> bool {
 /// reason. [`assert_binary_fresh`] turns that silent staleness into a
 /// loud, actionable panic.
 fn triton_binary_path() -> PathBuf {
+    // Explicit override, for a consumer that builds the binary itself
+    // (a CI job, a container image) and wants the harness to spawn
+    // exactly that one. Checked first so it beats every heuristic.
+    if let Some(p) = std::env::var_os("TRITON_BIN") {
+        return PathBuf::from(p);
+    }
     if let Some(p) = std::env::var_os("CARGO_BIN_EXE_triton") {
         // Set only when the test lives in the binary's own package; cargo
         // then guarantees a fresh build, so no staleness check is needed.
         return PathBuf::from(p);
     }
-    let mut here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    while here.parent().is_some() {
-        let candidate_debug = here.join("target/debug/triton");
-        let candidate_release = here.join("target/release/triton");
-        if candidate_debug.exists() {
-            ensure_fresh_binary(&candidate_debug, &here, false);
-            return candidate_debug;
-        }
-        if candidate_release.exists() {
-            ensure_fresh_binary(&candidate_release, &here, true);
-            return candidate_release;
-        }
-        here.pop();
+    // Anchored at THIS workspace, not at the caller's cwd. When triton is
+    // vendored (`vendor/triton`) into a consumer that sets
+    // `exclude = ["vendor"]`, the caller's workspace contains no
+    // `triton-bin` at all, and a walk that keeps climbing past this root
+    // would either find nothing or, worse, something of the consumer's
+    // that merely shares the name.
+    let root = triton_workspace_root();
+    let candidate_debug = root.join("target/debug/triton");
+    let candidate_release = root.join("target/release/triton");
+    if candidate_debug.exists() {
+        ensure_fresh_binary(&candidate_debug, &root, false);
+        return candidate_debug;
     }
-    panic!("could not locate `triton` binary; run `cargo build` first");
+    if candidate_release.exists() {
+        ensure_fresh_binary(&candidate_release, &root, true);
+        return candidate_release;
+    }
+    // Nothing built yet. That is the ordinary state in an embedded
+    // consumer — its `cargo build` never touches `triton-bin` — so build
+    // it rather than telling the operator to. This is the difference
+    // between a consumer running the no-mock integration tests and a
+    // consumer reporting 57 failures that assert nothing (§9).
+    if let Err(e) = build_triton_bin(false) {
+        panic!(
+            "could not locate a `triton` binary under {} and building one failed:\n{e}\n\
+             (build it yourself and point the harness at it with TRITON_BIN=/path/to/triton)",
+            root.display()
+        );
+    }
+    if candidate_debug.exists() {
+        return candidate_debug;
+    }
+    panic!(
+        "built `triton-bin` but no binary appeared at {}",
+        candidate_debug.display()
+    );
+}
+
+/// The root of the triton workspace this harness was compiled from.
+///
+/// `CARGO_MANIFEST_DIR` is baked in at compile time, so this is correct
+/// no matter whose `cargo test` is running or from which directory.
+pub fn triton_workspace_root() -> PathBuf {
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR")); // <root>/crates/triton-tests
+    root.pop();
+    root.pop();
+    root
+}
+
+/// The `triton` binary this harness will spawn (building it first if the
+/// workspace has none). Exposed so a consumer can assert which binary its
+/// integration tests actually exercise.
+pub fn locate_triton_binary() -> PathBuf {
+    triton_binary_path()
+}
+
+/// The command that builds `triton-bin`, naming the workspace it belongs
+/// to.
+///
+/// A bare `cargo build -p triton-bin` inherits the caller's cwd, so in an
+/// embedded consumer it resolves against the CONSUMER's workspace and
+/// fails with `package ID specification 'triton-bin' did not match any
+/// packages`. `--manifest-path` pins the resolution here, and an explicit
+/// `--target-dir` pins the output to where [`triton_binary_path`] looks
+/// for it (a consumer's `CARGO_TARGET_DIR` must not redirect it).
+pub fn triton_bin_build_command(release: bool) -> Command {
+    let root = triton_workspace_root();
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let mut cmd = Command::new(cargo);
+    cmd.arg("build")
+        .arg("--manifest-path")
+        .arg(root.join("Cargo.toml"))
+        .arg("--target-dir")
+        .arg(root.join("target"))
+        .args(["-p", "triton-bin"]);
+    if release {
+        cmd.arg("--release");
+    }
+    cmd
+}
+
+/// Run [`triton_bin_build_command`], returning cargo's stderr on failure.
+fn build_triton_bin(release: bool) -> Result<(), String> {
+    let out = triton_bin_build_command(release)
+        .output()
+        .map_err(|e| format!("spawning cargo build: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).into_owned())
+    }
 }
 
 /// Make sure the located `triton` binary reflects the code under test.
@@ -536,22 +618,7 @@ fn ensure_fresh_binary(bin: &std::path::Path, workspace_root: &std::path::Path, 
     }
 
     static BUILT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
-    let outcome = BUILT.get_or_init(|| {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let mut args = vec!["build", "-p", "triton-bin"];
-        if release {
-            args.push("--release");
-        }
-        let out = Command::new(cargo)
-            .args(&args)
-            .output()
-            .map_err(|e| format!("spawning `cargo build {}`: {e}", args.join(" ")))?;
-        if out.status.success() {
-            Ok(())
-        } else {
-            Err(String::from_utf8_lossy(&out.stderr).into_owned())
-        }
-    });
+    let outcome = BUILT.get_or_init(|| build_triton_bin(release));
     if let Err(e) = outcome {
         panic!(
             "the `triton` binary looked stale and rebuilding it failed:\n{e}\n\
