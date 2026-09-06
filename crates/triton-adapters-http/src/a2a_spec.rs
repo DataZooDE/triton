@@ -932,11 +932,18 @@ async fn doc_open_parts(
             Err(_) => Value::Null,
         };
         ge::build_document_material(&structured, doc.label)
-    } else if !doc.url.is_empty() {
-        // No skill/id to render natively — last resort is the iframe page.
-        ge::build_document_canvas(doc.url, doc.label)
     } else {
-        return vec![json!({ "kind": "text", "text": "This document is unavailable." })];
+        // No skill/id (an unexpected source label). Do NOT fall through to the
+        // Canvas/IFrameUrl here: in native-default mode (the common case)
+        // IFrameUrl needs GE's widget allowlist and would show a security
+        // error the operator never opted into. Return the signed /docs link as
+        // plain text so the user can still open it (or an unavailable note).
+        let text = if !doc.url.is_empty() {
+            format!("Open the document: {}", doc.url)
+        } else {
+            "This document is unavailable.".to_string()
+        };
+        return vec![json!({ "kind": "text", "text": text })];
     };
     let mut parts = vec![json!({
         "kind": "text",
