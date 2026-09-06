@@ -282,6 +282,12 @@ impl RejectionWindow {
         }
     }
 
+    /// The configured window. Exposed so a host can report what it is
+    /// actually running with, rather than what it believes it set.
+    pub fn window(&self) -> std::time::Duration {
+        self.window
+    }
+
     /// Decide whether this rejection should be audited.
     ///
     /// `Some(n)` — emit, and say the line stands for `n` further

@@ -1758,3 +1758,14 @@ a trap the next developer should not have to step in.
   own change one PR later. When adding a control, ask which surfaces
   construct the thing it guards, not which surface you happened to be
   editing.
+
+  Tracing that one turned up two more with the same shape — `can_invoke`'s
+  scope restriction and the rejection window — neither of which reached an
+  embedded host either. Only the denylist was actually dangerous, since
+  agent-lab names no pairing tool, but "nothing is broken today" is a
+  statement about configuration, not about the seam. All three are now read
+  where the dispatcher is built. The standalone binary keeps deriving the
+  pairing tools from its manifest, which is richer than an env var can be,
+  and the two sources MERGE rather than compete — `with_scope_restriction`
+  extends instead of replacing, because a host adding the manifest's tools
+  should not silently drop the environment's.

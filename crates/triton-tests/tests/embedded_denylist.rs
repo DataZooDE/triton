@@ -156,3 +156,103 @@ async fn the_embedded_streaming_entry_point_revokes_too() {
         std::env::remove_var("TRITON_DENIED_PRINCIPALS");
     }
 }
+
+// ── #284 / #249 on the embedded surface ─────────────────────────────────
+//
+// Tracing why the denylist never reached agent-lab turned up two more
+// controls with the same shape: `can_invoke`'s scope restriction (#284)
+// and the anonymous-rejection coalescing window (#249) were both applied
+// by `triton-bin` and by nobody else.
+//
+// Neither is broken on agent-lab today — its Chat adapter sets
+// `pairing_tool: None` deliberately, so there is no restriction to lose.
+// But "nothing is broken today" is not the property these tests are for.
+// An embedded host that DOES name a pairing tool would mint restricted
+// principals and then forget the restriction, which is the exact bug
+// #284 was opened to fix.
+
+const PAIRED_TENANT: &str = "embedded-pairing-test-tenant";
+
+fn pairing_principal() -> Principal {
+    Principal {
+        sub: "users/unenrolled".to_string(),
+        // Holding ONLY `pairing` is the whole test: an enrolled principal
+        // carries real scopes and is deliberately unaffected.
+        scopes: vec!["pairing".to_string()],
+        groups: Vec::new(),
+        tenant: PAIRED_TENANT.to_string(),
+        raw_token: String::new(),
+        trace_id: "test-pairing".to_string(),
+        sender_ref: None,
+    }
+}
+
+/// An un-enrolled sender reaches the one tool the deployment named, and
+/// nothing else — on a dispatcher built the way an embedded host builds
+/// one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_embedded_host_honours_the_pairing_restriction() {
+    unsafe {
+        std::env::set_var("TRITON_PAIRING_TOOLS", "pair");
+    }
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test");
+
+    // `echo` is not the pairing tool, so a pairing-only principal cannot
+    // reach it. Before this, they could reach anything.
+    let denied = dispatcher
+        .invoke("echo", json!({}), pairing_principal(), "rest")
+        .await;
+    assert!(
+        matches!(denied, Err(TritonError::Forbidden(_))),
+        "a pairing-only principal must not reach a tool outside the \
+         restriction; got {denied:?}"
+    );
+
+    // An enrolled principal in the same tenant is unaffected — enrolment
+    // itself lifts the restriction, so there is no second mechanism to
+    // keep in sync.
+    let enrolled = dispatcher
+        .invoke("echo", json!({}), principal(PAIRED_TENANT, "alice"), "rest")
+        .await;
+    assert!(enrolled.is_ok(), "an enrolled principal must be unaffected");
+
+    unsafe {
+        std::env::remove_var("TRITON_PAIRING_TOOLS");
+    }
+}
+
+/// The coalescing window (#249) likewise. Its value is audit-volume
+/// tuning rather than a security control, but a host that cannot set it
+/// cannot defend its own ring buffer from a scanner — and the embedded
+/// surface is the one exposed to the public internet.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_embedded_host_can_set_the_rejection_window() {
+    unsafe {
+        std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "0");
+    }
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test");
+    assert_eq!(
+        dispatcher.reject_window_secs(),
+        0,
+        "an embedded host must be able to disable coalescing"
+    );
+    unsafe {
+        std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "120");
+    }
+    let tuned = Dispatcher::new(Arc::new(registry()), "test");
+    assert_eq!(tuned.reject_window_secs(), 120);
+
+    // A junk value falls back to the default rather than failing boot:
+    // this knob must never be the reason a gateway will not start.
+    unsafe {
+        std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "not-a-number");
+    }
+    let fallback = Dispatcher::new(Arc::new(registry()), "test");
+    assert_eq!(
+        fallback.reject_window_secs(),
+        triton_core::dispatcher::DEFAULT_REJECT_WINDOW.as_secs()
+    );
+    unsafe {
+        std::env::remove_var("TRITON_AUDIT_REJECT_WINDOW_SECS");
+    }
+}
