@@ -229,6 +229,53 @@ pub enum Resolution {
 /// round-trip. Args: `{ "id": <agent id>, "msg": <pending text> }`.
 pub const USE_AGENT_TOOL: &str = "__use_agent";
 
+/// What an adapter should do with a routed message. Platform-neutral: the
+/// adapter turns this into its own reply (running `route_command` for a
+/// dispatch, or building a chooser card / text reply otherwise).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteOutcome {
+    /// Hand the turn to `agent_id`. The adapter runs its existing
+    /// `route_command(text, &agent_id)` to derive `(tool, args)`.
+    Dispatch { agent_id: String, text: String },
+    /// Show a chooser. The adapter renders `candidates` as buttons carrying a
+    /// signed [`USE_AGENT_TOOL`] token (`{id, msg}`), so a pick replays
+    /// `pending_text` statelessly.
+    Chooser {
+        candidates: Vec<AgentDescriptor>,
+        reason: ChooserReason,
+        pending_text: String,
+    },
+    /// A plain-text reply the adapter posts verbatim (e.g. `/agents`,
+    /// `/whoami`), already formatted by the host.
+    Info { text: String },
+    /// Entitlement denied — the adapter posts `message` and does not dispatch.
+    Deny { message: String },
+}
+
+/// Everything the host needs to route one turn.
+pub struct RouteCtx<'a> {
+    /// Normalized conversation identity for the sticky binding.
+    pub key: ConvKey,
+    /// User message, bot-mention already stripped.
+    pub text: &'a str,
+    /// Caller-derived tenant (input only; routing never changes it).
+    pub tenant: &'a str,
+    /// Verified caller subject, for entitlement + binding audit.
+    pub caller_sub: &'a str,
+    /// Set when this turn is a chooser-button click: `(agent_id, replayed_msg)`
+    /// decoded from a [`USE_AGENT_TOOL`] token. Bypasses `resolve`.
+    pub pick: Option<(String, String)>,
+}
+
+/// The host-provided router: resolves which agent handles a turn, reading and
+/// writing the (async, escurel-backed) sticky binding and enforcing the
+/// fail-closed `may(caller, agent)` entitlement gate. Adapters hold an
+/// `Option<Arc<dyn AgentRouter>>`; when `None`, they fall back to the legacy
+/// single-tool `route_command(text, &adapter.inbound_tool)` path unchanged.
+pub trait AgentRouter: Send + Sync {
+    fn route<'a>(&'a self, ctx: RouteCtx<'a>) -> futures::future::BoxFuture<'a, RouteOutcome>;
+}
+
 /// Route one incoming message. See the crate/precedence docs.
 ///
 /// * `text` — user message, bot-mention already stripped.

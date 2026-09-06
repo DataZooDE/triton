@@ -15,3 +15,7 @@ publish = false
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Only for the object-safe async `AgentRouter` seam (BoxFuture). The core
+# `resolve` logic stays pure/sync; the host implements `AgentRouter` because
+# reading the sticky binding is async (escurel).
+futures = { workspace = true }

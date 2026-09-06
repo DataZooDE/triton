@@ -856,6 +856,37 @@ pub fn chart_from_vega(spec: &Value, fallback_image_url: Option<&str>) -> Option
     }
 }
 
+/// Build the agent-chooser Adaptive Card: a lead prompt plus one
+/// `Action.Execute` per candidate agent. Each `(title, token)` carries a
+/// signed `triton_chat_routing::USE_AGENT_TOOL` token (`{id, msg}`); tapping it re-enters
+/// the webhook as an `adaptiveCard/action` invoke, where the router binds the
+/// pick and replays the buffered message. Plain AC 1.4 (no chart).
+pub fn build_agent_chooser(
+    prompt: &str,
+    buttons: &[(String, String)],
+    chrome: &CardChrome,
+) -> Value {
+    let mut body: Vec<Value> = Vec::new();
+    body.extend(header_container(chrome));
+    if !prompt.is_empty() {
+        body.push(json!({ "type": "TextBlock", "text": prompt, "wrap": true }));
+    }
+    let actions: Vec<Value> = buttons
+        .iter()
+        .map(|(title, token)| execute_action(title, token))
+        .collect();
+    let mut card = json!({
+        "type": "AdaptiveCard",
+        "$schema": ADAPTIVE_CARD_SCHEMA,
+        "version": ADAPTIVE_CARD_VERSION,
+        "body": body,
+    });
+    if !actions.is_empty() {
+        card["actions"] = Value::Array(actions);
+    }
+    card
+}
+
 pub fn build_adaptive_card(
     text: &str,
     dashboard: Option<&DashboardData>,
@@ -1018,6 +1049,25 @@ pub fn invoke_message_response(text: &str) -> Value {
 mod tests {
     use super::*;
     use triton_core::a2ui::{Component, Surface};
+
+    #[test]
+    fn agent_chooser_card_has_execute_actions() {
+        let buttons = vec![
+            ("Sales".to_string(), "tokA".to_string()),
+            ("Ops".to_string(), "tokB".to_string()),
+        ];
+        let card = build_agent_chooser("Pick one", &buttons, &CardChrome::default());
+        assert_eq!(card["type"], "AdaptiveCard");
+        assert_eq!(card["version"], ADAPTIVE_CARD_VERSION);
+        let actions = card["actions"].as_array().expect("actions");
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0]["type"], "Action.Execute");
+        assert_eq!(actions[0]["title"], "Sales");
+        assert_eq!(actions[0]["data"][TOKEN_DATA_KEY], "tokA");
+        assert_eq!(actions[1]["data"][TOKEN_DATA_KEY], "tokB");
+        // Lead prompt is a wrapped TextBlock in the body.
+        assert!(card.to_string().contains("Pick one"));
+    }
 
     #[test]
     fn passthrough_text_and_narration() {

@@ -15,6 +15,7 @@ sha2 = "0.10"
 futures = { workspace = true }
 triton-core = { path = "../triton-core" }
 triton-correlation = { path = "../triton-correlation" }
+triton-chat-routing = { path = "../triton-chat-routing" }
 triton-manifest = { path = "../triton-manifest" }
 triton-secrets = { path = "../triton-secrets" }
 axum = { workspace = true }
