@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use triton_core::dispatcher::DispatchControls;
 use triton_core::error::TritonError;
 use triton_core::principal::ToolPrincipal;
 use triton_core::{Dispatcher, Tool, ToolRegistry};
@@ -66,7 +67,11 @@ fn claims(iss: &str) -> Value {
 async fn serve(opts: EmbedOpts) -> String {
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(AssistantTool));
-    let dispatcher = Arc::new(Dispatcher::new(Arc::new(reg), "test".to_string()));
+    let dispatcher = Arc::new(Dispatcher::new(
+        Arc::new(reg),
+        "test".to_string(),
+        DispatchControls::unenforced(),
+    ));
     let app = router(dispatcher, &opts);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -373,7 +378,11 @@ async fn slow_spec_host() -> (TestIssuer, String) {
     let iss = TestIssuer::start().await;
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(SlowTool));
-    let dispatcher = Arc::new(Dispatcher::new(Arc::new(reg), "test".to_string()));
+    let dispatcher = Arc::new(Dispatcher::new(
+        Arc::new(reg),
+        "test".to_string(),
+        DispatchControls::unenforced(),
+    ));
     let opts = EmbedOpts::dev().oidc(iss.issuer_url(), AUD, None).spec_a2a(
         "DataZoo Agent",
         "Answers questions.",
@@ -633,4 +642,60 @@ async fn message_stream_emits_task_artifact_final() {
     assert!(comps.iter().any(|c| c["component"] == "MaterialCard"));
     assert!(comps.iter().any(|c| c["component"] == "Image"));
     assert!(comps.iter().any(|c| c["component"] == "MaterialButton"));
+}
+
+/// #306 crew F1: a spec-A2A task id IS the trace id, and `tasks/get`
+/// keyed on it alone — so naming another tenant's id returned their
+/// dispatch answer. The same pivot `/v1/trace` closes, one surface over,
+/// and it needed no out-of-band knowledge: ids come back in every
+/// `message/send` reply.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_task_id_is_not_a_bearer_token_for_another_tenants_answer() {
+    let (iss, base) = spec_host().await;
+    let issuer = iss.issuer_url();
+    let acme = iss.sign_jwt(json!({
+        "iss": issuer, "aud": AUD, "sub": "alice", "tenant": "acme",
+        "exp": now() + 600, "iat": now() - 5
+    }));
+    let globex = iss.sign_jwt(json!({
+        "iss": issuer, "aud": AUD, "sub": "bob", "tenant": "globex",
+        "exp": now() + 600, "iat": now() - 5
+    }));
+
+    // Tenant A sends a message and learns its task id.
+    let (_, sent) = rpc(&base, &acme, send("acme-only-answer")).await;
+    let task_id = sent["result"]["taskId"]
+        .as_str()
+        .or_else(|| sent["result"]["id"].as_str())
+        .expect("a task id comes back to its creator")
+        .to_string();
+
+    // Tenant B names it. That is the whole attack: one field, copied.
+    let (_, stolen) = rpc(
+        &base,
+        &globex,
+        json!({"jsonrpc":"2.0","id":9,"method":"tasks/get","params":{"id": task_id}}),
+    )
+    .await;
+    assert!(
+        stolen.get("error").is_some(),
+        "another tenant must not read the task: {stolen}"
+    );
+    assert!(
+        !stolen.to_string().contains("acme-only-answer"),
+        "and must not receive the answer: {stolen}"
+    );
+
+    // The other half: its owner still reads it. A check that refuses
+    // everyone is not a check.
+    let (_, own) = rpc(
+        &base,
+        &acme,
+        json!({"jsonrpc":"2.0","id":10,"method":"tasks/get","params":{"id": task_id}}),
+    )
+    .await;
+    assert!(
+        own.get("error").is_none(),
+        "the creating tenant must still read its own task: {own}"
+    );
 }

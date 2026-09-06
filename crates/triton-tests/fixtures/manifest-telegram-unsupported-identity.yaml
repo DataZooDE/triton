@@ -1,0 +1,45 @@
+# #289 boot-refusal fixture: telegram with an identity.kind it does
+# not implement. Derived from manifest-vault-resolver.yaml.
+# Integration manifest. Every secret is an `env://` ref — the
+# Vault-less substrate path (GCP Secret Manager → kamal `.kamal/secrets`
+# → container env). Tests inject the four env vars below on the spawned
+# binary. (Vault was decommissioned with the move off the HashiCorp
+# stack; this fixture is the env-resolved successor to the old
+# vault-resolved variant — the file name is kept so test paths don't
+# churn.)
+version: "0.2"
+
+adapters:
+  telegram:
+    kind: telegram
+    inbound:
+      kind: webhook
+      signature: secret_token
+      secret: env://TRITON_TG_WEBHOOK_SECRET
+    outbound:
+      kind: rest_api
+      token: env://TRITON_TG_BOT_TOKEN
+    identity:
+      # #289: telegram implements `sender_table` and `upstream` only.
+      # `azure` is MS Teams' Entra strategy and means nothing here, so
+      # the adapter must refuse to construct rather than fall through.
+      kind: azure
+      # The manifest validator (FR-L-4) requires this field for `azure`;
+      # the point of the fixture is what the ADAPTER does with a kind it
+      # does not implement, which is a step later.
+      azure_identity: env://TRITON_TG_SENDERS
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: env://TRITON_TG_CORRELATION_KEY
+
+tools:
+  echo:
+    surface_components: []

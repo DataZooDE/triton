@@ -128,12 +128,13 @@ impl EmailAdapter {
                 adapter.outbound.kind
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
-            return Err(BuildError::Unsupported(format!(
-                "email adapter requires `identity.kind: sender_table`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule.
+        triton_chat_identity::require_supported_kind(
+            "email",
+            &adapter.identity.kind,
+            &[IdentityKind::SenderTable],
+        )
+        .map_err(|e| BuildError::TableParse(e.to_string()))?;
 
         let token_field = adapter
             .outbound
@@ -173,6 +174,23 @@ impl EmailAdapter {
                 .into_iter()
                 .map(|(k, v)| (k.trim().to_ascii_lowercase(), v))
                 .collect();
+        // #289 / FR-I-11: the TWELFTH construction path, and the one the
+        // audit found after the sweep had already been corrected twice.
+        // `RecipientClaims` is a different SHAPE from `SenderClaims` — a
+        // recipient-email → tenant binding, with `sub`/`scopes` unused —
+        // so it cannot go through `SenderTable::parse`. The shape is
+        // adapter-specific; the RULE is not.
+        //
+        // Lower severity than the others and worth saying so: this tenant
+        // is COMPARED against the caller's (`authorize` below), never
+        // minted into a principal, so a malformed entry fails closed —
+        // the recipient is refused rather than mis-attributed. But it
+        // fails closed SILENTLY, and an operator debugs it as a delivery
+        // problem rather than a table typo.
+        for (recipient, claims) in &sender_table {
+            triton_chat_identity::validate_table_entry(recipient, recipient, &claims.tenant)
+                .map_err(|e| BuildError::TableParse(e.to_string()))?;
+        }
 
         let http = reqwest::Client::builder()
             .timeout(config.timeout)

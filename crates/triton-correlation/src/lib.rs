@@ -76,12 +76,22 @@ struct CompactBody<'a> {
     /// rationale.
     t: &'a str,
     a: &'a Value,
+    /// `x` is the expiry in unix HOURS, not seconds — four fewer digits,
+    /// which matters because the whole token has to fit a platform
+    /// budget as small as Telegram's 64 bytes. Hour granularity is ample
+    /// for TTLs measured in days. Unbound tokens never expire,
+    /// which with an 8-byte truncated HMAC makes each one a permanent
+    /// oracle until the correlation key rotates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    x: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CompactBodyOwned {
     t: String,
     a: Value,
+    #[serde(default)]
+    x: Option<u64>,
 }
 
 /// Encode a `(tool, args)` pair into a callback-data token signed
@@ -110,7 +120,17 @@ pub fn encode_with_cap(
     if tool.is_empty() {
         return Err(EncodeError::EmptyTool);
     }
-    let body = CompactBody { t: tool, a: args };
+    let body = CompactBody {
+        t: tool,
+        a: args,
+        x: None,
+    };
+    finish(body, key, cap)
+}
+
+/// Serialise, sign and cap-check one body. Shared by the bound and
+/// unbound mint paths so they cannot drift.
+fn finish(body: CompactBody<'_>, key: &[u8], cap: usize) -> Result<String, EncodeError> {
     let body_json =
         serde_json::to_string(&body).map_err(|e| EncodeError::Serialise(e.to_string()))?;
     let mac = compute_truncated_hmac(body_json.as_bytes(), key);
@@ -186,11 +206,479 @@ pub fn decode_with_cap(
     Ok((parsed.t, parsed.a))
 }
 
+/// Verify signature + shape and return the whole parsed body, so the
+/// bound path can inspect the binding fields the unbound path drops.
+fn decode_parsed(token: &str, key: &[u8], cap: usize) -> Result<CompactBodyOwned, DecodeError> {
+    if token.len() > cap {
+        return Err(DecodeError::Malformed);
+    }
+    let (body_b64, mac_b64) = token.split_once('.').ok_or(DecodeError::Malformed)?;
+    let body = URL_SAFE_NO_PAD
+        .decode(body_b64)
+        .map_err(|_| DecodeError::Malformed)?;
+    let presented_mac = URL_SAFE_NO_PAD
+        .decode(mac_b64)
+        .map_err(|_| DecodeError::Malformed)?;
+    let expected = compute_truncated_hmac(&body, key);
+    let lengths_match = presented_mac.len() == expected.len();
+    let content_eq: bool = if lengths_match {
+        presented_mac.ct_eq(&expected).into()
+    } else {
+        let mut padded = [0u8; HMAC_LEN];
+        let n = presented_mac.len().min(HMAC_LEN);
+        padded[..n].copy_from_slice(&presented_mac[..n]);
+        padded.ct_eq(&expected).into()
+    };
+    if !(content_eq && lengths_match) {
+        return Err(DecodeError::BadSignature);
+    }
+    let parsed: CompactBodyOwned =
+        serde_json::from_slice(&body).map_err(|e| DecodeError::Body(e.to_string()))?;
+    if parsed.t.is_empty() {
+        return Err(DecodeError::Body("empty tool".into()));
+    }
+    Ok(parsed)
+}
+
+/// Who a bound token is FOR: the three values folded into its derived
+/// signing key.
+///
+/// A struct rather than three positional arguments because `tenant` and
+/// `sender` are both `&str` and adjacent — swapping them compiles, and
+/// the result is a token bound to nothing anyone will ever present. The
+/// field names make that mistake unrepresentable at the call site, which
+/// matters more here than at most seams: the failure would not be a
+/// crash but a quiet, total loss of the binding.
+#[derive(Clone, Copy)]
+pub struct Binding<'a> {
+    /// The adapter minting it (`"telegram"`, `"discord"`, …). Without
+    /// this, two adapters sharing a `correlation_key` would accept each
+    /// other's tokens.
+    pub platform: &'a str,
+    /// The tenant the token is minted into (#250).
+    pub tenant: &'a str,
+    /// The PLATFORM id of the person who may redeem it (#287) — not the
+    /// resolved `Principal::sub`. It has to be the value the inbound
+    /// path has in hand before the token is verified.
+    pub sender: &'a str,
+}
+
+/// Mint a token BOUND to a tenant and an expiry (#250).
+///
+/// The unbound [`encode_with_cap`] produces a capability for
+/// `(tool, args)` and nothing else, so a card token minted into one
+/// tenant's conversation is replayable by a sender in another. Binding
+/// makes the token answer "who was this for, and until when" as well as
+/// "what does it do".
+/// Mint a bound token with an ABSOLUTE expiry (unix seconds).
+///
+/// [`encode_bound`] takes a relative TTL and rounds up to the next hour,
+/// so no caller can produce an already-expired token — which meant the
+/// expiry branch could only ever be exercised through crate internals,
+/// never against a running binary (CLAUDE.md §1). This is the seam that
+/// lets an integration test present a genuinely stale token to a real
+/// adapter.
+pub fn encode_bound_at(
+    tool: &str,
+    args: &Value,
+    key: &[u8],
+    cap: usize,
+    b: Binding<'_>,
+    exp_unix_secs: u64,
+) -> Result<String, EncodeError> {
+    if tool.is_empty() {
+        return Err(EncodeError::EmptyTool);
+    }
+    let body = CompactBody {
+        t: tool,
+        a: args,
+        x: Some(exp_unix_secs.div_ceil(3600)),
+    };
+    finish(body, &tenant_key(key, b), cap)
+}
+
+pub fn encode_bound(
+    tool: &str,
+    args: &Value,
+    key: &[u8],
+    cap: usize,
+    b: Binding<'_>,
+    ttl_secs: Option<u64>,
+) -> Result<String, EncodeError> {
+    if tool.is_empty() {
+        return Err(EncodeError::EmptyTool);
+    }
+    // Hours, not seconds — see `CompactBody::x`. Rounded UP so a token
+    // never expires earlier than the caller asked for. `None` where the
+    // platform's budget cannot afford the field at all (Telegram); the
+    // TENANT binding is free and applies regardless.
+    let exp = match ttl_secs {
+        Some(ttl) => Some(
+            now_secs()
+                .ok_or_else(|| EncodeError::Serialise("system clock before the epoch".into()))?
+                .saturating_add(ttl)
+                .div_ceil(3600),
+        ),
+        None => None,
+    };
+    let body = CompactBody {
+        t: tool,
+        a: args,
+        x: exp,
+    };
+    finish(body, &tenant_key(key, b), cap)
+}
+
+/// Verify a token AND its binding: the tenant must equal `tenant` and
+/// the expiry must not have passed.
+///
+/// A token carrying no binding is refused, not accepted. Accepting it
+/// would leave the replay open for every card minted before this
+/// shipped — and since unbound tokens never expire, "before this
+/// shipped" means forever. The cost is bounded and self-healing: cards
+/// already sitting in a conversation stop responding to a click and the
+/// next reply mints a bound one.
+pub fn decode_bound(
+    token: &str,
+    key: &[u8],
+    cap: usize,
+    b: Binding<'_>,
+) -> Result<(String, Value), DecodeError> {
+    // The tenant is in the KEY, so a token minted for another tenant
+    // fails the signature check here — there is no field to compare and
+    // nothing to forget to check. A pre-binding token, minted under the
+    // bare key, fails the same way.
+    let parsed = decode_parsed(token, &tenant_key(key, b), cap)?;
+    // An expiry is present only where the platform's token budget could
+    // afford one. Its ABSENCE is not attacker-selectable: the field is
+    // covered by the MAC, so stripping it invalidates the token.
+    if let Some(exp_hours) = parsed.x {
+        let Some(now) = now_secs() else {
+            return Err(DecodeError::Body(
+                "system clock before the epoch; cannot check expiry".into(),
+            ));
+        };
+        if exp_hours.saturating_mul(3600) < now {
+            return Err(DecodeError::Body("token expired".into()));
+        }
+    }
+    Ok((parsed.t, parsed.a))
+}
+
+/// Verify only the BINDING of an already-decoded token.
+///
+/// Some adapters decode a callback token before they resolve the sender
+/// — Google Chat routes on the token's tool to decide what to do next —
+/// so the tenant is not known at decode time. They call this once the
+/// principal exists, before dispatching. Same rules as
+/// [`decode_bound`]: unbound and expired are both refused.
+pub fn verify_tenant_binding(
+    token: &str,
+    key: &[u8],
+    cap: usize,
+    b: Binding<'_>,
+) -> Result<(), DecodeError> {
+    decode_bound(token, key, cap, b).map(|_| ())
+}
+
+/// Derive a per-tenant signing key — what actually binds a token to a
+/// tenant, at ZERO cost on the wire.
+///
+/// That cost is the whole point. Carrying the tenant, even as a
+/// 6-character digest, plus an expiry cost ~32 bytes; Telegram's
+/// `callback_data` cap is 64 and a real unbound token already reaches
+/// it, so a wire field could not be afforded there at all and Telegram
+/// and WhatsApp Cloud were left with the replay open. In the key it is
+/// free — and stronger, because a token minted for another tenant fails
+/// the SIGNATURE rather than an equality comparison a caller could
+/// forget to make.
+///
+/// The PLATFORM is folded in beside the tenant. Without it, two adapters
+/// sharing a `correlation_key` — nothing refuses that today, and every
+/// fixture uses one literal — would accept each other's tokens for the
+/// same tenant and tool. That matters most for the expiry-less tokens
+/// Telegram's budget forces: an immortal `callback_data` token would be
+/// a byte-valid Discord `custom_id`, re-creating the forever-capability
+/// this binding exists to close, one adapter over.
+///
+/// The SENDER is folded in beside them (#287). Without it a token is a
+/// capability held by the whole tenant: `callback_data` is not a secret
+/// in a shared space, so any member who can see another member's button
+/// could click it and have the tool run under their OWN principal
+/// against the OTHER person's arguments. Cross-tenant replay was closed;
+/// intra-tenant replay was not. In the key it costs nothing on the wire,
+/// which is what makes it affordable at Telegram's 64-byte budget.
+///
+/// The label domain-separates the whole thing from the body MAC, which
+/// is computed over JSON and so always begins with `{`. The original key
+/// is appended so the derived key never carries less entropy than the
+/// one it replaces.
+///
+/// Every component is NUL-separated and none of them may contain a NUL
+/// (a platform sender id and a tenant are both drawn from restricted
+/// alphabets), so no two distinct triples share a derivation input.
+fn tenant_key(key: &[u8], b: Binding<'_>) -> Vec<u8> {
+    let mut input = Vec::with_capacity(
+        DERIVATION_LABEL.len() + b.platform.len() + b.tenant.len() + b.sender.len() + 3,
+    );
+    input.extend_from_slice(DERIVATION_LABEL);
+    input.push(0);
+    input.extend_from_slice(b.platform.as_bytes());
+    input.push(0);
+    input.extend_from_slice(b.tenant.as_bytes());
+    input.push(0);
+    input.extend_from_slice(b.sender.as_bytes());
+    // The FULL tag, not the truncated one: truncation is a wire-budget
+    // constraint and this key never leaves the process.
+    //
+    // The master key is NOT appended. It used to be, to guarantee the
+    // derived key never carried less entropy than the one it replaced —
+    // but a 32-byte HMAC tag already guarantees that, and appending made
+    // a one-way derivation reversible. Any future leak of a derived key
+    // (a debug print, a panic payload, a heap dump) would then leak the
+    // master, and with it every other tenant's and sender's key.
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(&input);
+    mac.finalize().into_bytes().to_vec()
+}
+
+/// Versioned, unambiguous prefix for the key derivation. Rotating it
+/// invalidates every outstanding token, which is the point of having one.
+///
+/// `v2` (#287) added the sender to the derivation input. The bump is not
+/// decoration: it guarantees a v1 token cannot collide with a v2 one for
+/// any input, so the deploy that adds sender binding cannot leave a
+/// pre-binding token verifying by accident.
+///
+/// `v3` (#306 crew F10) dropped the master key that used to be appended
+/// to the derived output. That changed what this function RETURNS, and
+/// therefore invalidated every outstanding token — with no label bump to
+/// say so. The effect was identical to a rotation and the record showed
+/// none.
+///
+/// Hence the rule this constant now carries: **any change to what
+/// `tenant_key` returns bumps this label, whether or not the INPUT
+/// changed.** The label exists to make invalidation explicit and
+/// greppable; a derivation that changes underneath a fixed label is an
+/// invalidation nobody can find afterwards.
+const DERIVATION_LABEL: &[u8] = b"triton/correlation/tenant-key/v3";
+
+/// `None` when the clock is before the epoch (a machine mid-NTP-sync,
+/// say). Callers treat that as "cannot decide" and refuse: mapping it to
+/// `0` made the expiry check `exp >= 0`, i.e. every expired token passed.
+fn now_secs() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
 fn compute_truncated_hmac(body: &[u8], key: &[u8]) -> Vec<u8> {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(body);
     let full = mac.finalize().into_bytes();
     full[..HMAC_LEN].to_vec()
+}
+
+/// The set of correlation keys a deployment will accept, newest first.
+///
+/// #287: before this, `correlation_key` was one value used to both sign
+/// and verify, so changing it invalidated every token in flight — every
+/// button already sitting in a conversation stopped responding on the
+/// deploy that rotated it. Faced with "rotate and break every live
+/// button", nobody rotates, and a key nobody can rotate is a key nobody
+/// can recover from once it leaks.
+///
+/// A ring makes rotation a three-step operation with no broken window:
+///
+/// 1. prepend the new key — `new,old`;
+/// 2. deploy: new tokens are signed with `new`, old ones still verify;
+/// 3. once every token minted under `old` has expired, drop it.
+///
+/// The FIRST key signs. That ordering is the operator-facing contract
+/// and it is what makes step 3 finite: were the last key the signer,
+/// dropping the old one would change what gets minted and the window
+/// would never close.
+///
+/// The ring holds SECRETS, so it deliberately implements neither
+/// `Debug` nor `Display` — a key that reaches a log line is a key that
+/// has to be rotated, and the whole point here is to make that rare.
+#[derive(Clone)]
+pub struct KeyRing {
+    keys: Vec<Vec<u8>>,
+}
+
+impl KeyRing {
+    /// Parse an operator-supplied secret: one key, or several separated
+    /// by commas during a rotation. Surrounding whitespace is trimmed
+    /// (a list gets pasted as `new, old` far more often than not) and
+    /// empty entries are dropped, so a trailing comma is not a key.
+    ///
+    /// Fails when nothing survives: an empty ring would verify nothing
+    /// and, worse, sign with a key that does not exist.
+    pub fn parse(spec: &str) -> Result<Self, KeyRingError> {
+        let keys: Vec<Vec<u8>> = spec
+            .split(',')
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .map(|k| k.as_bytes().to_vec())
+            .collect();
+        if keys.is_empty() {
+            return Err(KeyRingError::Empty);
+        }
+        // A deployed secret that happens to CONTAIN a comma silently
+        // became a multi-key ring whose first fragment signs. Against an
+        // 8-byte truncated HMAC a short fragment is brute-forceable
+        // offline from one observed token, yielding forgery for arbitrary
+        // (tool, args) — and nothing logged the degradation, so this
+        // change is what would have introduced it. Refusing at boot turns
+        // a silent weakening into a failed deploy.
+        if let Some(short) = keys.iter().find(|k| k.len() < MIN_KEY_LEN) {
+            return Err(KeyRingError::TooShort {
+                len: short.len(),
+                min: MIN_KEY_LEN,
+            });
+        }
+        Ok(Self { keys })
+    }
+
+    /// A stable, non-reversible tag for the SIGNING key, safe to log.
+    ///
+    /// Rotation is ordered — the first key signs — and an operator
+    /// appending the new key (`old,new`, the natural edit) keeps signing
+    /// with the compromised one while nothing looks wrong. This is what
+    /// makes that visible: the fingerprint changes when the signing key
+    /// does, and does not otherwise.
+    pub fn signing_fingerprint(&self) -> String {
+        let mut mac =
+            HmacSha256::new_from_slice(self.signing()).expect("HMAC accepts any key length");
+        mac.update(b"triton/correlation/fingerprint/v1");
+        let tag = mac.finalize().into_bytes();
+        hex_prefix(&tag[..4])
+    }
+
+    /// A ring of exactly one key — the shape every caller had before
+    /// rotation existed, and what tests mint under.
+    ///
+    /// Honours the same [`MIN_KEY_LEN`] floor as [`parse`]: an invariant
+    /// that holds on one constructor and not its sibling is not an
+    /// invariant, and this is the constructor a test reaches for first.
+    ///
+    /// [`parse`]: KeyRing::parse
+    pub fn single(key: impl Into<Vec<u8>>) -> Result<Self, KeyRingError> {
+        let key = key.into();
+        if key.len() < MIN_KEY_LEN {
+            return Err(KeyRingError::TooShort {
+                len: key.len(),
+                min: MIN_KEY_LEN,
+            });
+        }
+        Ok(Self { keys: vec![key] })
+    }
+
+    /// The key new tokens are signed with: the first on the ring.
+    pub fn signing(&self) -> &[u8] {
+        &self.keys[0]
+    }
+
+    /// Every key a token may have been minted under, newest first.
+    pub fn verifying(&self) -> impl Iterator<Item = &[u8]> {
+        self.keys.iter().map(Vec::as_slice)
+    }
+
+    /// How many keys are on the ring. Operators see this in a boot log
+    /// line: a ring left at 2 forever is an unfinished rotation.
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        false // `parse` and `single` both refuse to build an empty ring.
+    }
+}
+
+/// Shortest key `parse` will accept.
+///
+/// 16 bytes is not a cryptographic ceiling, it is a floor below which an
+/// 8-byte truncated HMAC stops being the limiting factor — the key is.
+pub const MIN_KEY_LEN: usize = 16;
+
+fn hex_prefix(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum KeyRingError {
+    #[error("correlation key list is empty; at least one key is required")]
+    Empty,
+    #[error(
+        "a correlation key is {len} bytes, under the {min}-byte minimum — a \
+         short key is brute-forceable from one observed token. A deployed \
+         secret CONTAINING a comma splits into a ring, so check for one \
+         before assuming the value is short"
+    )]
+    TooShort { len: usize, min: usize },
+}
+
+/// Try `verify` under each key on the ring, newest first.
+///
+/// Returns the first success. On failure it returns the error from the
+/// FIRST key that got far enough to decode a body — an expiry failure
+/// means that key's MAC passed, which is a strictly more informative
+/// verdict than the `BadSignature` every other key will produce, and
+/// reporting it keeps "your button timed out" distinguishable from
+/// "your button was signed with a key we dropped".
+fn try_ring<T>(
+    ring: &KeyRing,
+    verify: impl Fn(&[u8]) -> Result<T, DecodeError>,
+) -> Result<T, DecodeError> {
+    let mut first_error: Option<DecodeError> = None;
+    for key in ring.verifying() {
+        match verify(key) {
+            Ok(v) => return Ok(v),
+            // The MAC passed under this key and the BODY was the
+            // problem (expired, unparseable). No other key can do
+            // better, so stop and report it.
+            Err(e @ DecodeError::Body(_)) => return Err(e),
+            Err(e) => {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+            }
+        }
+    }
+    Err(first_error.unwrap_or(DecodeError::BadSignature))
+}
+
+/// [`decode_bound`] against every key on the ring.
+pub fn decode_bound_any(
+    token: &str,
+    ring: &KeyRing,
+    cap: usize,
+    b: Binding<'_>,
+) -> Result<(String, Value), DecodeError> {
+    try_ring(ring, |key| decode_bound(token, key, cap, b))
+}
+
+/// [`verify_tenant_binding`] against every key on the ring.
+pub fn verify_tenant_binding_any(
+    token: &str,
+    ring: &KeyRing,
+    cap: usize,
+    b: Binding<'_>,
+) -> Result<(), DecodeError> {
+    try_ring(ring, |key| verify_tenant_binding(token, key, cap, b))
+}
+
+/// [`decode_with_cap`] against every key on the ring. Used by the
+/// UNBOUND tokens — report images, dashboard PNGs — which carry no
+/// tenant binding but rotate on the same schedule as everything else.
+pub fn decode_with_cap_any(
+    token: &str,
+    ring: &KeyRing,
+    cap: usize,
+) -> Result<(String, Value), DecodeError> {
+    try_ring(ring, |key| decode_with_cap(token, key, cap))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -221,6 +709,230 @@ pub enum DecodeError {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    const OLD: &[u8] = b"an-old-correlation-key-32-bytes!";
+    const NEW: &[u8] = b"a-new-correlation-key-32-bytes!!";
+
+    #[test]
+    fn the_first_key_signs_and_every_key_verifies() {
+        let ring =
+            KeyRing::parse("a-new-correlation-key-32-bytes!!,an-old-correlation-key-32-bytes!")
+                .expect("two keys");
+        assert_eq!(ring.signing(), b"a-new-correlation-key-32-bytes!!");
+        assert_eq!(ring.len(), 2);
+        assert_eq!(ring.verifying().count(), 2);
+    }
+
+    /// A deployed secret that happens to contain a comma splits into a
+    /// ring whose first fragment signs. Against an 8-byte truncated HMAC
+    /// a short fragment is brute-forceable offline from one observed
+    /// token — so this must fail the DEPLOY, not sign quietly.
+    /// The floor must hold on BOTH constructors. `single` is what a test
+    /// reaches for first, and an invariant enforced on one path is a
+    /// suggestion (#306 crew F5).
+    #[test]
+    fn the_key_length_floor_holds_on_single_too() {
+        assert!(KeyRing::single(b"short".to_vec()).is_err());
+        assert!(KeyRing::single(b"a-new-correlation-key-32-bytes!!".to_vec()).is_ok());
+    }
+
+    #[test]
+    fn a_short_key_refuses_rather_than_signing_weakly() {
+        // The realistic shape: a passphrase with a comma in it.
+        // `expect_err` would need `KeyRing: Debug`, and it deliberately
+        // has none — a key that reaches a log line is a key to rotate.
+        let Err(err) = KeyRing::parse("correlation,key-for-the-deployment") else {
+            panic!("the 11-byte first fragment must be refused");
+        };
+        assert!(matches!(err, KeyRingError::TooShort { .. }), "got {err:?}");
+        // And the message must point at the actual cause, because
+        // "your key is too short" is misleading when the value is long.
+        assert!(format!("{err}").contains("comma"), "{err}");
+    }
+
+    /// Rotation is ordered, and appending the new key (`old,new`) is the
+    /// natural edit — which keeps signing with the compromised one. The
+    /// fingerprint is what makes that visible.
+    #[test]
+    fn the_signing_fingerprint_tracks_the_first_key_only() {
+        let a = KeyRing::parse("a-new-correlation-key-32-bytes!!").unwrap();
+        let ab =
+            KeyRing::parse("a-new-correlation-key-32-bytes!!,an-old-correlation-key-32-bytes!")
+                .unwrap();
+        let ba =
+            KeyRing::parse("an-old-correlation-key-32-bytes!,a-new-correlation-key-32-bytes!!")
+                .unwrap();
+        assert_eq!(
+            a.signing_fingerprint(),
+            ab.signing_fingerprint(),
+            "adding a verify-only key must not change who signs"
+        );
+        assert_ne!(
+            ab.signing_fingerprint(),
+            ba.signing_fingerprint(),
+            "reversing the order DOES change who signs, and must show it"
+        );
+    }
+
+    #[test]
+    fn a_pasted_list_is_trimmed_and_a_trailing_comma_is_not_a_key() {
+        let ring = KeyRing::parse(
+            " a-new-correlation-key-32-bytes!! , an-old-correlation-key-32-bytes! ,",
+        )
+        .expect("parses");
+        assert_eq!(ring.len(), 2, "the empty tail entry is not a key");
+        assert_eq!(ring.signing(), b"a-new-correlation-key-32-bytes!!");
+        // The whitespace really is gone — not merely counted away.
+        assert_eq!(
+            ring.verifying().nth(1).unwrap(),
+            b"an-old-correlation-key-32-bytes!"
+        );
+    }
+
+    #[test]
+    fn an_empty_spec_is_refused_rather_than_silently_signing_with_nothing() {
+        assert!(KeyRing::parse("").is_err());
+        assert!(KeyRing::parse("   ").is_err());
+        assert!(KeyRing::parse(",,,").is_err());
+        assert!(KeyRing::parse(" , ").is_err());
+    }
+
+    #[test]
+    fn a_token_minted_under_a_dropped_key_stops_verifying() {
+        let token = encode_bound(
+            "narrate",
+            &json!({}),
+            OLD,
+            200,
+            Binding {
+                platform: "telegram",
+                tenant: "acme",
+                sender: "u1",
+            },
+            None,
+        )
+        .expect("fits");
+
+        let during = KeyRing {
+            keys: vec![NEW.to_vec(), OLD.to_vec()],
+        };
+        assert!(
+            decode_bound_any(
+                &token,
+                &during,
+                200,
+                Binding {
+                    platform: "telegram",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_ok()
+        );
+
+        let after = KeyRing::single(NEW).expect("NEW is long enough");
+        assert!(
+            matches!(
+                decode_bound_any(
+                    &token,
+                    &after,
+                    200,
+                    Binding {
+                        platform: "telegram",
+                        tenant: "acme",
+                        sender: "u1"
+                    }
+                ),
+                Err(DecodeError::BadSignature)
+            ),
+            "dropping the key must close the window",
+        );
+    }
+
+    #[test]
+    fn the_ring_does_not_widen_the_tenant_binding() {
+        // Every key on the ring still derives a per-tenant key, so a
+        // ring is not a way to smuggle a foreign-tenant token through.
+        let token = encode_bound(
+            "narrate",
+            &json!({}),
+            OLD,
+            200,
+            Binding {
+                platform: "telegram",
+                tenant: "globex",
+                sender: "u1",
+            },
+            None,
+        )
+        .expect("fits");
+        let ring = KeyRing {
+            keys: vec![NEW.to_vec(), OLD.to_vec()],
+        };
+        assert!(
+            decode_bound_any(
+                &token,
+                &ring,
+                200,
+                Binding {
+                    platform: "telegram",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn an_expired_token_reports_expiry_not_a_signature_mismatch() {
+        // The MAC passes under the second key; only the body is stale.
+        // Reporting `BadSignature` there would tell an operator their
+        // rotation broke when in fact the token simply timed out.
+        let long_ago = 1_000_000; // ~1970
+        let token = encode_bound_at(
+            "narrate",
+            &json!({}),
+            OLD,
+            200,
+            Binding {
+                platform: "telegram",
+                tenant: "acme",
+                sender: "u1",
+            },
+            long_ago,
+        )
+        .expect("fits");
+        let ring = KeyRing {
+            keys: vec![NEW.to_vec(), OLD.to_vec()],
+        };
+        match decode_bound_any(
+            &token,
+            &ring,
+            200,
+            Binding {
+                platform: "telegram",
+                tenant: "acme",
+                sender: "u1",
+            },
+        ) {
+            Err(DecodeError::Body(m)) => assert!(m.contains("expired"), "{m}"),
+            other => panic!("expected an expiry verdict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unbound_tokens_rotate_on_the_same_ring() {
+        // Report images and dashboard PNGs carry no tenant binding but
+        // are signed with the same secret, so they must survive a
+        // rotation too — otherwise every card image 404s on deploy.
+        let token = encode_with_cap("__img", &json!({ "a": 1 }), OLD, 4096).expect("fits");
+        let ring = KeyRing {
+            keys: vec![NEW.to_vec(), OLD.to_vec()],
+        };
+        let (marker, _) = decode_with_cap_any(&token, &ring, 4096).expect("verifies");
+        assert_eq!(marker, "__img");
+    }
 
     const KEY: &[u8] = b"test-correlation-key-32-bytes!!!";
 
@@ -327,5 +1039,543 @@ mod tests {
         let bad_mac = URL_SAFE_NO_PAD.encode(&bytes);
         let bad = format!("{body}.{bad_mac}");
         assert!(matches!(decode(&bad, KEY), Err(DecodeError::BadSignature)));
+    }
+}
+
+#[cfg(test)]
+mod bound_tests {
+    use super::*;
+    use serde_json::json;
+
+    const KEY: &[u8] = b"k";
+    const CAP: usize = 4096;
+
+    #[test]
+    fn a_bound_token_round_trips_for_its_own_tenant() {
+        let t = encode_bound(
+            "narrate",
+            &json!({"s": "a"}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+            Some(3600),
+        )
+        .unwrap();
+        let (tool, args) = decode_bound(
+            &t,
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+        )
+        .unwrap();
+        assert_eq!(tool, "narrate");
+        assert_eq!(args["s"], "a");
+    }
+
+    #[test]
+    fn another_sender_in_the_same_tenant_cannot_use_it() {
+        // #287. The tenant matches, so the #250 binding is satisfied
+        // and cannot be what refuses this — only the sender can.
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "alice",
+            },
+            Some(3600),
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "alice"
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            matches!(
+                decode_bound(
+                    &t,
+                    KEY,
+                    CAP,
+                    Binding {
+                        platform: "tg",
+                        tenant: "acme",
+                        sender: "bob"
+                    }
+                ),
+                Err(DecodeError::BadSignature)
+            ),
+            "a sibling in the same tenant must fail the SIGNATURE, not a comparison",
+        );
+    }
+
+    /// The label must change whenever the OUTPUT does, not only when the
+    /// input does. #306 crew F10 dropped the appended master key, which
+    /// invalidated every live token while the label still said `v2` — an
+    /// invalidation with no record of itself.
+    #[test]
+    fn the_label_is_part_of_the_derived_output() {
+        let k = tenant_key(
+            KEY,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+        );
+        // A 32-byte HMAC tag and nothing appended: if this grows, the
+        // master key is back in the output and every derived key leaks it.
+        assert_eq!(k.len(), 32, "the derived key is the tag alone");
+        assert!(
+            !k.windows(KEY.len()).any(|w| w == KEY),
+            "the master key must not appear in a derived key"
+        );
+    }
+
+    #[test]
+    fn the_derivation_inputs_cannot_be_confused_with_each_other() {
+        // NUL separators mean no two distinct triples share an input.
+        // Without them `(tenant="ac", sender="me")` and
+        // `(tenant="acme", sender="")` would derive the same key.
+        let a = tenant_key(
+            KEY,
+            Binding {
+                platform: "tg",
+                tenant: "ac",
+                sender: "me",
+            },
+        );
+        let b = tenant_key(
+            KEY,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "",
+            },
+        );
+        assert_ne!(a, b);
+        let c = tenant_key(
+            KEY,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+        );
+        let d = tenant_key(
+            KEY,
+            Binding {
+                platform: "tgacme",
+                tenant: "",
+                sender: "u1",
+            },
+        );
+        assert_ne!(c, d);
+    }
+
+    #[test]
+    fn a_sender_bound_token_still_fits_telegrams_budget() {
+        // The sender rides in the KEY, so it costs nothing on the wire.
+        // If that ever stops being true, Telegram's 64-byte
+        // callback_data is where it breaks first.
+        let t = encode_bound(
+            "narrate",
+            &json!({ "subject": "alice" }),
+            KEY,
+            PLATFORM_MAX_CALLBACK_DATA,
+            Binding {
+                platform: "tg",
+                tenant: "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+                sender: "298374928374982",
+            },
+            None,
+        )
+        .expect("a sender binding must stay free on the wire");
+        assert!(t.len() <= PLATFORM_MAX_CALLBACK_DATA, "{} bytes", t.len());
+    }
+
+    #[test]
+    fn another_tenant_cannot_use_it() {
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+            Some(3600),
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "globex",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn an_unbound_legacy_token_is_refused() {
+        // The compatibility decision, pinned: accepting these would keep
+        // the replay open for every card minted before the binding
+        // shipped, and unbound tokens never expire.
+        let legacy = encode_with_cap("narrate", &json!({}), KEY, CAP).unwrap();
+        assert!(
+            decode_bound(
+                &legacy,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
+        // ...but it still decodes on the unbound path, so nothing else breaks.
+        assert!(decode_with_cap(&legacy, KEY, CAP).is_ok());
+    }
+
+    #[test]
+    fn an_expired_token_is_refused() {
+        // Built directly with a past expiry: with HOUR granularity a
+        // `ttl_secs = 0` token still runs to the end of the current
+        // hour, so a sleep cannot make one lapse inside a test.
+        let args = json!({});
+        let past = CompactBody {
+            t: "narrate",
+            a: &args,
+            x: Some(now_secs().unwrap() / 3600 - 1),
+        };
+        let t = finish(
+            past,
+            &tenant_key(
+                KEY,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1",
+                },
+            ),
+            CAP,
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_ttl_rounds_up_so_a_token_never_dies_early() {
+        // Hour granularity must never shorten the caller's TTL.
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+            Some(1),
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_realistic_bound_token_fits_discords_budget() {
+        // Discord buttons were silently DEFERRED until the keyed digest
+        // and hour-expiry shrank the binding — a hardening that costs
+        // functionality is not a hardening. A GUID tenant with a 7-day
+        // TTL is the realistic worst case.
+        let t = encode_bound(
+            "narrate",
+            &json!({ "subject": "alice" }),
+            KEY,
+            DISCORD_MAX_CUSTOM_ID,
+            Binding {
+                platform: "dc",
+                tenant: "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+                sender: "u1",
+            },
+            Some(7 * 24 * 3600),
+        )
+        .expect("a realistic bound token fits Discord's budget");
+        assert!(t.len() <= DISCORD_MAX_CUSTOM_ID, "got {} bytes", t.len());
+    }
+
+    /// Telegram's 64-byte `callback_data` is the tightest budget any
+    /// adapter mints into, and a real unbound token already reaches it.
+    /// A WIRE binding could never fit — carrying the tenant plus an
+    /// expiry cost ~32 bytes — which is why the first attempt at this
+    /// left Telegram and WhatsApp Cloud with the replay open.
+    ///
+    /// Deriving the key from the tenant costs nothing on the wire, so
+    /// the binding fits everywhere. The expiry is the part still dropped
+    /// at this budget; a stale token stays tenant-scoped, which is the
+    /// property that matters.
+    #[test]
+    fn a_tenant_binding_fits_even_telegrams_budget() {
+        let t = encode_bound(
+            "narrate",
+            &json!({ "subject": "alice" }),
+            KEY,
+            PLATFORM_MAX_CALLBACK_DATA,
+            Binding {
+                platform: "tg",
+                tenant: "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+                sender: "u1",
+            },
+            None,
+        )
+        .expect("a tenant-bound token fits Telegram when the expiry is dropped");
+        assert!(
+            t.len() <= PLATFORM_MAX_CALLBACK_DATA,
+            "got {} bytes",
+            t.len()
+        );
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                PLATFORM_MAX_CALLBACK_DATA,
+                Binding {
+                    platform: "tg",
+                    tenant: "globex",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                PLATFORM_MAX_CALLBACK_DATA,
+                Binding {
+                    platform: "tg",
+                    tenant: "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+                    sender: "u1"
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    /// An expiry-less token must not be mistaken for an expired one, and
+    /// must still be refused for the wrong tenant.
+    #[test]
+    fn an_expiry_less_token_never_expires_but_stays_tenant_scoped() {
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+            None,
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "globex",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_bound_token_still_fails_a_wrong_key() {
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+            Some(3600),
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                b"other",
+                CAP,
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn the_binding_costs_bytes_and_the_cap_still_applies() {
+        // The tenant + expiry make the token longer; a cap that fitted
+        // the unbound form may not fit the bound one, and that must
+        // surface as OversizedToken rather than a silently dropped
+        // binding.
+        let unbound = encode_with_cap("narrate", &json!({}), KEY, CAP).unwrap();
+        let bound = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "tg",
+                tenant: "acme",
+                sender: "u1",
+            },
+            Some(3600),
+        )
+        .unwrap();
+        assert!(bound.len() > unbound.len());
+        assert!(matches!(
+            encode_bound(
+                "narrate",
+                &json!({}),
+                KEY,
+                unbound.len(),
+                Binding {
+                    platform: "tg",
+                    tenant: "acme",
+                    sender: "u1"
+                },
+                Some(3600)
+            ),
+            Err(EncodeError::OversizedToken { .. })
+        ));
+    }
+
+    /// #250 F5: two adapters sharing one `correlation_key` — nothing
+    /// refuses that today, and every fixture uses a single literal —
+    /// must not accept each other's tokens. It matters most for the
+    /// expiry-less tokens Telegram's budget forces: an immortal
+    /// `callback_data` token would otherwise be a byte-valid Discord
+    /// `custom_id`, re-creating the forever-capability one adapter over.
+    #[test]
+    fn a_token_from_one_platform_is_refused_on_another() {
+        let t = encode_bound(
+            "narrate",
+            &json!({}),
+            KEY,
+            CAP,
+            Binding {
+                platform: "telegram",
+                tenant: "acme",
+                sender: "u1",
+            },
+            None,
+        )
+        .unwrap();
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "telegram",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            decode_bound(
+                &t,
+                KEY,
+                CAP,
+                Binding {
+                    platform: "discord",
+                    tenant: "acme",
+                    sender: "u1"
+                }
+            )
+            .is_err(),
+            "same key, same tenant, different platform must not verify"
+        );
     }
 }

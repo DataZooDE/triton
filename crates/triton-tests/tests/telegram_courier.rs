@@ -256,7 +256,10 @@ async fn bot_token_never_leaks_into_courier_failure_logs() {
         ),
         ("TRITON_TG_BOT_TOKEN".to_string(), marker.to_string()),
         ("TRITON_TG_SENDERS".to_string(), SENDERS_JSON.to_string()),
-        ("TRITON_TG_CORRELATION_KEY".to_string(), "ck".to_string()),
+        (
+            "TRITON_TG_CORRELATION_KEY".to_string(),
+            "a-correlation-key-32-bytes-long!".to_string(),
+        ),
         (
             "TRITON_TELEGRAM_API_BASE".to_string(),
             "http://127.0.0.1:1".to_string(),

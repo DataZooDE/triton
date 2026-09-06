@@ -26,8 +26,24 @@ mod acc_hardening;
 mod audit_reject_coalescing;
 #[path = "../audit_retrieval.rs"]
 mod audit_retrieval;
+#[path = "../audit_tenant_scope.rs"]
+mod audit_tenant_scope;
 #[path = "../consumer_smoke.rs"]
 mod consumer_smoke;
+#[path = "../correlation_sender_binding.rs"]
+mod correlation_sender_binding;
+
+#[path = "../embedded_denylist.rs"]
+mod embedded_denylist;
+
+#[path = "../chat_identity.rs"]
+mod chat_identity;
+
+#[path = "../principal_denylist.rs"]
+mod principal_denylist;
+
+#[path = "../correlation_rotation.rs"]
+mod correlation_rotation;
 #[path = "../cors.rs"]
 mod cors;
 #[path = "../demo_panel.rs"]
@@ -74,6 +90,8 @@ mod metrics_endpoint;
 mod msteams;
 #[path = "../msteams_callback.rs"]
 mod msteams_callback;
+#[path = "../msteams_channels.rs"]
+mod msteams_channels;
 #[path = "../msteams_courier.rs"]
 mod msteams_courier;
 #[path = "../msteams_federated.rs"]
@@ -92,6 +110,8 @@ mod optional_adapters;
 mod outbound;
 #[path = "../outbound_issuer.rs"]
 mod outbound_issuer;
+#[path = "../pairing_authz.rs"]
+mod pairing_authz;
 #[path = "../process_liveness.rs"]
 mod process_liveness;
 #[path = "../rasterizer.rs"]
@@ -114,6 +134,7 @@ mod streaming;
 mod surface_render;
 #[path = "../telegram.rs"]
 mod telegram;
+
 #[path = "../telegram_callback.rs"]
 mod telegram_callback;
 #[path = "../telegram_courier.rs"]
@@ -144,6 +165,10 @@ mod twilio_whatsapp_button_reply;
 mod twilio_whatsapp_status_callback;
 #[path = "../twilio_whatsapp_template.rs"]
 mod twilio_whatsapp_template;
+#[path = "../upstream_contract.rs"]
+mod upstream_contract;
+#[path = "../upstream_identity_hardening.rs"]
+mod upstream_identity_hardening;
 #[path = "../upstream_listing.rs"]
 mod upstream_listing;
 #[path = "../version.rs"]

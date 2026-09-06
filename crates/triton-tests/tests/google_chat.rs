@@ -108,9 +108,24 @@ fn card_clicked_event(sender_name: &str, token: &str) -> Value {
 /// Sign `(tool, args)` into a button correlation token under the test
 /// manifest's `correlation_key`, exactly as the adapter does when it
 /// renders a button.
+/// #250: card tokens are bound to the minting tenant and an expiry, so
+/// a test token must be minted for the tenant its sender resolves to
+/// (`users/99` → `acme` in the card fixture). An unbound token is
+/// refused by design — see `decode_bound`.
 fn sign_button(tool: &str, args: Value) -> String {
-    triton_correlation::encode_with_cap(tool, &args, b"correlation-key-for-test", 1536)
-        .expect("encode correlation token")
+    triton_correlation::encode_bound(
+        tool,
+        &args,
+        b"correlation-key-for-test",
+        1536,
+        triton_correlation::Binding {
+            platform: "google_chat",
+            tenant: "acme",
+            sender: "users/99",
+        },
+        Some(7 * 24 * 3600),
+    )
+    .expect("encode correlation token")
 }
 
 /// A `CARD_CLICKED` from a Selection/Form submit: the signed token plus the
@@ -350,12 +365,20 @@ async fn dashboard_image_route_returns_a_png() {
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&jwks)).await;
     let webhook = proc.chat_webhook_addr.expect("listener bound");
 
+    // #306 crew F8: the dashboard token now carries an expiry, like its
+    // render_report sibling. The image route is deliberately
+    // unauthenticated (Google fetches card images anonymously), so the
+    // signed token IS the authorization and an unbounded one stays
+    // redeemable until the correlation key rotates.
     let spec = json!({
-        "title": "Stock at risk (€)",
-        "tiles": [
-            { "label": "Alpine Metals AG", "value": "€2.19M" },
-            { "label": "Catalonia Carbon", "value": "€1.79M" }
-        ]
+        "s": {
+            "title": "Stock at risk (€)",
+            "tiles": [
+                { "label": "Alpine Metals AG", "value": "€2.19M" },
+                { "label": "Catalonia Carbon", "value": "€1.79M" }
+            ]
+        },
+        "exp": unix_now() + 3600,
     });
     let token = triton_correlation::encode_with_cap(
         "__dashboard_png",
@@ -490,6 +513,46 @@ async fn card_clicked_render_report_png_renders_as_image() {
         b"\x89PNG",
         "expected PNG magic, got {} bytes",
         bytes.len()
+    );
+}
+
+/// #250: a card token minted into one tenant's space must not work for
+/// a sender in another. A Chat space is shared, so the token is visible
+/// to every member and in the client's network trace.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_card_token_from_another_tenant_is_rejected() {
+    let jwks = FakeGoogleJwks::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_with(&jwks)).await;
+    let webhook = proc.chat_webhook_addr.expect("listener bound");
+
+    // Correctly signed under the manifest key, but minted for `globex`;
+    // `users/99` resolves to `acme`.
+    let foreign = triton_correlation::encode_bound(
+        "echo",
+        &json!({ "message": "victim args" }),
+        b"correlation-key-for-test",
+        1536,
+        triton_correlation::Binding {
+            platform: "google_chat",
+            tenant: "globex",
+            sender: "users/99",
+        },
+        Some(7 * 24 * 3600),
+    )
+    .expect("encode");
+
+    let jwt = jwks.sign_jwt(standard_claims());
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/google_chat/webhook"))
+        .header("authorization", format!("Bearer {jwt}"))
+        .json(&card_clicked_event("users/99", &foreign))
+        .send()
+        .await
+        .expect("POST webhook");
+    assert_eq!(
+        resp.status(),
+        401,
+        "a token minted for another tenant must not be honoured"
     );
 }
 
@@ -1553,11 +1616,18 @@ async fn async_courier_click_ack_is_click_shaped() {
 
     // A real signed correlation token for the click, minted with the
     // manifest's key.
-    let token = triton_correlation::encode_with_cap(
+    // #250: bound to the tenant `users/99` resolves to in this fixture.
+    let token = triton_correlation::encode_bound(
         "answer",
         &json!({ "question": "top customers" }),
         b"correlation-key-for-test",
         512,
+        triton_correlation::Binding {
+            platform: "google_chat",
+            tenant: "acme",
+            sender: "users/99",
+        },
+        Some(7 * 24 * 3600),
     )
     .expect("token");
     let jwt = jwks.sign_jwt(standard_claims());

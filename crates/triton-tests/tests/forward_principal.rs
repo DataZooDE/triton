@@ -214,6 +214,54 @@ async fn forward_on_carries_resolved_scope_and_tenant() {
     assert_eq!(claims["tenant"], "globex", "resolved sender tenant");
 }
 
+/// #283: with shipped defaults the minted token carried NO tenant claim
+/// at all — `tenant: String::new()` plus "empty ⇒ omit the claim" plus
+/// `forward_principal` defaulting to false. So an upstream could not
+/// distinguish "single-tenant Triton" from "claim withheld", which makes
+/// the delegated authorization model unimplementable by any upstream
+/// even if it wants to implement it.
+///
+/// The tenant is identity, not an opt-in enrichment: it ships always,
+/// like `sub`. The flag keeps governing scopes and groups only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_tenant_claim_ships_even_with_forwarding_off() {
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob",
+        "scopes": ["chat", "reports"],
+        "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for(&whatsapp, &agent, &resolver, false),
+    )
+    .await;
+
+    let resp = post_inbound(&proc, UNKNOWN_WA_ID, "hi").await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let bearer = wait_for(Duration::from_secs(5), || {
+        agent.bearers_seen().into_iter().next()
+    });
+    let claims = jwt_claims(bearer.trim_start_matches("Bearer "));
+    assert_eq!(
+        claims["tenant"], "globex",
+        "the resolved tenant must reach the upstream regardless of the \
+         forwarding flag — otherwise no upstream can authorize on it; got: \
+         {claims}"
+    );
+    // ...and the flag still governs what it always governed.
+    assert!(
+        claims["triton_sender_scopes"].is_null(),
+        "scopes stay opt-in: shipping them by default is a deny-side \
+         regression for an upstream whose rule is `if scopes present, \
+         enforce them`. got: {claims}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_off_is_sub_only_by_default() {
     let resolver = FakeAgent::start_returning(json!({
@@ -239,15 +287,19 @@ async fn forward_off_is_sub_only_by_default() {
     });
     let claims = jwt_claims(&bearer);
     // Default contract unchanged: sub is the only per-sender claim; no
-    // forwarded scopes, and no per-sender `tenant` (deployment tenant unset).
+    // forwarded scopes. The `tenant` DOES ship — see #283; the flag's
+    // scope narrowed to scopes/groups.
     assert_eq!(claims["sub"], "resolved-bob");
     assert!(
         claims.get("triton_sender_scopes").is_none() && claims.get("scope").is_none(),
         "no forwarded scopes by default: {claims}"
     );
-    assert!(
-        claims.get("tenant").is_none(),
-        "no per-sender tenant by default: {claims}"
+    assert_eq!(
+        claims["tenant"], "globex",
+        "#283 changed this contract deliberately: the tenant is IDENTITY and \
+         now ships regardless of the flag, because an upstream that cannot \
+         see it cannot authorize on it. The flag governs scopes and groups \
+         only. got: {claims}"
     );
 }
 

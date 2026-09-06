@@ -1,0 +1,39 @@
+# #250: `identity.kind: azure` with an explicit `allowed_channel_ids`.
+# The hardcoded `channelId == "msteams"` gate made every non-Teams Bot
+# Framework channel — Copilot Studio, WebChat, M365 Copilot Chat —
+# unreachable. The allowlist is the operator's explicit statement of
+# which channels may assert an Entra-shaped principal; unknown channels
+# are still refused.
+version: "0.2"
+
+adapters:
+  msteams:
+    kind: ms_teams
+    inbound:
+      kind: webhook
+      signature: bot_framework_jwt
+      audience: triton-msteams-test-appid
+    outbound:
+      kind: bot_connector
+      client_id: triton-msteams-test-appid
+      client_secret: literal-client-secret-for-test
+    identity:
+      kind: azure
+      azure_identity: '{"allowed_tenants":["acme-tenant-guid"],"scopes":["chat"],"allowed_channel_ids":["msteams","pva"]}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: adaptive_card
+      selections: adaptive_card
+      forms: adaptive_card
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []
+  narrate:
+    surface_components: [text, narration, buttons]

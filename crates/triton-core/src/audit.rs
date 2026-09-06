@@ -116,6 +116,13 @@ pub struct AuditRecord<'a> {
     /// byte-identical.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttfb_ms: Option<u64>,
+    /// The RAW platform sender id behind this principal, when the
+    /// adapter knows one (see [`crate::principal::Principal::sender_ref`]).
+    /// Recorded beside the resolved `subject` so an impersonation under
+    /// `identity.kind: upstream` is distinguishable from the victim's own
+    /// session; omitted where there is no platform sender.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_ref: Option<&'a str>,
     /// How many further rejections this line stands for (#249).
     ///
     /// Anonymous rejections on a public path are coalesced into one line
@@ -131,6 +138,37 @@ pub struct AuditRecord<'a> {
     pub trace_id: &'a str,
 }
 
+/// How much of a principal-derived field is recorded in an audit line.
+///
+/// Under `identity.kind: upstream` (FR-I-7) an out-of-process resolver
+/// chooses `sub` and `tenant`, so these are attacker-influenced values
+/// recorded on a path that runs BEFORE anything validates them.
+/// Uncapped, a hostile resolver writes unbounded data into stdout and the
+/// 1024-entry ring buffer on every request — the harm #249 addressed,
+/// arriving through a different door. Observed live while verifying the
+/// #250 fail-closed path: the refusal was correct, and the audit line it
+/// emitted still carried the full 5000-character hostile tenant.
+///
+/// Generous enough that no legitimate value is ever touched: the longest
+/// real subjects are GUIDs and `29:`-prefixed Teams ids.
+pub const MAX_AUDITED_FIELD_LEN: usize = 128;
+
+/// Clamp a principal-derived field for recording. Zero-copy for every
+/// legitimate value; an over-long one is truncated with a marker naming
+/// the true length, so an operator can still see what was refused and
+/// that it was cut.
+pub fn clamp_audited(value: &str) -> std::borrow::Cow<'_, str> {
+    if value.len() <= MAX_AUDITED_FIELD_LEN {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    // Cut on a char boundary so the line stays valid UTF-8.
+    let mut end = MAX_AUDITED_FIELD_LEN;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(format!("{}…[{} bytes]", &value[..end], value.len()))
+}
+
 /// Emit one audit line to stdout. `stdout().lock()` plus an explicit
 /// flush survives concurrent emission from multiple in-flight
 /// requests (the lock serialises) and SIGTERM drain (`flush` makes
@@ -140,7 +178,13 @@ pub struct AuditRecord<'a> {
 /// buffer (FR-AU-5) so a tailnet-only operator endpoint can serve
 /// the recent history without scraping the substrate's log shipper.
 pub fn emit(record: &AuditRecord<'_>) {
-    let Ok(line) = serde_json::to_string(record) else {
+    // Serialise the ENTRY, not the record: `From<&AuditRecord>` is the
+    // one place principal-derived fields are clamped, so routing both
+    // sinks through it makes the bound an invariant of the emitter
+    // rather than a habit of each call site. A crew review found the
+    // per-site version covered 3 of 5 sinks (#250).
+    let entry = AuditEntry::from(record);
+    let Ok(line) = serde_json::to_string(&entry) else {
         return;
     };
     let stdout = std::io::stdout();
@@ -151,7 +195,7 @@ pub fn emit(record: &AuditRecord<'_>) {
     let _ = handle.write_all(b"\n");
     let _ = handle.flush();
     drop(handle);
-    AuditBuffer::push(record);
+    AuditBuffer::push_entry(entry);
 }
 
 /// In-process bounded history of recent audit records, exposed via
@@ -181,8 +225,16 @@ pub struct AuditEntry {
     pub status_label: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_detail: Option<&'static str>,
+    /// See [`AuditRecord::error_detail`]. Mirrored so the buffer and
+    /// stdout carry the same line — and so the clamp in `From` covers
+    /// it, since adapters interpolate resolver-chosen values into it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_detail: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttfb_ms: Option<u64>,
+    /// See [`AuditRecord::sender_ref`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_ref: Option<String>,
     /// See [`AuditRecord::suppressed`]. Mirrored into the buffer because
     /// the operator tailing `/v1/audit` is precisely the person who needs
     /// to know the entry stands for more than one refusal.
@@ -197,19 +249,27 @@ impl<'a> From<&AuditRecord<'a>> for AuditEntry {
             kind: r.kind,
             phase: r.phase,
             when: r.when.clone(),
-            who: r.who.to_string(),
+            who: clamp_audited(r.who).into_owned(),
             what: r.what.to_string(),
             env: r.env.to_string(),
             result: r.result.clone(),
             protocol: r.protocol.to_string(),
             tool: r.tool.to_string(),
-            subject: r.subject.to_string(),
-            tenant: r.tenant.to_string(),
+            subject: clamp_audited(r.subject).into_owned(),
+            tenant: clamp_audited(r.tenant).into_owned(),
             latency_ms: r.latency_ms,
             status: r.status,
             status_label: r.status_label,
             status_detail: r.status_detail,
+            // Bounded here too: adapters interpolate the resolver-chosen
+            // tenant into rate-limit messages, so an unclamped
+            // `error_detail` re-leaks what the fields above clamp.
+            error_detail: r
+                .error_detail
+                .as_deref()
+                .map(|d| clamp_audited(d).into_owned()),
             ttfb_ms: r.ttfb_ms,
+            sender_ref: r.sender_ref.map(|v| clamp_audited(v).into_owned()),
             suppressed: r.suppressed,
             trace_id: r.trace_id.to_string(),
         }
@@ -232,8 +292,9 @@ impl AuditBuffer {
         BUF.get_or_init(AuditBuffer::new)
     }
 
-    fn push(record: &AuditRecord<'_>) {
-        let entry: AuditEntry = record.into();
+    /// Push an already-clamped entry (see [`emit`], which builds it once
+    /// and shares it between stdout and the buffer).
+    fn push_entry(entry: AuditEntry) {
         let buf = Self::global();
         let mut q = buf.inner.lock().unwrap_or_else(|e| e.into_inner());
         if q.len() == AUDIT_BUFFER_CAPACITY {
@@ -245,6 +306,25 @@ impl AuditBuffer {
     /// Return the most recent `limit` entries (newest first),
     /// optionally filtered to entries whose `trace_id` matches.
     pub fn recent(limit: usize, trace_id: Option<&str>) -> Vec<AuditEntry> {
+        Self::recent_where(limit, trace_id, |_| true)
+    }
+
+    /// Newest-first slice, keeping only entries `visible` accepts.
+    ///
+    /// The predicate is applied BEFORE `limit` (#282). Filtering after
+    /// taking the window is the subtle version of the bug: a caller
+    /// whose traffic is a small share of a busy gateway asks for 50 rows,
+    /// gets the newest 50 across all tenants, keeps the two that are
+    /// theirs, and reads it as "no activity" rather than as a paging
+    /// artefact.
+    ///
+    /// The POLICY stays with the caller — this buffer owns recording,
+    /// not who may read what. It only guarantees the ordering.
+    pub fn recent_where(
+        limit: usize,
+        trace_id: Option<&str>,
+        visible: impl Fn(&AuditEntry) -> bool,
+    ) -> Vec<AuditEntry> {
         let buf = Self::global();
         let q = buf.inner.lock().unwrap_or_else(|e| e.into_inner());
         let it = q.iter().rev();
@@ -252,7 +332,11 @@ impl AuditBuffer {
             Some(t) => Box::new(it.filter(move |e| e.trace_id == t)),
             None => Box::new(it),
         };
-        filtered.take(limit).cloned().collect()
+        filtered
+            .filter(|e| visible(e))
+            .take(limit)
+            .cloned()
+            .collect()
     }
 
     /// Reset for tests. Not exposed in production — the buffer is
@@ -301,6 +385,7 @@ mod rejection_reason_tests {
             status_detail: None,
             error_detail: Some("bot framework jwt: jwt issuer does not match".into()),
             ttfb_ms: None,
+            sender_ref: None,
             suppressed: None,
             trace_id: "t-1",
         };
@@ -334,6 +419,7 @@ mod rejection_reason_tests {
             status_detail: None,
             error_detail: None,
             ttfb_ms: None,
+            sender_ref: None,
             suppressed: None,
             trace_id: "t-2",
         };

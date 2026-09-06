@@ -96,6 +96,11 @@ pub struct RestState {
     /// `TRITON_METRICS_PORT`; the REST route here is the
     /// authenticated CORS-friendly path the explorer uses.
     pub metrics: Arc<triton_core::Metrics>,
+    /// #306 crew F6/F7: principals the DEPLOYMENT names as operators,
+    /// parsed once at boot. Read per request previously, which re-parsed
+    /// the environment on every `/v1/audit` call and printed a
+    /// denylist-branded warning for a malformed audit entry.
+    pub audit_operators: Arc<std::collections::HashSet<(String, String)>>,
     /// OIDC signer for static-upstream dispatch. When set, Triton acts as the
     /// issuer for the JWTs it mints to agents: it serves discovery + JWKS at the
     /// `/.well-known/*` routes below so agents verify those tokens. `None`
@@ -281,6 +286,9 @@ async fn surface_render(
             match triton_chat_telegram::surface_mapper::try_render_surface(
                 &surface_input,
                 &PREVIEW_KEY,
+                // Preview only — see the discord arm.
+                "preview",
+                "preview",
             ) {
                 None => not_a2ui(),
                 Some(Err(_)) => empty("telegram"),
@@ -303,6 +311,12 @@ async fn surface_render(
             match triton_chat_discord::surface_mapper::try_render_surface(
                 &surface_input,
                 &PREVIEW_KEY,
+                // Preview only: this endpoint renders a surface for the
+                // explorer and the tokens it mints are never dispatched,
+                // so the tenant and sender are placeholders like
+                // `PREVIEW_KEY` itself.
+                "preview",
+                "preview",
             ) {
                 None => not_a2ui(),
                 Some(Err(_)) => empty("discord"),
@@ -373,6 +387,9 @@ async fn surface_render(
         "whatsapp" => match triton_chat_whatsapp::surface_mapper::try_render_surface(
             &surface_input,
             &PREVIEW_KEY,
+            // Preview only — see the discord arm.
+            "preview",
+            "preview",
         ) {
             None => not_a2ui(),
             Some(Err(_)) => empty("whatsapp"),
@@ -505,6 +522,60 @@ const fn default_limit() -> usize {
     AUDIT_LIMIT_DEFAULT
 }
 
+/// Scope that grants the cross-tenant view of `/v1/audit` and
+/// `/v1/trace`. Without it a caller sees only their own tenant's rows.
+pub const AUDIT_READ_ALL_SCOPE: &str = "audit:read-all";
+
+/// Which audit rows this principal may read (#282).
+///
+/// An operator (holding [`AUDIT_READ_ALL_SCOPE`]) sees everything. Anyone
+/// else sees their own tenant only — and NOT the unattributed rows.
+///
+/// Unattributed rows (`tenant: "-"`) are the boundary rejections: they
+/// exist precisely because no principal was resolved, so there is no
+/// tenant to scope them by, and they are the rows most likely to name
+/// another tenant's sender or reply target. Operator-only is the
+/// fail-closed reading. The cost is real and worth stating: a
+/// tenant-scoped caller cannot see their own failed authentications,
+/// because at the moment of failure nothing knew they were theirs.
+fn audit_visibility_in(
+    principal: &triton_core::principal::Principal,
+    // Operators the DEPLOYMENT named — not a claim the issuer can mint.
+    operators: &std::collections::HashSet<(String, String)>,
+    // The RESOLVED environment (`Dispatcher::env`), not the process
+    // variable: clap reads `TRITON_ENV` into `Settings` but never sets
+    // it, so `--env prod` would look local here and hand the
+    // cross-tenant view to the `audit:read-all` claim alone.
+    env: &str,
+) -> impl Fn(&triton_core::audit::AuditEntry) -> bool {
+    // BOTH the scope the issuer can mint AND membership of a list only
+    // the deployment can write — see `audit_operators`.
+    //
+    // Outside `local` an unset list means NOBODY holds the cross-tenant
+    // view. That is a behaviour change for a deployment relying on the
+    // scope alone, and it is the fail-closed direction: the symptom is an
+    // operator seeing only their own rows, which is visible and fixable,
+    // rather than a caller silently minting themselves everyone's. The
+    // boot warning below names the fix.
+    //
+    // In `local` the scope alone still suffices, mirroring how the
+    // dev-token path is already gated (ADR-10 / factor X) — otherwise
+    // every local dev loop needs an env var to see its own audit trail.
+    let claims_scope = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE);
+    let is_local = env == "local";
+    let named = is_local || operators.contains(&(principal.tenant.clone(), principal.sub.clone()));
+    let operator = claims_scope && named;
+    let tenant = principal.tenant.clone();
+    // A reserved tenant is a shared marker, not a tenant: `-` is what
+    // nearly every live OIDC caller carries and `pairing` is what every
+    // un-enrolled chat sender shares. Comparing them for equality would
+    // hand one caller every other unattributed caller's rows — which is
+    // most of the buffer, including the boundary rejections that name
+    // other tenants' senders. They match nothing but an operator.
+    let scopable = !triton_core::principal::is_reserved_tenant(&tenant);
+    move |e| operator || (scopable && e.tenant == tenant)
+}
+
 /// `GET /v1/audit?limit=N&trace_id=X` — newest-first slice of the
 /// in-process audit ring buffer. Authenticated; this is operational
 /// metadata about every request the gateway has processed since
@@ -514,26 +585,98 @@ async fn audit_tail(
     Query(q): Query<AuditQuery>,
     parts: Parts,
 ) -> Response {
-    if let Err(e) = state.identity.verify(&parts).await {
-        state.dispatcher.record_rejection(
-            "v1/audit",
-            "rest",
-            "-",
-            "-",
-            &uuid::Uuid::new_v4().to_string(),
-            &e,
-        );
-        return error_response(&e, None);
+    // #282: the Principal was previously verified and then DISCARDED,
+    // so any authenticated caller read every tenant's rows. This is the
+    // one confidentiality surface no upstream contract can cover —
+    // Triton serves the data itself.
+    let principal = match state.identity.verify(&parts).await {
+        Ok(p) => p,
+        Err(e) => {
+            state.dispatcher.record_rejection(
+                "v1/audit",
+                "rest",
+                "-",
+                "-",
+                &uuid::Uuid::new_v4().to_string(),
+                &e,
+            );
+            return error_response(&e, None);
+        }
+    };
+    if let Err(e) = state
+        .dispatcher
+        .deny_if_revoked(&principal, "v1/audit", "rest")
+    {
+        return error_response(&e, Some(&principal.trace_id));
     }
     let limit = q.limit.clamp(1, AUDIT_LIMIT_MAX);
     let trace_id = q.trace_id.as_deref().filter(|s| !s.is_empty());
-    let entries = AuditBuffer::recent(limit, trace_id);
+    let entries = AuditBuffer::recent_where(
+        limit,
+        trace_id,
+        audit_visibility_in(&principal, &state.audit_operators, state.dispatcher.env()),
+    );
     Json(json!({
         "entries": entries,
         "limit": limit,
         "trace_id": trace_id,
     }))
     .into_response()
+}
+
+/// May this caller see the captured bodies for a trace?
+///
+/// The capture store keys on `trace_id` alone and carries no tenant, so
+/// it cannot be filtered per entry. The tenant-scoped `entries` are the
+/// proxy: non-empty means at least one audited step of this trace ran
+/// under the caller's tenant, which is what entitles them to the rest of
+/// it. Empty means the trace is somebody else's.
+///
+/// Without this the pivot was one hop and needed no out-of-band
+/// knowledge — read your own `/v1/audit`, lift any `trace_id`, and
+/// receive the whole trace's bodies, including the identity-resolver
+/// dispatch that runs under `tenant: "system"`.
+///
+/// Separated from the handler so it is testable: `bodies` is only ever
+/// populated when the dev `capture` feature is compiled in, which the
+/// integration-test binary does not enable, so an end-to-end test cannot
+/// tell this fix from its absence.
+fn bodies_visible(entries: &[triton_core::audit::AuditEntry]) -> bool {
+    !entries.is_empty()
+}
+
+/// May this caller read anything keyed on `trace_id`?
+///
+/// The one answer to that question, shared by `/v1/trace` and spec-A2A's
+/// `tasks/get` — whose task ids ARE trace ids. Two implementations of
+/// this rule would drift, and the second surface is how the first one's
+/// fix got bypassed.
+pub fn may_read_trace(
+    principal: &triton_core::principal::Principal,
+    operators: &std::collections::HashSet<(String, String)>,
+    env: &str,
+    trace_id: &str,
+) -> bool {
+    // Deliberately NOT `audit_visibility_in`. That answers "may this
+    // caller BROWSE the tail", where a reserved tenant must match
+    // nothing — two callers holding `-` are both unattributed, not
+    // tenant-mates. This answers "is this specific trace THEIRS", and
+    // there the subject is the precise key: a caller's own dispatches
+    // carry their `sub` whatever their tenant resolves to.
+    //
+    // Using the browse predicate here would lock every `-` caller out of
+    // their OWN task — which is nearly every live caller, since a
+    // single-tenant OIDC token with no `tenant` claim resolves to `-`.
+    let tenant_scopable = !triton_core::principal::is_reserved_tenant(&principal.tenant);
+    let sub = principal.sub.clone();
+    let tenant = principal.tenant.clone();
+    let operator = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE)
+        && (env == "local"
+            || operators.contains(&(principal.tenant.clone(), principal.sub.clone())));
+    let visible = AuditBuffer::recent_where(AUDIT_LIMIT_MAX, Some(trace_id), move |e| {
+        operator || e.subject == sub || (tenant_scopable && e.tenant == tenant)
+    });
+    bodies_visible(&visible)
 }
 
 /// `GET /v1/trace/{trace_id}` — the one communication as a timeline: all
@@ -546,20 +689,43 @@ async fn trace_view(
     Path(trace_id): Path<String>,
     parts: Parts,
 ) -> Response {
-    if let Err(e) = state.identity.verify(&parts).await {
-        state.dispatcher.record_rejection(
-            "v1/trace",
-            "rest",
-            "-",
-            "-",
-            &uuid::Uuid::new_v4().to_string(),
-            &e,
-        );
-        return error_response(&e, None);
+    // #282: same shape as /v1/audit — verified, then discarded.
+    let principal = match state.identity.verify(&parts).await {
+        Ok(p) => p,
+        Err(e) => {
+            state.dispatcher.record_rejection(
+                "v1/trace",
+                "rest",
+                "-",
+                "-",
+                &uuid::Uuid::new_v4().to_string(),
+                &e,
+            );
+            return error_response(&e, None);
+        }
+    };
+    if let Err(e) = state
+        .dispatcher
+        .deny_if_revoked(&principal, "v1/trace", "rest")
+    {
+        return error_response(&e, Some(&principal.trace_id));
     }
-    let mut entries = AuditBuffer::recent(AUDIT_LIMIT_MAX, Some(&trace_id));
+    let mut entries = AuditBuffer::recent_where(
+        AUDIT_LIMIT_MAX,
+        Some(&trace_id),
+        audit_visibility_in(&principal, &state.audit_operators, state.dispatcher.env()),
+    );
     entries.reverse(); // chronological for a timeline
-    let bodies = triton_core::trace::captured(&trace_id);
+    let bodies = if may_read_trace(
+        &principal,
+        &state.audit_operators,
+        state.dispatcher.env(),
+        &trace_id,
+    ) {
+        triton_core::trace::captured(&trace_id)
+    } else {
+        Vec::new()
+    };
     Json(json!({
         "trace_id": trace_id,
         "entries": entries,
@@ -815,4 +981,115 @@ fn http_status_for(e: &TritonError) -> StatusCode {
     // TritonError::http_status() is the single source of truth shared
     // with A2A and the dispatcher audit (architecture §8.3).
     StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
+#[cfg(test)]
+mod trace_scope_tests {
+    use super::{AUDIT_READ_ALL_SCOPE, audit_visibility_in, bodies_visible};
+    use triton_core::audit::{AuditEntry, AuditPhase};
+    use triton_core::principal::Principal;
+
+    fn entry(tenant: &str) -> AuditEntry {
+        AuditEntry {
+            kind: "audit",
+            phase: AuditPhase::Dispatch,
+            when: "2026-09-06T00:00:00Z".into(),
+            who: "someone".into(),
+            what: "echo".into(),
+            env: "test".into(),
+            result: "ok".into(),
+            protocol: "rest".into(),
+            tool: "echo".into(),
+            subject: "someone".into(),
+            tenant: tenant.into(),
+            latency_ms: 0,
+            status: 200,
+            status_label: None,
+            status_detail: None,
+            error_detail: None,
+            ttfb_ms: None,
+            sender_ref: None,
+            suppressed: None,
+            trace_id: "t-1".into(),
+        }
+    }
+
+    /// No operators named — the deployment granted nobody.
+    fn no_operators() -> std::collections::HashSet<(String, String)> {
+        std::collections::HashSet::new()
+    }
+
+    fn principal(tenant: &str, scopes: &[&str]) -> Principal {
+        Principal {
+            sub: "caller".into(),
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            groups: Vec::new(),
+            tenant: tenant.into(),
+            raw_token: String::new(),
+            trace_id: "t".into(),
+            sender_ref: None,
+        }
+    }
+
+    /// The gate the handler applies to `bodies`. It is unit-tested rather
+    /// than driven end-to-end because `bodies` is only populated with the
+    /// dev `capture` feature, which the integration-test binary does not
+    /// compile in — an end-to-end assertion there passes whether or not
+    /// the fix is present, which is how the first version of this test
+    /// was written and why it proved nothing.
+    #[test]
+    fn bodies_follow_the_entries_beside_them() {
+        assert!(!bodies_visible(&[]), "no visible entries ⇒ no bodies");
+        assert!(bodies_visible(&[entry("acme")]), "own trace ⇒ bodies");
+    }
+
+    /// Outside `local` the `audit:read-all` claim alone is NOT enough:
+    /// that namespace belongs to the issuer. The deployment must also
+    /// name the principal in `TRITON_AUDIT_OPERATORS`.
+    ///
+    /// This is the test that would have caught reading `TRITON_ENV` from
+    /// the process instead of the resolved value — a `--env prod`
+    /// deployment leaves the variable unset and looked local.
+    #[test]
+    fn outside_local_the_scope_claim_alone_grants_nothing() {
+        let op = principal("acme", &[AUDIT_READ_ALL_SCOPE]);
+        // No named operators: the deployment granted nobody.
+        let ops = no_operators();
+        let visible = audit_visibility_in(&op, &ops, "prod");
+        assert!(
+            !visible(&entry("globex")),
+            "an issuer-minted scope must not grant the cross-tenant view \
+             in a real deployment"
+        );
+        // Their own tenant is unaffected — this is not a lockout.
+        assert!(visible(&entry("acme")));
+    }
+
+    /// A shared marker is not a tenant, so it must not match another
+    /// caller carrying the same marker.
+    #[test]
+    fn a_reserved_tenant_matches_nothing_but_an_operator() {
+        for marker in ["-", "pairing", ""] {
+            let p = principal(marker, &["chat"]);
+            let ops = no_operators();
+            let can_see = audit_visibility_in(&p, &ops, "local");
+            assert!(
+                !can_see(&entry(marker)),
+                "`{marker}` is a shared marker, not a tenant — two callers \
+                 carrying it are both unattributed, not tenant-mates"
+            );
+            let op = principal(marker, &[AUDIT_READ_ALL_SCOPE]);
+            let operator = audit_visibility_in(&op, &ops, "local");
+            assert!(
+                operator(&entry(marker)),
+                "the operator grant must still restore the view"
+            );
+        }
+        // A real tenant still matches itself.
+        let pa = principal("acme", &["chat"]);
+        let ops2 = no_operators();
+        let acme = audit_visibility_in(&pa, &ops2, "local");
+        assert!(acme(&entry("acme")));
+        assert!(!acme(&entry("globex")));
+    }
 }

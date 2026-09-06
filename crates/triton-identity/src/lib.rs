@@ -243,6 +243,7 @@ impl OidcVerifier {
             tenant,
             raw_token: raw_token.to_string(),
             trace_id: uuid::Uuid::new_v4().to_string(),
+            sender_ref: None,
         })
     }
 
@@ -750,6 +751,7 @@ impl GoogleAccessTokenVerifier {
             tenant: "-".to_string(),
             raw_token: raw_token.to_string(),
             trace_id: uuid::Uuid::new_v4().to_string(),
+            sender_ref: None,
         }
     }
 

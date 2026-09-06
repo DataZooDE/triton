@@ -13,6 +13,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 base64 = "0.22"
 sha2 = "0.10"
 futures = { workspace = true }
+triton-chat-identity = { path = "../triton-chat-identity" }
 triton-core = { path = "../triton-core" }
 triton-correlation = { path = "../triton-correlation" }
 triton-chat-routing = { path = "../triton-chat-routing" }

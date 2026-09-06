@@ -89,19 +89,17 @@ const CALLBACK_TTL_SECS: u32 = 300;
 /// (Codex PR 23 concern).
 const CALLBACK_FUTURE_SKEW_SECS: u32 = 60;
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SenderClaims {
-    pub sub: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    pub tenant: String,
-}
+/// #289: re-exported from `triton-chat-identity`, which owns the
+/// FR-I-7 seam. It was a private copy here, and in seven other
+/// adapters — and a rule added to one copy is a rule missing from
+/// the rest.
+pub use triton_chat_identity::SenderClaims;
 
 pub struct DiscordAdapter {
     name: String,
     verifying_key: VerifyingKey,
-    correlation_key: Vec<u8>,
-    sender_table: HashMap<String, SenderClaims>,
+    correlation_key: triton_correlation::KeyRing,
+    sender_table: triton_chat_identity::SenderTable,
     dispatcher: Arc<Dispatcher>,
     rate_limit: triton_core::ratelimit::TokenBucket,
     /// PR 28: per-tenant rate limit (NFR-P-3 second tier).
@@ -131,12 +129,13 @@ impl DiscordAdapter {
                 adapter.inbound.signature
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
-            return Err(BuildError::Unsupported(format!(
-                "discord adapter requires `identity.kind: sender_table`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule.
+        triton_chat_identity::require_supported_kind(
+            "discord",
+            &adapter.identity.kind,
+            &[IdentityKind::SenderTable],
+        )
+        .map_err(BuildError::Identity)?;
 
         let pk_field = adapter
             .inbound
@@ -177,14 +176,23 @@ impl DiscordAdapter {
             .resolve(table_field)
             .await
             .map_err(|e| BuildError::Resolve("identity.table", e))?;
-        let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+        // #289: `parse` validates every entry's `sub` and `tenant` here,
+        // at boot. The table used to go straight from JSON into a HashMap:
+        // a tenant carrying whitespace became a `PerTenantBuckets` map key
+        // and a signed upstream claim, and nothing ever refused it.
+        let sender_table =
+            triton_chat_identity::SenderTable::parse(&table_json).map_err(BuildError::Identity)?;
 
-        let correlation_key = resolver
-            .resolve(&adapter.correlation_key)
-            .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?
-            .into_bytes();
+        // #287: a comma-separated RING — signed with the first key,
+        // verified against all — so the key can be rotated without
+        // invalidating every button already in a conversation.
+        let correlation_key = triton_correlation::KeyRing::parse(
+            &resolver
+                .resolve(&adapter.correlation_key)
+                .await
+                .map_err(|e| BuildError::Resolve("correlation_key", e))?,
+        )
+        .map_err(BuildError::CorrelationKey)?;
 
         // PR 28: see triton-chat-telegram for the 10x headroom
         // rationale (adapter-wide is DoS-floor, per-tenant is
@@ -224,6 +232,14 @@ impl DiscordAdapter {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #289: FR-I-7 resolution now lives in `triton-chat-identity`;
+    /// its refusals surface here unchanged.
+    #[error("identity: {0}")]
+    Identity(#[source] triton_chat_identity::IdentityError),
+    /// #287: the resolved `correlation_key` secret is a
+    /// comma-separated ring; nothing usable survived parsing it.
+    #[error("correlation_key: {0}")]
+    CorrelationKey(#[source] triton_correlation::KeyRingError),
     #[error("adapter is not declared `kind: discord`")]
     WrongKind,
     #[error("PR 22 limitation: {0}")]
@@ -466,7 +482,20 @@ async fn handle_message_component(
         return (StatusCode::UNAUTHORIZED, "future-dated callback").into_response();
     }
 
-    let (tool_name, mut args) = match triton_correlation::decode(token, &adapter.correlation_key) {
+    // #250/#287: verified against the CLICKER's tenant AND the CLICKER.
+    // A Discord `custom_id` is visible to every member of the channel,
+    // so without the sender in the derivation a component is a
+    // capability held by the whole tenant.
+    let (tool_name, mut args) = match triton_correlation::decode_bound_any(
+        token,
+        &adapter.correlation_key,
+        triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: &claims.tenant,
+            sender: &user_id,
+        },
+    ) {
         Ok(v) => v,
         Err(e) => {
             record_rejection(
@@ -595,6 +624,7 @@ async fn handle_message_component(
         tenant: claims.tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     };
     let principal_for_post = principal.clone();
 
@@ -613,9 +643,12 @@ async fn handle_message_component(
             // get rendered as deferred text. Mixed surfaces (form
             // + other components) still fall through to the
             // existing path where Form defers.
-            if let Some(form_result) =
-                surface_mapper::try_render_form_modal(&dispatch.result, &adapter.correlation_key)
-            {
+            if let Some(form_result) = surface_mapper::try_render_form_modal(
+                &dispatch.result,
+                adapter.correlation_key.signing(),
+                &principal_for_post.tenant,
+                &user_id,
+            ) {
                 match form_result {
                     Ok(modal) => {
                         adapter.dispatcher.record_post(
@@ -637,8 +670,20 @@ async fn handle_message_component(
                     }
                 }
             }
-            match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
+            match surface_mapper::try_render_surface(
+                &dispatch.result,
+                adapter.correlation_key.signing(),
+                &principal_for_post.tenant,
+                &user_id,
+            ) {
                 Some(Ok(rendered)) => {
+                    // #250: a component that would not fit the token
+                    // budget is dropped, not rendered — the button
+                    // simply is not there. Every other adapter warns;
+                    // this one counted silently, so a deferral was
+                    // invisible in production. It matters more now that
+                    // the tenant binding costs ~32 of the 100 bytes.
+                    warn_deferred(&tool_name, &rendered);
                     build_response_with_rasterizer(
                         adapter,
                         &tool_name,
@@ -813,6 +858,7 @@ async fn handle_application_command(
         tenant: claims.tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     };
     let principal_for_post = principal.clone();
 
@@ -831,9 +877,12 @@ async fn handle_application_command(
             // get rendered as deferred text. Mixed surfaces (form
             // + other components) still fall through to the
             // existing path where Form defers.
-            if let Some(form_result) =
-                surface_mapper::try_render_form_modal(&dispatch.result, &adapter.correlation_key)
-            {
+            if let Some(form_result) = surface_mapper::try_render_form_modal(
+                &dispatch.result,
+                adapter.correlation_key.signing(),
+                &principal_for_post.tenant,
+                &user_id,
+            ) {
                 match form_result {
                     Ok(modal) => {
                         adapter.dispatcher.record_post(
@@ -855,8 +904,20 @@ async fn handle_application_command(
                     }
                 }
             }
-            match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
+            match surface_mapper::try_render_surface(
+                &dispatch.result,
+                adapter.correlation_key.signing(),
+                &principal_for_post.tenant,
+                &user_id,
+            ) {
                 Some(Ok(rendered)) => {
+                    // #250: a component that would not fit the token
+                    // budget is dropped, not rendered — the button
+                    // simply is not there. Every other adapter warns;
+                    // this one counted silently, so a deferral was
+                    // invisible in production. It matters more now that
+                    // the tenant binding costs ~32 of the 100 bytes.
+                    warn_deferred(tool_name, &rendered);
                     build_response_with_rasterizer(
                         adapter,
                         tool_name,
@@ -1000,10 +1061,18 @@ async fn handle_modal_submit(
         return (StatusCode::BAD_REQUEST, "missing custom_id").into_response();
     };
 
-    let (tool_name, mut args) = match triton_correlation::decode_with_cap(
+    // #250/#287: verified against the SUBMITTER's tenant AND the
+    // SUBMITTER, like the button and select paths — a modal custom_id
+    // captured from another member's card must not be replayable here.
+    let (tool_name, mut args) = match triton_correlation::decode_bound_any(
         token,
         &adapter.correlation_key,
         triton_correlation::DISCORD_MAX_CUSTOM_ID,
+        triton_correlation::Binding {
+            platform: "discord",
+            tenant: &claims.tenant,
+            sender: &user_id,
+        },
     ) {
         Ok(v) => v,
         Err(e) => {
@@ -1115,6 +1184,7 @@ async fn handle_modal_submit(
         tenant: claims.tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     };
     let principal_for_post = principal.clone();
 
@@ -1127,8 +1197,20 @@ async fn handle_modal_submit(
 
     match result {
         Ok(dispatch) => {
-            match surface_mapper::try_render_surface(&dispatch.result, &adapter.correlation_key) {
+            match surface_mapper::try_render_surface(
+                &dispatch.result,
+                adapter.correlation_key.signing(),
+                &principal_for_post.tenant,
+                &user_id,
+            ) {
                 Some(Ok(rendered)) => {
+                    // #250: a component that would not fit the token
+                    // budget is dropped, not rendered — the button
+                    // simply is not there. Every other adapter warns;
+                    // this one counted silently, so a deferral was
+                    // invisible in production. It matters more now that
+                    // the tenant binding costs ~32 of the 100 bytes.
+                    warn_deferred(&tool_name, &rendered);
                     build_response_with_rasterizer(
                         adapter,
                         &tool_name,
@@ -1260,6 +1342,27 @@ fn options_to_args(opts: &[DiscordCommandOption]) -> Result<Value, String> {
 /// On rasterizer failure we synthesise the same one-line placeholder
 /// the Telegram adapter emits — operators get one consistent shape
 /// across both platforms.
+/// Surface any components the mapper had to drop. Mirrors the shape
+/// telegram/whatsapp/signal/twilio already use — discord counted them
+/// and never logged, so an oversized correlation token made a control
+/// disappear with no trace (#250).
+fn warn_deferred(tool_name: &str, r: &surface_mapper::RenderedInteraction) {
+    if r.deferred_buttons > 0 {
+        tracing::warn!(
+            tool = %tool_name,
+            deferred_buttons = r.deferred_buttons,
+            "discord surface mapper: button components deferred (token over the custom_id budget)",
+        );
+    }
+    if r.deferred_selections > 0 {
+        tracing::warn!(
+            tool = %tool_name,
+            deferred_selections = r.deferred_selections,
+            "discord surface mapper: selection components deferred (token over the custom_id budget)",
+        );
+    }
+}
+
 async fn build_response_with_rasterizer(
     adapter: &Arc<DiscordAdapter>,
     tool_name: &str,

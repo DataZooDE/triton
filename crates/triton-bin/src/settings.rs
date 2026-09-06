@@ -90,10 +90,9 @@ pub struct Settings {
     pub google_chat_api_base: String,
     /// signald daemon address override for the Signal adapter
     /// (PR 34). Empty string ⇒ use the address declared in
-    /// `adapter.yaml`. Outside `local` env this MUST be set
-    /// per NFR-S-4 egress allowlist — the binary refuses to wire
-    /// the Signal adapter when the env is non-`local` and this
-    /// override is empty.
+    /// `adapter.yaml`. Outside `local` env this MUST be set to a
+    /// `unix://` path or a loopback IP literal (FR-I-9 / NFR-S-6) —
+    /// the binary refuses to boot otherwise.
     pub signal_signald_addr: String,
     /// OpenID discovery URL for Microsoft Bot Framework JWT
     /// verification. Production stays at the canonical Microsoft
@@ -216,6 +215,9 @@ pub struct Settings {
     /// fires ONLY for a missing `env://` secret, never for any other
     /// build error.
     pub optional_adapters: Vec<String>,
+    /// #287: raw `tenant/sub` list from `--denied-principals`/env; parsed
+    /// by `DispatchControls::deny`.
+    pub denied_principals: String,
 }
 
 impl Settings {
@@ -414,10 +416,11 @@ struct Cli {
     /// Address of the local WhatsApp Web bridge daemon (Baileys-style
     /// sidecar) the socket inbound connects to: `tcp://host:port` or
     /// `unix:///path`. The bridge terminates the WhatsApp Web session
-    /// inside the trust boundary; outside `local` env it MUST be a
-    /// `unix://` path or a `tcp://*.ts.net` tailnet target (NFR-S-4,
-    /// mirrors the Signal signald locality rule — loopback is allowed
-    /// only in `local`). Empty disables the adapter.
+    /// inside the trust boundary, so everything crossing this socket
+    /// is already decrypted; outside `local` env it MUST therefore be
+    /// a `unix://` path or a LOOPBACK IP literal (NFR-S-4 / C-11,
+    /// mirrors the Signal signald locality rule — #288). A DNS name is
+    /// refused, `localhost` included. Empty disables the adapter.
     #[arg(long, env = "TRITON_WHATSAPP_BRIDGE_ADDR", default_value = "")]
     whatsapp_bridge_addr: String,
 
@@ -464,9 +467,10 @@ struct Cli {
     /// signald daemon address for the Signal adapter (PR 34).
     /// Format: `tcp://<host>:<port>` or `unix:///path/to/sock`.
     /// Empty default — `adapter.yaml` carries the manifest value.
-    /// Outside `local` env the operator MUST set this per NFR-S-4
-    /// egress allowlist, otherwise the binary refuses to wire the
-    /// Signal adapter.
+    /// Outside `local` env the operator MUST set this to a `unix://`
+    /// path or a LOOPBACK IP literal (FR-I-9 / NFR-S-6 locality,
+    /// NFR-S-4 egress allowlist); anything else — a DNS name
+    /// included — refuses boot (#288).
     #[arg(long, env = "TRITON_SIGNAL_SIGNALD_ADDR", default_value = "")]
     signal_signald_addr: String,
 
@@ -635,6 +639,31 @@ struct Cli {
     /// still fails it loudly).
     #[arg(long, env = "TRITON_OPTIONAL_ADAPTERS", default_value = "")]
     optional_adapters: String,
+
+    /// #287: comma-separated principals to REVOKE, each written
+    /// `tenant/sub` (e.g. `acme/alice`). Checked at the dispatcher, so
+    /// it covers every protocol at once — MCP, A2A, REST and all eight
+    /// chat adapters. A listed principal's dispatches are refused 403
+    /// and audited `error:forbidden`.
+    ///
+    /// This is the ONLY lever that revokes a principal faster than its
+    /// token expires; everything else here is boot-time-only. Entries
+    /// are tenant-qualified because a bare `sub` would deny the same
+    /// name in every tenant — different people, silently, across a
+    /// customer boundary.
+    ///
+    /// Empty/unset (the default) denies nobody.
+    /// #287: comma-separated `tenant/sub` principals to revoke.
+    ///
+    /// Plumbed through `Settings` and applied ON TOP of what
+    /// `controls_from_env` read, so the CLI flag wins as factor III
+    /// requires. It was previously declared here and never mapped, so
+    /// `--help` advertised a lever that revoked nobody: clap READS the
+    /// variable into this struct but never writes it back to the process
+    /// environment, so an operator using the flag mid-incident got a
+    /// healthy pod and zero revocation.
+    #[arg(long, env = "TRITON_DENIED_PRINCIPALS", default_value = "")]
+    denied_principals: String,
 }
 
 impl From<Cli> for Settings {
@@ -670,6 +699,7 @@ impl From<Cli> for Settings {
                 .collect(),
             egress_allowed_suffixes: parse_egress_suffixes(&c.egress_allowed_suffixes),
             optional_adapters: parse_optional_adapters(&c.optional_adapters),
+            denied_principals: c.denied_principals,
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
             stream_idle_timeout: Duration::from_millis(c.stream_idle_timeout_ms),
             stream_max_duration: Duration::from_millis(c.stream_max_duration_ms),

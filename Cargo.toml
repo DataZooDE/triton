@@ -6,6 +6,8 @@ members = [
     "crates/triton-manifest",
     "crates/triton-secrets",
     "crates/triton-correlation",
+    "crates/triton-chat-identity",
+    "crates/triton-config",
     "crates/triton-chat-routing",
     "crates/triton-chat-telegram",
     "crates/triton-chat-discord",

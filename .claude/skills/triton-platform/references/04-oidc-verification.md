@@ -10,6 +10,20 @@ discovery), and your agent verifies the token against that JWKS.
 `agent-oidc-swap` role; Vault is gone — Triton signs directly. The
 wire shape and TTL cap are unchanged.)
 
+**The normative contract is `doc/requirements.md` FR-U-6** (#286). Triton
+authenticates callers and propagates identity; it does not authorize your
+tool calls, so authorization is yours. An agent that does not honour
+FR-U-6 is not a supported Triton upstream. In short: verify `iss`; pin
+`aud` to your own audience and refuse a token minted for another agent;
+RS256 only; authorize on `sub` AND `tenant`; treat
+`triton_sender_scopes`/`triton_sender_groups` as advertised, never
+authoritative; log `trace_id`.
+
+`crates/triton-tests/tests/upstream_contract.rs` is a reference upstream
+implementing it — the audience-pinning clause in particular, which costs
+nothing to skip and breaks nothing visibly, which is why it has an
+executable assertion rather than only prose.
+
 This reference names the **callee shape** Triton expects. The actual
 cryptography — JWKS discovery, caching, rotation, the per-language
 verify recipe — is documented once in the substrate skill:

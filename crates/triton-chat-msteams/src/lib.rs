@@ -21,7 +21,6 @@ pub mod token_client;
 
 pub use surface_mapper::RenderedMessage;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
@@ -41,13 +40,9 @@ use token_client::TokenClient;
 
 pub const PROTOCOL: &str = "messenger:msteams";
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SenderClaims {
-    pub sub: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    pub tenant: String,
-}
+/// #289: re-exported from `triton-chat-identity`, which owns the
+/// FR-I-7 seam.
+pub use triton_chat_identity::SenderClaims;
 
 /// Config for the `azure` identity strategy (FR-I-7).
 ///
@@ -78,13 +73,58 @@ pub struct AzureConfig {
     /// Adapter-granted scopes for azure-authenticated senders.
     #[serde(default)]
     pub scopes: Vec<String>,
+    /// Bot Framework `channelId` values permitted to assert an
+    /// Entra-shaped principal. Defaults to `["msteams"]`, which is
+    /// exactly the behaviour before this field existed — an operator
+    /// who says nothing keeps a Teams-only adapter.
+    ///
+    /// The gate itself is NOT optional and is not a formality: the AAD
+    /// fields are unsigned body metadata, trusted only because the
+    /// request is connector-authenticated AND arrived over a channel
+    /// this deployment chose to trust. A valid Bot Framework token for
+    /// this bot on some other channel must not inject an Entra-shaped
+    /// principal. Making the set explicit is what lets one deployment
+    /// serve Copilot Studio (`pva`), WebChat or M365 Copilot Chat
+    /// without deleting the gate.
+    ///
+    /// Not derived from JWKS `endorsements` — Microsoft's own binding
+    /// for `channelId` — because endorsements exist only on the Bot
+    /// Framework keyset, and a single-tenant bot (the type Microsoft
+    /// now requires for new registrations) is signed by the Entra
+    /// anchor, which publishes none.
+    #[serde(default = "default_allowed_channel_ids")]
+    pub allowed_channel_ids: Vec<String>,
+}
+
+/// Bot Framework channels where the caller, not the platform, chooses
+/// `from.id` — so a body-derived principal is meaningless there.
+///
+/// Direct Line issues tokens to a web page; unless the embedding site
+/// mints them server-side under enhanced authentication (a `dl_` prefix
+/// on the user id), the id in the Activity is whatever the client sent.
+/// `webchat` and `emulator` sit on the same machinery, and Copilot
+/// Studio's test canvas is Direct Line underneath.
+/// Lowercase; compared case-insensitively. `directlinespeech` is the
+/// same Direct Line machinery with a speech front end, and `emulator`
+/// and `test` are developer surfaces where the id is whatever the tool
+/// sends.
+const CLIENT_CHOSEN_ID_CHANNELS: &[&str] = &[
+    "directline",
+    "directlinespeech",
+    "webchat",
+    "emulator",
+    "test",
+];
+
+fn default_allowed_channel_ids() -> Vec<String> {
+    vec!["msteams".to_string()]
 }
 
 /// How this adapter resolves an inbound sender to a `Principal`.
 enum IdentityMode {
     /// `from.id` (the AAD object id encoded as `29:...`) keyed into an
     /// operator-enumerated table.
-    SenderTable(HashMap<String, SenderClaims>),
+    SenderTable(triton_chat_identity::SenderTable),
     /// Principal derived from the activity's Entra claims:
     /// `from.aadObjectId` → sub, `channelData.tenant.id` → tenant.
     Azure(AzureConfig),
@@ -128,7 +168,7 @@ pub struct MsTeamsAdapter {
     audience: String,
     /// HMAC key signing/verifying the correlation tokens on Adaptive
     /// Card actions and the inbound callback (issue #155).
-    correlation_key: Vec<u8>,
+    correlation_key: triton_correlation::KeyRing,
     identity: IdentityMode,
     /// Manifest `tool`: where plain inbound text dispatches (default
     /// `echo`). Commands (`/narrate` etc.) keep their special routes.
@@ -178,15 +218,16 @@ impl MsTeamsAdapter {
                 adapter.outbound.kind
             )));
         }
-        if !matches!(
-            adapter.identity.kind,
-            IdentityKind::SenderTable | IdentityKind::Azure
-        ) {
-            return Err(BuildError::Unsupported(format!(
-                "msteams adapter supports `identity.kind: sender_table` or `azure`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule. `azure` stays
+        // adapter-owned — its Entra config has no analogue in the other
+        // seven adapters, so pulling it into the shared crate would be
+        // the premature abstraction CLAUDE.md §4 warns about.
+        triton_chat_identity::require_supported_kind(
+            "msteams",
+            &adapter.identity.kind,
+            &[IdentityKind::SenderTable, IdentityKind::Azure],
+        )
+        .map_err(BuildError::Identity)?;
 
         let audience_field = adapter
             .inbound
@@ -272,9 +313,11 @@ impl MsTeamsAdapter {
                     .resolve(table_field)
                     .await
                     .map_err(|e| BuildError::Resolve("identity.table", e))?;
-                let table: HashMap<String, SenderClaims> = serde_json::from_str(&table_json)
-                    .map_err(|e| BuildError::TableParse(e.to_string()))?;
-                IdentityMode::SenderTable(table)
+                // #289: validates every entry's `sub` and `tenant` at boot.
+                IdentityMode::SenderTable(
+                    triton_chat_identity::SenderTable::parse(&table_json)
+                        .map_err(BuildError::Identity)?,
+                )
             }
             IdentityKind::Azure => {
                 let cfg_field = adapter
@@ -286,17 +329,89 @@ impl MsTeamsAdapter {
                     .resolve(cfg_field)
                     .await
                     .map_err(|e| BuildError::Resolve("identity.azure_identity", e))?;
-                let cfg: AzureConfig = serde_json::from_str(&cfg_json)
+                let mut cfg: AzureConfig = serde_json::from_str(&cfg_json)
                     .map_err(|e| BuildError::TableParse(e.to_string()))?;
                 // Fail closed: an empty allowlist is not cross-tenant
                 // isolation. A single-tenant deployment lists its one
                 // tenant explicitly.
-                if cfg.allowed_tenants.is_empty() {
+                // #250: channels whose `from.id` is chosen by the CLIENT
+                // cannot carry an Entra-shaped principal, because that
+                // principal is read entirely from the Activity body. On
+                // Direct Line-family channels Microsoft's connector will
+                // mint a valid bot token for an anonymous user with a
+                // self-chosen id, so `azure` there is sender-id-as-
+                // password with a public password. Refuse the
+                // combination at boot rather than trust an assumption
+                // nobody has verified — serving those channels needs an
+                // identity mode that does not read the principal off the
+                // body (`sender_table` or `upstream`).
+                // Normalised once, here: comparing case-sensitively would
+                // make the gate depend on Microsoft's serialisation
+                // matching the operator's spelling — the class of
+                // unverified assumption this whole change exists to
+                // remove. `"DirectLine"` must be refused exactly like
+                // `"directline"`.
+                cfg.allowed_channel_ids
+                    .iter_mut()
+                    .for_each(|c| *c = c.trim().to_ascii_lowercase());
+                if cfg.allowed_channel_ids.is_empty() {
                     return Err(BuildError::Unsupported(
-                        "azure identity requires a non-empty `allowed_tenants` list \
-                         (fail-closed cross-tenant isolation)"
+                        "identity.azure_identity `allowed_channel_ids` is present but empty; \
+                         that refuses every Activity while looking configured. Omit the field \
+                         for the Teams-only default, or name the channels this adapter serves."
                             .into(),
                     ));
+                }
+                if let Some(bad) = cfg
+                    .allowed_channel_ids
+                    .iter()
+                    .find(|c| CLIENT_CHOSEN_ID_CHANNELS.contains(&c.as_str()))
+                {
+                    return Err(BuildError::Unsupported(format!(
+                        "identity.kind `azure` cannot serve channel `{bad}`: its \
+                         `from.id` is client-chosen, so the Entra fields this \
+                         strategy reads from the Activity body prove nothing. \
+                         Use `sender_table` or `upstream` for that channel."
+                    )));
+                }
+                // #250: the tenant this strategy derives comes from
+                // `channelData.tenant.id` — unsigned body metadata. With
+                // ONE allowed tenant that is harmless: the only value
+                // that passes is the only value it could have been, so
+                // the check is equivalent to pinning. With two or more
+                // the body field becomes a privilege SELECTOR — a caller
+                // able to present an Activity chooses which tenant the
+                // downstream Escurel token is scoped to, and nothing in
+                // the transport can contradict them (the Bot Framework
+                // connector token carries no `tid`; realizations §7).
+                //
+                // No mechanism Microsoft ships makes that assertion
+                // trustworthy, so the configuration is refused rather
+                // than served insecurely. Multi-tenant has two supported
+                // shapes, both of which keep the tenant out of the body:
+                // `identity.kind: upstream`, where a resolver decides
+                // it, or one bot registration per tenant, which puts it
+                // in the credential.
+                match cfg.allowed_tenants.len() {
+                    0 => {
+                        return Err(BuildError::Unsupported(
+                            "azure identity requires a non-empty `allowed_tenants` list \
+                             (fail-closed cross-tenant isolation)"
+                                .into(),
+                        ));
+                    }
+                    1 => {}
+                    n => {
+                        return Err(BuildError::Unsupported(format!(
+                            "azure identity lists {n} `allowed_tenants`, but it derives the \
+                             tenant from `channelData.tenant.id` — unsigned body metadata. \
+                             With one tenant that check is equivalent to pinning; with more \
+                             it lets the caller SELECT which tenant's data their token is \
+                             scoped to, and the Bot Framework token carries no `tid` to \
+                             contradict them. Use `identity.kind: upstream` (a resolver \
+                             decides the tenant) or one bot registration per tenant."
+                        )));
+                    }
                 }
                 IdentityMode::Azure(cfg)
             }
@@ -308,11 +423,16 @@ impl MsTeamsAdapter {
             }
         };
 
-        let correlation_key = resolver
-            .resolve(&adapter.correlation_key)
-            .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?
-            .into_bytes();
+        // #287: a comma-separated RING — signed with the first key,
+        // verified against all — so the key can be rotated without
+        // invalidating every button already in a conversation.
+        let correlation_key = triton_correlation::KeyRing::parse(
+            &resolver
+                .resolve(&adapter.correlation_key)
+                .await
+                .map_err(|e| BuildError::Resolve("correlation_key", e))?,
+        )
+        .map_err(BuildError::CorrelationKey)?;
 
         // Adapter-wide rate limit is the DoS floor (10x headroom
         // over per-tenant). Same rationale as Telegram/Discord —
@@ -467,6 +587,14 @@ enum OutboundCredential {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #289: FR-I-7 resolution now lives in `triton-chat-identity`;
+    /// its refusals surface here unchanged.
+    #[error("identity: {0}")]
+    Identity(#[source] triton_chat_identity::IdentityError),
+    /// #287: the resolved `correlation_key` secret is a
+    /// comma-separated ring; nothing usable survived parsing it.
+    #[error("correlation_key: {0}")]
+    CorrelationKey(#[source] triton_correlation::KeyRingError),
     #[error("adapter is not declared `kind: ms_teams`")]
     WrongKind,
     #[error("msteams adapter limitation: {0}")]
@@ -766,8 +894,11 @@ fn resolve_sender(
     };
 
     let (sub, scopes, tenant) = match &adapter.identity {
-        IdentityMode::SenderTable(table) => match table.get(&from.id) {
-            Some(c) => (c.sub.clone(), c.scopes.clone(), c.tenant.clone()),
+        IdentityMode::SenderTable(table) => match table.resolve(&from.id) {
+            Some(r) => {
+                let (sub, scopes, _groups, tenant) = r.into_parts();
+                (sub, scopes, tenant)
+            }
             None => {
                 record_rejection(
                     adapter,
@@ -781,17 +912,48 @@ fn resolve_sender(
         IdentityMode::Azure(cfg) => {
             // The AAD identity fields are unsigned body metadata,
             // trusted only because the request is connector-
-            // authenticated AND arrived over the Teams channel. A
-            // valid Bot Framework token for this bot on another
-            // channel must NOT inject an Entra-shaped principal.
-            if activity.channel_id.as_deref() != Some("msteams") {
+            // authenticated AND arrived over a channel this deployment
+            // declared. A valid Bot Framework token for this bot on any
+            // other channel must NOT inject an Entra-shaped principal.
+            // An absent or empty `channelId` matches nothing and is
+            // therefore refused, never treated as a wildcard.
+            //
+            // #306 crew F3 asked for this assertion to be CORROBORATED
+            // against the verified `serviceUrl` host, turning a body
+            // claim into a transport-backed one. That is the right idea
+            // and it is NOT implemented, deliberately:
+            //
+            // Nothing in this repo documents Microsoft's channel →
+            // serviceUrl-host mapping, and the msteams adapter is live on
+            // agent-lab. A guessed mapping that is too narrow refuses
+            // real Teams traffic; too wide and it corroborates nothing.
+            // The same over-reach already bit this stack once (a runtime
+            // dev-token guard broke 23 tests encoding a deliberate
+            // contract), so the bar here is evidence, not plausibility.
+            //
+            // To close it: capture the `serviceUrl` values Microsoft
+            // actually sends for each channel this deployment serves —
+            // they are already in the audit trail — and pin the mapping
+            // to observed hosts. Until then the gate rests on connector
+            // authentication plus the boot-time refusal of
+            // client-chosen-id channels, which is what #250 established
+            // and what the endorsement model supports.
+            let channel = activity.channel_id.as_deref().unwrap_or_default();
+            // `allowed_channel_ids` was lowercased at build time; fold the
+            // inbound too so the gate cannot turn on Microsoft's casing.
+            if !cfg
+                .allowed_channel_ids
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(channel))
+            {
                 record_rejection(
                     adapter,
                     "-",
                     "-",
                     TritonError::Auth(format!(
-                        "azure identity requires channelId=msteams; got {:?}",
-                        activity.channel_id
+                        "channelId {channel:?} is not on this adapter's \
+                         allowed_channel_ids {:?}",
+                        cfg.allowed_channel_ids
                     )),
                 );
                 return Err((StatusCode::UNAUTHORIZED, "wrong channel").into_response());
@@ -828,8 +990,11 @@ fn resolve_sender(
                 );
                 return Err((StatusCode::UNAUTHORIZED, "missing tenant").into_response());
             };
-            // Cross-tenant isolation: the inbound tenant MUST be on
-            // the allowlist (guaranteed non-empty at build time).
+            // Cross-tenant isolation: the inbound tenant MUST match the
+            // single configured one (the list is guaranteed to hold
+            // exactly one entry at build time — see `from_manifest`), so
+            // this is an equality check against configuration, not a
+            // selection the caller gets to make.
             if !cfg.allowed_tenants.iter().any(|t| t == tenant) {
                 record_rejection(
                     adapter,
@@ -885,6 +1050,7 @@ fn make_principal(sub: &str, scopes: &[String], tenant: &str) -> Principal {
         tenant: tenant.to_string(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     }
 }
 
@@ -945,11 +1111,20 @@ async fn dispatch_message(
                     .iter()
                     .filter_map(|a| {
                         let payload = serde_json::json!({ "id": a.id, "msg": pending_text });
-                        triton_correlation::encode_with_cap(
+                        // Bound like every other card token (#250/#287):
+                        // the chooser lands in a channel every member can
+                        // see, so it is a capability for the CLICKER.
+                        triton_correlation::encode_bound(
                             triton_chat_routing::USE_AGENT_TOOL,
                             &payload,
-                            &adapter.correlation_key,
+                            adapter.correlation_key.signing(),
                             surface_mapper::MSTEAMS_CORRELATION_CAP,
+                            triton_correlation::Binding {
+                                platform: "msteams",
+                                tenant: &sender.tenant,
+                                sender: &sender.from_id,
+                            },
+                            Some(CARD_TOKEN_TTL_SECS),
                         )
                         .ok()
                         .map(|tok| (a.display.clone(), tok))
@@ -1053,10 +1228,18 @@ async fn handle_task_fetch(adapter: &Arc<MsTeamsAdapter>, activity: &Activity) -
     let Some(token) = token else {
         return (StatusCode::BAD_REQUEST, "missing action").into_response();
     };
-    let (tool_name, args) = match triton_correlation::decode_with_cap(
+    // #250/#287: the OpenDoc token was minted bound to (tenant, sender)
+    // in `render_card_content`; verify it against the SENDER of this
+    // `task/fetch`, not merely against the key.
+    let (tool_name, args) = match triton_correlation::decode_bound_any(
         token,
         &adapter.correlation_key,
         surface_mapper::MSTEAMS_CORRELATION_CAP,
+        triton_correlation::Binding {
+            platform: "msteams",
+            tenant: &sender.tenant,
+            sender: &sender.from_id,
+        },
     ) {
         Ok(p) => p,
         Err(_) => {
@@ -1162,10 +1345,19 @@ async fn handle_callback(
     // Verify the HMAC BEFORE trusting the tool/args. A forged or
     // tampered token — even on an authenticated webhook — is refused
     // and audited as `error:auth`, never re-dispatched.
-    let (mut tool_name, mut args) = match triton_correlation::decode_with_cap(
+    // #250/#287: verified against the SENDER's tenant AND the SENDER.
+    // An `Action.Submit.data` token travels in a card that every member
+    // of a Teams channel can see, so without the sender in the
+    // derivation the card is a capability held by the whole tenant.
+    let (mut tool_name, mut args) = match triton_correlation::decode_bound_any(
         &token,
         &adapter.correlation_key,
         surface_mapper::MSTEAMS_CORRELATION_CAP,
+        triton_correlation::Binding {
+            platform: "msteams",
+            tenant: &sender.tenant,
+            sender: &sender.from_id,
+        },
     ) {
         Ok(p) => p,
         Err(_) => {
@@ -1369,6 +1561,12 @@ async fn dispatch_and_post_reply(
         );
         return StatusCode::OK.into_response();
     }
+    // #250: msteams offers `sender_table` and `azure` only, and both
+    // derive the subject FROM `from.id` — so recording it again would
+    // add no forensic value, only more personal data in the log. The
+    // helper is here for when `upstream` lands, where the resolver
+    // replaces the asserted identity and the raw id becomes the only
+    // way to tell an impersonation from the victim's own session.
     let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
     // Direct render_report (the "Open report:" Execute): the chart URL
@@ -1431,6 +1629,12 @@ async fn dispatch_and_refresh_card(
     args: Value,
     sender: &ResolvedSender,
 ) -> Response {
+    // #250: msteams offers `sender_table` and `azure` only, and both
+    // derive the subject FROM `from.id` — so recording it again would
+    // add no forensic value, only more personal data in the log. The
+    // helper is here for when `upstream` lands, where the resolver
+    // replaces the asserted identity and the raw id becomes the only
+    // way to tell an impersonation from the victim's own session.
     let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
     let image_hint = (tool_name == "render_report")
@@ -1463,6 +1667,8 @@ async fn dispatch_and_refresh_card(
                 image_url.as_deref(),
                 chart.as_ref(),
                 &chrome,
+                &sender.tenant,
+                &sender.from_id,
             ) {
                 Some(card) => surface_mapper::invoke_card_response(card),
                 None => surface_mapper::invoke_message_response(
@@ -1524,6 +1730,15 @@ async fn fetch_chrome(
         }
     }
 }
+
+/// How long a card action token stays clickable (#250).
+///
+/// Unbound tokens never expired, which with an 8-byte truncated HMAC
+/// makes each one a permanent oracle until the correlation key rotates.
+/// A week matches the chart-image links: long enough that a user
+/// scrolling recent history still gets a working button, short enough
+/// that an old card is not a forever-capability.
+const CARD_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;
 
 /// Marker `tool` slot of the signed chart-image tokens — namespaced
 /// away from card-action tokens even under one key.
@@ -1595,7 +1810,7 @@ fn report_image_url(adapter: &MsTeamsAdapter, rargs: &Value, tenant: &str) -> Op
     let token = triton_correlation::encode_with_cap(
         RENDER_REPORT_IMG_MARKER,
         &payload,
-        &adapter.correlation_key,
+        adapter.correlation_key.signing(),
         IMG_TOKEN_CAP,
     )
     .ok()?;
@@ -1621,7 +1836,7 @@ async fn serve_report_png(
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Response {
     let Ok((marker, payload)) =
-        triton_correlation::decode_with_cap(&token, &adapter.correlation_key, IMG_TOKEN_CAP)
+        triton_correlation::decode_with_cap_any(&token, &adapter.correlation_key, IMG_TOKEN_CAP)
     else {
         return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
     };
@@ -1700,6 +1915,8 @@ async fn build_reply_body(
         image_url.as_deref(),
         chart.as_ref(),
         chrome,
+        tenant,
+        recipient_id,
     ) {
         surface_mapper::build_card_activity_body(bot_id, conversation_id, recipient_id, card)
     } else {
@@ -1712,12 +1929,17 @@ async fn build_reply_body(
 /// surface has no interactive controls or dashboard (caller then sends
 /// a plain-text reply). Each interactive control's `(tool, base_args)`
 /// is signed here — the adapter holds the correlation key.
+#[allow(clippy::too_many_arguments)]
 fn render_card_content(
     adapter: &MsTeamsAdapter,
     result: &Value,
     image_url: Option<&str>,
     chart: Option<&Value>,
     chrome: &surface_mapper::CardChrome,
+    tenant: &str,
+    // #287: the card's recipient. Folded into the derived signing key
+    // beside the tenant, so only they can submit its actions.
+    sender: &str,
 ) -> Option<Value> {
     let specs = surface_mapper::interactive_from_result(result);
     let dashboard = surface_mapper::dashboard_from_result(result);
@@ -1731,11 +1953,17 @@ fn render_card_content(
     let signed: Vec<(surface_mapper::InteractiveSpec, String)> = specs
         .into_iter()
         .filter_map(|spec| {
-            match triton_correlation::encode_with_cap(
+            match triton_correlation::encode_bound(
                 spec.tool(),
                 &spec.base_args(),
-                &adapter.correlation_key,
+                adapter.correlation_key.signing(),
                 surface_mapper::MSTEAMS_CORRELATION_CAP,
+                triton_correlation::Binding {
+                    platform: "msteams",
+                    tenant,
+                    sender,
+                },
+                Some(CARD_TOKEN_TTL_SECS),
             ) {
                 Ok(token) => Some((spec, token)),
                 Err(e) => {
@@ -1994,6 +2222,12 @@ async fn courier_deliver(
     recipient_id: String,
     conversation_type: Option<String>,
 ) {
+    // #250: msteams offers `sender_table` and `azure` only, and both
+    // derive the subject FROM `from.id` — so recording it again would
+    // add no forensic value, only more personal data in the log. The
+    // helper is here for when `upstream` lands, where the resolver
+    // replaces the asserted identity and the raw id becomes the only
+    // way to tell an impersonation from the victim's own session.
     let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
     let principal_for_post = principal.clone();
     // See dispatch_and_post_reply: direct render_report invocations get

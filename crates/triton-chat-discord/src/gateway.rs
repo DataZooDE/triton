@@ -18,7 +18,6 @@
 //! uses; the reply is a REST `POST /channels/{id}/messages` carrying
 //! the bot token (never logged — FR-AU-3).
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -32,7 +31,7 @@ use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
 use triton_secrets::SecretResolver;
 
-use crate::{BuildError, PROTOCOL, SenderClaims};
+use crate::{BuildError, PROTOCOL};
 
 /// Initial reconnect delay; doubles to the cap on repeated failure.
 const BACKOFF_INITIAL: Duration = Duration::from_millis(500);
@@ -48,7 +47,7 @@ const INTENTS: u64 = (1 << 9) | (1 << 12) | (1 << 15);
 pub struct DiscordGatewayAdapter {
     name: String,
     bot_token: String,
-    sender_table: HashMap<String, SenderClaims>,
+    sender_table: triton_chat_identity::SenderTable,
     /// Manifest `tool`: where plain inbound text dispatches (default
     /// `echo`). Commands (`/narrate` etc.) keep their special routes.
     inbound_tool: String,
@@ -78,12 +77,13 @@ impl DiscordGatewayAdapter {
                 adapter.inbound.signature
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
-            return Err(BuildError::Unsupported(format!(
-                "discord gateway adapter requires `identity.kind: sender_table`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule.
+        triton_chat_identity::require_supported_kind(
+            "discord_gateway",
+            &adapter.identity.kind,
+            &[IdentityKind::SenderTable],
+        )
+        .map_err(BuildError::Identity)?;
 
         let token_field = adapter
             .outbound
@@ -109,15 +109,28 @@ impl DiscordGatewayAdapter {
             .resolve(table_field)
             .await
             .map_err(|e| BuildError::Resolve("identity.table", e))?;
-        let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+        // #289: this SOCKET adapter is a tenth construction path the
+        // first sweep missed — it counted the eight webhook adapters and
+        // the PR claimed 8 → 0 while two more parsed a raw HashMap. So a
+        // table with a whitespace tenant still booted here and that
+        // tenant still became a `PerTenantBuckets` key, in direct
+        // contradiction of FR-I-11 as the same PR words it.
+        let sender_table =
+            triton_chat_identity::SenderTable::parse(&table_json).map_err(BuildError::Identity)?;
 
         // FR-L-6: resolve correlation_key at boot so a bad ref fails
         // closed even though the gateway text path doesn't sign tokens.
-        resolver
-            .resolve(&adapter.correlation_key)
-            .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?;
+        // #287: parse the RING, not just the ref. A malformed key list
+        // must fail at boot on every adapter that declares one — even
+        // where the gateway text path never signs a token — so a rotation typo is caught
+        // by the deploy that carries it, not by the first click after.
+        triton_correlation::KeyRing::parse(
+            &resolver
+                .resolve(&adapter.correlation_key)
+                .await
+                .map_err(|e| BuildError::Resolve("correlation_key", e))?,
+        )
+        .map_err(BuildError::CorrelationKey)?;
 
         const ADAPTER_HEADROOM: u32 = 10;
         let rate_limit = triton_core::ratelimit::TokenBucket::new(
@@ -422,6 +435,7 @@ impl DiscordGatewayAdapter {
             tenant: claims.tenant.clone(),
             raw_token: String::new(),
             trace_id: uuid::Uuid::new_v4().to_string(),
+            sender_ref: None,
         };
         let principal_for_post = principal.clone();
         let (tool, args) = route_command(content, &self.inbound_tool);

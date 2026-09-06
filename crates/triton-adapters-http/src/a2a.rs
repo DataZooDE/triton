@@ -155,6 +155,18 @@ pub struct A2aState {
     pub dispatcher: Arc<Dispatcher>,
     pub tasks: InMemoryTaskStore,
     pub identity: Arc<IdentityProvider>,
+    /// #306 crew F1: `tasks/get` answers on a trace id, so it needs the
+    /// same tenant-scoping inputs `/v1/trace` uses. Parsed once at boot,
+    /// like everywhere else.
+    pub audit_operators: Arc<std::collections::HashSet<(String, String)>>,
+}
+
+impl A2aState {
+    /// The RESOLVED deployment environment — never
+    /// `std::env::var("TRITON_ENV")`, which clap reads without setting.
+    pub fn env(&self) -> &str {
+        self.dispatcher.env()
+    }
 }
 
 pub fn router(state: A2aState) -> Router {

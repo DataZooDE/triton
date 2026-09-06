@@ -228,6 +228,29 @@ on implementation details not pinned below.
   `Action.Submit.data`, numbered-prompt reply text for Signal /
   WhatsApp Web / Google Chat); rejection MUST surface as a
   documented error and MUST NOT reach the dispatcher. *(M-CORRELATION-1.)*
+- **FR-A-14 (v0.2, #287)** The `correlation_key` secret MUST be
+  accepted as a comma-separated **list** of keys. Tokens MUST be
+  signed with the FIRST key and verified against EVERY key on the
+  list. Surrounding whitespace is trimmed and empty entries are
+  dropped; a list from which no key survives MUST refuse adapter
+  construction (and therefore boot), on every adapter declaring a
+  `correlation_key` — including those that never sign a token.
+  This makes rotation an operation with no broken window: prepend
+  the new key, deploy, and drop the old one once every token minted
+  under it has expired. Without it, changing the key invalidates
+  every interactive component already delivered to a conversation,
+  which in practice means the key is never rotated at all.
+  *(M-CORRELATION-1.)*
+- **FR-A-15 (v0.2, #287)** A correlation token MUST be bound to the
+  PLATFORM SENDER it was minted for, in addition to the tenant
+  (FR-A-12). The binding MUST live in the derived signing key, not on
+  the wire, so it costs nothing against the tightest platform token
+  budget. A token presented by any other sender — including one in the
+  SAME tenant — MUST fail verification and MUST NOT reach the
+  dispatcher. Rationale: an interactive payload (`callback_data`,
+  `custom_id`, `Action.Submit.data`, a card action) is visible to every
+  member of a shared conversation, so a token bound only to the tenant
+  is a capability held by all of them. *(M-CORRELATION-1.)*
 - **FR-A-13 (v0.2)** For any tool invocation whose envelope carries
   only stable, non-rasterised component types (text, narration,
   button-row, selection-row), the `PlatformMessage` produced by
@@ -327,6 +350,41 @@ on implementation details not pinned below.
   filesystem). The refusal MUST be documented in stdout logs and
   MUST prevent `/healthz` from returning 200. *(M-LOCALITY-1; C-11.)*
 
+- **FR-I-10 (v0.2, #287)** Triton MUST support an operator-managed
+  denylist of principals, configured as tenant-qualified `tenant/sub`
+  entries. The check MUST happen at the dispatcher, so that it applies
+  to every protocol (MCP, A2A, REST, and every chat adapter) and every
+  entry point into a dispatch (`invoke`, `invoke_streaming`,
+  `read_resource`, `update_model_context`). A denied dispatch MUST be
+  refused with HTTP 403 and audited with result class
+  `error:forbidden` — distinct from `error:auth`, because the caller
+  authenticated successfully and was then revoked, and an operator must
+  be able to tell those apart in the audit stream. An entry lacking a
+  tenant qualifier MUST be ignored with a warning rather than applied
+  to every tenant. An empty or unset denylist MUST deny nobody.
+  Rationale: every other secret is boot-time-only and every token runs
+  to its own expiry, so without this there is no lever that revokes a
+  compromised principal sooner than its issuer's TTL.
+  *(M-DENYLIST-1.)*
+
+- **FR-I-11 (v0.2, #289)** FR-I-7 identity resolution MUST have a single
+  owning module. Every adapter's `identity.table` MUST be validated at
+  ADAPTER CONSTRUCTION — each entry's `sub` and `tenant` subject to the
+  same rules as a resolver reply — and a table with any unusable entry
+  MUST refuse construction, naming the offending KEY. Adapters MUST
+  declare the `identity.kind` values they implement, and an undeclared
+  kind MUST refuse construction. A resolved principal MUST NOT be
+  obtainable without that validation having run; this is a property of
+  the type, not a call each adapter is asked to remember. The rule binds
+  EVERY adapter construction path, including the socket adapters
+  (`discord_gateway`, `whatsapp_web`) — the first implementation counted
+  the eight webhook adapters and left those two parsing a raw map, while
+  this row read `IMPL — PASS`.
+  Rationale: the rule previously guarded the `upstream` path in three
+  adapters and no path in the other five, because it had to be added
+  eight times and the eighth was skipped by omission.
+  *(M-IDENTITY-SEAM-1.)*
+
 ### 5.4 Upstream router (FR-U)
 
 - **FR-U-1** Triton MUST discover upstream agents by querying Consul
@@ -350,6 +408,40 @@ on implementation details not pinned below.
   A2UI envelope when the inbound caller requested A2UI; pre-shaped
   A2UI returned by an upstream MUST be passed through unchanged.
   *(G-12.)*
+- **FR-U-6 (#286)** **The upstream-agent auth contract.** Triton
+  authenticates callers and propagates their identity; it does not
+  authorize tool calls (the one exception is FR-U-7). Authorization is
+  therefore the upstream agent's responsibility, and that delegation is
+  only sound if the agent honours all of the following. An upstream that
+  does not is not a supported Triton upstream.
+  1. **Verify `iss`** against Triton's configured issuer, and fetch keys
+     from that issuer's JWKS. Never accept an unverified token.
+  2. **Pin `aud` to itself.** The claim is an array so one token can name
+     several intended recipients (the agent, and a downstream the agent
+     forwards to). An agent MUST match its own audience and MUST NOT
+     accept a token minted for another agent — this is what keeps every
+     hop a *named* audience rather than a replay.
+  3. **RS256 only.** No algorithm negotiation, and never `none`.
+  4. **Authorize on `sub` and `tenant`.** Both are always present
+     (#283): `sub` is the resolved caller, `tenant` the organisation the
+     call belongs to. An agent that ignores `tenant` has no tenant
+     isolation, and Triton cannot supply it on the agent's behalf.
+  5. **Treat `triton_sender_scopes` and `triton_sender_groups` as
+     ADVERTISED, NOT AUTHORITATIVE.** They describe the sender as some
+     resolver reported them; they grant nothing. They are deliberately
+     not the standard `scope` claim, and groups are deliberately not
+     `roles` — a downstream that derives admin from `roles` would
+     otherwise be handed a privilege-escalation vector. They are opt-in
+     (`TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL`) and may be absent.
+  6. **Log `trace_id`** so one communication can be followed across the
+     boundary; Triton's audit lines carry the same value.
+- **FR-U-7 (#284)** Triton MAY refuse a dispatch when the caller holds
+  only a scope an operator has declared restricted (`identity.
+  pairing_tool`). This is the sole authorization decision the gateway
+  makes, it is default-allow, and it exists because Triton would
+  otherwise make a distinction — admitting an un-enrolled sender under a
+  pairing scope — and then discard it. It does not relieve an upstream
+  of FR-U-6.
 
 ### 5.5 Audit (FR-AU)
 
@@ -685,11 +777,14 @@ is the canonical mapping; the messenger paper's
 | M-MAP-1           | FR-A-9, FR-A-13 (mapper purity, parity)                | IMPL — PASS         |
 | M-RICHNESS-1      | FR-A-10 (SurfaceLimits at mapper edge)                 | IMPL — PASS         |
 | M-RASTER-1        | FR-A-11 (Rasterizer for dashboard components)          | IMPL — PASS         |
-| M-CORRELATION-1   | FR-A-12 (HMAC token round-trip)                        | IMPL — PASS         |
+| M-CORRELATION-1   | FR-A-12, FR-A-14, FR-A-15 (token round-trip; rotation; sender binding) | IMPL — PASS |
 | M-MANIFEST-1      | FR-L-4 (closed-set boot validation)                    | PAPER — PASS        |
 | M-COVERAGE-1      | FR-L-5 (degrade rule coverage)                         | PAPER — PASS        |
 | M-SECRETS-1       | FR-L-6, NFR-S-5 (Vault credentials)                    | PAPER — PASS        |
-| M-LOCALITY-1      | FR-I-9, NFR-S-6, C-11 (Signal loopback refusal)        | IMPL — PASS         |
+| M-IDENTITY-SEAM-1 | FR-I-11 (one owning module for FR-I-7 resolution)      | IMPL — PASS         |
+| M-DENYLIST-1      | FR-I-10 (operator principal revocation)                | IMPL — PASS         |
+| M-LOCALITY-1      | FR-I-9, NFR-S-6, C-11 (Signal + WhatsApp-bridge loopback refusal) | IMPL — PASS |
+| M-LOCALITY-1      | FR-I-9, NFR-S-6, C-11 (Signal + WhatsApp-bridge loopback refusal) | IMPL — PASS |
 | M-LIFECYCLE-1     | NFR-P-4 (socket recovery bound)                        | IMPL — deferred     |
 | M-PARITY-MULTI-1  | FR-A-13 (pairwise cross-adapter parity)                | IMPL — PASS         |
 | M-ENROL-1         | FR-I-7 (`self_enrol` strategy)                         | IMPL — deferred     |

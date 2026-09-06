@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use triton_core::dispatcher::DispatchControls;
 use triton_core::error::TritonError;
 use triton_core::principal::ToolPrincipal;
 use triton_core::{Dispatcher, Tool, ToolRegistry};
@@ -28,7 +29,11 @@ impl Tool for EchoTool {
 async fn boot() -> String {
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(EchoTool));
-    let dispatcher = Arc::new(Dispatcher::new(Arc::new(reg), "test"));
+    let dispatcher = Arc::new(Dispatcher::new(
+        Arc::new(reg),
+        "test",
+        DispatchControls::unenforced(),
+    ));
     let app = router(dispatcher, &EmbedOpts::dev());
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -228,8 +233,12 @@ async fn capture_does_not_buffer_an_sse_response() {
     }
 
     let dispatcher = Arc::new(
-        Dispatcher::new(Arc::new(ToolRegistry::new()), "test")
-            .with_upstream(Arc::new(SlowStreamUpstream)),
+        Dispatcher::new(
+            Arc::new(ToolRegistry::new()),
+            "test",
+            DispatchControls::unenforced(),
+        )
+        .with_upstream(Arc::new(SlowStreamUpstream)),
     );
     let app = router(dispatcher, &EmbedOpts::dev());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

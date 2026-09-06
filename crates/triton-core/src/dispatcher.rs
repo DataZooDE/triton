@@ -13,6 +13,7 @@
 //!     auth produces a `phase: rejected` audit line *before* the
 //!     dispatcher would normally run; we still own the schema.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -145,6 +146,195 @@ pub struct Dispatcher {
     /// #249: coalescing window for ANONYMOUS rejection audit, so a
     /// scanner on a public path can't evict the ring buffer.
     reject_window: crate::ratelimit::RejectionWindow,
+    /// #287: principals an operator has revoked, as `(tenant, sub)`.
+    denied: HashSet<(String, String)>,
+    /// #284: scopes that RESTRICT rather than grant. A principal holding
+    /// exactly one of these scopes and nothing else may invoke only the
+    /// tools it maps to. Empty by default, so a deployment that declares
+    /// nothing behaves exactly as before.
+    scope_restrictions: HashMap<String, HashSet<String>>,
+}
+
+/// Everything a dispatcher enforces that is not a tool: who is revoked,
+/// which scopes are restricted, and how rejection audit is coalesced.
+///
+/// It is a REQUIRED constructor parameter, and that is the whole design.
+/// These controls were previously applied by builder methods, so a host
+/// that did not call them got none — which is not a hypothetical: the
+/// revocation lever shipped wired in `triton-bin` only, and the
+/// deployment that actually runs embeds the library instead. It booted
+/// healthy and revoked nobody, with every test passing.
+///
+/// Making it a parameter turns that omission into a compile error naming
+/// the field, and turns "deny nobody" into a reviewable
+/// [`DispatchControls::unenforced()`] at the call site rather than an absence
+/// nobody can see. It also keeps `triton-core` env-free: [`from_env`]
+/// lives in the host layer, so this crate never reads a variable.
+///
+/// [`from_env`]: https://docs.rs/triton-embed
+#[derive(Debug, Clone)]
+pub struct DispatchControls {
+    /// Revoked principals as `(tenant, sub)` (#287).
+    ///
+    /// A PAIR, not a joined string: nothing forbids `/` in a tenant, so
+    /// `("acme/al", "ice")` and `("acme", "al/ice")` collide once joined
+    /// — revoking one principal could silently revoke a different one
+    /// across a customer boundary, the exact failure tenant-qualification
+    /// exists to prevent.
+    pub denied_principals: HashSet<(String, String)>,
+    /// Scopes that RESTRICT rather than grant (#284): a principal holding
+    /// one of these may invoke only the tools it maps to.
+    pub scope_restrictions: HashMap<String, HashSet<String>>,
+    /// Coalescing window for ANONYMOUS rejection audit (#249).
+    pub reject_window: Duration,
+}
+
+impl Default for DispatchControls {
+    fn default() -> Self {
+        Self::unenforced()
+    }
+}
+
+impl DispatchControls {
+    /// Deny nobody, restrict nothing, coalesce at the default window.
+    ///
+    /// Named `unenforced` rather than `none` because `none()` reads like
+    /// a harmless default and is the one-token way to silence the
+    /// required-parameter compile error — this repo's own tests took
+    /// that shortcut four times, which is the strongest available
+    /// evidence about what a host under time pressure will do. A
+    /// reviewer seeing `unenforced()` in a production wiring has been
+    /// told something; one seeing `none()` has not.
+    ///
+    /// `DeploymentConfig::from_env` warns when a non-`local` host builds
+    /// these.
+    pub fn unenforced() -> Self {
+        Self {
+            denied_principals: HashSet::new(),
+            scope_restrictions: HashMap::new(),
+            reject_window: DEFAULT_REJECT_WINDOW,
+        }
+    }
+
+    /// Revoke these principals, given as `tenant/sub` strings.
+    ///
+    /// Entries without a tenant qualifier, or with a `/` in the tenant,
+    /// are dropped with a warning — see [`parse_denied_principals`].
+    pub fn extend_denied_principals(mut self, entries: &str) -> Self {
+        self.denied_principals
+            .extend(parse_denied_principals(entries));
+        self
+    }
+
+    /// Whether anything is actually enforced. A host reports this at
+    /// boot so an unenforced production deployment is visible.
+    pub fn is_enforcing(&self) -> bool {
+        !self.denied_principals.is_empty() || !self.scope_restrictions.is_empty()
+    }
+
+    /// Restrict a scope to a set of tools, REPLACING any existing
+    /// restriction for that scope.
+    ///
+    /// The name says `replace` and its neighbour says `extend` because
+    /// they are adjacent methods with opposite merge semantics, and a
+    /// reader should not have to reach the doc comment to find that out. A scope restriction is an ALLOW-set inside a gate, so a
+    /// merge can only WIDEN what a restricted principal reaches — a
+    /// stale environment entry would silently keep another adapter's
+    /// enrolment tool reachable by every un-enrolled sender. (Its
+    /// neighbour `denied_principals` is a DENY-set, where merging is the
+    /// safe direction, which is why that one extends.)
+    pub fn replace_scope_restriction(
+        mut self,
+        scope: impl Into<String>,
+        tools: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let scope = scope.into();
+        let tools: HashSet<String> = tools.into_iter().collect();
+        if tools.is_empty() {
+            return self;
+        }
+        if let Some(existing) = self.scope_restrictions.get(&scope)
+            && existing != &tools
+        {
+            let mut was: Vec<&str> = existing.iter().map(String::as_str).collect();
+            let mut now: Vec<&str> = tools.iter().map(String::as_str).collect();
+            was.sort_unstable();
+            now.sort_unstable();
+            eprintln!(
+                "WARN scope restriction for `{scope}` replaced: was [{}], now [{}] \
+                 — the later source wins; merging would only WIDEN an allow-set",
+                was.join(", "),
+                now.join(", ")
+            );
+        }
+        self.scope_restrictions.insert(scope, tools);
+        self
+    }
+
+    pub fn with_reject_window(mut self, window: Duration) -> Self {
+        self.reject_window = window;
+        self
+    }
+}
+
+/// The parse itself, separated so it can be tested without the process
+/// environment (which several hundred tests share).
+pub fn parse_denied_principals(raw: &str) -> HashSet<(String, String)> {
+    parse_principal_set(raw, "denylist")
+}
+
+/// Parse a comma-separated `tenant/sub` list, naming `what` in any
+/// warning.
+///
+/// `what` exists because the audit-operator list used to borrow the
+/// denylist parser, so a malformed operator entry printed
+/// `WARN denylist entry ... ignored` and sent the reader hunting through
+/// the wrong variable.
+pub fn parse_principal_set(raw: &str, what: &str) -> HashSet<(String, String)> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|entry| match entry.split_once('/') {
+            // The tenant may not itself contain `/`. Splitting on the
+            // FIRST separator would otherwise make `acme/al` + `ice` and
+            // `acme` + `al/ice` the same entry, so revoking one principal
+            // could silently revoke a different one across a customer
+            // boundary — the exact failure tenant-qualification exists to
+            // prevent.
+            // Exactly ONE separator. `acme/al/ice` is ambiguous — it
+            // could mean tenant `acme/al` + sub `ice`, or tenant `acme` +
+            // sub `al/ice` — and guessing either way can revoke a
+            // different principal across a customer boundary. Checking
+            // `!tenant.contains('/')` after `split_once` cannot catch
+            // this: the tenant is everything BEFORE the first separator,
+            // so it never contains one.
+            // Both halves trimmed. `acme / alice` is what a human types,
+            // and an untrimmed half matches no principal — so the only
+            // same-day revocation lever would report success and revoke
+            // nobody. (#306 crew F4.)
+            Some((tenant, sub))
+                if !tenant.trim().is_empty()
+                    && !sub.trim().is_empty()
+                    && entry.matches('/').count() == 1 =>
+            {
+                Some((tenant.trim().to_string(), sub.trim().to_string()))
+            }
+            _ => {
+                // This crate has no tracing dependency; the audit emitter
+                // is its logging surface and this is boot-time operator
+                // feedback, not an audit event. stderr is the honest
+                // channel for it — and it MUST be said out loud, because
+                // the failure mode is an operator believing they revoked
+                // someone when they did not.
+                eprintln!(
+                    "WARN {what} entry `{entry}` ignored: expected `tenant/sub` with \
+                     exactly one `/` (a bare subject would match that name in EVERY \
+                     tenant, so it is refused rather than guessed)"
+                );
+                None
+            }
+        })
+        .collect()
 }
 
 /// The synthetic `subject` an adapter passes when it refused an inbound
@@ -159,23 +349,137 @@ pub const ANONYMOUS_SUBJECT: &str = "-";
 pub const DEFAULT_REJECT_WINDOW: Duration = Duration::from_secs(60);
 
 impl Dispatcher {
-    pub fn new(registry: Arc<ToolRegistry>, env: impl Into<String>) -> Self {
+    pub fn new(
+        registry: Arc<ToolRegistry>,
+        env: impl Into<String>,
+        controls: DispatchControls,
+    ) -> Self {
         Self {
             registry,
             env: env.into(),
             upstream: None,
             metrics: Arc::new(Metrics::new()),
-            reject_window: crate::ratelimit::RejectionWindow::new(DEFAULT_REJECT_WINDOW),
+            reject_window: crate::ratelimit::RejectionWindow::new(controls.reject_window),
+            // #287/#284/#249: these arrive as a REQUIRED parameter, so a
+            // host cannot get a dispatcher without deciding. They used to
+            // be builder methods, and the deployment that actually runs
+            // called none of them — it booted healthy and revoked nobody.
+            // Omission is now a compile error naming the field, and this
+            // crate reads no environment: `triton-config` does.
+            denied: controls.denied_principals,
+            scope_restrictions: controls.scope_restrictions,
         }
     }
 
-    /// Override the anonymous-rejection coalescing window (#249).
-    /// `Duration::ZERO` disables coalescing — every rejection emits.
-    /// `triton-bin` wires this from `TRITON_AUDIT_REJECT_WINDOW_SECS`;
-    /// this crate stays env-free.
-    pub fn with_rejection_window(mut self, window: Duration) -> Self {
-        self.reject_window = crate::ratelimit::RejectionWindow::new(window);
-        self
+    /// May this principal invoke this tool? `Ok(())` unless a scope
+    /// restriction says otherwise.
+    fn can_invoke(&self, principal: &Principal, tool: &str) -> Result<(), TritonError> {
+        if self.scope_restrictions.is_empty() {
+            return Ok(());
+        }
+        // "Holds a restricted scope AT ALL", not "holds exactly one".
+        // The doc on `replace_scope_restriction` says the same; keep them
+        // in step if either changes.
+        // The old test meant any adapter granting a second scope beside
+        // `pairing` disabled the restriction entirely and silently — the
+        // invariant lived in one adapter's construction site rather than
+        // in the gate. An enrolled principal is still unaffected: they
+        // carry real scopes and none of them is restricted.
+        let Some(held) = principal
+            .scopes
+            .iter()
+            .find(|s| self.scope_restrictions.contains_key(*s))
+        else {
+            return Ok(());
+        };
+        match self.scope_restrictions.get(held) {
+            Some(allowed) if !allowed.contains(tool) => Err(TritonError::Forbidden(format!(
+                "principal holds only the `{held}` scope, which may invoke \
+                 {allowed:?} — not `{tool}`"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// The coalescing window actually in force, in seconds. A host
+    /// reports what it is RUNNING with rather than what it believes it
+    /// set — those differed, which is how this whole seam came up.
+    pub fn reject_window_secs(&self) -> u64 {
+        self.reject_window.window().as_secs()
+    }
+
+    /// Whether this dispatcher enforces anything. Reported at boot so an
+    /// unenforced production deployment is visible rather than assumed.
+    pub fn is_enforcing(&self) -> bool {
+        !self.denied.is_empty() || !self.scope_restrictions.is_empty()
+    }
+
+    /// The tools a principal holding `scope` may invoke. Empty when the
+    /// scope is unrestricted. Exposed so a host can log the EFFECTIVE
+    /// restriction rather than the part it contributed.
+    pub fn restricted_tools(&self, scope: &str) -> impl Iterator<Item = String> {
+        let mut tools: Vec<String> = self
+            .scope_restrictions
+            .get(scope)
+            .map(|t| t.iter().cloned().collect())
+            .unwrap_or_default();
+        tools.sort_unstable();
+        tools.into_iter()
+    }
+
+    /// The principals this dispatcher refuses, as `tenant/sub`. Exposed
+    /// so a host can log an active denylist at boot — an operator should
+    /// be able to see the lever is engaged without knowing to look.
+    pub fn denied_principals(&self) -> impl Iterator<Item = String> {
+        self.denied.iter().map(|(t, s)| format!("{t}/{s}"))
+    }
+
+    /// Whether this principal has been revoked. Cheap and allocation-free
+    /// on the empty-denylist path, which is every deployment that has
+    /// never had an incident.
+    fn is_denied(&self, principal: &Principal) -> bool {
+        if self.denied.is_empty() {
+            return false;
+        }
+        // A tuple lookup, so no separator can be confused for data.
+        self.denied
+            .contains(&(principal.tenant.clone(), principal.sub.clone()))
+    }
+
+    /// Refuse a revoked principal on a surface that does NOT dispatch.
+    ///
+    /// `/v1/outbound` couriers a message without invoking a tool;
+    /// `/v1/audit` and `/v1/trace` read the buffer. None of them reach
+    /// `invoke`, so none of them saw the denylist — a revoked caller kept
+    /// proactive push and read access to operational metadata, which is
+    /// most of what a compromised caller would want. The docs said "every
+    /// protocol at once"; this is what makes that true.
+    ///
+    /// `Ok(())` when the principal is fine. The `Err` is already audited
+    /// through the same path a refused dispatch takes, so the caller just
+    /// maps it to a response.
+    pub fn deny_if_revoked(
+        &self,
+        principal: &Principal,
+        surface: &str,
+        protocol: &str,
+    ) -> Result<(), TritonError> {
+        if self.is_denied(principal) {
+            return Err(self.deny(surface, protocol, principal));
+        }
+        Ok(())
+    }
+
+    /// The refusal, audited through the same `fail` path every other
+    /// dispatch error takes — so a revoked principal shows up on the
+    /// pivot exactly like any other `error:auth`, with its trace_id.
+    fn deny(&self, tool_name: &str, protocol: &str, principal: &Principal) -> TritonError {
+        let e = TritonError::Forbidden(format!(
+            "principal `{}/{}` has been revoked by the operator",
+            principal.tenant, principal.sub
+        ));
+        self.fail(tool_name, protocol, principal, &e, 0);
+        e
     }
 
     /// Attach a shared `Metrics` registry. When unset, the
@@ -327,6 +631,25 @@ impl Dispatcher {
         protocol: &str,
         a2ui: Option<crate::A2uiVersion>,
     ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        // #287: same gate as `invoke`. Streaming is a second entry point
+        // into the same dispatch, so a check on one alone is no check.
+        if self.is_denied(&principal) {
+            return Err(self.deny(tool_name, protocol, &principal));
+        }
+        // #284: the one authorization gate. Placed here so a denial is
+        // identical across REST/MCP/A2A and every chat adapter, and gets
+        // its audit line from the same pivot as everything else (ADR-6).
+        if let Err(e) = self.can_invoke(&principal, tool_name) {
+            // Audit takes the outcome by reference and `TritonError` is
+            // not `Clone`, so borrow it for the audit and hand the same
+            // value back rather than deciding twice.
+            let outcome: Result<Value, TritonError> = Err(e);
+            self.audit_dispatch(tool_name, protocol, &principal, 0, &outcome);
+            match outcome {
+                Err(e) => return Err(e),
+                Ok(_) => unreachable!("constructed as Err"),
+            }
+        }
         let started = Instant::now();
 
         // In-process tools that OPT IN to streaming (#635 P5) ride the
@@ -358,6 +681,7 @@ impl Dispatcher {
                     let sub = principal.sub.clone();
                     let tenant = principal.tenant.clone();
                     let trace_id = principal.trace_id.clone();
+                    let sender_ref = principal.sender_ref.clone();
                     let open_offset = started.elapsed();
                     let finalized =
                         Finalized::new(inner, move |term: Termination, timing: Timing| {
@@ -370,6 +694,7 @@ impl Dispatcher {
                                 tool: &tool,
                                 sub: &sub,
                                 tenant: &tenant,
+                                sender_ref: sender_ref.as_deref(),
                                 trace_id: &trace_id,
                                 term,
                                 total_ms,
@@ -434,6 +759,7 @@ impl Dispatcher {
                 let sub = principal.sub.clone();
                 let tenant = principal.tenant.clone();
                 let trace_id = principal.trace_id.clone();
+                let sender_ref = principal.sender_ref.clone();
                 // Offset from request start to the moment the stream
                 // opened, so `ttfb`/`total` reflect the whole request, not
                 // just the post-200 window the combinator clocks.
@@ -448,6 +774,7 @@ impl Dispatcher {
                         tool: &tool,
                         sub: &sub,
                         tenant: &tenant,
+                        sender_ref: sender_ref.as_deref(),
                         trace_id: &trace_id,
                         term,
                         total_ms,
@@ -469,6 +796,26 @@ impl Dispatcher {
         principal: Principal,
         protocol: &str,
     ) -> Result<Dispatch, TritonError> {
+        // #287: before anything runs, and before the tool name is even
+        // looked up — a revoked principal must not be able to probe the
+        // registry either.
+        if self.is_denied(&principal) {
+            return Err(self.deny(tool_name, protocol, &principal));
+        }
+        // #284: the one authorization gate. Placed here so a denial is
+        // identical across REST/MCP/A2A and every chat adapter, and gets
+        // its audit line from the same pivot as everything else (ADR-6).
+        if let Err(e) = self.can_invoke(&principal, tool_name) {
+            // Audit takes the outcome by reference and `TritonError` is
+            // not `Clone`, so borrow it for the audit and hand the same
+            // value back rather than deciding twice.
+            let outcome: Result<Value, TritonError> = Err(e);
+            self.audit_dispatch(tool_name, protocol, &principal, 0, &outcome);
+            match outcome {
+                Err(e) => return Err(e),
+                Ok(_) => unreachable!("constructed as Err"),
+            }
+        }
         let started = Instant::now();
         let outcome = self.run(tool_name, args, &principal).await;
         let latency_ms = started.elapsed().as_millis() as u64;
@@ -501,6 +848,23 @@ impl Dispatcher {
         uri: &str,
         principal: Principal,
     ) -> Result<Dispatch, TritonError> {
+        // #287: reading an MCP-App resource is a dispatch like any
+        // other, and it reaches the upstream with the caller's identity.
+        if self.is_denied(&principal) {
+            return Err(self.deny(uri, "mcp", &principal));
+        }
+        // #284: and it is a dispatch for authorization too. A principal
+        // restricted to one enrolment tool could otherwise read any
+        // MCP-App resource through the upstream router under that
+        // identity — the restriction covered `invoke` alone.
+        if let Err(e) = self.can_invoke(&principal, uri) {
+            let outcome: Result<Value, TritonError> = Err(e);
+            self.audit_dispatch(uri, "mcp", &principal, 0, &outcome);
+            return match outcome {
+                Err(e) => Err(e),
+                Ok(_) => unreachable!("constructed as Err"),
+            };
+        }
         let started = Instant::now();
         let outcome = match &self.upstream {
             Some(upstream) => upstream.read_resource(uri, &principal).await,
@@ -528,6 +892,21 @@ impl Dispatcher {
         record: Value,
         principal: Principal,
     ) -> Result<Dispatch, TritonError> {
+        // #287: this writes the caller's record into an upstream's
+        // context. A revoked principal must not still be able to.
+        if self.is_denied(&principal) {
+            return Err(self.deny(uri, "mcp", &principal));
+        }
+        // #284: writing context is at least as consequential as reading
+        // a resource, so the same restriction applies.
+        if let Err(e) = self.can_invoke(&principal, uri) {
+            let outcome: Result<Value, TritonError> = Err(e);
+            self.audit_dispatch(uri, "mcp", &principal, 0, &outcome);
+            return match outcome {
+                Err(e) => Err(e),
+                Ok(_) => unreachable!("constructed as Err"),
+            };
+        }
         let started = Instant::now();
         let outcome = match &self.upstream {
             Some(upstream) => upstream.update_model_context(uri, record, &principal).await,
@@ -614,6 +993,9 @@ impl Dispatcher {
             // audit line alone rather than from adapter source.
             error_detail: Some(error.to_string()),
             ttfb_ms: None,
+            // A boundary rejection happens before a Principal exists, so
+            // there is no resolved identity to contrast a raw sender with.
+            sender_ref: None,
             suppressed,
             trace_id,
         });
@@ -673,6 +1055,7 @@ impl Dispatcher {
             status_detail: detail,
             error_detail: None,
             ttfb_ms: None,
+            sender_ref: principal.sender_ref.as_deref(),
             suppressed: None,
             trace_id: &principal.trace_id,
         });
@@ -746,6 +1129,7 @@ impl Dispatcher {
             status_detail: None,
             error_detail: None,
             ttfb_ms: None,
+            sender_ref: principal.sender_ref.as_deref(),
             suppressed: None,
             trace_id: &principal.trace_id,
         });
@@ -792,6 +1176,7 @@ impl Dispatcher {
             status_detail: None,
             error_detail: None,
             ttfb_ms: None,
+            sender_ref: principal.sender_ref.as_deref(),
             suppressed: None,
             trace_id: &principal.trace_id,
         });
@@ -841,6 +1226,8 @@ struct StreamAudit<'a> {
     tool: &'a str,
     sub: &'a str,
     tenant: &'a str,
+    /// See [`crate::audit::AuditRecord::sender_ref`].
+    sender_ref: Option<&'a str>,
     trace_id: &'a str,
     term: Termination,
     total_ms: u64,
@@ -889,6 +1276,7 @@ fn emit_stream_audit(a: StreamAudit<'_>) {
         status_detail,
         error_detail: None,
         ttfb_ms: a.ttfb_ms,
+        sender_ref: a.sender_ref,
         suppressed: None,
         trace_id: a.trace_id,
     });
@@ -907,6 +1295,44 @@ pub fn envelope(dispatch: &Dispatch) -> Value {
 
 #[cfg(test)]
 mod tests {
+    use super::{DispatchControls, parse_denied_principals};
+
+    #[test]
+    fn denied_principals_require_a_tenant_qualifier() {
+        let d = parse_denied_principals("acme/alice, globex/bob ");
+        assert!(d.contains(&("acme".into(), "alice".into())));
+        assert!(d.contains(&("globex".into(), "bob".into())));
+        assert_eq!(d.len(), 2);
+        // A `/` in the tenant is refused: joined, `acme/al` + `ice` and
+        // `acme` + `al/ice` would be the same entry, so revoking one
+        // principal could silently revoke another across a customer
+        // boundary.
+        assert!(parse_denied_principals("acme/al/ice").is_empty());
+        // Both halves trimmed: `acme / alice` is what a human types, and
+        // an untrimmed half matches no principal — the lever would report
+        // success and revoke nobody (#306 crew F4).
+        let spaced = parse_denied_principals("acme / alice");
+        assert!(
+            spaced.contains(&("acme".into(), "alice".into())),
+            "a spaced entry must revoke the same principal: {spaced:?}"
+        );
+        // A bare subject is DROPPED, not widened to every tenant.
+        assert!(parse_denied_principals("alice").is_empty());
+        assert!(parse_denied_principals("/alice").is_empty());
+        assert!(parse_denied_principals("acme/").is_empty());
+        // A mixed list keeps the well-formed entries and drops the rest.
+        let mixed = parse_denied_principals("alice,acme/bob");
+        assert_eq!(mixed.len(), 1);
+        assert!(mixed.contains(&("acme".into(), "bob".into())));
+    }
+
+    #[test]
+    fn an_empty_denylist_is_the_default() {
+        assert!(parse_denied_principals("").is_empty());
+        assert!(parse_denied_principals("  ").is_empty());
+        assert!(parse_denied_principals(" , ,").is_empty());
+    }
+
     use super::*;
 
     /// An upstream that returns a surface, like a real agent.
@@ -935,6 +1361,7 @@ mod tests {
             tenant: "default".into(),
             raw_token: String::new(),
             trace_id: "trace-test".into(),
+            sender_ref: None,
         }
     }
 
@@ -946,8 +1373,12 @@ mod tests {
     /// raw surface instead of a stream.
     #[tokio::test]
     async fn upstream_dispatch_reports_returns_a2ui() {
-        let dispatcher = Dispatcher::new(Arc::new(ToolRegistry::new()), "test")
-            .with_upstream(Arc::new(SurfaceUpstream));
+        let dispatcher = Dispatcher::new(
+            Arc::new(ToolRegistry::new()),
+            "test",
+            DispatchControls::unenforced(),
+        )
+        .with_upstream(Arc::new(SurfaceUpstream));
         let dispatch = dispatcher
             .invoke("assistant", json!({}), test_principal(), "rest")
             .await
@@ -964,7 +1395,11 @@ mod tests {
     /// the unknown tool is a genuine error, not a silent a2ui=true.
     #[tokio::test]
     async fn missing_tool_without_upstream_errors() {
-        let dispatcher = Dispatcher::new(Arc::new(ToolRegistry::new()), "test");
+        let dispatcher = Dispatcher::new(
+            Arc::new(ToolRegistry::new()),
+            "test",
+            DispatchControls::unenforced(),
+        );
         let result = dispatcher
             .invoke("nope", json!({}), test_principal(), "rest")
             .await;
@@ -1032,7 +1467,8 @@ mod tests {
         use futures::StreamExt as _;
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(StreamingTool));
-        let dispatcher = Dispatcher::new(Arc::new(registry), "test");
+        let dispatcher =
+            Dispatcher::new(Arc::new(registry), "test", DispatchControls::unenforced());
         let stream = dispatcher
             .invoke_streaming("streamer", json!({}), test_principal(), "rest", None)
             .await
@@ -1052,7 +1488,8 @@ mod tests {
         use futures::StreamExt as _;
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(BufferedTool));
-        let dispatcher = Dispatcher::new(Arc::new(registry), "test");
+        let dispatcher =
+            Dispatcher::new(Arc::new(registry), "test", DispatchControls::unenforced());
         let stream = dispatcher
             .invoke_streaming("buffered", json!({}), test_principal(), "rest", None)
             .await

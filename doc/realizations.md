@@ -1414,6 +1414,111 @@ a trap the next developer should not have to step in.
   the window is consulted, so the exact total is never actually lost.
   Suppress the LINE, never the COUNTER.
 
+- **A test can go vacuous when you make the code better (#250,
+  2026-09-05).** An integration test asserted that a hostile resolver
+  tenant appeared *truncated* in the audit line. Later in the same
+  branch, resolver validation moved to the boundary — so the hostile
+  value no longer reached the audit path at all, the assertion started
+  reading `"-"`, and it passed with the clamp deleted. Nothing failed;
+  the test just stopped meaning anything, and the suite stayed green
+  throughout. Two lessons: assert on a value that is *supposed* to reach
+  the sink (here `sender_ref`, unvalidated platform input by design)
+  rather than one you are also busy eliminating; and re-run the mutation
+  check after any change that moves a boundary, not only when the test
+  is first written.
+
+- **Enumerate audit SINKS, not audit call sites (#250, 2026-09-05).**
+  Clamping principal-derived fields at three `AuditRecord` construction
+  sites left two uncovered — and one of them, `record_rejection`, also
+  emits `error_detail`, into which every chat adapter interpolates the
+  raw tenant. So the hostile value still reached the log through a field
+  the clamp never considered: bounding a field beside an unbounded
+  message is not a bound. Clamp once in `From<&AuditRecord> for
+  AuditEntry` and have `emit` serialise that, making the rule an
+  invariant of the emitter which new sites inherit for free.
+
+- **An invariant a type documents should hold IN the type (#250,
+  2026-09-05).** `PerTenantBuckets` promised "the cardinality is bounded
+  by the manifest, not by inbound traffic". True for `sender_table`,
+  where tenants are enumerated at boot; false the moment FR-I-7
+  `upstream` let an out-of-process resolver name the tenant per request.
+  Validating at the resolver boundary keeps hostile values out, but a
+  merely buggy resolver or a large tenant estate still grows the map for
+  the process lifetime. When a doc-comment states a bound, enforce it in
+  the type rather than trusting every present and future caller.
+
+- **Eviction can be a reset, and the obvious reasoning about who gets
+  evicted is backwards (#250, 2026-09-05).** Capping that map needs an
+  eviction policy, and least-recently-used looks safe — "an attacker
+  flooding the map evicts themselves first". Exactly wrong: a caller
+  naming a FRESH key each time is never the least recently used, so the
+  flood evicts the throttled victim, who then returns with a full
+  bucket. A rate limiter's state IS the thing being protected, so evict
+  only entries that have refilled to capacity (nothing owed), and when
+  none qualify refuse the newcomer rather than make room. The first
+  version of that doc-comment asserted the false claim confidently; the
+  test caught it, because it was written to assert the property rather
+  than the implementation.
+
+- **Telegram's 64-byte `callback_data` cannot carry a token binding at
+  all (#250, 2026-09-05).** Binding a correlation token to a tenant and
+  an expiry closed a cross-tenant replay on Teams, Google Chat and
+  Discord. It does NOT fit Telegram: the smallest possible bound body —
+  one-character tool, empty args, 6-char keyed tenant digest, hour-
+  granularity expiry — is 66 bytes before base64, against a hard
+  platform cap of 64. WhatsApp Cloud mints on the same budget. So those
+  two adapters still mint unbound, never-expiring callback tokens, and
+  the replay stays open there. This is a **wire-format decision**, not a
+  follow-up commit: closing it needs a shorter epoch unit, a 4-character
+  digest, or a different token shape entirely. Pinned by
+  `telegrams_budget_cannot_carry_a_binding_at_all` so nobody
+  re-discovers it by writing a comment that claims otherwise — which is
+  exactly what happened on the first attempt.
+
+  **The fix is known and costs zero wire bytes: derive the HMAC key from
+  the tenant** (`HMAC(key, "n\0" || tenant)`) instead of carrying a
+  tenant field. A token minted for tenant A then fails the SIGNATURE for
+  tenant B — stronger than an equality check, since there is no field to
+  forget to compare — and it fits every budget because nothing is added
+  to the payload. Prototyped and measured: it drops ~17 bytes and a
+  tenant-bound, expiry-less token fits Telegram's 64 with room to spare.
+  What blocks it is **Google Chat's handler ordering**, not the crypto:
+  gc decodes the token with the bare key to route on its tool BEFORE it
+  resolves the sender, so it has no tenant to derive with at that point.
+  Landing it meant moving gc's decode after sender resolution, as
+  msteams already does — a real refactor of that handler, done in the
+  commit that follows. The crypto was the easy half, exactly as
+  predicted: the work was proving nothing between the match arm and the
+  principal reads the tool or args, so the click path can carry
+  placeholders until the verified token supplies them.
+
+  The general lesson: when a binding does not fit a budget, look at
+  whether it needs to be ON the wire at all. Anything both sides already
+  know can move into the key instead, and there it is free AND stronger
+  — a mismatch becomes a signature failure rather than a comparison
+  someone can forget to write.
+
+- **When an assertion cannot be made trustworthy, refuse the
+  configuration that needs it (#250, 2026-09-05).** The original defect
+  was that `identity.kind: azure` reads the tenant from
+  `channelData.tenant.id` and checks it only against `allowed_tenants`.
+  Months of work went into asking how to VERIFY that field, and the
+  answer is that you cannot: the Bot Framework connector token carries
+  no `tid`, endorsements bind only `channelId`, and Teams SSO is
+  Teams-only. What finally closed it was noticing the check is sound at
+  exactly one list length. With ONE allowed tenant the only value that
+  passes is the only value it could have been, so the check is
+  equivalent to pinning; with two or more the body field becomes a
+  privilege selector. So refuse `n > 1` at boot and point at the two
+  shapes that keep the tenant out of the body — `upstream`, where a
+  resolver decides it, or one bot registration per tenant, where it is
+  in the credential.
+  The general move: when an input cannot be verified, look for the
+  configuration boundary at which it stops mattering, and make
+  everything past that boundary unrepresentable. It converts an open
+  security question into a deployment-topology choice, which is a
+  decision someone can actually make.
+
 ---
 
 ## 8. CI/CD build-time traps (2026-08-30)
@@ -1501,3 +1606,346 @@ a trap the next developer should not have to step in.
   3.44.4; a local 3.47.1 rewrites `apps/explorer/analysis_options.yaml`
   (adding an `analyzer: exclude:` block) on `pub get`. Harmless, but it
   shows up as an unrelated modified file in the diff.
+
+- **A secret that cannot be rotated without an outage is a secret that never
+  gets rotated.** `correlation_key` was one value used to both sign and
+  verify, so changing it invalidated every token in flight: every button
+  already sitting in a conversation stopped responding on the deploy that
+  rotated it. Nothing was broken, exactly — the failure mode was that the
+  operation was too expensive to ever perform, which is how a compromised
+  key becomes permanent.
+
+  The fix is a ring — `new,old`, sign with the first, verify against all —
+  and the ordering is the load-bearing part: were the LAST key the signer,
+  dropping the old one would change what gets minted and the window would
+  never close. Two things had to come along for the ring to be honest.
+  Unbound tokens (report images, dashboard PNGs) rotate on the same secret,
+  so they needed a ring-aware decode too or every card image would 404 on
+  the rotating deploy. And an expiry failure has to short-circuit the loop:
+  if key A's MAC passes and only the body is stale, trying key B and
+  reporting its `BadSignature` tells an operator their rotation broke when
+  in fact the token simply timed out.
+
+- **A tenant binding is not a sender binding, and in a group chat that is the
+  whole gap.** #250 bound correlation tokens to the tenant, which closed
+  cross-tenant replay and read as "the token is now bound". It was not:
+  `callback_data` in a Telegram group, a Discord `custom_id`, a Teams
+  `Action.Submit.data`, a Google Chat card action are all visible to every
+  member of the conversation, so a token bound only to the tenant is a
+  capability held by everyone in it. Any member could click another
+  member's button and have the tool run under their OWN principal against
+  the OTHER person's arguments.
+
+  Folding the sender into the same derived key costs nothing on the wire —
+  a bound token still fits Telegram's 64 bytes — and fails the SIGNATURE
+  rather than a comparison someone has to remember to make. Two details
+  worth keeping. The derivation label went `v1` → `v2`, so a pre-binding
+  token cannot collide with a bound one for any input. And `tenant` and
+  `sender` are both `&str` and adjacent: passed positionally, swapping them
+  compiles and yields a token bound to nothing anyone will ever present, so
+  they travel in a named `Binding` struct instead. The compiler cannot
+  catch a swap; a field name can.
+
+  The consequence to accept deliberately: in a shared space, only the
+  person who triggered a command can use its buttons. That is the point,
+  but it IS a behaviour change — a colleague can no longer click "Refresh"
+  on someone else's card.
+
+- **"Where does the check go" is answered by the audit pivot, not by the
+  boundary that happens to know first.** A principal denylist looks like it
+  belongs at the identity boundary — that is where the caller is
+  authenticated. But Triton has thirteen of those: the OIDC verifier, the
+  Entra multi-tenant verifier, the Google access-token verifier, the dev
+  token, and one per chat adapter. A check at any one of them leaves the
+  other twelve open, and a check at all thirteen is a rule nobody can
+  verify holds.
+
+  The dispatcher is the single audit pivot (ADR-6) precisely because it is
+  the one place every protocol converges, and that makes it the one place a
+  revocation is provable. Four entry points had to be gated, not one:
+  `invoke`, `invoke_streaming`, `read_resource` and `update_model_context`.
+  Gating only `invoke` would have left MCP-App resource reads and context
+  writes running under a revoked identity — both reach an upstream carrying
+  the caller.
+
+  Two details that make the difference between a lever and a trap. The
+  audit class is `error:forbidden`, not `error:auth`: the caller
+  authenticated fine and was then revoked, and an operator watching an
+  incident needs to tell those apart. And an entry without a `tenant/`
+  qualifier is DROPPED with a warning rather than read as a bare subject —
+  `alice` exists in every tenant, and the person typing it is by definition
+  in a hurry.
+
+- **Duplication does not cost you the lines, it costs you the invariants.**
+  FR-I-7 identity resolution was copied into eight adapters. The lines were
+  never the problem — the problem is that a rule added to a copied seam has
+  to be added eight times, and the eighth is skipped by *omission* rather
+  than by decision. `validate_resolved` is the worked example: it guarded
+  the `upstream` path in three adapters and no path at all in the rest,
+  including the `sender_table` path in every one of them — where the same
+  values reach the same places (`PerTenantBuckets` makes `tenant` a
+  process-lifetime map key; `static_upstream::bearer` signs it into a
+  token). A sender table declaring `tenant: "ac me"` booted happily.
+
+  The extraction is only worth it if the rules become unskippable, not
+  merely available. Two things make that true here: `Resolved` is
+  constructible only inside `triton-chat-identity`, so an adapter cannot
+  hold one that skipped validation; and `SenderTable::parse` validates at
+  BOOT, turning a class of silent misconfiguration into a failed deploy —
+  the one moment an operator is actually looking.
+
+  What stayed out: `azure` (Teams' Entra config) and `self_enrol` (Google
+  Chat's pairing table). They genuinely differ per adapter today, and
+  CLAUDE.md §4 says extract a trait when the fourth concrete case appears,
+  not in anticipation of it.
+- **A trust check outlives the network it was written for, and the
+  traceability table keeps saying PASS.** The Signal signald gate and the
+  WhatsApp Web bridge gate both required a `.ts.net` host outside `local`.
+  That was sound while every host was a Tailscale node authenticated by the
+  tailnet. The tailnet was decommissioned in the move to Kamal — and the
+  check kept compiling, kept passing its tests, and kept meaning something
+  entirely different: "any host under a domain we no longer control". What
+  it should have meant, and what FR-I-9 / NFR-S-6 said all along, is
+  loopback. The M-LOCALITY-1 row read `IMPL — PASS` throughout.
+
+  Two lessons. First, when a piece of infrastructure is retired, grep for
+  what *named* it — a hostname suffix in a security predicate is a
+  dependency on that infrastructure just as much as a client library is.
+  Second, prefer a check whose premise cannot silently expire: `.ts.net`
+  needs the tailnet to still exist, while `IpAddr::is_loopback` needs
+  nothing. #288 tightened both gates to a loopback IP **literal** — a DNS
+  name, `localhost` included, is refused, because the property these gates
+  need is "the plaintext never leaves this host" and a name only has that
+  property until someone changes what it resolves to.
+
+- **A mutation test against an adapter is silently vacuous unless you rebuild
+  the binary first.** `cargo test -p triton-tests` does not rebuild
+  `triton-bin` — `triton-tests/src/lib.rs` documents that for the spawn
+  helper — so a mutation in adapter code never reaches the process the
+  integration tests actually spawn. Deleting `SenderTable`'s entry
+  validation and re-running left all eight boot tests green, which reads
+  exactly like "the tests do not pin this behaviour" and is in fact "you
+  tested the old binary".
+
+  The tell is that the *wrong* answer here is the reassuring one. A
+  mutation test that comes back green makes you delete or rewrite a test
+  that was fine. Run `cargo build --bins` between the mutation and the
+  test run; with it, the same four refusal tests fail and the four
+  must-still-work tests pass, which is the result the mutation was asking
+  for. This bites integration tests specifically — a mutation inside a
+  crate the test binary links (`triton-correlation`, say) does rebuild,
+  so the habit works everywhere else and fails silently right here.
+
+- **A control wired in `main.rs` does not exist for anyone who does not run
+  your `main.rs`.** `TRITON_DENIED_PRINCIPALS` (#287) was plumbed through
+  `triton-bin`'s `Settings` and applied with a builder call. It worked, and
+  every test proved it worked, because every test drove the standalone
+  binary. The deployment that actually runs does not use that binary:
+  `dz-agent-template` embeds triton and calls `Dispatcher::new` directly, in
+  three separate places. So the denylist deployed, the pod booted, and
+  nothing was revoked — silently, with a healthy `/healthz`.
+
+  Only the live probe caught it. The unit and integration tests could not:
+  they all instantiate the surface that had the wiring.
+
+  The first fix read the environment inside `Dispatcher::new`, breaking
+  this crate's env-free rule. A reviewer pointed out the better shape and
+  it is what shipped: the controls are a REQUIRED constructor parameter
+  (`DispatchControls`), read by `triton-config` in the host layer. Same
+  guarantee, no rule broken — and omission became a compile error rather
+  than a runtime absence. The original reasoning below still holds for
+  WHY the control had to reach every host; only the mechanism changed. That rule was written for a TUNING
+  parameter (`with_rejection_window` says so in its own doc). A revocation
+  lever is not tuning — its entire value is that it applies everywhere — and
+  a security control each call site must remember to opt into is a
+  suggestion, not a control. It is the same "available vs unskippable"
+  argument #289 makes about `validate_resolved`, and I got it wrong in my
+  own change one PR later. When adding a control, ask which surfaces
+  construct the thing it guards, not which surface you happened to be
+  editing.
+
+  Tracing that one turned up two more with the same shape — `can_invoke`'s
+  scope restriction and the rejection window — neither of which reached an
+  embedded host either. Only the denylist was actually dangerous, since
+  agent-lab names no pairing tool, but "nothing is broken today" is a
+  statement about configuration, not about the seam. All three are now read
+  where the dispatcher is built. The standalone binary keeps deriving the
+  pairing tools from its manifest, which is richer than an env var can be,
+  and the two sources MERGE rather than compete — `with_scope_restriction`
+  extends instead of replacing, because a host adding the manifest's tools
+  should not silently drop the environment's.
+
+- **A merge is fail-closed for a deny-set and fail-open for an allow-set, and
+  the two live one method apart.** `with_denied_principals` and
+  `with_scope_restriction` look like siblings and were written to behave the
+  same way. They must not. A denylist is a DENY-set: merging the
+  environment's entries with a host's can only revoke more, which is the
+  safe direction, and replacing silently drops revocations. A scope
+  restriction is an ALLOW-set inside a gate: merging can only widen what a
+  restricted principal reaches, so a stale `TRITON_PAIRING_TOOLS` left in a
+  values file keeps another adapter's enrolment tool reachable forever.
+  Same shape, opposite correct answer. Ask which direction the set fails
+  before choosing.
+
+- **Announcing a control from where it is READ reports the wrong set.** The
+  denylist boot warning fired inside `Dispatcher::new`, i.e. when the
+  environment was parsed — before any builder call could add to it. A host
+  that pinned a principal in code logged one set and enforced another, which
+  is worse than silence: the runbook tells an operator to read the count
+  back, so a wrong count is a control that lies at exactly the moment it is
+  being checked. Announce from where the thing is FINISHED being built, not
+  from where its config is read.
+
+- **A test that drives the real endpoint can still prove nothing.** Two of
+  the four tests written for this review passed with their fix reverted.
+  One asserted a 403 on `/v1/outbound` for a revoked principal — but used a
+  recipient outside the adapter's sender table, so `courier.authorize`
+  refused it anyway and the denylist was never consulted. The other asserted
+  empty `bodies` on `/v1/trace`, which is true unconditionally because the
+  dev `capture` feature is off in the test binary. Both looked like strong
+  end-to-end tests. Mutation is the only thing that told them apart from
+  real ones, and where a feature flag makes an end-to-end assertion
+  structurally vacuous, the honest move is to extract the gate, unit-test
+  it, and say in the integration test's doc comment what it does not cover.
+
+- **A required constructor parameter is the only version of "you must decide"
+  that holds.** The dispatcher's controls — the denylist, the scope
+  restriction, the rejection window — were builder methods, so a host that
+  called none got none, silently. Two hosts existed and one of them did
+  exactly that. `DispatchControls` is now a parameter of
+  `Dispatcher::new`, which turns the omission into a compile error naming
+  the field and turns "deny nobody" into a reviewable
+  `DispatchControls::none()` at the call site rather than an absence nobody
+  can see. It also puts `triton-core` back to env-free: `controls_from_env`
+  lives in the host layer, where reading the environment belongs.
+
+  The general form: when a control must apply everywhere, the question is
+  not "did I wire it" but "can this type exist without it".
+
+- **`cargo test --workspace` stops at the first failing crate, so "no FAILED
+  lines" can mean "the tests never ran".** A unit test in `triton-core`
+  failed; `triton-tests` — 450 integration tests, including the four that
+  prove the embedded host gets its controls — was never reached. Grepping
+  the output for `FAILED` found nothing, and "full suite green" went into a
+  commit message and a report to the user. It was false, and a reviewer
+  caught it rather than the tooling.
+
+  Use `--no-fail-fast`, and read the per-crate `test result:` summary lines
+  rather than grepping for failures. The absence of a failure is only
+  evidence if you know the test ran.
+
+- **A fix can assert more than the contract it is protecting.** A crew
+  finding suggested refusing the dev-token path at runtime outside `local`.
+  Implementing it broke 23 integration tests that boot `TRITON_ENV=nonprod`
+  and authenticate with the dev token deliberately — a dev build in a
+  non-production environment accepting it is the SHIPPED contract, and
+  ADR-10's guarantee is the compile-time one. The finding's actual request
+  was to check the deployed build flags rather than assume them; that check
+  passes (agent-lab refuses `Bearer dev-token` with 401, so the image is
+  built `--no-default-features`). Reverted the guard, recorded the
+  evidence. When a security fix breaks many tests, ask whether the tests
+  encode a decision before assuming they encode an oversight.
+
+- **"No FAILED lines" is not "no failures", twice over.** First
+  `cargo test --workspace` stops at the first failing crate, so a broken
+  unit test hides 450 integration tests. Then, even with `--no-fail-fast`,
+  grepping for `^test .* FAILED` misses a failure whose output happens to
+  be formatted differently — it reported 0 while one test was red.
+
+  The only honest check is to read the per-crate summary lines and add
+  them up:
+
+  ```sh
+  cargo test --workspace --no-fail-fast 2>&1 \
+    | grep -E '^test result:' | awk '{p+=$4; f+=$6} END {print p" passed, "f" failed"}'
+  ```
+
+  Both mistakes produced a confident "full suite green" in this session.
+  A verification you cannot state as a number is not a verification.
+
+- **Scoping a browse and scoping one record are different questions.** The
+  audit tail asks "may this caller browse", where a reserved pseudo-tenant
+  (`-`, `pairing`) must match NOTHING — two callers holding `-` are both
+  unattributed, not tenant-mates. A trace or task read asks "is this
+  specific record theirs", and there the SUBJECT is the precise key: a
+  caller's own dispatches carry their `sub` whatever their tenant resolves
+  to. Reusing the browse predicate for the record read locked every `-`
+  caller out of their own task — which is nearly every live caller. One
+  predicate looked like reuse and was a category error.
+
+- **"Eight adapters" was a count of the wrong thing.** The #289 extraction
+  swept the eight webhook adapters and reported `local SenderClaims
+  definitions 8 → 0`. There are TEN construction paths: `discord_gateway`
+  and `whatsapp_web` are socket adapters built in `gateway.rs` and
+  `bridge.rs`, and both kept parsing a raw `HashMap`. So two live paths
+  still accepted a table FR-I-11 says must refuse the deploy, while
+  `requirements.md` in the same PR marked the row `IMPL — PASS`.
+
+  That is #288's lesson repeating inside the fix for a different issue: a
+  traceability row claiming PASS for a rule the code does not implement
+  everywhere is worse than no row. When counting call sites for a sweep,
+  count the CONSTRUCTORS (`grep 'fn from_manifest'`), not the crates or
+  the adapter names — an adapter can have two.
+
+## 9. The embedded-surface audit (2026-09-06)
+
+A deliberate sweep after two "the sweep missed a path" findings in two
+review rounds. The rule that came out of it, and the one to use next
+time: **count the CONSTRUCTORS, not the crates.**
+
+`grep -l 'fn from_manifest' crates/triton-chat-*/src/` returns ELEVEN
+files across nine crates, plus `triton-chat-email`'s courier — twelve
+identity-bearing construction paths. The #289 sweep counted eight
+adapters, which is the number of chat platforms, not the number of places
+a sender table is parsed. Three separate corrections were needed before
+the count was right: the two socket adapters (`discord_gateway`,
+`whatsapp_web`) and then email.
+
+What the audit found, in order of severity:
+
+- **`triton-chat-email` parsed `identity.table` unvalidated** — the
+  twelfth path, with its own `RecipientClaims` shape. Lower severity than
+  the others and worth stating precisely: its tenant is COMPARED against
+  the caller's, never minted into a principal, so a malformed entry fails
+  closed. But it fails closed silently, and an operator debugs a refused
+  delivery rather than a table typo. Now validated at boot.
+
+- **A test whose NAME asserted a property it did not check.**
+  `the_tool_listing_is_scoped_too` asserted only that `/v1/tools` returns
+  200 and an array, while its name and doc comment said the
+  discarded-principal leak had been fixed there. It had not:
+  `list_tools` calls `descriptors_all()`, which is deployment-wide. A
+  test like that is worse than no test — it makes an unfixed thing look
+  covered, which is how a traceability row comes to read PASS for a rule
+  the code never implemented. Renamed to what it actually covers.
+
+- **Four handlers still verify a principal and drop it** —
+  `metrics_view`, `surface_render`, `manifest_view`, `list_tools`. Known,
+  deliberate, and now NAMED in the boot warning rather than covered by an
+  overstated claim of "every dispatch, proactive send and audit read".
+
+What the audit confirmed as clean: every `TRITON_*` authorization value
+is read in one place (`triton-config`); no `Dispatcher` can be built
+without deciding its controls; and the four dispatch entry points plus
+`/v1/outbound`, the two audit reads and `tasks/get` all consult the
+denylist.
+
+One thing left alone: `TRITON_GOOGLE_CHAT_PUBLIC_BASE` is read per
+request inside the adapter. It is a base URL for image links, not an
+authorization value, so it is outside this rule — noted so the next
+reader does not have to re-derive that.
+
+- **A versioned label only records what you remember to bump.** The
+  correlation-token derivation carries
+  `triton/correlation/tenant-key/vN`, whose stated job is that rotating it
+  invalidates every outstanding token. `v1 → v2` did that deliberately
+  when the sender joined the derivation INPUT. Then a later fix dropped
+  the master key that had been appended to the derived OUTPUT — same
+  effect, every live token invalidated, and the label still said `v2`.
+
+  An invalidation with no record of itself is the worst of both: users
+  lose their buttons and the git history offers no reason. The rule now
+  written on the constant: **any change to what the function returns
+  bumps the label, whether or not the input changed.** A test pins the
+  output shape (32-byte tag, master key absent) so the next such change
+  fails a test rather than shipping silently.

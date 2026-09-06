@@ -186,14 +186,56 @@ async fn main() -> std::io::Result<()> {
     // buffer an operator tails. `0` disables coalescing; a junk value
     // falls back to the default rather than failing boot — this knob
     // must never be the reason a gateway won't start.
-    let reject_window = std::env::var("TRITON_AUDIT_REJECT_WINDOW_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(std::time::Duration::from_secs)
-        .unwrap_or(triton_core::dispatcher::DEFAULT_REJECT_WINDOW);
-    let mut dispatcher = Dispatcher::new(registry, settings.env.clone())
-        .with_metrics(metrics.clone())
-        .with_rejection_window(reject_window);
+    // #284: a `self_enrol` adapter may name the ONE tool an un-enrolled
+    // sender is allowed to reach. Triton already mints those senders a
+    // restricted `pairing` principal and then forgets the restriction;
+    // this is where it is remembered. Opt-in: naming no tool leaves the
+    // gate default-allow, so no existing deployment changes behaviour.
+    let pairing_tools: Vec<String> = manifest
+        .as_ref()
+        .map(|m| {
+            m.adapters
+                .values()
+                .filter(|a| a.identity.kind == triton_manifest::IdentityKind::SelfEnrol)
+                .filter_map(|a| a.identity.pairing_tool.clone())
+                .filter(|t| !t.trim().is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    // #249/#284/#287: the reject window, the pairing restriction and the
+    // denylist are all read by `Dispatcher::new` itself, so an embedded
+    // host gets them too. This wiring only ADDS the manifest-derived
+    // pairing tools, which the environment cannot express as richly.
+    // #284/#287: the environment's controls, then the manifest's pairing
+    // tools layered on top — the manifest is the richer source (it knows
+    // WHICH adapter named the tool) and `restrict_scope` replaces rather
+    // than merges, because widening an allow-set is the unsafe direction.
+    // `extend_denied_principals` adds to what the environment supplied
+    // rather than replacing it — a deny-set merges in the safe direction,
+    // so `CLI > env` (factor III) cannot drop a revocation either way.
+    // The pairing restriction is the opposite: an allow-set, where the
+    // manifest REPLACES the environment because merging could only widen
+    // what an un-enrolled sender reaches.
+    let triton_config::DeploymentConfig {
+        controls,
+        audit_operators,
+    } = triton_config::DeploymentConfig::from_env();
+    let controls = controls
+        .extend_denied_principals(&settings.denied_principals)
+        .replace_scope_restriction("pairing", pairing_tools);
+    let mut dispatcher =
+        Dispatcher::new(registry, settings.env.clone(), controls).with_metrics(metrics.clone());
+
+    // One announcement, one place, for whichever host is running
+    // (#306 crew F6) — announcing from a host's `main` is how the
+    // revocation lever came to be enforced on one surface and reported
+    // on another.
+    triton_config::announce(
+        &settings.env,
+        &audit_operators,
+        dispatcher.denied_principals(),
+        dispatcher.is_enforcing(),
+    );
 
     // Static-upstream OIDC signer: when a signing key + issuer + JWKS are all
     // configured, Triton mints a per-call RS256 JWT to agents (workload→workload
@@ -423,11 +465,15 @@ async fn main() -> std::io::Result<()> {
         manifest: manifest_arc,
         metrics: metrics.clone(),
         oidc_signer: static_signer.clone(),
+        // Parsed once at boot, not per request (#306 crew F7).
+        audit_operators: Arc::new(audit_operators.clone()),
     };
     let a2a_state = A2aState {
         dispatcher: dispatcher.clone(),
         tasks: InMemoryTaskStore::new(),
         identity: identity.clone(),
+        // #306 crew F1: `tasks/get` scopes on a trace id.
+        audit_operators: Arc::new(audit_operators.clone()),
     };
     let mcp_state = McpState {
         dispatcher: dispatcher.clone(),
@@ -588,34 +634,26 @@ async fn main() -> std::io::Result<()> {
                         // var redirect signald connections at an
                         // arbitrary host. Now:
                         //   * empty → reject (must be set explicitly)
-                        //   * `unix://...` → accept (file path, not a
-                        //     network destination)
+                        //   * `unix://...` → accept (a local file path,
+                        //     not a network destination)
                         //   * `tcp://host[:port]` (or bare `host:port`)
-                        //     → host MUST end with `.ts.net`, i.e. a
-                        //     Tailscale tailnet hostname.
+                        //     → the host MUST be a loopback IP literal.
                         if settings.env != "local" {
                             let addr = settings.signal_signald_addr.as_str();
-                            let allowed = if addr.is_empty() {
-                                false
-                            } else if is_unix_socket_addr(addr) {
-                                true
-                            } else {
-                                // tcp:// or bare host:port. Parse the
-                                // host portion and require a `.ts.net`
-                                // suffix on a label boundary.
-                                let host = parse_host(addr).unwrap_or("");
-                                !host.is_empty()
-                                    && host
-                                        .strip_suffix(".ts.net")
-                                        .is_some_and(|prefix| !prefix.is_empty())
-                            };
+                            let allowed = !addr.is_empty()
+                                && (is_unix_socket_addr(addr) || is_loopback_addr(addr));
                             if !allowed {
                                 tracing::error!(
                                     env = %settings.env,
                                     signald_addr = %addr,
                                     "non-`local` env MUST set TRITON_SIGNAL_SIGNALD_ADDR \
-                                     to a `unix://...` path or a `tcp://*.ts.net[:port]` \
-                                     tailnet target (NFR-S-4 egress allowlist)",
+                                     to a `unix://...` path or a loopback IP literal \
+                                     (`tcp://127.0.0.1:port`, `tcp://[::1]:port`) — \
+                                     signal-cli is a host-local sidecar and the bridge \
+                                     carries decrypted message plaintext \
+                                     (FR-I-9 / NFR-S-6 locality; NFR-S-4 egress allowlist). \
+                                     A DNS name (including `localhost`) is refused: \
+                                     what it resolves to is not ours to decide",
                                 );
                                 std::process::exit(2);
                             }
@@ -720,9 +758,11 @@ async fn main() -> std::io::Result<()> {
                         // sidecar terminating the WhatsApp session
                         // inside the trust boundary. NFR-S-4 / C-11
                         // (mirrors Signal): outside `local` the bridge
-                        // addr MUST be a `unix://` path or a
-                        // `tcp://*.ts.net` tailnet target — never an
-                        // arbitrary host.
+                        // addr MUST be a `unix://` path or a loopback
+                        // IP literal — never an arbitrary host. What
+                        // crosses this socket is already DECRYPTED
+                        // (the daemon terminates the WhatsApp Web
+                        // session), so locality is the whole control.
                         let addr = settings.whatsapp_bridge_addr.as_str();
                         if addr.is_empty() {
                             tracing::error!(
@@ -732,22 +772,18 @@ async fn main() -> std::io::Result<()> {
                             std::process::exit(2);
                         }
                         if settings.env != "local" {
-                            let allowed = if is_unix_socket_addr(addr) {
-                                true
-                            } else {
-                                let host = parse_host(addr).unwrap_or("");
-                                !host.is_empty()
-                                    && host
-                                        .strip_suffix(".ts.net")
-                                        .is_some_and(|prefix| !prefix.is_empty())
-                            };
+                            let allowed = is_unix_socket_addr(addr) || is_loopback_addr(addr);
                             if !allowed {
                                 tracing::error!(
                                     env = %settings.env,
                                     whatsapp_bridge_addr = %addr,
                                     "non-`local` env MUST set TRITON_WHATSAPP_BRIDGE_ADDR to a \
-                                     `unix://...` path or a `tcp://*.ts.net[:port]` tailnet target \
-                                     (NFR-S-4 / C-11 locality)",
+                                     `unix://...` path or a loopback IP literal \
+                                     (`tcp://127.0.0.1:port`, `tcp://[::1]:port`) — the bridge \
+                                     carries decrypted message plaintext \
+                                     (NFR-S-4 / C-11 locality). A DNS name (including \
+                                     `localhost`) is refused: what it resolves to is not \
+                                     ours to decide",
                                 );
                                 std::process::exit(2);
                             }
@@ -1686,15 +1722,51 @@ fn build_registry(shadowed: &std::collections::HashSet<String>) -> ToolRegistry 
 }
 
 /// Extract `host` from `scheme://host[:port][/path]`. Returns
-/// None for unparseable URLs; the caller treats `None` as "not a
-/// tailnet host" so a malformed env var fails closed.
+/// None for unparseable URLs; every caller treats `None` as
+/// "not allowed", so a malformed env var fails closed.
+///
+/// IPv6 note: an address literal is bracketed (`[::1]:15432`), so
+/// the brackets are stripped and the colons inside them are not
+/// mistaken for a port separator.
 fn parse_host(url: &str) -> Option<&str> {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     // Strip path.
     let host_port = rest.split('/').next().unwrap_or(rest);
-    // Strip port.
-    let host = host_port.split(':').next().unwrap_or(host_port);
+    let host = if let Some(bracketed) = host_port.strip_prefix('[') {
+        // `[::1]:15432` — the authority is everything up to `]`.
+        bracketed.split(']').next().unwrap_or(bracketed)
+    } else {
+        // Strip port.
+        host_port.split(':').next().unwrap_or(host_port)
+    };
     if host.is_empty() { None } else { Some(host) }
+}
+
+/// FR-I-9 / NFR-S-6: true iff `addr`'s host is a loopback IP
+/// **literal** — IPv4 `127.0.0.0/8` or IPv6 `::1`.
+///
+/// #288: this replaced a `.ts.net` suffix check. That check was
+/// written when signald was reached across a Tailscale tailnet; the
+/// tailnet has since been decommissioned, and the spec always said
+/// loopback. See `doc/realizations.md` §7.
+///
+/// A DNS name is refused even when it is `localhost`, because the
+/// property FR-I-9 needs is "the plaintext never leaves this host",
+/// and a name only has that property until someone changes what it
+/// resolves to. An IP literal is checked here, once, and stays true.
+fn is_loopback_addr(addr: &str) -> bool {
+    let rest = addr.split_once("://").map(|(_, r)| r).unwrap_or(addr);
+    // `127.0.0.1:80@169.254.169.254` is USERINFO followed by the real
+    // host: a parser that stops at the first `:` sees loopback while
+    // the connection goes to the metadata service. There is no
+    // legitimate userinfo on a signald or bridge socket, so any `@`
+    // (and any query/fragment/whitespace that could hide one) refuses.
+    if rest.contains(['@', '?', '#']) || rest.chars().any(char::is_whitespace) {
+        return false;
+    }
+    parse_host(rest)
+        .and_then(|h| h.parse::<std::net::IpAddr>().ok())
+        .is_some_and(|ip| ip.is_loopback())
 }
 
 /// NFR-S-4: exact-host canonical-URL check. Returns true iff `raw`
@@ -1808,7 +1880,7 @@ mod rasterizer_gate_tests {
 
 #[cfg(test)]
 mod url_host_check_tests {
-    use super::{is_canonical_url, is_unix_socket_addr};
+    use super::{is_canonical_url, is_loopback_addr, is_unix_socket_addr};
 
     // NFR-S-4 / fix-up PR 37: the Google Chat / WhatsApp / MS Teams
     // egress-allowlist checks used `starts_with` which a sub-domain
@@ -1888,6 +1960,42 @@ mod url_host_check_tests {
         assert!(!is_unix_socket_addr("tcp://signald.tailnet.ts.net:15432"));
         assert!(!is_unix_socket_addr("signald.tailnet.ts.net:15432"));
         assert!(!is_unix_socket_addr(""));
+    }
+
+    #[test]
+    fn loopback_literals_are_the_only_accepted_tcp_hosts() {
+        // FR-I-9 names these three forms.
+        assert!(is_loopback_addr("tcp://127.0.0.1:15432"));
+        assert!(is_loopback_addr("tcp://[::1]:15432"));
+        // 127.0.0.0/8 is loopback in full, not just .0.1.
+        assert!(is_loopback_addr("tcp://127.9.9.9:15432"));
+        // Bare host:port (no scheme) is the same host.
+        assert!(is_loopback_addr("127.0.0.1:15432"));
+
+        // A DNS name is refused even when it looks local: the gate is
+        // evaluated once at boot, and resolution is not.
+        assert!(!is_loopback_addr("tcp://localhost:15432"));
+        assert!(!is_loopback_addr("tcp://attacker.example:15432"));
+        // The retired tailnet suffix that used to be the whole rule.
+        assert!(!is_loopback_addr("tcp://signald.example.ts.net:15432"));
+        // Non-loopback literals, including the cloud metadata service.
+        assert!(!is_loopback_addr("tcp://169.254.169.254:80"));
+        assert!(!is_loopback_addr("tcp://[fe80::1]:15432"));
+        // Unparseable / empty fail closed.
+        assert!(!is_loopback_addr(""));
+        assert!(!is_loopback_addr("tcp://"));
+    }
+
+    #[test]
+    fn a_loopback_looking_prefix_does_not_make_a_host_loopback() {
+        // The old check was a string suffix test; this one parses. A
+        // host that merely CONTAINS a loopback literal is not one.
+        assert!(!is_loopback_addr("tcp://127.0.0.1.evil.example:80"));
+        assert!(!is_loopback_addr("tcp://not-127.0.0.1:80"));
+        // Userinfo is the classic bypass: reqwest would connect to the
+        // metadata IP while a naive host parse sees `127.0.0.1`.
+        assert!(!is_loopback_addr("tcp://127.0.0.1@169.254.169.254:80"));
+        assert!(!is_loopback_addr("tcp://127.0.0.1:80@169.254.169.254"));
     }
 }
 

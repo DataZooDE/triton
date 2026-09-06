@@ -246,23 +246,63 @@ fn forwarded_email_principal(email: &str) -> Principal {
         // separately (issue #67 option B).
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     }
+}
+
+/// Constant-time string compare that does not leak length through the
+/// early return. Mirrors the padded `ct_eq` used for correlation tokens.
+#[cfg(feature = "dev-token")]
+fn ct_eq_str(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let n = a.len().max(b.len());
+    let mut pa = vec![0u8; n];
+    let mut pb = vec![0u8; n];
+    pa[..a.len()].copy_from_slice(a);
+    pb[..b.len()].copy_from_slice(b);
+    let content: bool = pa.ct_eq(&pb).into();
+    content && a.len() == b.len()
 }
 
 #[cfg(feature = "dev-token")]
 fn verify_dev_or_reject(token: &str, expected: &str) -> Result<Principal, TritonError> {
+    // #306 crew F12 asked whether this path's cross-tenant audit grant
+    // rests on an unverified assumption about the embedding host's build
+    // flags. It was checked rather than assumed: `dev-token` IS in the
+    // default feature set, and the deployed agent refuses
+    // `Bearer dev-token` on /v1/tools with 401 — so that image is built
+    // `--no-default-features` and this function does not exist in it.
+    //
+    // A runtime refusal outside `local` was tried and REVERTED. Twenty-
+    // three integration tests boot `TRITON_ENV=nonprod` and authenticate
+    // with the dev token on purpose: a dev build in a non-production
+    // environment accepting it is the shipped contract, and ADR-10's
+    // guarantee is the COMPILE-time one, not a runtime env check.
+    // Changing that contract is a decision about what a nonprod dev build
+    // is for, not a security fix, and it does not belong in this stack.
     // An empty `expected` disables the dev-token path (kill-switch) and
     // also prevents an empty `Bearer ` from matching an empty token.
-    if expected.is_empty() || token != expected {
+    // #282 F10: constant-time, like every other secret compare in the
+    // workspace. Length is padded into the comparison so the path taken
+    // does not depend on where the tokens first differ.
+    if expected.is_empty() || !ct_eq_str(token, expected) {
         return Err(TritonError::Auth("unknown token".into()));
     }
     Ok(Principal {
         sub: "dev-user".into(),
-        scopes: vec!["dev".into()],
+        // #282: the dev principal holds the operator audit scope. The
+        // Explorer authenticates with this token, and the rows it exists
+        // to show belong to chat senders, not to `tenant: "dev"` — so
+        // without it the audit page silently empties. This grants nothing
+        // in production: the whole dev-token path is compiled out there
+        // (`--no-default-features`, ADR-10).
+        scopes: vec!["dev".into(), crate::rest::AUDIT_READ_ALL_SCOPE.into()],
         groups: Vec::new(),
         tenant: "dev".into(),
         raw_token: token.into(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        sender_ref: None,
     })
 }
 

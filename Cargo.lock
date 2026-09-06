@@ -2440,6 +2440,7 @@ dependencies = [
  "futures",
  "serde",
  "serde_json",
+ "subtle",
  "tokio",
  "tower-http",
  "tracing",
@@ -2480,6 +2481,7 @@ dependencies = [
  "triton-chat-telegram",
  "triton-chat-twilio",
  "triton-chat-whatsapp",
+ "triton-config",
  "triton-core",
  "triton-identity",
  "triton-manifest",
@@ -2506,6 +2508,7 @@ dependencies = [
  "tokio-tungstenite 0.24.0",
  "tokio-util",
  "tracing",
+ "triton-chat-identity",
  "triton-core",
  "triton-correlation",
  "triton-manifest",
@@ -2524,6 +2527,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "triton-chat-identity",
  "triton-core",
  "triton-manifest",
  "triton-secrets",
@@ -2555,11 +2559,26 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "triton-chat-identity",
  "triton-chat-routing",
  "triton-core",
  "triton-correlation",
  "triton-manifest",
  "triton-rasterizer",
+ "triton-secrets",
+ "uuid",
+]
+
+[[package]]
+name = "triton-chat-identity"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "triton-core",
+ "triton-manifest",
  "triton-secrets",
  "uuid",
 ]
@@ -2581,6 +2600,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "triton-chat-identity",
  "triton-chat-routing",
  "triton-core",
  "triton-correlation",
@@ -2610,7 +2630,9 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "triton-chat-identity",
  "triton-core",
+ "triton-correlation",
  "triton-manifest",
  "triton-secrets",
  "uuid",
@@ -2629,6 +2651,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "triton-chat-identity",
  "triton-core",
  "triton-correlation",
  "triton-manifest",
@@ -2653,6 +2676,7 @@ dependencies = [
  "subtle",
  "thiserror 2.0.18",
  "tracing",
+ "triton-chat-identity",
  "triton-core",
  "triton-manifest",
  "triton-secrets",
@@ -2676,12 +2700,20 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "triton-chat-identity",
  "triton-core",
  "triton-correlation",
  "triton-manifest",
  "triton-rasterizer",
  "triton-secrets",
  "uuid",
+]
+
+[[package]]
+name = "triton-config"
+version = "0.0.1"
+dependencies = [
+ "triton-core",
 ]
 
 [[package]]
@@ -2725,6 +2757,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "triton-adapters-http",
+ "triton-config",
  "triton-core",
  "triton-identity",
 ]
@@ -2809,6 +2842,7 @@ dependencies = [
  "sha2",
  "tiny-skia 0.11.4",
  "tokio",
+ "triton-config",
  "triton-core",
  "triton-correlation",
  "triton-embed",

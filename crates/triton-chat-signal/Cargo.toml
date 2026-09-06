@@ -7,7 +7,9 @@ license.workspace = true
 publish = false
 
 [dependencies]
+triton-chat-identity = { path = "../triton-chat-identity" }
 triton-core = { path = "../triton-core" }
+triton-correlation = { path = "../triton-correlation" }
 triton-manifest = { path = "../triton-manifest" }
 triton-secrets = { path = "../triton-secrets" }
 serde = { workspace = true }

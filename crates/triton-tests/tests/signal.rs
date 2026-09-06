@@ -82,13 +82,14 @@ fn spawn_and_wait_for_exit(env: &[(&str, &str)]) -> std::process::Output {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn signal_rejects_non_tailnet_addr_in_nonprod() {
+async fn signal_rejects_non_loopback_addr_in_nonprod() {
     // PR 37 Finding 7 (MEDIUM, NFR-S-4): the previous check only
     // refused an EMPTY TRITON_SIGNAL_SIGNALD_ADDR outside `local`.
     // Setting it to anything non-empty was accepted, so an operator
     // (or a compromised env var) could redirect signald connections
-    // at an arbitrary host. The fix: outside `local`, the tcp://
-    // host MUST end with `.ts.net` (the Tailscale tailnet domain).
+    // at an arbitrary host. The fix: outside `local`, the tcp:// host
+    // MUST be loopback (#288 tightened this from the since-retired
+    // `.ts.net` tailnet suffix to what FR-I-9 always said).
     let mpath = vault_manifest_path();
     let out = spawn_and_wait_for_exit(&[
         ("TRITON_ENV", "nonprod"),
@@ -99,7 +100,7 @@ async fn signal_rejects_non_tailnet_addr_in_nonprod() {
     assert_eq!(
         out.status.code(),
         Some(2),
-        "non-local env with non-tailnet TRITON_SIGNAL_SIGNALD_ADDR MUST exit 2;\nstderr:\n{}\nstdout:\n{}",
+        "non-local env with non-loopback TRITON_SIGNAL_SIGNALD_ADDR MUST exit 2;\nstderr:\n{}\nstdout:\n{}",
         String::from_utf8_lossy(&out.stderr),
         String::from_utf8_lossy(&out.stdout),
     );
@@ -109,26 +110,26 @@ async fn signal_rejects_non_tailnet_addr_in_nonprod() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        combined.contains("NFR-S-4"),
-        "exit log MUST mention NFR-S-4; got: {combined}"
+        combined.contains("NFR-S-4") && combined.contains("FR-I-9"),
+        "exit log MUST name both rules it enforces; got: {combined}"
     );
 }
 
+/// #288: the gate checked for a `.ts.net` suffix — a network that has
+/// been decommissioned — while FR-I-9 and NFR-S-6 say LOOPBACK, and the
+/// traceability table claimed PASS. A table claiming PASS for a rule the
+/// code does not implement is worse than either the rule or its absence,
+/// because it stops anyone looking.
+///
+/// The premise that justified the looser check is gone, so the code
+/// tightens to what the spec always said.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn signal_accepts_tailnet_addr_in_nonprod() {
-    // Paired with the rejection test: a `tcp://*.ts.net:port` is on
-    // the tailnet allowlist and MUST get past the NFR-S-4 gate. The
-    // binary still fails downstream (the manifest's `env://` credential
-    // refs are unset, so secret resolution fails) but the FAILURE
-    // MODE is what matters: the NFR-S-4 path emits a specific
-    // "MUST set TRITON_SIGNAL_SIGNALD_ADDR" + "NFR-S-4" error.
-    // A non-allowlist value triggers that error; an allowlist value
-    // skips it and the binary fails downstream for a different reason.
+async fn signal_rejects_a_tailnet_addr_now_that_the_tailnet_is_gone() {
     let mpath = vault_manifest_path();
     let out = spawn_and_wait_for_exit(&[
         ("TRITON_ENV", "nonprod"),
         ("TRITON_MANIFEST_PATH", &mpath),
-        // Allowlist-passing override.
+        // Valid under the OLD rule; the tailnet no longer exists.
         (
             "TRITON_SIGNAL_SIGNALD_ADDR",
             "tcp://signald.example.ts.net:15432",
@@ -139,17 +140,54 @@ async fn signal_accepts_tailnet_addr_in_nonprod() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
-    // Negative assertion: the NFR-S-4 boot-rejection path must NOT
-    // have fired. The binary will still exit 2 for the downstream
-    // vault-unreachable failure; that's expected. We just need the
-    // NFR-S-4 path to have been skipped.
+    // Both the refusal and the accept path exit 2 here (the fixture's
+    // `env://` credentials are unset, so boot fails downstream either
+    // way). The exit code is therefore NOT discriminating — the rule
+    // named in the refusal line is.
     assert!(
-        !combined.contains(
-            "non-`local` env MUST set TRITON_SIGNAL_SIGNALD_ADDR \
-             to a `unix://...` path or a `tcp://*.ts.net[:port]`"
-        ),
-        "tailnet addr MUST pass the NFR-S-4 gate; combined output:\n{combined}"
+        combined.contains("FR-I-9"),
+        "a `.ts.net` target MUST no longer pass — the network is gone \
+         and FR-I-9 requires loopback; got:\n{combined}"
     );
+    assert_eq!(out.status.code(), Some(2), "refusal exits 2");
+}
+
+/// FR-I-9 spells out what IS allowed: IPv4 loopback, IPv6 loopback, or a
+/// unix socket. Each must get past the gate.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signal_accepts_every_loopback_form_fr_i_9_names() {
+    let mpath = vault_manifest_path();
+    for addr in [
+        "tcp://127.0.0.1:15432",
+        "tcp://127.0.0.5:15432",
+        "tcp://[::1]:15432",
+        "unix:///var/run/signald/signald.sock",
+    ] {
+        let out = spawn_and_wait_for_exit(&[
+            ("TRITON_ENV", "nonprod"),
+            ("TRITON_MANIFEST_PATH", &mpath),
+            ("TRITON_SIGNAL_SIGNALD_ADDR", addr),
+        ]);
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        // Asserting the ABSENCE of a refusal would pass vacuously while
+        // the gate refuses these for a different reason, so assert the
+        // POSITIVE evidence that boot reached past the gate: the adapter
+        // build runs and fails downstream on the fixture's unset
+        // `env://` credentials.
+        assert!(
+            combined.contains("signal adapter build failed"),
+            "`{addr}` is a form FR-I-9 explicitly permits and must reach \
+             adapter construction; got: {combined}"
+        );
+        assert!(
+            !combined.contains("FR-I-9"),
+            "`{addr}` must not trigger the locality refusal; got: {combined}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -173,11 +211,8 @@ async fn signal_accepts_unix_socket_addr_in_nonprod() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !combined.contains(
-            "non-`local` env MUST set TRITON_SIGNAL_SIGNALD_ADDR \
-             to a `unix://...` path or a `tcp://*.ts.net[:port]`"
-        ),
-        "unix:// addr MUST pass the NFR-S-4 gate; combined output:\n{combined}"
+        combined.contains("signal adapter build failed") && !combined.contains("FR-I-9"),
+        "unix:// addr MUST pass the locality gate; combined output:\n{combined}"
     );
 }
 

@@ -63,13 +63,7 @@ pub const PROTOCOL: &str = "messenger:google_chat";
 /// Per-Google-Chat-user claims resolved from the `sender_table`.
 /// The table is keyed by the full `users/<id>` string Google sends
 /// in `message.sender.name`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SenderClaims {
-    pub sub: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    pub tenant: String,
-}
+pub use triton_chat_identity::SenderClaims;
 
 /// Per-user claims in the `self_enrol` strategy's `fallback_table`.
 /// Unlike `sender_table` there is no `sub`: the subject is always the
@@ -86,7 +80,7 @@ pub struct EnrolClaims {
 /// How this adapter resolves an inbound sender to a `Principal`.
 enum IdentityMode {
     /// Operator-enumerated `users/<id>` → claims. Unknown sender = 401.
-    SenderTable(HashMap<String, SenderClaims>),
+    SenderTable(triton_chat_identity::SenderTable),
     /// Pairing flow: unknown senders are admitted with the literal
     /// scope `"pairing"` (subject = sender id) so an upstream pairing
     /// tool can issue a code; operator confirmation enrols the sender
@@ -96,7 +90,7 @@ enum IdentityMode {
     /// upstream router (FR-I-7). The adapter calls `resolver_tool`
     /// with the platform sender id; the tool returns `{sub, scopes,
     /// tenant}`. A resolver error rejects the inbound.
-    Upstream { resolver_tool: String },
+    Upstream(triton_chat_identity::UpstreamResolver),
 }
 
 /// Scope granted to an unknown sender during the `self_enrol` pairing
@@ -132,6 +126,11 @@ const DASHBOARD_MARKER: &str = "__dashboard_png";
 /// (e.g. peacock `render_report`, which returns its own PNG). Distinguishes it
 /// from a dashboard token on the shared `…/img/` route.
 const RENDER_REPORT_IMG_MARKER: &str = "__render_report_png";
+
+/// How long a card action token stays clickable (#250). Unbound tokens
+/// never expired, making each one a permanent replay oracle until the
+/// correlation key rotates.
+const CARD_TOKEN_TTL_SECS: u64 = 7 * 24 * 3600;
 /// PNG canvas width (matches the standalone `triton-rasterizer` bin).
 const DASHBOARD_PNG_WIDTH: u32 = 1200;
 
@@ -171,15 +170,23 @@ fn dashboard_image_url(
 ) -> Option<String> {
     let base = base?;
     let (title, tiles) = dashboard;
+    // #306 crew F8: an expiry, like the render_report image token beside
+    // it. Without one this URL is a forever-capability: the image route
+    // is deliberately unauthenticated (Google fetches card images
+    // anonymously), so the signed token IS the authorization and an
+    // unbounded one stays redeemable until the correlation key rotates.
     let spec = serde_json::json!({
-        "title": title,
-        "tiles": tiles.iter().map(|(l, v)| serde_json::json!({ "label": l, "value": v }))
-            .collect::<Vec<_>>(),
+        "s": {
+            "title": title,
+            "tiles": tiles.iter().map(|(l, v)| serde_json::json!({ "label": l, "value": v }))
+                .collect::<Vec<_>>(),
+        },
+        "exp": unix_now() + IMG_TOKEN_TTL_SECS,
     });
     let token = triton_correlation::encode_with_cap(
         DASHBOARD_MARKER,
         &spec,
-        &adapter.correlation_key,
+        adapter.correlation_key.signing(),
         DASHBOARD_TOKEN_CAP,
     )
     .ok()?;
@@ -235,20 +242,11 @@ fn report_image_url(
     let token = triton_correlation::encode_with_cap(
         RENDER_REPORT_IMG_MARKER,
         &payload,
-        &adapter.correlation_key,
+        adapter.correlation_key.signing(),
         DASHBOARD_TOKEN_CAP,
     )
     .ok()?;
     Some(format!("{base}/{}/img/{token}", adapter.name))
-}
-
-/// Principal shape the `upstream` resolver tool returns.
-#[derive(Debug, Deserialize)]
-struct ResolvedPrincipal {
-    sub: String,
-    #[serde(default)]
-    scopes: Vec<String>,
-    tenant: String,
 }
 
 /// Configuration for the #164 T1a async reply courier. Google Chat's
@@ -317,7 +315,7 @@ pub struct GoogleChatAdapter {
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
     /// HMAC key signing/verifying button correlation tokens (FR-I,
     /// the `CARD_CLICKED` round-trip). Resolved from `correlation_key`.
-    correlation_key: Vec<u8>,
+    correlation_key: triton_correlation::KeyRing,
     /// Ephemeral cache of upstream-rendered chart PNGs, served on demand at
     /// the signed `…/img/{token}` route (peacock `render_report`).
     /// #164 T1a: async reply courier switch + Chat REST API base.
@@ -358,15 +356,17 @@ impl GoogleChatAdapter {
                 adapter.inbound.signature
             )));
         }
-        if !matches!(
-            adapter.identity.kind,
-            IdentityKind::SenderTable | IdentityKind::SelfEnrol | IdentityKind::Upstream
-        ) {
-            return Err(BuildError::Unsupported(format!(
-                "google_chat adapter supports `identity.kind: sender_table`, `self_enrol`, or `upstream`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule.
+        triton_chat_identity::require_supported_kind(
+            "google_chat",
+            &adapter.identity.kind,
+            &[
+                IdentityKind::SenderTable,
+                IdentityKind::SelfEnrol,
+                IdentityKind::Upstream,
+            ],
+        )
+        .map_err(BuildError::Identity)?;
 
         let aud_field = adapter
             .inbound
@@ -444,8 +444,9 @@ impl GoogleChatAdapter {
                     .resolve(table_field)
                     .await
                     .map_err(|e| BuildError::Resolve("identity.table", e))?;
-                let table: HashMap<String, SenderClaims> = serde_json::from_str(&table_json)
-                    .map_err(|e| BuildError::TableParse(e.to_string()))?;
+                // #289: validates every entry's `sub` and `tenant` at boot.
+                let table = triton_chat_identity::SenderTable::parse(&table_json)
+                    .map_err(BuildError::Identity)?;
                 IdentityMode::SenderTable(table)
             }
             IdentityKind::SelfEnrol => {
@@ -460,6 +461,16 @@ impl GoogleChatAdapter {
                     .map_err(|e| BuildError::Resolve("identity.fallback_table", e))?;
                 let table: HashMap<String, EnrolClaims> = serde_json::from_str(&table_json)
                     .map_err(|e| BuildError::TableParse(e.to_string()))?;
+                // #289: `fallback_table` has a DIFFERENT SHAPE from
+                // `sender_table` — no `sub`, because under `self_enrol`
+                // the subject is always the platform sender id — so it
+                // cannot go through `SenderTable::parse`. The shape is
+                // adapter-specific; the rule is not. Pass the KEY as the
+                // subject, which is exactly what `sub` becomes here.
+                for (key, claims) in &table {
+                    triton_chat_identity::validate_table_entry(key, key, &claims.tenant)
+                        .map_err(BuildError::Identity)?;
+                }
                 IdentityMode::SelfEnrol(table)
             }
             IdentityKind::Upstream => {
@@ -472,45 +483,42 @@ impl GoogleChatAdapter {
                     .resolve(field)
                     .await
                     .map_err(|e| BuildError::Resolve("identity.resolver_tool", e))?;
-                if resolver_tool.trim().is_empty() {
-                    return Err(BuildError::Unsupported(
-                        "identity.resolver_tool must be non-empty".into(),
-                    ));
-                }
-                // The resolver MUST be an upstream tool (FR-I-7
-                // "reached through the upstream router"). If its name
-                // collides with an in-process tool, dispatcher.invoke
-                // would run that locally and silently bypass the static
-                // upstream router + the per-call RS256 JWT. Refuse at boot.
-                if dispatcher
-                    .descriptors()
-                    .iter()
-                    .any(|d| d.name == resolver_tool)
-                {
-                    return Err(BuildError::Unsupported(format!(
-                        "identity.resolver_tool `{resolver_tool}` collides with an in-process \
-                         tool; the upstream resolver must be a distinct static-upstream agent"
-                    )));
-                }
-                IdentityMode::Upstream { resolver_tool }
+                // `new` refuses an empty tool and one colliding with an
+                // in-process tool — the latter would let `invoke` run that
+                // tool locally, deciding identity without the router or
+                // the per-call RS256 JWT.
+                let up = triton_chat_identity::UpstreamResolver::new(
+                    resolver_tool,
+                    "google_chat",
+                    PROTOCOL_RESOLVE,
+                    &dispatcher,
+                )
+                .map_err(BuildError::Identity)?;
+                up.warn_trust_model(name);
+                IdentityMode::Upstream(up)
             }
             // Guarded above; unreachable for other kinds.
-            other => {
-                return Err(BuildError::Unsupported(format!(
-                    "google_chat adapter supports `identity.kind: sender_table` or `self_enrol`; got {other:?}"
-                )));
-            }
+            // `require_supported_kind` above already refused everything
+            // else; this arm exists only to satisfy the match. It used to
+            // restate the rule in wording that had already drifted — the
+            // message omitted `upstream`, which the adapter does support.
+            other => unreachable!("identity.kind {other:?} was refused at boot"),
         };
 
         // `correlation_key` signs the HMAC tokens on rendered buttons
         // and verifies them on the `CARD_CLICKED` callback (see the
         // `surface_mapper::buttons_from_result` + `card_token` paths).
         // Resolved at boot so a bad `env://` ref also fails closed.
-        let correlation_key = resolver
-            .resolve(&adapter.correlation_key)
-            .await
-            .map_err(|e| BuildError::Resolve("correlation_key", e))?
-            .into_bytes();
+        // #287: a comma-separated RING — signed with the first key,
+        // verified against all — so the key can be rotated without
+        // invalidating every button already in a conversation.
+        let correlation_key = triton_correlation::KeyRing::parse(
+            &resolver
+                .resolve(&adapter.correlation_key)
+                .await
+                .map_err(|e| BuildError::Resolve("correlation_key", e))?,
+        )
+        .map_err(BuildError::CorrelationKey)?;
 
         // PR 28 headroom rationale: see triton-chat-telegram.
         const ADAPTER_HEADROOM: u32 = 10;
@@ -582,7 +590,7 @@ async fn serve_dashboard_png(
     State(adapter): State<Arc<GoogleChatAdapter>>,
     axum::extract::Path(token): axum::extract::Path<String>,
 ) -> Response {
-    let (marker, spec) = match triton_correlation::decode_with_cap(
+    let (marker, spec) = match triton_correlation::decode_with_cap_any(
         &token,
         &adapter.correlation_key,
         DASHBOARD_TOKEN_CAP,
@@ -612,6 +620,7 @@ async fn serve_dashboard_png(
             tenant: "-".to_string(),
             raw_token: String::new(),
             trace_id: uuid::Uuid::new_v4().to_string(),
+            sender_ref: None,
         };
         return match adapter
             .dispatcher
@@ -639,7 +648,21 @@ async fn serve_dashboard_png(
     if marker != DASHBOARD_MARKER {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     }
-    let req: triton_rasterizer::DashboardRequest = match serde_json::from_value(spec) {
+    // #306 crew F8: same expiry check as the render_report branch above.
+    // A missing `exp` is REFUSED, not treated as "never expires" — the
+    // field is covered by the MAC, so its absence means a pre-expiry
+    // token, and those are exactly the unbounded ones.
+    if spec
+        .get("exp")
+        .and_then(Value::as_u64)
+        .is_none_or(|exp| exp < unix_now())
+    {
+        return (StatusCode::GONE, "image link expired").into_response();
+    }
+    let Some(inner) = spec.get("s").cloned() else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    let req: triton_rasterizer::DashboardRequest = match serde_json::from_value(inner) {
         Ok(r) => r,
         Err(_) => return (StatusCode::BAD_REQUEST, "bad spec").into_response(),
     };
@@ -666,6 +689,14 @@ async fn serve_dashboard_png(
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #289: FR-I-7 resolution now lives in `triton-chat-identity`;
+    /// its refusals surface here unchanged.
+    #[error("identity: {0}")]
+    Identity(#[source] triton_chat_identity::IdentityError),
+    /// #287: the resolved `correlation_key` secret is a
+    /// comma-separated ring; nothing usable survived parsing it.
+    #[error("correlation_key: {0}")]
+    CorrelationKey(#[source] triton_correlation::KeyRingError),
     #[error("adapter is not declared `kind: google_chat`")]
     WrongKind,
     #[error("PR 33 limitation: {0}")]
@@ -1057,6 +1088,28 @@ async fn handle_webhook(
     // match, which consumes `event.message`.
     let was_message = event.kind == "MESSAGE";
     let mut routing_text: Option<String> = None;
+    // #250: captured now, because `event` is partially moved below and
+    // the TENANT binding can only be verified once the sender is
+    // resolved, further down.
+    let card_token: Option<String> = is_card_click
+        .then(|| event.card_token())
+        .flatten()
+        .map(str::to_owned);
+    // Captured with it: the token is decoded AFTER sender resolution
+    // (see below), by which point `event` is partially moved.
+    let card_inputs: Vec<(String, String)> = if is_card_click {
+        event
+            .form_inputs()
+            .into_iter()
+            .filter(|(_, v)| !v.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // `tool_name`/`args` are DEFERRED on the click path: the correlation
+    // token that carries them is bound to (tenant, sender), and neither is
+    // known until sender resolution below. They are filled in from the
+    // VERIFIED token before any dispatch.
     let (sender_name, tool_name, args, action_echo): (String, String, Value, Option<String>) =
         match event.kind.as_str() {
             "MESSAGE" => {
@@ -1089,7 +1142,13 @@ async fn handle_webhook(
                 (sender, tool, args, None)
             }
             "CARD_CLICKED" => {
-                let Some(token) = event.card_token() else {
+                // #250/#287: the token is NOT decoded here. It is a bearer
+                // capability bound to a tenant AND a sender, and neither is
+                // known until sender resolution further down — so decoding
+                // now would be verifying a binding against nothing. Capture
+                // and defer; the click cannot dispatch until the deferred
+                // decode fills `tool_name`/`args` from the VERIFIED token.
+                if card_token.is_none() {
                     record_rejection(
                         &adapter,
                         "-",
@@ -1097,57 +1156,6 @@ async fn handle_webhook(
                         TritonError::Validation("CARD_CLICKED missing correlation token".into()),
                     );
                     return (StatusCode::BAD_REQUEST, "missing action").into_response();
-                };
-                let (tool, mut args) = match triton_correlation::decode_with_cap(
-                    token,
-                    &adapter.correlation_key,
-                    CARD_CORRELATION_CAP,
-                ) {
-                    Ok(p) => p,
-                    Err(_) => {
-                        // Forged/expired/oversized token — never trust the
-                        // click's tool/args. Audited as `error:auth`.
-                        record_rejection(
-                            &adapter,
-                            "-",
-                            "-",
-                            TritonError::Auth("CARD_CLICKED correlation token invalid".into()),
-                        );
-                        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
-                    }
-                };
-                // Merge the user-supplied Selection/Form values onto the
-                // token's signed base args (the token fixed the TOOL; the
-                // values are user query params bound by the named-query
-                // layer). Skip EMPTY values: Google Chat submits *every*
-                // input on the card with *any* action, so tapping a
-                // preset button also sends the (blank) follow-up form and
-                // dropdown — an empty merge would clobber the button's own
-                // preset args (e.g. blank out its `question`). Only a value
-                // the user actually entered/selected overrides the preset.
-                // The open-doc pseudo-tool carries a signed `{skill, id}` that
-                // must NOT be overridable by card form inputs (a co-resident
-                // field literally named `skill`/`id` could otherwise redirect
-                // the document render). It has no user inputs anyway, so skip
-                // the merge entirely for it and trust only the signed args.
-                let inputs = if tool == surface_mapper::OPEN_DOC_TOOL {
-                    Vec::new()
-                } else {
-                    event.form_inputs()
-                };
-                let non_empty: Vec<(String, String)> =
-                    inputs.into_iter().filter(|(_, v)| !v.is_empty()).collect();
-                if !non_empty.is_empty() {
-                    let map = match &mut args {
-                        Value::Object(m) => m,
-                        other => {
-                            *other = Value::Object(Default::default());
-                            other.as_object_mut().unwrap()
-                        }
-                    };
-                    for (k, v) in non_empty {
-                        map.insert(k, Value::String(v));
-                    }
                 }
                 let echo = event.action_echo();
                 let sender = event
@@ -1156,7 +1164,9 @@ async fn handle_webhook(
                     .and_then(|u| u.name.as_deref())
                     .unwrap_or("")
                     .to_string();
-                (sender, tool, args, echo)
+                // Placeholders. Nothing between here and the deferred
+                // decode reads either.
+                (sender, String::new(), Value::Null, echo)
             }
             "ADDED_TO_SPACE" => {
                 let sender = event
@@ -1202,16 +1212,16 @@ async fn handle_webhook(
         // `upstream` delegates to a resolver tool reached through the
         // upstream router; it's async, so it lives outside the pure
         // `resolve_sender`.
-        IdentityMode::Upstream { resolver_tool } => {
-            match resolve_via_upstream(&adapter.dispatcher, resolver_tool, sender_name).await {
-                Ok(p) => p,
-                Err(e) => {
-                    record_rejection(&adapter, "-", "-", e);
-                    return (StatusCode::UNAUTHORIZED, "identity resolution failed")
-                        .into_response();
-                }
+        IdentityMode::Upstream(up) => match up.resolve(&adapter.dispatcher, sender_name).await {
+            Ok(r) => {
+                let (sub, scopes, _groups, tenant) = r.into_parts();
+                (sub, scopes, tenant)
             }
-        }
+            Err(e) => {
+                record_rejection(&adapter, "-", "-", e);
+                return (StatusCode::UNAUTHORIZED, "identity resolution failed").into_response();
+            }
+        },
         // Sync strategies. `None` means reject (sender_table unknown,
         // or a malformed self_enrol sender).
         other => match resolve_sender(other, sender_name) {
@@ -1249,6 +1259,9 @@ async fn handle_webhook(
             .into_response();
     }
 
+    // #250: the raw sender only earns a place in the audit line
+    // when the resolver replaced the asserted identity.
+    let identity_was_resolved_upstream = matches!(adapter.identity, IdentityMode::Upstream(_));
     let principal = Principal {
         sub: sub.clone(),
         scopes: scopes.clone(),
@@ -1256,9 +1269,76 @@ async fn handle_webhook(
         tenant: tenant.clone(),
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
+        // #250: only under `upstream` — see Principal::sender_ref.
+        sender_ref: identity_was_resolved_upstream.then(|| sender_name.to_string()),
     };
     let principal_for_post = principal.clone();
 
+    // #250: a card action token is a bearer capability. The token was
+    // HMAC-verified above, but the sender is only resolved HERE, so the
+    // TENANT binding can only be checked now — before the tool it names
+    // is dispatched. Without it a token minted into one tenant's space
+    // (visible to every member of that space and in the client's network
+    // trace) is replayable by a sender in another, yielding their
+    // principal against the original arguments.
+    // #250: a card action token is a bearer capability, and it is only
+    // NOW — with the sender resolved — that its tenant binding can be
+    // checked. So this is where the click's tool and args come from:
+    // decoded from the VERIFIED token, never from the placeholder above.
+    // Without the binding a token minted into one tenant's space (visible
+    // to every member of that space and in the client's network trace)
+    // would be replayable by a sender in another, yielding their
+    // principal against the original arguments.
+    if let Some(token) = card_token.as_deref() {
+        match triton_correlation::decode_bound_any(
+            token,
+            &adapter.correlation_key,
+            CARD_CORRELATION_CAP,
+            triton_correlation::Binding {
+                platform: "google_chat",
+                tenant: &principal.tenant,
+                // #287: the CLICKER. A card in a space is visible to
+                // every member of it, so the tenant binding alone left
+                // the token a capability held by all of them.
+                sender: sender_name,
+            },
+        ) {
+            Ok((tool, decoded_args)) => {
+                tool_name = tool;
+                args = decoded_args;
+            }
+            Err(_) => {
+                // Forged, expired, oversized, or minted for another
+                // tenant — never trust the click's tool/args.
+                record_rejection(
+                    &adapter,
+                    &sub,
+                    &tenant,
+                    TritonError::Auth("CARD_CLICKED correlation token invalid".into()),
+                );
+                return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+            }
+        }
+        // Merge the user-supplied Selection/Form values onto the token's
+        // signed base args (the token fixed the TOOL; the values are user
+        // query params bound by the named-query layer). Empty values were
+        // filtered at capture: Google Chat submits *every* input on the
+        // card with *any* action, so tapping a preset button also sends
+        // the blank follow-up form and dropdown — an empty merge would
+        // clobber the button's own preset args.
+        if !card_inputs.is_empty() {
+            let map = match &mut args {
+                Value::Object(m) => m,
+                other => {
+                    *other = Value::Object(Default::default());
+                    other.as_object_mut().unwrap()
+                }
+            };
+            for (k, v) in card_inputs {
+                map.insert(k, Value::String(v));
+            }
+        }
+    }
     // A source "Open" button (open-doc token): render the cited document and
     // return it as a Chat DIALOG. This MUST be synchronous (a dialog can only
     // ride the click's own response, never the courier), and it's fast (a
@@ -1360,11 +1440,21 @@ async fn handle_webhook(
                         .iter()
                         .filter_map(|a| {
                             let payload = serde_json::json!({ "id": a.id, "msg": pending_text });
-                            triton_correlation::encode_with_cap(
+                            // Same binding as every other card token
+                            // (#250/#287): the chooser is rendered into a
+                            // space every member can see, so the token is
+                            // a capability for the CLICKER, not the space.
+                            triton_correlation::encode_bound(
                                 triton_chat_routing::USE_AGENT_TOOL,
                                 &payload,
-                                &adapter.correlation_key,
+                                adapter.correlation_key.signing(),
                                 CARD_CORRELATION_CAP,
+                                triton_correlation::Binding {
+                                    platform: "google_chat",
+                                    tenant: &principal.tenant,
+                                    sender: sender_name,
+                                },
+                                Some(CARD_TOKEN_TTL_SECS),
                             )
                             .ok()
                             .map(|tok| (a.display.clone(), tok))
@@ -1418,6 +1508,7 @@ async fn handle_webhook(
                 // The public image base derives from request headers, which
                 // the spawned task no longer has — capture it now.
                 let base = public_base(&headers);
+                let sender_owned = sender_name.to_string();
                 let task = async move {
                     courier_reply(
                         adapter,
@@ -1426,6 +1517,7 @@ async fn handle_webhook(
                         tool_name,
                         args,
                         principal,
+                        sender_owned,
                         action_echo,
                     )
                     .await;
@@ -1489,6 +1581,7 @@ async fn handle_webhook(
             &dispatch.result,
             &action_echo,
             &principal_for_post,
+            sender_name,
             workspace_addon,
             image_hint,
         )
@@ -1577,6 +1670,10 @@ async fn build_reply_message(
     dispatch_result: &Value,
     action_echo: &Option<String>,
     principal: &Principal,
+    // #287: the platform sender the card is rendered for — folded into
+    // the derived signing key beside the tenant, so only they can
+    // submit its actions.
+    sender_name: &str,
     workspace_addon: bool,
     image_hint: Option<String>,
 ) -> Result<Value, surface_mapper::RenderError> {
@@ -1613,11 +1710,17 @@ async fn build_reply_message(
                     surface_mapper::interactive_from_result(dispatch_result)
                         .into_iter()
                         .filter_map(|spec| {
-                            match triton_correlation::encode_with_cap(
+                            match triton_correlation::encode_bound(
                                 spec.tool(),
                                 &spec.base_args(),
-                                &adapter.correlation_key,
+                                adapter.correlation_key.signing(),
                                 CARD_CORRELATION_CAP,
+                                triton_correlation::Binding {
+                                    platform: "google_chat",
+                                    tenant: &principal.tenant,
+                                    sender: sender_name,
+                                },
+                                Some(CARD_TOKEN_TTL_SECS),
                             ) {
                                 Ok(token) => Some((spec, token)),
                                 Err(e) => {
@@ -1749,6 +1852,7 @@ async fn build_reply_message(
 /// one patch per turn sits inside the 1-write/s per-space quota with no
 /// limiter. A failed placeholder create degrades to a plain create of
 /// the final answer — never a dropped turn.
+#[allow(clippy::too_many_arguments)]
 async fn courier_reply(
     adapter: Arc<GoogleChatAdapter>,
     space: String,
@@ -1756,6 +1860,9 @@ async fn courier_reply(
     tool_name: String,
     args: Value,
     principal: Principal,
+    // #287: the platform sender the reply's card is minted for. Owned,
+    // because this runs in a spawned task that outlives the request.
+    sender_name: String,
     action_echo: Option<String>,
 ) {
     let principal_for_post = principal.clone();
@@ -1834,6 +1941,7 @@ async fn courier_reply(
                 &result_value,
                 &action_echo,
                 &principal_for_post,
+                &sender_name,
                 false,
                 image_hint,
             )
@@ -2079,9 +2187,10 @@ fn resolve_sender(
     sender_name: &str,
 ) -> Option<(String, Vec<String>, String)> {
     match identity {
-        IdentityMode::SenderTable(table) => table
-            .get(sender_name)
-            .map(|c| (c.sub.clone(), c.scopes.clone(), c.tenant.clone())),
+        IdentityMode::SenderTable(table) => table.resolve(sender_name).map(|r| {
+            let (sub, scopes, _groups, tenant) = r.into_parts();
+            (sub, scopes, tenant)
+        }),
         IdentityMode::SelfEnrol(table) => {
             // A pairing subject must be a real human user resource
             // name. Reject empty / non-`users/` senders (e.g. Google's
@@ -2104,7 +2213,7 @@ fn resolve_sender(
         // `upstream` is async and handled by `resolve_via_upstream` at
         // the call site; never resolved here. Defensive `None` keeps
         // the match total.
-        IdentityMode::Upstream { .. } => None,
+        IdentityMode::Upstream(_) => None,
     }
 }
 
@@ -2112,51 +2221,6 @@ fn resolve_sender(
 /// form `users/<id>` with a non-empty id.
 fn is_valid_user_sender(name: &str) -> bool {
     name.strip_prefix("users/").is_some_and(|id| !id.is_empty())
-}
-
-/// Resolve a sender to `(sub, scopes, tenant)` by invoking the
-/// `resolver_tool` through the upstream router (FR-I-7 `upstream`).
-/// The resolver receives `{platform, sender}` and returns `{sub,
-/// scopes, tenant}`. Any failure (empty sender, resolver error,
-/// malformed reply) is an `Auth` error so the inbound is rejected
-/// rather than dispatched with a guessed principal.
-///
-/// The resolver call is itself a dispatch: it emits a `phase:
-/// dispatch` audit line under [`PROTOCOL_RESOLVE`] plus the upstream
-/// router's `phase: upstream` line (the latter hardcoded to
-/// `protocol: "upstream"`), both under the bootstrap principal's
-/// trace_id — distinct from the real command's audit pair.
-async fn resolve_via_upstream(
-    dispatcher: &Dispatcher,
-    resolver_tool: &str,
-    sender_name: &str,
-) -> Result<(String, Vec<String>, String), TritonError> {
-    if sender_name.is_empty() {
-        return Err(TritonError::Auth(
-            "empty sender for upstream resolver".into(),
-        ));
-    }
-    let bootstrap = Principal {
-        sub: "identity-resolver".to_string(),
-        scopes: vec!["resolve".to_string()],
-        groups: Vec::new(),
-        tenant: "system".to_string(),
-        raw_token: String::new(),
-        trace_id: uuid::Uuid::new_v4().to_string(),
-    };
-    let args = serde_json::json!({ "platform": "google_chat", "sender": sender_name });
-    let dispatch = dispatcher
-        .invoke(resolver_tool, args, bootstrap, PROTOCOL_RESOLVE)
-        .await
-        .map_err(|e| TritonError::Auth(format!("identity resolver `{resolver_tool}`: {e}")))?;
-    let resolved: ResolvedPrincipal = serde_json::from_value(dispatch.result)
-        .map_err(|e| TritonError::Auth(format!("resolver reply not {{sub,scopes,tenant}}: {e}")))?;
-    if resolved.sub.trim().is_empty() || resolved.tenant.trim().is_empty() {
-        return Err(TritonError::Auth(
-            "resolver returned empty sub or tenant".into(),
-        ));
-    }
-    Ok((resolved.sub, resolved.scopes, resolved.tenant))
 }
 
 /// Strip a leading `@bot ` mention if present, then route by the
@@ -2285,16 +2349,15 @@ mod tests {
 
     #[test]
     fn sender_table_unknown_returns_none_for_rejection() {
-        let mut t = HashMap::new();
-        t.insert(
-            "users/99".to_string(),
-            SenderClaims {
-                sub: "alice".to_string(),
-                scopes: vec!["chat".to_string()],
-                tenant: "acme".to_string(),
-            },
+        // #289: built through `parse`, which is the only constructor —
+        // so this test now also asserts the table it uses is one the
+        // adapter would actually accept at boot.
+        let id = IdentityMode::SenderTable(
+            triton_chat_identity::SenderTable::parse(
+                r#"{"users/99":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
+            )
+            .expect("a well-formed table"),
         );
-        let id = IdentityMode::SenderTable(t);
         assert!(resolve_sender(&id, "users/unknown").is_none());
         let (sub, _, _) = resolve_sender(&id, "users/99").unwrap();
         assert_eq!(

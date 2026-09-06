@@ -22,6 +22,7 @@ use hmac::{Hmac, Mac};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use triton_tests::chat_courier_fixture::FakeWhatsAppApi;
+use triton_tests::upstream_fixture::FakeAgent;
 use triton_tests::{TestIssuer, TritonProcess};
 
 const APP_SECRET: &str = "whatsapp-app-secret-for-test";
@@ -383,4 +384,151 @@ fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
         }
         std::thread::sleep(Duration::from_millis(30));
     }
+}
+
+/// #250: under `identity.kind: upstream` the caller's tenant and the
+/// RECIPIENT's tenant are not the same thing.
+///
+/// `authorize` forces them equal for `sender_table` (`claims.tenant ==
+/// principal.tenant`) but returns `Ok(())` unconditionally for
+/// `upstream` — nothing ties an agent's tenant to the tenant its
+/// recipient resolves to. Card tokens are now bound to the minting
+/// tenant, so minting against the CALLER would make every button in a
+/// proactive message dead: the click fails the signature and is audited
+/// as a forged token, i.e. a functional break disguised as an attack.
+///
+/// The token must be minted for the tenant the RECIPIENT will resolve
+/// to, because that is who clicks it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn outbound_buttons_are_minted_for_the_recipients_tenant() {
+    let issuer = TestIssuer::start().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    // The resolver answers with a tenant DIFFERENT from the caller's
+    // (`acme`, from the outbound token).
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-ada", "scopes": ["chat"], "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let mut env = env_for(&issuer, &whatsapp);
+    env.insert(
+        "TRITON_MANIFEST_PATH".to_string(),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/manifest-whatsapp-cloud-upstream-identity.yaml")
+            .display()
+            .to_string(),
+    );
+    env.insert(
+        "TRITON_STATIC_UPSTREAMS".to_string(),
+        format!(
+            "assistant={},resolve_identity={}",
+            agent.host_port(),
+            resolver.host_port()
+        ),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    open_service_window(&proc, "490000000001").await;
+    let _ = wait_for(Duration::from_secs(3), || {
+        let v = whatsapp.captured();
+        (!v.is_empty()).then_some(v)
+    });
+    let before = whatsapp.captured().len();
+
+    let token = token_with_aud(&issuer, OUTBOUND_AUDIENCE);
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "adapter": "whatsapp",
+            "to": "490000000001",
+            "result": { "surface": { "components": [
+                { "kind": "text", "value": "Pick one" },
+                { "kind": "button", "label": "Yes", "tool": "assistant", "args": {} }
+            ] } },
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+    assert_eq!(resp.status(), 202, "{}", resp.status());
+
+    let sent = wait_for(Duration::from_secs(5), || {
+        let v = whatsapp.captured();
+        (v.len() > before).then(|| v[before].clone())
+    });
+    let body = serde_json::to_string(&sent.body).expect("body json");
+    // Pull the interactive reply id (the correlation token) out.
+    let minted = sent.body["interactive"]["action"]["buttons"][0]["reply"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected an interactive button; got: {body}"))
+        .to_string();
+
+    assert!(
+        triton_correlation::decode_bound(
+            &minted,
+            b"whatsapp-correlation-key-for-test",
+            triton_correlation::PLATFORM_MAX_CALLBACK_DATA,
+            triton_correlation::Binding {
+                platform: "whatsapp",
+                tenant: "globex",
+                // #287: and the RECIPIENT themselves — the `to` of the
+                // proactive send, which is who will tap it.
+                sender: "490000000001",
+            },
+        )
+        .is_ok(),
+        "the button must be minted for the RECIPIENT's tenant (`globex`) and \
+         the recipient, or every click on a proactive message dies as a \
+         forged token"
+    );
+}
+
+/// Crew review of #306, F3. `/v1/outbound` never reaches the dispatcher —
+/// it goes verify → scope → rate limit → courier — so it never saw the
+/// #287 denylist. A revoked principal kept PROACTIVE PUSH, which is most
+/// of what a compromised caller would want, while the runbook told an
+/// operator the refusal covered "every protocol at once".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revoked_principal_cannot_push_proactively() {
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let issuer = TestIssuer::start().await;
+    let mut env = env_for(&issuer, &whatsapp);
+    // `token_with_aud` mints sub `carl-agent` in tenant `acme`.
+    env.insert(
+        "TRITON_DENIED_PRINCIPALS".to_string(),
+        "acme/carl-agent".to_string(),
+    );
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    let before = whatsapp.captured().len();
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(token_with_aud(&issuer, OUTBOUND_AUDIENCE))
+        // KNOWN_WA_ID, not an arbitrary number: this recipient IS in the
+        // adapter's sender table and in `carl-agent`'s tenant, so
+        // `courier.authorize` would accept it. The denylist has to be the
+        // only thing that can refuse — an unauthorized recipient makes
+        // the test pass for the wrong reason, which is exactly what the
+        // first draft of it did.
+        .json(&json!({
+            "adapter": "whatsapp",
+            "to": KNOWN_WA_ID,
+            "result": { "echo": "should never be delivered" },
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+
+    assert_eq!(
+        resp.status(),
+        403,
+        "a revoked principal must be refused — authenticated, then revoked"
+    );
+    // The status is not the property that matters; delivery is.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        whatsapp.captured().len(),
+        before,
+        "nothing may reach the courier"
+    );
 }

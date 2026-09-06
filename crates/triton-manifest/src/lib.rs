@@ -118,6 +118,20 @@ pub struct Outbound {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Identity {
     pub kind: IdentityKind,
+    /// #284: for `kind: self_enrol` — the ONE tool an un-enrolled sender
+    /// may reach.
+    ///
+    /// First contact yields a principal holding only the `pairing` scope
+    /// so an enrolment tool can issue a code (M-ENROL-1); naming that
+    /// tool here is what stops the same principal invoking everything
+    /// else. Absent ⇒ no restriction, so no existing manifest changes
+    /// meaning.
+    ///
+    /// A tool NAME, not a credential: it lives beside `kind` rather than
+    /// in the flattened `credentials` map, so it is not run through the
+    /// secret resolver and does not trip the literal-credential warning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_tool: Option<String>,
     #[serde(flatten)]
     pub credentials: BTreeMap<String, SecretField>,
 }
