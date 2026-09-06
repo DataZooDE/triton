@@ -106,6 +106,50 @@ pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<Strin
     hit.and_then(|(_, m)| m.get(&n).cloned())
 }
 
+/// GE-specific presentation tweaks to peacock's Vega-Lite spec (on a clone —
+/// peacock's shared spec is untouched). GE's `VegaChart` renders the raw spec
+/// as-is, which looks cluttered next to the Teams card: peacock rotates the
+/// x-axis labels vertical, and a single-series bar colored by its own x-field
+/// carries a redundant color legend. Fix both, and let the chart fill GE's
+/// iframe width.
+fn beautify_vega_for_ge(spec: &Value) -> Value {
+    let mut s = spec.clone();
+    if let Some(obj) = s.as_object_mut() {
+        // Responsive: fill the iframe rather than a fixed peacock width.
+        obj.insert("width".to_string(), json!("container"));
+        if let Some(enc) = obj.get_mut("encoding").and_then(Value::as_object_mut) {
+            let x_field = enc
+                .get("x")
+                .and_then(|x| x.get("field"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            // Horizontal x-axis labels (peacock rotates them vertical, which is
+            // unreadable in GE's renderer).
+            if let Some(x) = enc.get_mut("x").and_then(Value::as_object_mut) {
+                match x.get_mut("axis").and_then(Value::as_object_mut) {
+                    Some(a) => {
+                        a.insert("labelAngle".to_string(), json!(0));
+                    }
+                    None => {
+                        x.insert("axis".to_string(), json!({ "labelAngle": 0 }));
+                    }
+                }
+            }
+            // Drop the redundant color legend when `color` encodes the SAME
+            // field as `x` (e.g. supplier-reliability colors each bar by the
+            // supplier the x-axis already labels). A genuine series (a stacked
+            // bar colored by a different field) keeps its legend.
+            if let (Some(xf), Some(color)) =
+                (x_field, enc.get_mut("color").and_then(Value::as_object_mut))
+                && color.get("field").and_then(Value::as_str) == Some(xf.as_str())
+            {
+                color.insert("legend".to_string(), Value::Null);
+            }
+        }
+    }
+    s
+}
+
 /// Build the A2UI v0.9 message array from a raw surface value
 /// (`result["surface"]["components"]`). Returns `None` when the value carries
 /// no renderable component, so the caller can fall back to a text part.
@@ -152,7 +196,7 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                     flat.push(json!({
                         "id": cid,
                         "component": "VegaChart",
-                        "spec": spec,
+                        "spec": beautify_vega_for_ge(spec),
                         "height": 300,
                     }));
                     root_children.push(cid);
@@ -427,7 +471,12 @@ mod tests {
         let spec = json!({
             "mark": "bar",
             "data": { "values": [{ "c": "widgets", "v": 900 }] },
-            "encoding": { "x": { "field": "c" }, "y": { "field": "v" } },
+            // color == x → the legend is redundant and must be dropped for GE.
+            "encoding": {
+                "x": { "field": "c" },
+                "y": { "field": "v" },
+                "color": { "field": "c" },
+            },
         });
         let result = json!({ "surface": { "components": [
             { "kind": "report", "report_id": "sales", "image_url": "https://x/img/tok", "vega_spec": spec },
@@ -441,6 +490,11 @@ mod tests {
             .find(|c| c["component"] == "VegaChart")
             .expect("VegaChart");
         assert_eq!(vega["spec"]["mark"], "bar");
+        // GE presentation tweaks: horizontal x labels, redundant legend dropped,
+        // responsive width.
+        assert_eq!(vega["spec"]["encoding"]["x"]["axis"]["labelAngle"], 0);
+        assert!(vega["spec"]["encoding"]["color"]["legend"].is_null());
+        assert_eq!(vega["spec"]["width"], "container");
         // Static Image must NOT also be emitted (no double chart).
         assert!(!comps.iter().any(|c| c["component"] == "Image"));
     }
