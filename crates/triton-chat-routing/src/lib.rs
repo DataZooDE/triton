@@ -354,14 +354,14 @@ pub fn resolve(
         };
     }
 
-    // 5/6. First-contact chooser vs. global default / single entitled agent.
+    // 5. First contact. With more than one entitled agent, ALWAYS show the
+    // chooser — the precedence is "first-contact chooser → global default", so
+    // a `default`-flagged agent does NOT preempt the chooser (it orders/labels
+    // it and serves the single-agent path). With exactly one entitled agent
+    // there is nothing to choose, so use it. Zero entitled → an empty chooser
+    // the host turns into a deny.
     let entitled = catalog.list();
     match entitled.len() {
-        0 => Resolution::Chooser {
-            candidates: entitled,
-            reason: ChooserReason::FirstContact,
-            pending_text: trimmed.to_string(),
-        },
         1 => {
             let agent = entitled.into_iter().next().unwrap();
             let id = agent.id.clone();
@@ -372,26 +372,11 @@ pub fn resolve(
                 bind: Some(id),
             }
         }
-        _ => {
-            // Multiple entitled agents. A configured global default is the
-            // deliberate fallback; otherwise show the first-contact chooser.
-            match catalog.global_default() {
-                Some(agent) => {
-                    let id = agent.id.clone();
-                    Resolution::Selection {
-                        agent_id: agent.id,
-                        text: trimmed.to_string(),
-                        source: SelectionSource::GlobalDefault,
-                        bind: Some(id),
-                    }
-                }
-                None => Resolution::Chooser {
-                    candidates: entitled,
-                    reason: ChooserReason::FirstContact,
-                    pending_text: trimmed.to_string(),
-                },
-            }
-        }
+        _ => Resolution::Chooser {
+            candidates: entitled,
+            reason: ChooserReason::FirstContact,
+            pending_text: trimmed.to_string(),
+        },
     }
 }
 

@@ -192,18 +192,19 @@ fn first_contact_multi_agent_no_default_shows_chooser() {
 }
 
 #[test]
-fn global_default_used_when_configured() {
-    // cat() has "assistant" flagged default → used as last resort, and binds.
-    let r = resolve("hey", None, "default", &cat());
-    assert_eq!(
-        sel(&r),
-        (
-            "assistant",
-            "hey",
-            SelectionSource::GlobalDefault,
-            Some("assistant")
-        )
-    );
+fn first_contact_chooser_wins_over_global_default() {
+    // cat() has "assistant" flagged default, but with >1 entitled agent and no
+    // binding/tenant-default the first-contact CHOOSER must win — the default
+    // flag does not preempt it (precedence: chooser → global default).
+    match resolve("hey", None, "default", &cat()) {
+        Resolution::Chooser {
+            reason, candidates, ..
+        } => {
+            assert_eq!(reason, ChooserReason::FirstContact);
+            assert_eq!(candidates.len(), 3);
+        }
+        other => panic!("expected first-contact chooser, got {other:?}"),
+    }
 }
 
 #[test]
