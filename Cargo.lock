@@ -2681,6 +2681,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "triton-chat-identity",
  "triton-core",
  "triton-correlation",
  "triton-manifest",
