@@ -1717,3 +1717,21 @@ a trap the next developer should not have to step in.
   name, `localhost` included, is refused, because the property these gates
   need is "the plaintext never leaves this host" and a name only has that
   property until someone changes what it resolves to.
+
+- **A mutation test against an adapter is silently vacuous unless you rebuild
+  the binary first.** `cargo test -p triton-tests` does not rebuild
+  `triton-bin` — `triton-tests/src/lib.rs` documents that for the spawn
+  helper — so a mutation in adapter code never reaches the process the
+  integration tests actually spawn. Deleting `SenderTable`'s entry
+  validation and re-running left all eight boot tests green, which reads
+  exactly like "the tests do not pin this behaviour" and is in fact "you
+  tested the old binary".
+
+  The tell is that the *wrong* answer here is the reassuring one. A
+  mutation test that comes back green makes you delete or rewrite a test
+  that was fine. Run `cargo build --bins` between the mutation and the
+  test run; with it, the same four refusal tests fail and the four
+  must-still-work tests pass, which is the result the mutation was asking
+  for. This bites integration tests specifically — a mutation inside a
+  crate the test binary links (`triton-correlation`, say) does rebuild,
+  so the habit works everywhere else and fails silently right here.

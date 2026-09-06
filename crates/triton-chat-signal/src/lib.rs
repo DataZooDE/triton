@@ -38,10 +38,8 @@ pub mod surface_mapper;
 
 pub use surface_mapper::{RenderedMessage, build_send_body};
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
-use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -58,13 +56,11 @@ pub const PROTOCOL: &str = "messenger:signal";
 /// envelope). Phone numbers are deliberately not used as the key:
 /// Signal explicitly designs the UUID as the durable identity, and
 /// users rotate numbers.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SenderClaims {
-    pub sub: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    pub tenant: String,
-}
+/// #289: re-exported from `triton-chat-identity`, which owns the
+/// FR-I-7 seam. It was a private copy here, and in seven other
+/// adapters — and a rule added to one copy is a rule missing from
+/// the rest.
+pub use triton_chat_identity::SenderClaims;
 
 /// Build artefacts the adapter holds. Constructed once at boot from
 /// the manifest entry; immutable thereafter.
@@ -77,7 +73,7 @@ pub struct SignalAdapter {
     /// in the initial `subscribe` request and copied into every
     /// outbound `send.username`.
     account: String,
-    sender_table: HashMap<String, SenderClaims>,
+    sender_table: triton_chat_identity::SenderTable,
     /// Manifest `tool`: where plain inbound text dispatches (default
     /// `echo`). Commands (`/narrate` etc.) keep their special routes.
     inbound_tool: String,
@@ -88,6 +84,10 @@ pub struct SignalAdapter {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #289: FR-I-7 resolution now lives in `triton-chat-identity`;
+    /// its refusals surface here unchanged.
+    #[error("identity: {0}")]
+    Identity(#[source] triton_chat_identity::IdentityError),
     /// #287: the resolved `correlation_key` secret is a
     /// comma-separated ring; nothing usable survived parsing it.
     #[error("correlation_key: {0}")]
@@ -122,12 +122,13 @@ impl SignalAdapter {
                 adapter.inbound.signature
             )));
         }
-        if adapter.identity.kind != IdentityKind::SenderTable {
-            return Err(BuildError::Unsupported(format!(
-                "signal adapter requires `identity.kind: sender_table`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule.
+        triton_chat_identity::require_supported_kind(
+            "signal",
+            &adapter.identity.kind,
+            &[IdentityKind::SenderTable],
+        )
+        .map_err(BuildError::Identity)?;
 
         let addr_field = adapter
             .inbound
@@ -166,8 +167,12 @@ impl SignalAdapter {
             .resolve(table_field)
             .await
             .map_err(|e| BuildError::Resolve("identity.table", e))?;
-        let sender_table: HashMap<String, SenderClaims> =
-            serde_json::from_str(&table_json).map_err(|e| BuildError::TableParse(e.to_string()))?;
+        // #289: `parse` validates every entry's `sub` and `tenant` here,
+        // at boot. The table used to go straight from JSON into a HashMap:
+        // a tenant carrying whitespace became a `PerTenantBuckets` map key
+        // and a signed upstream claim, and nothing ever refused it.
+        let sender_table =
+            triton_chat_identity::SenderTable::parse(&table_json).map_err(BuildError::Identity)?;
 
         // FR-L-6 / NFR-S-5: resolve correlation_key at boot even
         // though Signal has no native button primitive to feed it
