@@ -90,6 +90,19 @@ fn boot_adapter(adapter: &str, table: &str) -> (Option<i32>, String) {
                 ),
             ],
         ),
+        "msteams" => (
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("fixtures/manifest-msteams-vault.yaml")
+                .display()
+                .to_string(),
+            "TRITON_MSTEAMS_SENDER_TABLE",
+            vec![
+                ("TRITON_MSTEAMS_AUDIENCE", "msteams-audience-for-test"),
+                ("TRITON_MSTEAMS_CLIENT_ID", "msteams-client-id-for-test"),
+                ("TRITON_MSTEAMS_CLIENT_SECRET", "msteams-client-secret"),
+                ("TRITON_MSTEAMS_CORRELATION_KEY", "msteams-correlation-key!"),
+            ],
+        ),
         other => panic!("no boot fixture wired for `{other}`"),
     };
     let mut cmd = std::process::Command::new(locate_triton_binary());
@@ -366,5 +379,42 @@ async fn discord_still_boots_on_a_well_formed_table() {
     assert!(
         !log.contains("identity.table entry"),
         "a valid table must not trip the entry validator; got:\n{log}"
+    );
+}
+
+// ── msteams ─────────────────────────────────────────────────────────────
+//
+// The last of the eight. `azure` stays adapter-owned — its Entra config
+// has no analogue elsewhere — but the `sender_table` half now goes
+// through the same validator as every other adapter's.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn msteams_refuses_a_sender_table_it_cannot_use_safely() {
+    let (code, log) = boot_adapter(
+        "msteams",
+        r#"{"29:1abc":{"sub":"alice","scopes":[],"tenant":"ac me"}}"#,
+    );
+    assert_eq!(
+        code,
+        Some(2),
+        "a whitespace tenant must refuse boot;\n{log}"
+    );
+    assert!(
+        log.contains("identity.table entry"),
+        "the refusal must come from the shared entry validator; got:\n{log}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn msteams_still_boots_on_a_well_formed_table() {
+    // A Teams-shaped id and a GUID tenant — the realistic case, and the
+    // one a validator written for `users/99` would wrongly refuse.
+    let (_, log) = boot_adapter(
+        "msteams",
+        r#"{"29:1abc":{"sub":"29:1abc","scopes":["chat"],"tenant":"28c0071d-815c-4ace-a3b5-9a28bde005fd"}}"#,
+    );
+    assert!(
+        !log.contains("identity.table entry"),
+        "a valid Teams-shaped table must not trip the validator; got:\n{log}"
     );
 }

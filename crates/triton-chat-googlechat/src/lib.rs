@@ -63,13 +63,7 @@ pub const PROTOCOL: &str = "messenger:google_chat";
 /// Per-Google-Chat-user claims resolved from the `sender_table`.
 /// The table is keyed by the full `users/<id>` string Google sends
 /// in `message.sender.name`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SenderClaims {
-    pub sub: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    pub tenant: String,
-}
+pub use triton_chat_identity::SenderClaims;
 
 /// Per-user claims in the `self_enrol` strategy's `fallback_table`.
 /// Unlike `sender_table` there is no `sub`: the subject is always the
@@ -86,7 +80,7 @@ pub struct EnrolClaims {
 /// How this adapter resolves an inbound sender to a `Principal`.
 enum IdentityMode {
     /// Operator-enumerated `users/<id>` → claims. Unknown sender = 401.
-    SenderTable(HashMap<String, SenderClaims>),
+    SenderTable(triton_chat_identity::SenderTable),
     /// Pairing flow: unknown senders are admitted with the literal
     /// scope `"pairing"` (subject = sender id) so an upstream pairing
     /// tool can issue a code; operator confirmation enrols the sender
@@ -96,7 +90,7 @@ enum IdentityMode {
     /// upstream router (FR-I-7). The adapter calls `resolver_tool`
     /// with the platform sender id; the tool returns `{sub, scopes,
     /// tenant}`. A resolver error rejects the inbound.
-    Upstream { resolver_tool: String },
+    Upstream(triton_chat_identity::UpstreamResolver),
 }
 
 /// Scope granted to an unknown sender during the `self_enrol` pairing
@@ -255,15 +249,6 @@ fn report_image_url(
     Some(format!("{base}/{}/img/{token}", adapter.name))
 }
 
-/// Principal shape the `upstream` resolver tool returns.
-#[derive(Debug, Deserialize)]
-struct ResolvedPrincipal {
-    sub: String,
-    #[serde(default)]
-    scopes: Vec<String>,
-    tenant: String,
-}
-
 /// Configuration for the #164 T1a async reply courier. Google Chat's
 /// webhook is synchronous with a ~30s deadline while live-LLM
 /// dispatches run 17–60s; with `enabled` the webhook acks 200 (empty
@@ -365,15 +350,17 @@ impl GoogleChatAdapter {
                 adapter.inbound.signature
             )));
         }
-        if !matches!(
-            adapter.identity.kind,
-            IdentityKind::SenderTable | IdentityKind::SelfEnrol | IdentityKind::Upstream
-        ) {
-            return Err(BuildError::Unsupported(format!(
-                "google_chat adapter supports `identity.kind: sender_table`, `self_enrol`, or `upstream`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule.
+        triton_chat_identity::require_supported_kind(
+            "google_chat",
+            &adapter.identity.kind,
+            &[
+                IdentityKind::SenderTable,
+                IdentityKind::SelfEnrol,
+                IdentityKind::Upstream,
+            ],
+        )
+        .map_err(BuildError::Identity)?;
 
         let aud_field = adapter
             .inbound
@@ -451,8 +438,9 @@ impl GoogleChatAdapter {
                     .resolve(table_field)
                     .await
                     .map_err(|e| BuildError::Resolve("identity.table", e))?;
-                let table: HashMap<String, SenderClaims> = serde_json::from_str(&table_json)
-                    .map_err(|e| BuildError::TableParse(e.to_string()))?;
+                // #289: validates every entry's `sub` and `tenant` at boot.
+                let table = triton_chat_identity::SenderTable::parse(&table_json)
+                    .map_err(BuildError::Identity)?;
                 IdentityMode::SenderTable(table)
             }
             IdentityKind::SelfEnrol => {
@@ -467,6 +455,16 @@ impl GoogleChatAdapter {
                     .map_err(|e| BuildError::Resolve("identity.fallback_table", e))?;
                 let table: HashMap<String, EnrolClaims> = serde_json::from_str(&table_json)
                     .map_err(|e| BuildError::TableParse(e.to_string()))?;
+                // #289: `fallback_table` has a DIFFERENT SHAPE from
+                // `sender_table` — no `sub`, because under `self_enrol`
+                // the subject is always the platform sender id — so it
+                // cannot go through `SenderTable::parse`. The shape is
+                // adapter-specific; the rule is not. Pass the KEY as the
+                // subject, which is exactly what `sub` becomes here.
+                for (key, claims) in &table {
+                    triton_chat_identity::validate_table_entry(key, key, &claims.tenant)
+                        .map_err(BuildError::Identity)?;
+                }
                 IdentityMode::SelfEnrol(table)
             }
             IdentityKind::Upstream => {
@@ -479,44 +477,19 @@ impl GoogleChatAdapter {
                     .resolve(field)
                     .await
                     .map_err(|e| BuildError::Resolve("identity.resolver_tool", e))?;
-                if resolver_tool.trim().is_empty() {
-                    return Err(BuildError::Unsupported(
-                        "identity.resolver_tool must be non-empty".into(),
-                    ));
-                }
-                // The resolver MUST be an upstream tool (FR-I-7
-                // "reached through the upstream router"). If its name
-                // collides with an in-process tool, dispatcher.invoke
-                // would run that locally and silently bypass the static
-                // upstream router + the per-call RS256 JWT. Refuse at boot.
-                if dispatcher
-                    .descriptors()
-                    .iter()
-                    .any(|d| d.name == resolver_tool)
-                {
-                    return Err(BuildError::Unsupported(format!(
-                        "identity.resolver_tool `{resolver_tool}` collides with an in-process \
-                         tool; the upstream resolver must be a distinct static-upstream agent"
-                    )));
-                }
-                // #250: state the trust model out loud, once, at boot.
-                // `upstream` resolution is an authorization-table LOOKUP,
-                // not a verification: the resolver is keyed on the
-                // platform sender id, which arrives in the request body
-                // and is not signed by anything. Whoever can cause the
-                // platform to deliver a message bearing a chosen sender
-                // id inherits that sender's principal. That is acceptable
-                // for the deployments this mode was built for, but it
-                // should be a decision an operator sees rather than one
-                // buried in a doc comment.
-                tracing::warn!(
-                    adapter = %name,
-                    resolver_tool = %resolver_tool,
-                    "identity.kind `upstream`: the resolver maps an UNSIGNED platform sender id to a principal. \
-                     It is an authorization table, not a cryptographic identity proof — anyone able to present \
-                     a chosen sender id inherits that sender's tenant and scopes. See doc/realizations.md §7."
-                );
-                IdentityMode::Upstream { resolver_tool }
+                // `new` refuses an empty tool and one colliding with an
+                // in-process tool — the latter would let `invoke` run that
+                // tool locally, deciding identity without the router or
+                // the per-call RS256 JWT.
+                let up = triton_chat_identity::UpstreamResolver::new(
+                    resolver_tool,
+                    "google_chat",
+                    PROTOCOL_RESOLVE,
+                    &dispatcher,
+                )
+                .map_err(BuildError::Identity)?;
+                up.warn_trust_model(name);
+                IdentityMode::Upstream(up)
             }
             // Guarded above; unreachable for other kinds.
             other => {
@@ -702,6 +675,10 @@ async fn serve_dashboard_png(
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #289: FR-I-7 resolution now lives in `triton-chat-identity`;
+    /// its refusals surface here unchanged.
+    #[error("identity: {0}")]
+    Identity(#[source] triton_chat_identity::IdentityError),
     /// #287: the resolved `correlation_key` secret is a
     /// comma-separated ring; nothing usable survived parsing it.
     #[error("correlation_key: {0}")]
@@ -1196,16 +1173,13 @@ async fn handle_webhook(
         // `upstream` delegates to a resolver tool reached through the
         // upstream router; it's async, so it lives outside the pure
         // `resolve_sender`.
-        IdentityMode::Upstream { resolver_tool } => {
-            match resolve_via_upstream(&adapter.dispatcher, resolver_tool, sender_name).await {
-                Ok(p) => p,
-                Err(e) => {
-                    record_rejection(&adapter, "-", "-", e);
-                    return (StatusCode::UNAUTHORIZED, "identity resolution failed")
-                        .into_response();
-                }
+        IdentityMode::Upstream(up) => match up.resolve(&adapter.dispatcher, sender_name).await {
+            Ok(r) => (r.sub, r.scopes, r.tenant),
+            Err(e) => {
+                record_rejection(&adapter, "-", "-", e);
+                return (StatusCode::UNAUTHORIZED, "identity resolution failed").into_response();
             }
-        }
+        },
         // Sync strategies. `None` means reject (sender_table unknown,
         // or a malformed self_enrol sender).
         other => match resolve_sender(other, sender_name) {
@@ -1245,7 +1219,7 @@ async fn handle_webhook(
 
     // #250: the raw sender only earns a place in the audit line
     // when the resolver replaced the asserted identity.
-    let identity_was_resolved_upstream = matches!(adapter.identity, IdentityMode::Upstream { .. });
+    let identity_was_resolved_upstream = matches!(adapter.identity, IdentityMode::Upstream(_));
     let principal = Principal {
         sub: sub.clone(),
         scopes: scopes.clone(),
@@ -2021,8 +1995,8 @@ fn resolve_sender(
 ) -> Option<(String, Vec<String>, String)> {
     match identity {
         IdentityMode::SenderTable(table) => table
-            .get(sender_name)
-            .map(|c| (c.sub.clone(), c.scopes.clone(), c.tenant.clone())),
+            .resolve(sender_name)
+            .map(|r| (r.sub, r.scopes, r.tenant)),
         IdentityMode::SelfEnrol(table) => {
             // A pairing subject must be a real human user resource
             // name. Reject empty / non-`users/` senders (e.g. Google's
@@ -2045,7 +2019,7 @@ fn resolve_sender(
         // `upstream` is async and handled by `resolve_via_upstream` at
         // the call site; never resolved here. Defensive `None` keeps
         // the match total.
-        IdentityMode::Upstream { .. } => None,
+        IdentityMode::Upstream(_) => None,
     }
 }
 
@@ -2053,52 +2027,6 @@ fn resolve_sender(
 /// form `users/<id>` with a non-empty id.
 fn is_valid_user_sender(name: &str) -> bool {
     name.strip_prefix("users/").is_some_and(|id| !id.is_empty())
-}
-
-/// Resolve a sender to `(sub, scopes, tenant)` by invoking the
-/// `resolver_tool` through the upstream router (FR-I-7 `upstream`).
-/// The resolver receives `{platform, sender}` and returns `{sub,
-/// scopes, tenant}`. Any failure (empty sender, resolver error,
-/// malformed reply) is an `Auth` error so the inbound is rejected
-/// rather than dispatched with a guessed principal.
-///
-/// The resolver call is itself a dispatch: it emits a `phase:
-/// dispatch` audit line under [`PROTOCOL_RESOLVE`] plus the upstream
-/// router's `phase: upstream` line (the latter hardcoded to
-/// `protocol: "upstream"`), both under the bootstrap principal's
-/// trace_id — distinct from the real command's audit pair.
-async fn resolve_via_upstream(
-    dispatcher: &Dispatcher,
-    resolver_tool: &str,
-    sender_name: &str,
-) -> Result<(String, Vec<String>, String), TritonError> {
-    if sender_name.is_empty() {
-        return Err(TritonError::Auth(
-            "empty sender for upstream resolver".into(),
-        ));
-    }
-    let bootstrap = Principal {
-        sub: "identity-resolver".to_string(),
-        scopes: vec!["resolve".to_string()],
-        groups: Vec::new(),
-        tenant: "system".to_string(),
-        raw_token: String::new(),
-        trace_id: uuid::Uuid::new_v4().to_string(),
-        sender_ref: None,
-    };
-    let args = serde_json::json!({ "platform": "google_chat", "sender": sender_name });
-    let dispatch = dispatcher
-        .invoke(resolver_tool, args, bootstrap, PROTOCOL_RESOLVE)
-        .await
-        .map_err(|e| TritonError::Auth(format!("identity resolver `{resolver_tool}`: {e}")))?;
-    let resolved: ResolvedPrincipal = serde_json::from_value(dispatch.result)
-        .map_err(|e| TritonError::Auth(format!("resolver reply not {{sub,scopes,tenant}}: {e}")))?;
-    // #250: validate at the BOUNDARY, before these values are used for
-    // anything — the per-tenant rate limiter turns `tenant` into a
-    // process-lifetime map key well before the mint-time check in
-    // `static_upstream::bearer` runs.
-    triton_core::principal::validate_resolved(&resolved.sub, &resolved.tenant)?;
-    Ok((resolved.sub, resolved.scopes, resolved.tenant))
 }
 
 /// Strip a leading `@bot ` mention if present, then route by the
@@ -2227,16 +2155,15 @@ mod tests {
 
     #[test]
     fn sender_table_unknown_returns_none_for_rejection() {
-        let mut t = HashMap::new();
-        t.insert(
-            "users/99".to_string(),
-            SenderClaims {
-                sub: "alice".to_string(),
-                scopes: vec!["chat".to_string()],
-                tenant: "acme".to_string(),
-            },
+        // #289: built through `parse`, which is the only constructor —
+        // so this test now also asserts the table it uses is one the
+        // adapter would actually accept at boot.
+        let id = IdentityMode::SenderTable(
+            triton_chat_identity::SenderTable::parse(
+                r#"{"users/99":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}"#,
+            )
+            .expect("a well-formed table"),
         );
-        let id = IdentityMode::SenderTable(t);
         assert!(resolve_sender(&id, "users/unknown").is_none());
         let (sub, _, _) = resolve_sender(&id, "users/99").unwrap();
         assert_eq!(

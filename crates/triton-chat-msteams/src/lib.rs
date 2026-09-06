@@ -21,7 +21,6 @@ pub mod token_client;
 
 pub use surface_mapper::RenderedMessage;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Router;
@@ -41,13 +40,9 @@ use token_client::TokenClient;
 
 pub const PROTOCOL: &str = "messenger:msteams";
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct SenderClaims {
-    pub sub: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    pub tenant: String,
-}
+/// #289: re-exported from `triton-chat-identity`, which owns the
+/// FR-I-7 seam.
+pub use triton_chat_identity::SenderClaims;
 
 /// Config for the `azure` identity strategy (FR-I-7).
 ///
@@ -129,7 +124,7 @@ fn default_allowed_channel_ids() -> Vec<String> {
 enum IdentityMode {
     /// `from.id` (the AAD object id encoded as `29:...`) keyed into an
     /// operator-enumerated table.
-    SenderTable(HashMap<String, SenderClaims>),
+    SenderTable(triton_chat_identity::SenderTable),
     /// Principal derived from the activity's Entra claims:
     /// `from.aadObjectId` → sub, `channelData.tenant.id` → tenant.
     Azure(AzureConfig),
@@ -218,15 +213,16 @@ impl MsTeamsAdapter {
                 adapter.outbound.kind
             )));
         }
-        if !matches!(
-            adapter.identity.kind,
-            IdentityKind::SenderTable | IdentityKind::Azure
-        ) {
-            return Err(BuildError::Unsupported(format!(
-                "msteams adapter supports `identity.kind: sender_table` or `azure`; got {:?}",
-                adapter.identity.kind
-            )));
-        }
+        // #289: one call, one statement of the rule. `azure` stays
+        // adapter-owned — its Entra config has no analogue in the other
+        // seven adapters, so pulling it into the shared crate would be
+        // the premature abstraction CLAUDE.md §4 warns about.
+        triton_chat_identity::require_supported_kind(
+            "msteams",
+            &adapter.identity.kind,
+            &[IdentityKind::SenderTable, IdentityKind::Azure],
+        )
+        .map_err(BuildError::Identity)?;
 
         let audience_field = adapter
             .inbound
@@ -312,9 +308,11 @@ impl MsTeamsAdapter {
                     .resolve(table_field)
                     .await
                     .map_err(|e| BuildError::Resolve("identity.table", e))?;
-                let table: HashMap<String, SenderClaims> = serde_json::from_str(&table_json)
-                    .map_err(|e| BuildError::TableParse(e.to_string()))?;
-                IdentityMode::SenderTable(table)
+                // #289: validates every entry's `sub` and `tenant` at boot.
+                IdentityMode::SenderTable(
+                    triton_chat_identity::SenderTable::parse(&table_json)
+                        .map_err(BuildError::Identity)?,
+                )
             }
             IdentityKind::Azure => {
                 let cfg_field = adapter
@@ -576,6 +574,10 @@ enum OutboundCredential {
 
 #[derive(Debug, thiserror::Error)]
 pub enum BuildError {
+    /// #289: FR-I-7 resolution now lives in `triton-chat-identity`;
+    /// its refusals surface here unchanged.
+    #[error("identity: {0}")]
+    Identity(#[source] triton_chat_identity::IdentityError),
     /// #287: the resolved `correlation_key` secret is a
     /// comma-separated ring; nothing usable survived parsing it.
     #[error("correlation_key: {0}")]
@@ -873,8 +875,8 @@ fn resolve_sender(
     };
 
     let (sub, scopes, tenant) = match &adapter.identity {
-        IdentityMode::SenderTable(table) => match table.get(&from.id) {
-            Some(c) => (c.sub.clone(), c.scopes.clone(), c.tenant.clone()),
+        IdentityMode::SenderTable(table) => match table.resolve(&from.id) {
+            Some(r) => (r.sub, r.scopes, r.tenant),
             None => {
                 record_rejection(
                     adapter,
