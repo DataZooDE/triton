@@ -876,7 +876,10 @@ fn resolve_sender(
 
     let (sub, scopes, tenant) = match &adapter.identity {
         IdentityMode::SenderTable(table) => match table.resolve(&from.id) {
-            Some(r) => (r.sub, r.scopes, r.tenant),
+            Some(r) => {
+                let (sub, scopes, _groups, tenant) = r.into_parts();
+                (sub, scopes, tenant)
+            }
             None => {
                 record_rejection(
                     adapter,

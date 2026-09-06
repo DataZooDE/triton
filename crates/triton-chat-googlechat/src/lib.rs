@@ -1174,7 +1174,10 @@ async fn handle_webhook(
         // upstream router; it's async, so it lives outside the pure
         // `resolve_sender`.
         IdentityMode::Upstream(up) => match up.resolve(&adapter.dispatcher, sender_name).await {
-            Ok(r) => (r.sub, r.scopes, r.tenant),
+            Ok(r) => {
+                let (sub, scopes, _groups, tenant) = r.into_parts();
+                (sub, scopes, tenant)
+            }
             Err(e) => {
                 record_rejection(&adapter, "-", "-", e);
                 return (StatusCode::UNAUTHORIZED, "identity resolution failed").into_response();
@@ -1994,9 +1997,10 @@ fn resolve_sender(
     sender_name: &str,
 ) -> Option<(String, Vec<String>, String)> {
     match identity {
-        IdentityMode::SenderTable(table) => table
-            .resolve(sender_name)
-            .map(|r| (r.sub, r.scopes, r.tenant)),
+        IdentityMode::SenderTable(table) => table.resolve(sender_name).map(|r| {
+            let (sub, scopes, _groups, tenant) = r.into_parts();
+            (sub, scopes, tenant)
+        }),
         IdentityMode::SelfEnrol(table) => {
             // A pairing subject must be a real human user resource
             // name. Reject empty / non-`users/` senders (e.g. Google's

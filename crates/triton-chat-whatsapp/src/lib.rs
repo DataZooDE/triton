@@ -183,7 +183,9 @@ impl WhatsAppAdapter {
     ) -> Result<String, TritonError> {
         match &self.identity {
             IdentityMode::SenderTable(_) => Ok(principal.tenant.clone()),
-            IdentityMode::Upstream(up) => Ok(up.resolve(&self.dispatcher, to).await?.tenant),
+            IdentityMode::Upstream(up) => {
+                Ok(up.resolve(&self.dispatcher, to).await?.into_parts().3)
+            }
         }
     }
 
@@ -927,12 +929,7 @@ async fn process_message(
             }
         },
     };
-    let (sub, scopes, groups, tenant) = (
-        resolved.sub,
-        resolved.scopes,
-        resolved.groups,
-        resolved.tenant,
-    );
+    let (sub, scopes, groups, tenant) = resolved.into_parts();
 
     // #94: a verified inbound message opens this recipient's 24-hour
     // service window, so a later proactive send may go free-form.
