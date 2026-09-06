@@ -1802,3 +1802,17 @@ a trap the next developer should not have to step in.
   real ones, and where a feature flag makes an end-to-end assertion
   structurally vacuous, the honest move is to extract the gate, unit-test
   it, and say in the integration test's doc comment what it does not cover.
+
+- **A required constructor parameter is the only version of "you must decide"
+  that holds.** The dispatcher's controls — the denylist, the scope
+  restriction, the rejection window — were builder methods, so a host that
+  called none got none, silently. Two hosts existed and one of them did
+  exactly that. `DispatchControls` is now a parameter of
+  `Dispatcher::new`, which turns the omission into a compile error naming
+  the field and turns "deny nobody" into a reviewable
+  `DispatchControls::none()` at the call site rather than an absence nobody
+  can see. It also puts `triton-core` back to env-free: `controls_from_env`
+  lives in the host layer, where reading the environment belongs.
+
+  The general form: when a control must apply everywhere, the question is
+  not "did I wire it" but "can this type exist without it".

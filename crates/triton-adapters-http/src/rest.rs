@@ -533,10 +533,48 @@ pub const AUDIT_READ_ALL_SCOPE: &str = "audit:read-all";
 /// fail-closed reading. The cost is real and worth stating: a
 /// tenant-scoped caller cannot see their own failed authentications,
 /// because at the moment of failure nothing knew they were theirs.
+/// Operators named by the deployment, as `tenant/sub`, read from
+/// `TRITON_AUDIT_OPERATORS` where the REST state is built.
+///
+/// #306 crew F6: the grant used to rest solely on `AUDIT_READ_ALL_SCOPE`
+/// appearing in `principal.scopes`, which comes from the token's `scp` /
+/// `scope` claim — a namespace the ISSUER owns, not Triton. On any issuer
+/// where a client can request a scope or an admin can add one (Keycloak
+/// optional scopes, an Entra app registration, a second configured pair),
+/// a caller could grant themselves the cross-tenant view of every
+/// tenant's audit trail.
+///
+/// The scope is still required, so nothing an operator has today breaks;
+/// it is no longer SUFFICIENT. Same reasoning that justified reading the
+/// denylist from the environment: authorization for the most sensitive
+/// read surface belongs to the deployment, not to a claim.
+fn audit_operators() -> std::collections::HashSet<(String, String)> {
+    triton_core::dispatcher::parse_denied_principals(
+        &std::env::var("TRITON_AUDIT_OPERATORS").unwrap_or_default(),
+    )
+}
+
 fn audit_visibility(
     principal: &triton_core::principal::Principal,
 ) -> impl Fn(&triton_core::audit::AuditEntry) -> bool {
-    let operator = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE);
+    // BOTH the scope the issuer can mint AND membership of a list only
+    // the deployment can write — see `audit_operators`.
+    //
+    // Outside `local` an unset list means NOBODY holds the cross-tenant
+    // view. That is a behaviour change for a deployment relying on the
+    // scope alone, and it is the fail-closed direction: the symptom is an
+    // operator seeing only their own rows, which is visible and fixable,
+    // rather than a caller silently minting themselves everyone's. The
+    // boot warning below names the fix.
+    //
+    // In `local` the scope alone still suffices, mirroring how the
+    // dev-token path is already gated (ADR-10 / factor X) — otherwise
+    // every local dev loop needs an env var to see its own audit trail.
+    let claims_scope = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE);
+    let is_local = std::env::var("TRITON_ENV").as_deref().unwrap_or("local") == "local";
+    let named =
+        is_local || audit_operators().contains(&(principal.tenant.clone(), principal.sub.clone()));
+    let operator = claims_scope && named;
     let tenant = principal.tenant.clone();
     // A reserved tenant is a shared marker, not a tenant: `-` is what
     // nearly every live OIDC caller carries and `pairing` is what every

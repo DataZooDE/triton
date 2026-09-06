@@ -28,6 +28,7 @@ use triton_adapters_http::cors;
 use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{self, McpSessions, McpState};
 use triton_adapters_http::rest::{self, OidcProviderInfo, RestState, RuntimeDiscovery};
+use triton_core::dispatcher::DispatchControls;
 use triton_core::{Dispatcher, RuntimeInfo, ToolRegistry};
 use triton_identity::{GoogleAccessTokenVerifier, OidcConfig, OidcVerifier};
 
@@ -344,10 +345,48 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
     app
 }
 
+/// Read [`DispatchControls`] from the process environment.
+///
+/// This lives in the HOST layer, not in `triton-core`: that crate stays
+/// env-free, and the controls reach it as a required constructor
+/// parameter instead. Both shipped hosts call this — `triton-bin` and
+/// [`serve`] — so an embedded host gets the same controls as the
+/// standalone binary without wiring anything, which is the property that
+/// was missing when the revocation lever shipped in `triton-bin` alone.
+///
+/// * `TRITON_DENIED_PRINCIPALS` — comma-separated `tenant/sub` (#287)
+/// * `TRITON_PAIRING_TOOLS` — comma-separated tool names (#284)
+/// * `TRITON_AUDIT_REJECT_WINDOW_SECS` — seconds; junk falls back to the
+///   default rather than failing boot, because this knob must never be
+///   the reason a gateway will not start (#249)
+pub fn controls_from_env() -> DispatchControls {
+    let mut controls = DispatchControls::none()
+        .deny(&std::env::var("TRITON_DENIED_PRINCIPALS").unwrap_or_default());
+    let tools: Vec<String> = std::env::var("TRITON_PAIRING_TOOLS")
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .collect();
+    controls = controls.restrict_scope("pairing", tools);
+    if let Some(secs) = std::env::var("TRITON_AUDIT_REJECT_WINDOW_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        controls = controls.with_reject_window(std::time::Duration::from_secs(secs));
+    }
+    controls
+}
+
 /// Build a dispatcher from `reg` and serve the trio (+ `/explorer`) on one
 /// port until the process exits.
 pub async fn serve(reg: ToolRegistry, opts: EmbedOpts) -> anyhow::Result<()> {
-    let dispatcher = Arc::new(Dispatcher::new(Arc::new(reg), opts.env.clone()));
+    let dispatcher = Arc::new(Dispatcher::new(
+        Arc::new(reg),
+        opts.env.clone(),
+        controls_from_env(),
+    ));
     serve_dispatcher(dispatcher, opts).await
 }
 

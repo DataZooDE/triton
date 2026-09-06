@@ -13,6 +13,7 @@
 //!     auth produces a `phase: rejected` audit line *before* the
 //!     dispatcher would normally run; we still own the schema.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -145,77 +146,119 @@ pub struct Dispatcher {
     /// #249: coalescing window for ANONYMOUS rejection audit, so a
     /// scanner on a public path can't evict the ring buffer.
     reject_window: crate::ratelimit::RejectionWindow,
-    /// #287: principals an operator has revoked, as `tenant/sub`. Empty
-    /// by default — see [`Dispatcher::with_denied_principals`].
-    denied: std::collections::HashSet<String>,
+    /// #287: principals an operator has revoked, as `(tenant, sub)`.
+    denied: HashSet<(String, String)>,
     /// #284: scopes that RESTRICT rather than grant. A principal holding
     /// exactly one of these scopes and nothing else may invoke only the
     /// tools it maps to. Empty by default, so a deployment that declares
     /// nothing behaves exactly as before.
-    scope_restrictions: std::collections::HashMap<String, std::collections::HashSet<String>>,
+    scope_restrictions: HashMap<String, HashSet<String>>,
 }
 
-/// Read `TRITON_AUDIT_REJECT_WINDOW_SECS` (#249).
+/// Everything a dispatcher enforces that is not a tool: who is revoked,
+/// which scopes are restricted, and how rejection audit is coalesced.
 ///
-/// A junk value falls back to the default rather than failing boot: this
-/// knob must never be the reason a gateway will not start. `0` disables
-/// coalescing, so every rejection is audited.
-fn reject_window_from_env() -> Duration {
-    std::env::var("TRITON_AUDIT_REJECT_WINDOW_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_REJECT_WINDOW)
+/// It is a REQUIRED constructor parameter, and that is the whole design.
+/// These controls were previously applied by builder methods, so a host
+/// that did not call them got none — which is not a hypothetical: the
+/// revocation lever shipped wired in `triton-bin` only, and the
+/// deployment that actually runs embeds the library instead. It booted
+/// healthy and revoked nobody, with every test passing.
+///
+/// Making it a parameter turns that omission into a compile error naming
+/// the field, and turns "deny nobody" into a reviewable
+/// [`DispatchControls::none()`] at the call site rather than an absence
+/// nobody can see. It also keeps `triton-core` env-free: [`from_env`]
+/// lives in the host layer, so this crate never reads a variable.
+///
+/// [`from_env`]: https://docs.rs/triton-embed
+#[derive(Debug, Clone)]
+pub struct DispatchControls {
+    /// Revoked principals as `(tenant, sub)` (#287).
+    ///
+    /// A PAIR, not a joined string: nothing forbids `/` in a tenant, so
+    /// `("acme/al", "ice")` and `("acme", "al/ice")` collide once joined
+    /// — revoking one principal could silently revoke a different one
+    /// across a customer boundary, the exact failure tenant-qualification
+    /// exists to prevent.
+    pub denied_principals: HashSet<(String, String)>,
+    /// Scopes that RESTRICT rather than grant (#284): a principal holding
+    /// one of these may invoke only the tools it maps to.
+    pub scope_restrictions: HashMap<String, HashSet<String>>,
+    /// Coalescing window for ANONYMOUS rejection audit (#249).
+    pub reject_window: Duration,
 }
 
-/// Read `TRITON_PAIRING_TOOLS` into the `pairing` scope restriction (#284).
-///
-/// The standalone binary derives this from the manifest, which is richer
-/// and stays authoritative there — it knows WHICH adapter named the tool.
-/// An embedded host builds its `Adapter` values in code and never hands
-/// them to a loader, so it needs a way to declare the same restriction
-/// without one; this is it, and the two sources merge rather than
-/// compete (`with_scope_restriction` adds to whatever the environment
-/// supplied).
-///
-/// Empty or unset restricts nothing, which keeps the gate default-allow:
-/// Triton authenticates and propagates, leaving authorization to the
-/// resource owner. What it must not do is make an authorization
-/// distinction — minting an un-enrolled sender a `pairing` principal —
-/// and then discard it.
-fn pairing_restriction_from_env()
--> std::collections::HashMap<String, std::collections::HashSet<String>> {
-    let tools: std::collections::HashSet<String> = std::env::var("TRITON_PAIRING_TOOLS")
-        .unwrap_or_default()
-        .split(',')
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(str::to_string)
-        .collect();
-    let mut out = std::collections::HashMap::new();
-    if !tools.is_empty() {
-        out.insert("pairing".to_string(), tools);
+impl Default for DispatchControls {
+    fn default() -> Self {
+        Self::none()
     }
-    out
 }
 
-/// Read and parse `TRITON_DENIED_PRINCIPALS` (#287).
-///
-/// Comma-separated `tenant/sub` entries; trimmed, blanks dropped. An
-/// entry WITHOUT a `/` is dropped with a warning rather than treated as
-/// a bare `sub`: `alice` exists in every tenant, and the person typing
-/// the short form is by definition in a hurry. Better to revoke nobody,
-/// loudly, than to revoke more than was asked.
-///
-/// Unset or empty denies nobody, which has to be the default — an
-/// operator who never sets this must not discover it by having their
-/// gateway refuse everyone.
-fn denied_principals_from_env() -> std::collections::HashSet<String> {
-    let raw = match std::env::var("TRITON_DENIED_PRINCIPALS") {
-        Ok(v) => v,
-        Err(_) => return std::collections::HashSet::new(),
-    };
-    parse_denied_principals(&raw)
+impl DispatchControls {
+    /// Deny nobody, restrict nothing, coalesce at the default window.
+    ///
+    /// Named rather than derived so a call site that means "no controls"
+    /// says so, and a reviewer can tell it from a forgotten argument.
+    pub fn none() -> Self {
+        Self {
+            denied_principals: HashSet::new(),
+            scope_restrictions: HashMap::new(),
+            reject_window: DEFAULT_REJECT_WINDOW,
+        }
+    }
+
+    /// Revoke these principals, given as `tenant/sub` strings.
+    ///
+    /// Entries without a tenant qualifier, or with a `/` in the tenant,
+    /// are dropped with a warning — see [`parse_denied_principals`].
+    pub fn deny(mut self, entries: &str) -> Self {
+        self.denied_principals
+            .extend(parse_denied_principals(entries));
+        self
+    }
+
+    /// Restrict a scope to a set of tools.
+    ///
+    /// REPLACES any existing restriction for that scope rather than
+    /// merging. A scope restriction is an ALLOW-set inside a gate, so a
+    /// merge can only WIDEN what a restricted principal reaches — a
+    /// stale environment entry would silently keep another adapter's
+    /// enrolment tool reachable by every un-enrolled sender. (Its
+    /// neighbour `denied_principals` is a DENY-set, where merging is the
+    /// safe direction, which is why that one extends.)
+    pub fn restrict_scope(
+        mut self,
+        scope: impl Into<String>,
+        tools: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let scope = scope.into();
+        let tools: HashSet<String> = tools.into_iter().collect();
+        if tools.is_empty() {
+            return self;
+        }
+        if let Some(existing) = self.scope_restrictions.get(&scope)
+            && existing != &tools
+        {
+            let mut was: Vec<&str> = existing.iter().map(String::as_str).collect();
+            let mut now: Vec<&str> = tools.iter().map(String::as_str).collect();
+            was.sort_unstable();
+            now.sort_unstable();
+            eprintln!(
+                "WARN scope restriction for `{scope}` replaced: was [{}], now [{}] \
+                 — the later source wins; merging would only WIDEN an allow-set",
+                was.join(", "),
+                now.join(", ")
+            );
+        }
+        self.scope_restrictions.insert(scope, tools);
+        self
+    }
+
+    pub fn with_reject_window(mut self, window: Duration) -> Self {
+        self.reject_window = window;
+        self
+    }
 }
 
 /// Announce the controls actually in force, AFTER the host has finished
@@ -226,7 +269,7 @@ fn denied_principals_from_env() -> std::collections::HashSet<String> {
 /// builders is enforcing — and a control that misreports itself is worse
 /// than one that is silent, because an operator acts on the report.
 pub fn announce_controls(dispatcher: &Dispatcher) {
-    let mut denied: Vec<&str> = dispatcher.denied_principals().collect();
+    let mut denied: Vec<String> = dispatcher.denied_principals().collect();
     if !denied.is_empty() {
         // Say it HERE, not in a host's `main`. The whole point of #287's
         // follow-up is that this control reaches hosts that do not run
@@ -246,12 +289,22 @@ pub fn announce_controls(dispatcher: &Dispatcher) {
 
 /// The parse itself, separated so it can be tested without the process
 /// environment (which several hundred tests share).
-pub fn parse_denied_principals(raw: &str) -> std::collections::HashSet<String> {
+pub fn parse_denied_principals(raw: &str) -> HashSet<(String, String)> {
     raw.split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .filter_map(|entry| match entry.split_once('/') {
-            Some((tenant, sub)) if !tenant.is_empty() && !sub.is_empty() => Some(entry.to_string()),
+            // The tenant may not itself contain `/`. Splitting on the
+            // FIRST separator would otherwise make `acme/al` + `ice` and
+            // `acme` + `al/ice` the same entry, so revoking one principal
+            // could silently revoke a different one across a customer
+            // boundary — the exact failure tenant-qualification exists to
+            // prevent.
+            Some((tenant, sub))
+                if !tenant.is_empty() && !sub.is_empty() && !tenant.contains('/') =>
+            {
+                Some((tenant.to_string(), sub.to_string()))
+            }
             _ => {
                 // This crate has no tracing dependency; the audit emitter
                 // is its logging surface and this is boot-time operator
@@ -260,9 +313,9 @@ pub fn parse_denied_principals(raw: &str) -> std::collections::HashSet<String> {
                 // the failure mode is an operator believing they revoked
                 // someone when they did not.
                 eprintln!(
-                    "WARN TRITON_DENIED_PRINCIPALS entry `{entry}` ignored: expected \
-                     `tenant/sub` (a bare subject would deny that name in EVERY \
-                     tenant, so it is refused rather than guessed)"
+                    "WARN denylist entry `{entry}` ignored: expected `tenant/sub` \
+                     with no `/` in the tenant (a bare subject would deny that \
+                     name in EVERY tenant, so it is refused rather than guessed)"
                 );
                 None
             }
@@ -282,18 +335,24 @@ pub const ANONYMOUS_SUBJECT: &str = "-";
 pub const DEFAULT_REJECT_WINDOW: Duration = Duration::from_secs(60);
 
 impl Dispatcher {
-    pub fn new(registry: Arc<ToolRegistry>, env: impl Into<String>) -> Self {
+    pub fn new(
+        registry: Arc<ToolRegistry>,
+        env: impl Into<String>,
+        controls: DispatchControls,
+    ) -> Self {
         Self {
             registry,
             env: env.into(),
             upstream: None,
             metrics: Arc::new(Metrics::new()),
-            // #249/#284, same reasoning as the denylist below: a control
-            // wired in one host's `main` does not exist for the hosts
-            // that build a dispatcher themselves, and `triton-embed`
-            // hosts do exactly that.
-            reject_window: crate::ratelimit::RejectionWindow::new(reject_window_from_env()),
-            // #287: read HERE, not in whichever host remembers to wire
+            reject_window: crate::ratelimit::RejectionWindow::new(controls.reject_window),
+            // #287/#284/#249: these arrive as a REQUIRED parameter, so a
+            // host cannot get a dispatcher without deciding. They used to
+            // be builder methods, and the deployment that actually runs
+            // called none of them — it booted healthy and revoked nobody.
+            // Omission is now a compile error naming the field.
+            //
+            // (was: read HERE, not in whichever host remembers to wire
             // it. `triton-bin` did wire it — and the deployment that
             // actually runs does not use `triton-bin`. `triton-embed`
             // hosts call this constructor directly (dz-agent-template
@@ -307,47 +366,30 @@ impl Dispatcher {
             // a security control each call site must remember to opt into
             // is a suggestion, not a control. The exception is deliberate
             // and this is the only one.
-            denied: denied_principals_from_env(),
-            scope_restrictions: pairing_restriction_from_env(),
+            denied: controls.denied_principals,
+            scope_restrictions: controls.scope_restrictions,
         }
-    }
-
-    /// Declare that a principal holding ONLY `scope` may invoke only
-    /// `tools` (#284).
-    ///
-    /// This is the gateway's one authorization seam, and it is
-    /// deliberately **default-allow**: Triton authenticates and
-    /// propagates identity, leaving authorization to the resource owner.
-    /// What it must not do is make an authorization distinction and then
-    /// discard it — which is exactly what happened to `self_enrol`'s
-    /// pairing marker, where an un-enrolled sender was admitted with a
-    /// restricted scope and then allowed to invoke anything.
-    ///
-    /// "Holding only" is the right test: an enrolled principal carries
-    /// real scopes and is unaffected, so enrolment itself lifts the
-    /// restriction and there is no second mechanism to keep in sync.
-    pub fn with_scope_restriction(
-        mut self,
-        scope: impl Into<String>,
-        tools: impl IntoIterator<Item = String>,
-    ) -> Self {
-        // Extend rather than replace: `TRITON_PAIRING_TOOLS` may already
-        // have supplied some, and a host adding the manifest's should not
-        // silently drop the environment's.
-        self.scope_restrictions
-            .entry(scope.into())
-            .or_default()
-            .extend(tools);
-        self
     }
 
     /// May this principal invoke this tool? `Ok(())` unless a scope
     /// restriction says otherwise.
     fn can_invoke(&self, principal: &Principal, tool: &str) -> Result<(), TritonError> {
-        if self.scope_restrictions.is_empty() || principal.scopes.len() != 1 {
+        if self.scope_restrictions.is_empty() {
             return Ok(());
         }
-        let held = &principal.scopes[0];
+        // "Holds a restricted scope AT ALL", not "holds exactly one".
+        // The old test meant any adapter granting a second scope beside
+        // `pairing` disabled the restriction entirely and silently — the
+        // invariant lived in one adapter's construction site rather than
+        // in the gate. An enrolled principal is still unaffected: they
+        // carry real scopes and none of them is restricted.
+        let Some(held) = principal
+            .scopes
+            .iter()
+            .find(|s| self.scope_restrictions.contains_key(*s))
+        else {
+            return Ok(());
+        };
         match self.scope_restrictions.get(held) {
             Some(allowed) if !allowed.contains(tool) => Err(TritonError::Forbidden(format!(
                 "principal holds only the `{held}` scope, which may invoke \
@@ -364,53 +406,24 @@ impl Dispatcher {
         self.reject_window.window().as_secs()
     }
 
+    /// The tools a principal holding `scope` may invoke. Empty when the
+    /// scope is unrestricted. Exposed so a host can log the EFFECTIVE
+    /// restriction rather than the part it contributed.
+    pub fn restricted_tools(&self, scope: &str) -> impl Iterator<Item = String> {
+        let mut tools: Vec<String> = self
+            .scope_restrictions
+            .get(scope)
+            .map(|t| t.iter().cloned().collect())
+            .unwrap_or_default();
+        tools.sort_unstable();
+        tools.into_iter()
+    }
+
     /// The principals this dispatcher refuses, as `tenant/sub`. Exposed
     /// so a host can log an active denylist at boot — an operator should
     /// be able to see the lever is engaged without knowing to look.
-    pub fn denied_principals(&self) -> impl Iterator<Item = &str> {
-        self.denied.iter().map(String::as_str)
-    }
-
-    /// #287: revoke a set of principals, named `tenant/sub`.
-    ///
-    /// Every secret here is boot-time-only and every token runs to its
-    /// own expiry, so between learning a principal is compromised and
-    /// its token lapsing there was no lever at all — rotating a signing
-    /// key invalidates everyone, which is not a lever, it is an outage.
-    /// This is the shorter one.
-    ///
-    /// It lives at the DISPATCHER because that is the single audit pivot
-    /// (ADR-6) and the one place every protocol converges. Put at any
-    /// single boundary — the OIDC verifier, one adapter — it would leave
-    /// the other twelve open.
-    ///
-    /// Entries are TENANT-QUALIFIED. A bare `sub` would deny `alice` in
-    /// every tenant at once: same string, different people, and the
-    /// mistake crosses a customer boundary silently.
-    ///
-    /// This is a kill switch, not an authorization system. It answers
-    /// "this principal is compromised, stop it now" and nothing else;
-    /// per-tool permission is `can_invoke`'s job.
-    /// ADDS to whatever the environment supplied — it does not replace it.
-    ///
-    /// It used to replace, and that was a defect: the boot announcement
-    /// fires when the environment is read, so a host calling this would
-    /// log one denylist and enforce another. A revocation lever that
-    /// misreports itself is worse than one that says nothing, and the
-    /// runbook's "read the accepted count back" check depends on the
-    /// announcement being true.
-    ///
-    /// Extending is also the fail-closed direction here: a denylist is a
-    /// DENY-set, so a merge can only revoke more, never less. (Its
-    /// sibling `with_scope_restriction` guards an ALLOW-set, where the
-    /// same merge would widen — which is why that one replaces.)
-    pub fn with_denied_principals<I, S>(mut self, denied: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.denied.extend(denied.into_iter().map(Into::into));
-        self
+    pub fn denied_principals(&self) -> impl Iterator<Item = String> {
+        self.denied.iter().map(|(t, s)| format!("{t}/{s}"))
     }
 
     /// Whether this principal has been revoked. Cheap and allocation-free
@@ -420,8 +433,9 @@ impl Dispatcher {
         if self.denied.is_empty() {
             return false;
         }
+        // A tuple lookup, so no separator can be confused for data.
         self.denied
-            .contains(&format!("{}/{}", principal.tenant, principal.sub))
+            .contains(&(principal.tenant.clone(), principal.sub.clone()))
     }
 
     /// Refuse a revoked principal on a surface that does NOT dispatch.
@@ -458,15 +472,6 @@ impl Dispatcher {
         ));
         self.fail(tool_name, protocol, principal, &e, 0);
         e
-    }
-
-    /// Override the anonymous-rejection coalescing window (#249).
-    /// `Duration::ZERO` disables coalescing — every rejection emits.
-    /// `triton-bin` wires this from `TRITON_AUDIT_REJECT_WINDOW_SECS`;
-    /// this crate stays env-free.
-    pub fn with_rejection_window(mut self, window: Duration) -> Self {
-        self.reject_window = crate::ratelimit::RejectionWindow::new(window);
-        self
     }
 
     /// Attach a shared `Metrics` registry. When unset, the
@@ -840,6 +845,18 @@ impl Dispatcher {
         if self.is_denied(&principal) {
             return Err(self.deny(uri, "mcp", &principal));
         }
+        // #284: and it is a dispatch for authorization too. A principal
+        // restricted to one enrolment tool could otherwise read any
+        // MCP-App resource through the upstream router under that
+        // identity — the restriction covered `invoke` alone.
+        if let Err(e) = self.can_invoke(&principal, uri) {
+            let outcome: Result<Value, TritonError> = Err(e);
+            self.audit_dispatch(uri, "mcp", &principal, 0, &outcome);
+            return match outcome {
+                Err(e) => Err(e),
+                Ok(_) => unreachable!("constructed as Err"),
+            };
+        }
         let started = Instant::now();
         let outcome = match &self.upstream {
             Some(upstream) => upstream.read_resource(uri, &principal).await,
@@ -871,6 +888,16 @@ impl Dispatcher {
         // context. A revoked principal must not still be able to.
         if self.is_denied(&principal) {
             return Err(self.deny(uri, "mcp", &principal));
+        }
+        // #284: writing context is at least as consequential as reading
+        // a resource, so the same restriction applies.
+        if let Err(e) = self.can_invoke(&principal, uri) {
+            let outcome: Result<Value, TritonError> = Err(e);
+            self.audit_dispatch(uri, "mcp", &principal, 0, &outcome);
+            return match outcome {
+                Err(e) => Err(e),
+                Ok(_) => unreachable!("constructed as Err"),
+            };
         }
         let started = Instant::now();
         let outcome = match &self.upstream {
@@ -1260,13 +1287,19 @@ pub fn envelope(dispatch: &Dispatch) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_denied_principals;
+    use super::{DispatchControls, parse_denied_principals};
 
     #[test]
     fn denied_principals_require_a_tenant_qualifier() {
         let d = parse_denied_principals("acme/alice, globex/bob ");
-        assert!(d.contains("acme/alice") && d.contains("globex/bob"));
+        assert!(d.contains(&("acme".into(), "alice".into())));
+        assert!(d.contains(&("globex".into(), "bob".into())));
         assert_eq!(d.len(), 2);
+        // A `/` in the tenant is refused: joined, `acme/al` + `ice` and
+        // `acme` + `al/ice` would be the same entry, so revoking one
+        // principal could silently revoke another across a customer
+        // boundary.
+        assert!(parse_denied_principals("acme/al/ice").is_empty());
         // A bare subject is DROPPED, not widened to every tenant.
         assert!(parse_denied_principals("alice").is_empty());
         assert!(parse_denied_principals("/alice").is_empty());
@@ -1274,7 +1307,7 @@ mod tests {
         // A mixed list keeps the well-formed entries and drops the rest.
         let mixed = parse_denied_principals("alice,acme/bob");
         assert_eq!(mixed.len(), 1);
-        assert!(mixed.contains("acme/bob"));
+        assert!(mixed.contains(&("acme".into(), "bob".into())));
     }
 
     #[test]
@@ -1324,8 +1357,12 @@ mod tests {
     /// raw surface instead of a stream.
     #[tokio::test]
     async fn upstream_dispatch_reports_returns_a2ui() {
-        let dispatcher = Dispatcher::new(Arc::new(ToolRegistry::new()), "test")
-            .with_upstream(Arc::new(SurfaceUpstream));
+        let dispatcher = Dispatcher::new(
+            Arc::new(ToolRegistry::new()),
+            "test",
+            DispatchControls::none(),
+        )
+        .with_upstream(Arc::new(SurfaceUpstream));
         let dispatch = dispatcher
             .invoke("assistant", json!({}), test_principal(), "rest")
             .await
@@ -1342,7 +1379,11 @@ mod tests {
     /// the unknown tool is a genuine error, not a silent a2ui=true.
     #[tokio::test]
     async fn missing_tool_without_upstream_errors() {
-        let dispatcher = Dispatcher::new(Arc::new(ToolRegistry::new()), "test");
+        let dispatcher = Dispatcher::new(
+            Arc::new(ToolRegistry::new()),
+            "test",
+            DispatchControls::none(),
+        );
         let result = dispatcher
             .invoke("nope", json!({}), test_principal(), "rest")
             .await;
@@ -1410,7 +1451,7 @@ mod tests {
         use futures::StreamExt as _;
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(StreamingTool));
-        let dispatcher = Dispatcher::new(Arc::new(registry), "test");
+        let dispatcher = Dispatcher::new(Arc::new(registry), "test", DispatchControls::none());
         let stream = dispatcher
             .invoke_streaming("streamer", json!({}), test_principal(), "rest", None)
             .await
@@ -1430,7 +1471,7 @@ mod tests {
         use futures::StreamExt as _;
         let mut registry = ToolRegistry::new();
         registry.register(Arc::new(BufferedTool));
-        let dispatcher = Dispatcher::new(Arc::new(registry), "test");
+        let dispatcher = Dispatcher::new(Arc::new(registry), "test", DispatchControls::none());
         let stream = dispatcher
             .invoke_streaming("buffered", json!({}), test_principal(), "rest", None)
             .await

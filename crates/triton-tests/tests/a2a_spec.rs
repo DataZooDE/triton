@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use triton_core::dispatcher::DispatchControls;
 use triton_core::error::TritonError;
 use triton_core::principal::ToolPrincipal;
 use triton_core::{Dispatcher, Tool, ToolRegistry};
@@ -66,7 +67,11 @@ fn claims(iss: &str) -> Value {
 async fn serve(opts: EmbedOpts) -> String {
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(AssistantTool));
-    let dispatcher = Arc::new(Dispatcher::new(Arc::new(reg), "test".to_string()));
+    let dispatcher = Arc::new(Dispatcher::new(
+        Arc::new(reg),
+        "test".to_string(),
+        DispatchControls::none(),
+    ));
     let app = router(dispatcher, &opts);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -373,7 +378,11 @@ async fn slow_spec_host() -> (TestIssuer, String) {
     let iss = TestIssuer::start().await;
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(SlowTool));
-    let dispatcher = Arc::new(Dispatcher::new(Arc::new(reg), "test".to_string()));
+    let dispatcher = Arc::new(Dispatcher::new(
+        Arc::new(reg),
+        "test".to_string(),
+        DispatchControls::none(),
+    ));
     let opts = EmbedOpts::dev().oidc(iss.issuer_url(), AUD, None).spec_a2a(
         "DataZoo Agent",
         "Answers questions.",

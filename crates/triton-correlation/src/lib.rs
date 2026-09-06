@@ -430,11 +430,16 @@ fn tenant_key(key: &[u8], b: Binding<'_>) -> Vec<u8> {
     input.extend_from_slice(b.sender.as_bytes());
     // The FULL tag, not the truncated one: truncation is a wire-budget
     // constraint and this key never leaves the process.
+    //
+    // The master key is NOT appended. It used to be, to guarantee the
+    // derived key never carried less entropy than the one it replaced —
+    // but a 32-byte HMAC tag already guarantees that, and appending made
+    // a one-way derivation reversible. Any future leak of a derived key
+    // (a debug print, a panic payload, a heap dump) would then leak the
+    // master, and with it every other tenant's and sender's key.
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(&input);
-    let mut derived = mac.finalize().into_bytes().to_vec();
-    derived.extend_from_slice(key);
-    derived
+    mac.finalize().into_bytes().to_vec()
 }
 
 /// Versioned, unambiguous prefix for the key derivation. Rotating it
@@ -509,7 +514,35 @@ impl KeyRing {
         if keys.is_empty() {
             return Err(KeyRingError::Empty);
         }
+        // A deployed secret that happens to CONTAIN a comma silently
+        // became a multi-key ring whose first fragment signs. Against an
+        // 8-byte truncated HMAC a short fragment is brute-forceable
+        // offline from one observed token, yielding forgery for arbitrary
+        // (tool, args) — and nothing logged the degradation, so this
+        // change is what would have introduced it. Refusing at boot turns
+        // a silent weakening into a failed deploy.
+        if let Some(short) = keys.iter().find(|k| k.len() < MIN_KEY_LEN) {
+            return Err(KeyRingError::TooShort {
+                len: short.len(),
+                min: MIN_KEY_LEN,
+            });
+        }
         Ok(Self { keys })
+    }
+
+    /// A stable, non-reversible tag for the SIGNING key, safe to log.
+    ///
+    /// Rotation is ordered — the first key signs — and an operator
+    /// appending the new key (`old,new`, the natural edit) keeps signing
+    /// with the compromised one while nothing looks wrong. This is what
+    /// makes that visible: the fingerprint changes when the signing key
+    /// does, and does not otherwise.
+    pub fn signing_fingerprint(&self) -> String {
+        let mut mac =
+            HmacSha256::new_from_slice(self.signing()).expect("HMAC accepts any key length");
+        mac.update(b"triton/correlation/fingerprint/v1");
+        let tag = mac.finalize().into_bytes();
+        hex_prefix(&tag[..4])
     }
 
     /// A ring of exactly one key — the shape every caller had before
@@ -541,10 +574,27 @@ impl KeyRing {
     }
 }
 
+/// Shortest key `parse` will accept.
+///
+/// 16 bytes is not a cryptographic ceiling, it is a floor below which an
+/// 8-byte truncated HMAC stops being the limiting factor — the key is.
+pub const MIN_KEY_LEN: usize = 16;
+
+fn hex_prefix(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum KeyRingError {
     #[error("correlation key list is empty; at least one key is required")]
     Empty,
+    #[error(
+        "a correlation key is {len} bytes, under the {min}-byte minimum — a \
+         short key is brute-forceable from one observed token. A deployed \
+         secret CONTAINING a comma splits into a ring, so check for one \
+         before assuming the value is short"
+    )]
+    TooShort { len: usize, min: usize },
 }
 
 /// Try `verify` under each key on the ring, newest first.
@@ -642,22 +692,69 @@ mod tests {
 
     #[test]
     fn the_first_key_signs_and_every_key_verifies() {
-        let ring = KeyRing::parse("new-key,old-key").expect("two keys");
-        assert_eq!(ring.signing(), b"new-key");
+        let ring =
+            KeyRing::parse("a-new-correlation-key-32-bytes!!,an-old-correlation-key-32-bytes!")
+                .expect("two keys");
+        assert_eq!(ring.signing(), b"a-new-correlation-key-32-bytes!!");
         assert_eq!(ring.len(), 2);
+        assert_eq!(ring.verifying().count(), 2);
+    }
+
+    /// A deployed secret that happens to contain a comma splits into a
+    /// ring whose first fragment signs. Against an 8-byte truncated HMAC
+    /// a short fragment is brute-forceable offline from one observed
+    /// token — so this must fail the DEPLOY, not sign quietly.
+    #[test]
+    fn a_short_key_refuses_rather_than_signing_weakly() {
+        // The realistic shape: a passphrase with a comma in it.
+        // `expect_err` would need `KeyRing: Debug`, and it deliberately
+        // has none — a key that reaches a log line is a key to rotate.
+        let Err(err) = KeyRing::parse("correlation,key-for-the-deployment") else {
+            panic!("the 11-byte first fragment must be refused");
+        };
+        assert!(matches!(err, KeyRingError::TooShort { .. }), "got {err:?}");
+        // And the message must point at the actual cause, because
+        // "your key is too short" is misleading when the value is long.
+        assert!(format!("{err}").contains("comma"), "{err}");
+    }
+
+    /// Rotation is ordered, and appending the new key (`old,new`) is the
+    /// natural edit — which keeps signing with the compromised one. The
+    /// fingerprint is what makes that visible.
+    #[test]
+    fn the_signing_fingerprint_tracks_the_first_key_only() {
+        let a = KeyRing::parse("a-new-correlation-key-32-bytes!!").unwrap();
+        let ab =
+            KeyRing::parse("a-new-correlation-key-32-bytes!!,an-old-correlation-key-32-bytes!")
+                .unwrap();
+        let ba =
+            KeyRing::parse("an-old-correlation-key-32-bytes!,a-new-correlation-key-32-bytes!!")
+                .unwrap();
         assert_eq!(
-            ring.verifying().collect::<Vec<_>>(),
-            vec![b"new-key".as_slice(), b"old-key".as_slice()],
+            a.signing_fingerprint(),
+            ab.signing_fingerprint(),
+            "adding a verify-only key must not change who signs"
+        );
+        assert_ne!(
+            ab.signing_fingerprint(),
+            ba.signing_fingerprint(),
+            "reversing the order DOES change who signs, and must show it"
         );
     }
 
     #[test]
     fn a_pasted_list_is_trimmed_and_a_trailing_comma_is_not_a_key() {
-        let ring = KeyRing::parse(" new , old ,").expect("parses");
+        let ring = KeyRing::parse(
+            " a-new-correlation-key-32-bytes!! , an-old-correlation-key-32-bytes! ,",
+        )
+        .expect("parses");
         assert_eq!(ring.len(), 2, "the empty tail entry is not a key");
-        assert_eq!(ring.signing(), b"new");
+        assert_eq!(ring.signing(), b"a-new-correlation-key-32-bytes!!");
         // The whitespace really is gone — not merely counted away.
-        assert_eq!(ring.verifying().nth(1).unwrap(), b"old");
+        assert_eq!(
+            ring.verifying().nth(1).unwrap(),
+            b"an-old-correlation-key-32-bytes!"
+        );
     }
 
     #[test]

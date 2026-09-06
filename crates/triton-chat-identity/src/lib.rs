@@ -58,16 +58,43 @@ pub struct Resolved {
     pub scopes: Vec<String>,
     pub groups: Vec<String>,
     pub tenant: String,
+    /// Private, and that is the whole mechanism.
+    ///
+    /// With four public fields and a public `From<&SenderClaims>`, any
+    /// adapter could write `Resolved { .. }` and skip validation — which
+    /// is precisely the shortcut seven adapters were about to be
+    /// migrated against. A private field means the type can only be
+    /// built in this module, so "an adapter cannot hold an unvalidated
+    /// principal" is enforced by the compiler rather than by everyone
+    /// remembering.
+    _validated: Validated,
 }
 
-impl From<&SenderClaims> for Resolved {
-    fn from(c: &SenderClaims) -> Self {
-        Self {
-            sub: c.sub.clone(),
-            scopes: c.scopes.clone(),
-            groups: c.groups.clone(),
-            tenant: c.tenant.clone(),
-        }
+/// Zero-sized proof that [`validate_resolved`] ran. Constructible only
+/// here.
+#[derive(Debug, Clone)]
+struct Validated;
+
+impl Resolved {
+    /// The only way to build a [`Resolved`], and it validates.
+    ///
+    /// Adapters do not call this — [`SenderTable`] and
+    /// [`UpstreamResolver`] do, which is why every path through this
+    /// crate is checked.
+    fn checked(
+        sub: String,
+        scopes: Vec<String>,
+        groups: Vec<String>,
+        tenant: String,
+    ) -> Result<Self, TritonError> {
+        validate_resolved(&sub, &tenant)?;
+        Ok(Self {
+            sub,
+            scopes,
+            groups,
+            tenant,
+            _validated: Validated,
+        })
     }
 }
 
@@ -124,7 +151,19 @@ impl SenderTable {
     /// rather than an error so the adapter can audit it in its own
     /// shape.
     pub fn resolve(&self, sender_key: &str) -> Option<Resolved> {
-        self.get(sender_key).map(Resolved::from)
+        // `parse` already validated every entry at boot, so this cannot
+        // fail — but it goes through the same checked constructor as
+        // everything else rather than trusting that, because "cannot
+        // fail" is a claim about code somewhere else.
+        self.get(sender_key).and_then(|c| {
+            Resolved::checked(
+                c.sub.clone(),
+                c.scopes.clone(),
+                c.groups.clone(),
+                c.tenant.clone(),
+            )
+            .ok()
+        })
     }
 }
 
@@ -233,13 +272,7 @@ impl UpstreamResolver {
         let reply: ResolverReply = serde_json::from_value(dispatch.result).map_err(|e| {
             TritonError::Auth(format!("resolver reply not {{sub,scopes,tenant}}: {e}"))
         })?;
-        validate_resolved(&reply.sub, &reply.tenant)?;
-        Ok(Resolved {
-            sub: reply.sub,
-            scopes: reply.scopes,
-            groups: reply.groups,
-            tenant: reply.tenant,
-        })
+        Resolved::checked(reply.sub, reply.scopes, reply.groups, reply.tenant)
     }
 }
 

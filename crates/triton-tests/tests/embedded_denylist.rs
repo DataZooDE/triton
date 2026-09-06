@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use triton_core::dispatcher::DispatchControls;
 use triton_core::error::TritonError;
 use triton_core::principal::{Principal, ToolPrincipal};
 use triton_core::{Dispatcher, Tool, ToolRegistry};
@@ -74,7 +75,7 @@ async fn an_embedded_host_revokes_without_wiring_anything() {
         );
     }
     // Exactly what agent-core does — no `.with_denied_principals(...)`.
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test");
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
 
     let denied = dispatcher
         .invoke(
@@ -138,7 +139,7 @@ async fn the_embedded_streaming_entry_point_revokes_too() {
             format!("{REVOKED_TENANT}/{REVOKED_SUB}"),
         );
     }
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test");
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
     let denied = dispatcher
         .invoke_streaming(
             "echo",
@@ -195,7 +196,7 @@ async fn an_embedded_host_honours_the_pairing_restriction() {
     unsafe {
         std::env::set_var("TRITON_PAIRING_TOOLS", "pair");
     }
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test");
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
 
     // `echo` is not the pairing tool, so a pairing-only principal cannot
     // reach it. Before this, they could reach anything.
@@ -230,7 +231,7 @@ async fn an_embedded_host_can_set_the_rejection_window() {
     unsafe {
         std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "0");
     }
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test");
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
     assert_eq!(
         dispatcher.reject_window_secs(),
         0,
@@ -239,7 +240,7 @@ async fn an_embedded_host_can_set_the_rejection_window() {
     unsafe {
         std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "120");
     }
-    let tuned = Dispatcher::new(Arc::new(registry()), "test");
+    let tuned = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
     assert_eq!(tuned.reject_window_secs(), 120);
 
     // A junk value falls back to the default rather than failing boot:
@@ -247,7 +248,7 @@ async fn an_embedded_host_can_set_the_rejection_window() {
     unsafe {
         std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "not-a-number");
     }
-    let fallback = Dispatcher::new(Arc::new(registry()), "test");
+    let fallback = Dispatcher::new(Arc::new(registry()), "test", DispatchControls::none());
     assert_eq!(
         fallback.reject_window_secs(),
         triton_core::dispatcher::DEFAULT_REJECT_WINDOW.as_secs()
@@ -325,65 +326,63 @@ async fn an_active_denylist_announces_itself() {
     );
 }
 
-/// Crew review of #306, F13. `with_denied_principals` used to REPLACE the
-/// environment's set while the boot announcement fired inside `new()` —
-/// before any override. A host calling the builder logged one denylist
-/// and enforced another.
+/// Crew review of #306, F13. `with_denied_principals` used to REPLACE
+/// the environment's set while the boot announcement fired inside
+/// `new()`, before any override — so a host calling the builder logged
+/// one denylist and enforced another.
 ///
-/// That re-created the exact failure the env exception exists to prevent,
-/// one method away, and worse: it looked verified. The runbook's whole
-/// "read the accepted count back" check depends on the announcement being
-/// true.
+/// Both halves of that are now structurally impossible: the controls are
+/// a REQUIRED constructor parameter, so there is no builder to disagree
+/// with, and the announcement happens where the dispatcher is finished
+/// being built rather than where its config is read.
+///
+/// What remains testable, and what this pins: the two sources compose in
+/// the safe direction. A denylist is a DENY-set, so merging can only
+/// revoke MORE.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_builder_adds_to_the_environments_denylist_rather_than_replacing_it() {
-    unsafe {
-        std::env::set_var(
-            "TRITON_DENIED_PRINCIPALS",
-            format!("{REVOKED_TENANT}/{REVOKED_SUB}"),
+async fn denylist_sources_compose_by_revoking_more_never_less() {
+    let controls = DispatchControls::none()
+        .deny("env-tenant/env-sub")
+        .deny("code-tenant/code-sub");
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls);
+
+    for (tenant, sub) in [("env-tenant", "env-sub"), ("code-tenant", "code-sub")] {
+        let denied = dispatcher
+            .invoke("echo", json!({}), principal(tenant, sub), "rest")
+            .await;
+        assert!(
+            matches!(denied, Err(TritonError::Forbidden(_))),
+            "`{tenant}/{sub}` came from one of two sources and both must be in force"
         );
     }
-    let dispatcher = Dispatcher::new(Arc::new(registry()), "test")
-        .with_denied_principals(["other-tenant/pinned-in-code".to_string()]);
+    assert_eq!(dispatcher.denied_principals().count(), 2);
+}
 
-    // The environment's entry must survive the builder call.
-    let from_env = dispatcher
-        .invoke(
-            "echo",
-            json!({}),
-            principal(REVOKED_TENANT, REVOKED_SUB),
-            "rest",
-        )
-        .await;
+/// A scope restriction is an ALLOW-set inside a gate, so the opposite
+/// rule applies: merging could only WIDEN what a restricted principal
+/// reaches, which is why `restrict_scope` REPLACES and says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_scope_restriction_replaces_rather_than_widening() {
+    let controls = DispatchControls::none()
+        .restrict_scope("pairing", ["stale_env_tool".to_string()])
+        .restrict_scope("pairing", ["echo".to_string()]);
+    let dispatcher = Dispatcher::new(Arc::new(registry()), "test", controls);
+
+    // The later source won outright: `echo` is reachable...
     assert!(
-        matches!(from_env, Err(TritonError::Forbidden(_))),
-        "the env-supplied revocation must survive a builder call — \
-         otherwise the boot announcement describes a set nobody enforces"
+        dispatcher
+            .invoke("echo", json!({}), pairing_principal(), "rest")
+            .await
+            .is_ok(),
+        "the surviving restriction must permit its own tool"
     );
-
-    // …and so must the one pinned in code.
-    let from_code = dispatcher
-        .invoke(
-            "echo",
-            json!({}),
-            principal("other-tenant", "pinned-in-code"),
-            "rest",
-        )
-        .await;
-    assert!(
-        matches!(from_code, Err(TritonError::Forbidden(_))),
-        "the explicitly wired revocation must apply too"
-    );
-
-    // A denylist is a DENY-set, so merging can only revoke more, never
-    // less — the fail-closed direction. (Its sibling guards an ALLOW-set,
-    // where the same merge would widen, which is why that one replaces.)
+    // ...and the stale entry did not survive as a union. A merge here
+    // would silently keep another adapter's enrolment tool reachable by
+    // every un-enrolled sender, forever.
+    let restrictions: Vec<String> = dispatcher.restricted_tools("pairing").collect();
     assert_eq!(
-        dispatcher.denied_principals().count(),
-        2,
-        "both sources are in force, and the announcement reports both"
+        restrictions,
+        vec!["echo".to_string()],
+        "a stale entry must not survive as a union"
     );
-
-    unsafe {
-        std::env::remove_var("TRITON_DENIED_PRINCIPALS");
-    }
 }

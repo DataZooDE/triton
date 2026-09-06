@@ -206,15 +206,13 @@ async fn main() -> std::io::Result<()> {
     // denylist are all read by `Dispatcher::new` itself, so an embedded
     // host gets them too. This wiring only ADDS the manifest-derived
     // pairing tools, which the environment cannot express as richly.
+    // #284/#287: the environment's controls, then the manifest's pairing
+    // tools layered on top — the manifest is the richer source (it knows
+    // WHICH adapter named the tool) and `restrict_scope` replaces rather
+    // than merges, because widening an allow-set is the unsafe direction.
+    let controls = triton_embed::controls_from_env().restrict_scope("pairing", pairing_tools);
     let mut dispatcher =
-        Dispatcher::new(registry, settings.env.clone()).with_metrics(metrics.clone());
-    if !pairing_tools.is_empty() {
-        tracing::info!(
-            tools = ?pairing_tools,
-            "self_enrol pairing restriction active (from the manifest): a principal holding only the `pairing` scope may invoke these tools and nothing else"
-        );
-        dispatcher = dispatcher.with_scope_restriction("pairing", pairing_tools);
-    }
+        Dispatcher::new(registry, settings.env.clone(), controls).with_metrics(metrics.clone());
 
     // #287: announce what is ENFORCED, once every builder above has run.
     // Announcing inside `Dispatcher::new` reported what the environment
@@ -222,6 +220,18 @@ async fn main() -> std::io::Result<()> {
     // misreports itself is worse than a silent one, because an operator
     // acts on the report.
     triton_core::dispatcher::announce_controls(&dispatcher);
+    // #306 crew F6: the cross-tenant audit view needs the `audit:read-all`
+    // scope AND membership of this list. Outside `local` an unset list
+    // means nobody holds it — say so, because the symptom (an operator
+    // seeing only their own rows) does not name its cause.
+    if settings.env != "local" && std::env::var("TRITON_AUDIT_OPERATORS").is_err() {
+        tracing::warn!(
+            "TRITON_AUDIT_OPERATORS is unset: NOBODY holds the cross-tenant view of \
+             /v1/audit or /v1/trace. The `audit:read-all` scope alone no longer grants \
+             it, because that claim namespace belongs to the issuer rather than to this \
+             deployment. Set it to a comma-separated list of `tenant/sub`."
+        );
+    }
 
     // Static-upstream OIDC signer: when a signing key + issuer + JWKS are all
     // configured, Triton mints a per-call RS256 JWT to agents (workload→workload

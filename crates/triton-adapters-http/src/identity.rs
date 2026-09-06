@@ -267,6 +267,17 @@ fn ct_eq_str(a: &str, b: &str) -> bool {
 
 #[cfg(feature = "dev-token")]
 fn verify_dev_or_reject(token: &str, expected: &str) -> Result<Principal, TritonError> {
+    // #306 crew F12: this path grants the cross-tenant audit view, and it
+    // is safe only if every embedding host builds with
+    // `--no-default-features` — an assumption about someone else's build
+    // flags, which is the exact class of assumption this stack was caught
+    // by. Refuse outright when the environment is not `local`, so the
+    // guarantee stops depending on a flag we cannot see.
+    if std::env::var("TRITON_ENV").as_deref().unwrap_or("local") != "local" {
+        return Err(TritonError::Auth(
+            "dev-token is compiled in but the environment is not `local`; refusing".into(),
+        ));
+    }
     // An empty `expected` disables the dev-token path (kill-switch) and
     // also prevents an empty `Bearer ` from matching an empty token.
     // #282 F10: constant-time, like every other secret compare in the

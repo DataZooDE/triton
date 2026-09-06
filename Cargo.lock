@@ -2482,6 +2482,7 @@ dependencies = [
  "triton-chat-twilio",
  "triton-chat-whatsapp",
  "triton-core",
+ "triton-embed",
  "triton-identity",
  "triton-manifest",
  "triton-rasterizer",
