@@ -339,3 +339,62 @@ async fn extra_service_url_hosts_refuse_to_boot_outside_local() {
          got: {out}"
     );
 }
+
+/// The control announces when it is NOT protecting anything.
+///
+/// The corroboration needs an ATTESTED `serviceUrl`, and a single-tenant
+/// Entra bot's token carries no `serviceurl` claim — the shape agent-lab
+/// runs. On such a deployment this check never fires, while the code and
+/// its tests read as though the hole is closed. That is the
+/// false-confidence risk a crew review named, so the adapter says so on
+/// the first Activity that skips the check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unattested_activity_says_the_corroboration_did_not_apply() {
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_with(&fake, "manifest-msteams-azure.yaml"),
+    )
+    .await;
+
+    // No `serviceurl` claim in the token: the single-tenant shape. The
+    // body still carries one, so the request is servable.
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+    let jwt = fake.sign_jwt(json!({
+        "iss": BOT_ISSUER,
+        "aud": AUDIENCE,
+        "exp": now_unix() + 600,
+        "iat": now_unix() - 5,
+    }));
+    let mut activity = activity_on("msteams");
+    activity["serviceUrl"] = json!(fake.service_url());
+    let _ = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&activity)
+        .send()
+        .await
+        .expect("POST");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let said = loop {
+        if proc
+            .stdout_snapshot()
+            .iter()
+            .any(|l| l.contains("corroboration INACTIVE"))
+        {
+            break true;
+        }
+        if std::time::Instant::now() > deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        said,
+        "an Activity with no signed `serviceurl` must make the adapter \
+         announce that the corroboration did not apply — otherwise a \
+         deployment where this control never fires looks exactly like one \
+         where it does"
+    );
+}

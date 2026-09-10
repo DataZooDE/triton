@@ -399,7 +399,16 @@ impl JwtVerifier {
         let Some(host) = parsed.host_str() else {
             return false;
         };
-        self.extra_service_url_hosts.iter().any(|e| e == host)
+        // Normalised on BOTH sides. `host_str()` is bare and lowercased,
+        // while the config entry is whatever an operator typed — so
+        // `127.0.0.1:8080`, ` 127.0.0.1 ` or `LOCALHOST` silently stopped
+        // matching, the exemption stopped applying, and legitimate local
+        // traffic was refused as a "channel mismatch" — a confusing
+        // outage rather than a hole, but confusing in a way that costs an
+        // afternoon.
+        self.extra_service_url_hosts
+            .iter()
+            .any(|e| normalize_host(e.as_ref()) == host)
     }
 
     /// Is `url` an acceptable reply target?
@@ -449,6 +458,31 @@ impl JwtVerifier {
         });
         Ok(arc)
     }
+}
+
+/// An operator-supplied host, reduced to what `Url::host_str` returns:
+/// trimmed, port dropped, lowercased. Bracketed IPv6 literals keep their
+/// brackets off, matching `host_str`.
+fn normalize_host(entry: &str) -> String {
+    let e = entry.trim();
+    // Bracketed: the brackets already delimit the host, and anything after
+    // `]` is the port. Nothing further to strip — doing so would eat an
+    // IPv6 group (`[::1]` → `:`), which is how the first version of this
+    // failed.
+    if let Some(rest) = e.strip_prefix('[') {
+        let inside = rest.split_once(']').map_or(rest, |(inside, _)| inside);
+        return inside.to_ascii_lowercase();
+    }
+    // Unbracketed with more than one colon is a bare IPv6 literal, which
+    // cannot carry a port: leave it whole.
+    if e.matches(':').count() > 1 {
+        return e.to_ascii_lowercase();
+    }
+    let e = match e.rsplit_once(':') {
+        Some((head, tail)) if !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) => head,
+        _ => e,
+    };
+    e.to_ascii_lowercase()
 }
 
 /// True iff `service_url` parses as an `https` URL whose host ends
@@ -766,5 +800,22 @@ mod service_url_source_tests {
             claims.service_url.is_empty(),
             "camelCase must not be picked up — Microsoft does not send it in the JWT"
         );
+    }
+}
+
+#[cfg(test)]
+mod extra_host_tests {
+    use super::normalize_host;
+
+    #[test]
+    fn operator_typed_entries_reduce_to_what_host_str_returns() {
+        assert_eq!(normalize_host(" 127.0.0.1 "), "127.0.0.1");
+        assert_eq!(normalize_host("127.0.0.1:8080"), "127.0.0.1");
+        assert_eq!(normalize_host("LOCALHOST"), "localhost");
+        assert_eq!(normalize_host("[::1]:8080"), "::1");
+        assert_eq!(normalize_host("[::1]"), "::1");
+        // An unbracketed IPv6 literal must not lose its last group to the
+        // port-stripping rule.
+        assert_eq!(normalize_host("fe80::1"), "fe80::1");
     }
 }

@@ -1039,6 +1039,32 @@ fn resolve_sender(
             //    impossible: Microsoft assigns the host by REGION and every
             //    tenant in a region shares one, so a host can never identify
             //    a tenant.
+            // Say ONCE, on real traffic, when the corroboration does not
+            // apply.
+            //
+            // A crew review named the risk precisely: the code, the tests
+            // and realizations.md all read as though the forged-channel
+            // hole is closed, but the check needs an ATTESTED serviceUrl
+            // and a single-tenant Entra token carries no `serviceurl`
+            // claim at all — which is the shape agent-lab actually runs.
+            // So on that deployment the control never fires, and nothing
+            // said so.
+            //
+            // A boot-time line could not tell the truth here: the binary
+            // cannot know which token shape will arrive until one does.
+            // This fires on the first Activity that skips the check, which
+            // is the moment the fact becomes knowable. Once per process —
+            // an operator needs to know THAT it is inactive, not once per
+            // request.
+            if !verified.service_url_attested {
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| {
+                    println!(
+                        r#"{{"kind":"log","level":"warn","msg":"msteams: channel/serviceUrl corroboration INACTIVE — this Activity carried no signed `serviceurl` claim (single-tenant Entra bots carry none), so `channelId` is trusted from the unsigned body alone (#250/#319)","channel":"{}"}}"#,
+                        adapter.name.escape_default(),
+                    );
+                });
+            }
             if verified.service_url_attested
                 && let Some(url) = verified.service_url.as_deref()
                 // A fixture/local stand-in host is in no channel family.
