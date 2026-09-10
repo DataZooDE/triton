@@ -768,10 +768,14 @@ async fn handle_webhook(
     let verified = match verified.service_url.clone() {
         Some(signed) => VerifiedClaims {
             service_url: Some(signed),
+            service_url_attested: true,
         },
         None => match activity.service_url.as_deref() {
             Some(from_body) if adapter.verifier.service_url_allowed(from_body) => VerifiedClaims {
                 service_url: Some(from_body.to_string()),
+                // Body-supplied: allowlisted as a reply TARGET, but it
+                // attests nothing about which channel delivered this.
+                service_url_attested: false,
             },
             Some(bad) => {
                 record_rejection(
@@ -828,7 +832,7 @@ async fn handle_webhook(
         // return it as a task-module dialog card. Fast (a peacock render, not
         // an LLM turn), so it rides the invoke's own HTTP response.
         Some("invoke") if activity.name.as_deref() == Some("task/fetch") => {
-            handle_task_fetch(&adapter, &activity).await
+            handle_task_fetch(&adapter, &verified, &activity).await
         }
         Some("message") => {
             if let Some(value) = activity.value.clone() {
@@ -859,6 +863,41 @@ enum CallbackKind {
     Submit,
 }
 
+/// The `serviceUrl` host family Microsoft uses for a Bot Framework
+/// channel, for the channels there is documented evidence for.
+///
+/// `None` means "no documented mapping", and the caller must then
+/// corroborate NOTHING. Inventing an entry for a channel we have not
+/// verified — `pva` (Copilot Studio) is the live example — would refuse
+/// real traffic on a guess, which is the over-reach that made this
+/// finding a deferral in the first place.
+///
+/// Matched on the HOST family, never the path. Teams is regional
+/// (`/teams/`, `/amer/`, `/emea/`, `/in/`, …) and Microsoft adds regions;
+/// pinning the path would turn each new one into an outage.
+fn expected_service_url_family(channel_id: &str) -> Option<&'static str> {
+    match channel_id {
+        // Teams: https://smba.trafficmanager.net/<region>/
+        "msteams" => Some(".trafficmanager.net"),
+        // Direct Line and Web Chat: https://directline.botframework.com/,
+        // https://webchat.botframework.com/
+        "directline" | "webchat" | "emulator" => Some(".botframework.com"),
+        _ => None,
+    }
+}
+
+/// Does `service_url`'s host sit in `family` (on a DNS-label boundary)?
+fn service_url_in_family(service_url: &str, family: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(service_url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let apex = family.strip_prefix('.').unwrap_or(family);
+    host == apex || host.ends_with(family)
+}
+
 /// Identity resolved off an inbound Activity: the channel-scoped
 /// `from.id` (always the reply target) plus the `(sub, scopes, tenant)`
 /// the sender maps to. Shared by the text-message and callback paths.
@@ -879,6 +918,7 @@ struct ResolvedSender {
 fn resolve_sender(
     adapter: &Arc<MsTeamsAdapter>,
     activity: &Activity,
+    verified: &VerifiedClaims,
 ) -> Result<ResolvedSender, Response> {
     // The `from.id` carries the channel-scoped id (`29:...`); we always
     // need it as the outbound reply target, regardless of how identity
@@ -920,24 +960,18 @@ fn resolve_sender(
             //
             // #306 crew F3 asked for this assertion to be CORROBORATED
             // against the verified `serviceUrl` host, turning a body
-            // claim into a transport-backed one. That is the right idea
-            // and it is NOT implemented, deliberately:
+            // claim into a transport-backed one.
             //
-            // Nothing in this repo documents Microsoft's channel →
-            // serviceUrl-host mapping, and the msteams adapter is live on
-            // agent-lab. A guessed mapping that is too narrow refuses
-            // real Teams traffic; too wide and it corroborates nothing.
-            // The same over-reach already bit this stack once (a runtime
-            // dev-token guard broke 23 tests encoding a deliberate
-            // contract), so the bar here is evidence, not plausibility.
-            //
-            // To close it: capture the `serviceUrl` values Microsoft
-            // actually sends for each channel this deployment serves —
-            // they are already in the audit trail — and pin the mapping
-            // to observed hosts. Until then the gate rests on connector
-            // authentication plus the boot-time refusal of
-            // client-chosen-id channels, which is what #250 established
-            // and what the endorsement model supports.
+            // The CHANNEL half of that is now implemented below, against
+            // Microsoft's documented host families. The TENANT half is
+            // not, and is not pending either — it is impossible.
+            // Microsoft assigns the `serviceUrl` host by REGION
+            // (`/amer/`, `/emea/`, `/in/`), and every tenant in a region
+            // shares one, so a host can never identify a tenant. An
+            // earlier version of this comment implied the tenant check
+            // awaited data collection; it does not, and saying so was
+            // itself a small hazard — a deferral that reads as scheduled
+            // gets scheduled.
             let channel = activity.channel_id.as_deref().unwrap_or_default();
             // `allowed_channel_ids` was lowercased at build time; fold the
             // inbound too so the gate cannot turn on Microsoft's casing.
@@ -957,6 +991,56 @@ fn resolve_sender(
                     )),
                 );
                 return Err((StatusCode::UNAUTHORIZED, "wrong channel").into_response());
+            }
+            // #250 crew F3: the declared channel must match the transport
+            // that actually delivered this.
+            //
+            // Everything the gate above read is UNSIGNED body metadata, so
+            // a deployment declaring Teams only is still reachable over any
+            // channel Microsoft will mint a token for: deliver over Direct
+            // Line — where `from.id` is client-chosen, which is why `azure`
+            // refuses to boot on a declared Direct Line channel — and write
+            // `"channelId": "msteams"` in the body. `from.aadObjectId` and
+            // `channelData.tenant.id` then become the principal.
+            //
+            // `serviceUrl` is the one field describing the transport rather
+            // than the sender's claim about it, and on a multi-tenant bot
+            // Microsoft SIGNS it into the connector token. Microsoft assigns
+            // those hosts by channel family, so a signed Direct Line host
+            // beside a body claiming `msteams` is a contradiction.
+            //
+            // Three deliberate limits, each a case where a check would look
+            // stronger than it is:
+            //
+            //  * Only when the value is ATTESTED. A single-tenant bot's
+            //    Entra token carries no `serviceurl` claim, so its reply
+            //    target is body-supplied too — corroborating one body field
+            //    against another proves nothing.
+            //  * Only for channels with a documented host family
+            //    (`expected_service_url_family`). No guessing.
+            //  * NOT for the tenant. That half of F3 is not deferred, it is
+            //    impossible: Microsoft assigns the host by REGION and every
+            //    tenant in a region shares one, so a host can never identify
+            //    a tenant.
+            if verified.service_url_attested
+                && let Some(url) = verified.service_url.as_deref()
+                // A fixture/local stand-in host is in no channel family.
+                && !adapter.verifier.is_extra_service_url_host(url)
+                && let Some(family) = expected_service_url_family(channel)
+                && !service_url_in_family(url, family)
+            {
+                record_rejection(
+                    adapter,
+                    "-",
+                    "-",
+                    TritonError::Auth(format!(
+                        "channelId {channel:?} contradicts the signed \
+                         serviceUrl host, which is not in {family:?} — the \
+                         Activity was delivered on a different channel than \
+                         its body claims"
+                    )),
+                );
+                return Err((StatusCode::UNAUTHORIZED, "channel mismatch").into_response());
             }
             // sub = from.aadObjectId. Refuse rather than fall back to
             // the channel id: a message with no AAD object id can't
@@ -1060,7 +1144,7 @@ async fn dispatch_message(
     activity: &Activity,
     text: &str,
 ) -> Response {
-    let sender = match resolve_sender(adapter, activity) {
+    let sender = match resolve_sender(adapter, activity, verified) {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -1211,8 +1295,12 @@ fn find_document_structured(v: &Value) -> Option<&Value> {
 /// render the peacock `document` report for its `(skill, id)`, and return the
 /// document as a `task/continue` dialog card. The webhook JWT is already
 /// verified; the HMAC token authorises the specific (skill, id).
-async fn handle_task_fetch(adapter: &Arc<MsTeamsAdapter>, activity: &Activity) -> Response {
-    let sender = match resolve_sender(adapter, activity) {
+async fn handle_task_fetch(
+    adapter: &Arc<MsTeamsAdapter>,
+    verified: &VerifiedClaims,
+    activity: &Activity,
+) -> Response {
+    let sender = match resolve_sender(adapter, activity, verified) {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -1323,7 +1411,7 @@ async fn handle_callback(
     value: &Value,
     kind: CallbackKind,
 ) -> Response {
-    let sender = match resolve_sender(adapter, activity) {
+    let sender = match resolve_sender(adapter, activity, verified) {
         Ok(s) => s,
         Err(resp) => return resp,
     };

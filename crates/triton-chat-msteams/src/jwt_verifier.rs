@@ -73,6 +73,17 @@ pub struct VerifiedClaims {
     /// caller must then take it from the Activity body and put it through
     /// [`JwtVerifier::service_url_allowed`].
     pub service_url: Option<String>,
+    /// Did `service_url` come from the TOKEN (signed by Microsoft), or
+    /// from the request body?
+    ///
+    /// The distinction is the whole basis of the channel corroboration in
+    /// `lib.rs`: only a signed value attests the transport. A
+    /// single-tenant bot's Entra token carries no `serviceurl` claim at
+    /// all, so its reply target is body-supplied and corroborating it
+    /// against another body field would prove nothing — that case must
+    /// stay explicitly uncorroborated rather than get a check that looks
+    /// like one.
+    pub service_url_attested: bool,
 }
 
 impl VerifiedClaims {
@@ -355,7 +366,10 @@ impl JwtVerifier {
             // Single-tenant: nothing signed to check here. The caller
             // validates the body's serviceUrl instead — it must, and
             // `service_url_allowed` is the same check.
-            return Ok(VerifiedClaims { service_url: None });
+            return Ok(VerifiedClaims {
+                service_url: None,
+                service_url_attested: false,
+            });
         }
         if !service_url_host_allowed_with_extras(
             &data.claims.service_url,
@@ -365,7 +379,27 @@ impl JwtVerifier {
         }
         Ok(VerifiedClaims {
             service_url: Some(data.claims.service_url),
+            // Straight out of the verified JWT.
+            service_url_attested: true,
         })
+    }
+
+    /// Is `url`'s host one of the deployment's `extra_service_url_hosts`?
+    ///
+    /// Those exist so a fixture (or a `local` operator) can stand in for
+    /// Microsoft; a nontrivial value is fatal outside `local`. A stand-in
+    /// host belongs to no Bot Framework channel family, so the channel
+    /// corroboration in `lib.rs` must not judge it — otherwise every
+    /// integration test that signs the fixture's own serviceUrl reads as
+    /// a channel contradiction.
+    pub fn is_extra_service_url_host(&self, url: &str) -> bool {
+        let Ok(parsed) = url::Url::parse(url) else {
+            return false;
+        };
+        let Some(host) = parsed.host_str() else {
+            return false;
+        };
+        self.extra_service_url_hosts.iter().any(|e| e == host)
     }
 
     /// Is `url` an acceptable reply target?
@@ -673,10 +707,18 @@ mod service_url_source_tests {
 
     #[test]
     fn reply_base_is_empty_only_when_unresolved() {
-        assert_eq!(VerifiedClaims { service_url: None }.reply_base(), "");
         assert_eq!(
             VerifiedClaims {
-                service_url: Some("https://smba.trafficmanager.net/emea/".into())
+                service_url: None,
+                service_url_attested: false,
+            }
+            .reply_base(),
+            ""
+        );
+        assert_eq!(
+            VerifiedClaims {
+                service_url: Some("https://smba.trafficmanager.net/emea/".into()),
+                service_url_attested: true,
             }
             .reply_base(),
             "https://smba.trafficmanager.net/emea/"

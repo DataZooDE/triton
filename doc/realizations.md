@@ -1984,3 +1984,43 @@ Two things to carry forward:
 The harness now also honours `TRITON_BIN` (spawn exactly this binary)
 and builds one itself when the workspace has none, so a consumer that
 has never built `triton-bin` gets a working suite rather than a panic.
+
+### "Undocumented" and "impossible" are different deferrals (2026-09-09)
+
+#306's crew finding F3 asked for `channelData.tenant.id` and `channelId`
+to be corroborated against the verified `serviceUrl`. It was deferred
+with the note that nothing in the repo documents Microsoft's mapping, and
+that the way to close it was to observe real `serviceUrl` values. That
+reads as *scheduled*, so it stayed on the list as a to-do.
+
+An hour of reading Microsoft's docs split it in two:
+
+- **The channel half is documented.** Teams lands on
+  `smba.trafficmanager.net`, Direct Line and Web Chat on
+  `directline.botframework.com` / `webchat.botframework.com`. Now
+  implemented: an Activity whose SIGNED `serviceUrl` is in one family
+  cannot claim a `channelId` from another.
+- **The tenant half is impossible.** Microsoft assigns the host by
+  REGION, and every tenant in a region shares one. No amount of observed
+  traffic will make a host identify a tenant.
+
+The lesson is about how deferrals are written. "We lack evidence" and
+"this cannot work" both stop the work today, but only one of them should
+ever be picked up again. A comment that says the first when it means the
+second quietly commits a future reader to research that cannot succeed.
+Say which it is.
+
+Three limits worth keeping in view when reading that check:
+
+- It only fires on an ATTESTED `serviceUrl`. A single-tenant bot's Entra
+  token has no `serviceurl` claim, so the reply target is body-supplied
+  and corroborating one body field against another proves nothing. That
+  is the shape `agent-lab` runs, so the live deployment gains nothing
+  here — the check is for multi-tenant bots.
+- It only fires for channels with a documented family. `pva` (Copilot
+  Studio) has none, and inventing one would refuse real traffic on a
+  guess.
+- It skips `extra_service_url_hosts`. A fixture standing in for Microsoft
+  belongs to no channel family; without that exemption the check reads
+  every integration test as a contradiction — which is exactly how it
+  first failed, taking three legitimate Teams tests down with it.
