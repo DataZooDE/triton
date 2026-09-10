@@ -2088,3 +2088,38 @@ Found by an agent-crew review of a proactive-delivery PR that reused this
 list for OUTBOUND egress — which is where it would have been worse still,
 since there the destination comes from a persisted, caller-supplied
 reference. The inbound weakness was already on `main`.
+
+### A control the caller can switch off is not a control (2026-09-10)
+
+The proactive-Teams courier bound an out-of-band send to a tenant like
+this:
+
+```rust
+tenant_id: Option<String>,   // absent ⇒ no binding asserted
+...
+if let Some(tenant) = &r.tenant_id && tenant != &principal.tenant { refuse }
+```
+
+The reference is caller-supplied JSON. So the caller decided whether to be
+bound: omit one field and the cross-tenant check disappeared, letting an
+`outbound:send` holder deliver into any conversation id it knew. The
+cross-tenant test passed throughout, because it supplied the field.
+
+`Option` is the shape of the bug. An optional field on attacker-controlled
+input means "the attacker may choose absent", and `if let Some(...)` then
+reads as a check while being a request. It is required now — which costs a
+genuine reference nothing, since the minting side always writes the real
+tenant.
+
+Two more from the same review, worth the same suspicion next time:
+
+- **A public trait method reachable without its gate.** `deliver` is on the
+  public `OutboundCourier` trait and only the endpoint called `authorize`
+  first. It re-runs the checks itself now; a gate one call site away from
+  the thing it guards is a convention, not a control.
+- **An id interpolated into a URL path.** `conversation_id` is
+  caller-supplied and becomes a path segment on the connector URL, so `..`
+  or `/` aimed a POST carrying a real bot token at a different endpoint.
+
+The distinguishing habit: for every field on inbound data, ask *what
+happens when it is absent*, not only *what happens when it is hostile*.

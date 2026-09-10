@@ -235,3 +235,107 @@ fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
         std::thread::sleep(Duration::from_millis(30));
     }
 }
+
+/// A reference that names NO tenant must be refused.
+///
+/// `tenant_id` was `Option<String>`, and absent meant "no binding
+/// asserted" — so omitting one field turned the cross-tenant check off
+/// entirely. The reference is caller-supplied JSON, so the caller chose
+/// whether to be bound. An `outbound:send` holder could deliver into any
+/// conversation id it knew by leaving the field out.
+///
+/// The minting side (`conversation_reference_json`) always writes the
+/// real tenant, so requiring it costs a genuine reference nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reference_without_a_tenant_is_forbidden() {
+    let fake = FakeBotFramework::start().await;
+    let issuer = TestIssuer::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &fake)).await;
+
+    let mut reference = conversation_reference(&fake, "acme");
+    reference.as_object_mut().unwrap().remove("tenant_id");
+
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(outbound_token(&issuer, "globex"))
+        .json(&json!({
+            "adapter": "msteams",
+            "to": "29:1abc",
+            "result": { "text": "unbound" },
+            "reference": reference,
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+
+    // 400, not 403, and the difference is the point: a reference with no
+    // tenant is MALFORMED, while a reference naming someone else's tenant
+    // is FORBIDDEN. Asserting the mode rather than "some 4xx" keeps the
+    // two distinguishable — `cross_tenant_conversation_is_forbidden`
+    // pins 403 for the other one.
+    assert_eq!(
+        resp.status(),
+        400,
+        "a reference with no tenant must be refused as malformed, not \
+         treated as unbound — otherwise omitting a field disables the check"
+    );
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        fake.captured().is_empty(),
+        "a forbidden outbound must not post to the connector"
+    );
+}
+
+/// The destination host is caller-supplied, and the adapter POSTs there
+/// with a real Bot Connector bearer for the app. Anything off Microsoft's
+/// operated hosts is an exfiltration target.
+///
+/// `evil.trafficmanager.net` is the case that mattered: until #329 the
+/// allowlist matched the whole Azure Traffic Manager namespace, which
+/// anyone with a subscription can register a name in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_attacker_controlled_service_url_is_forbidden() {
+    let fake = FakeBotFramework::start().await;
+    let issuer = TestIssuer::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &fake)).await;
+
+    for host in [
+        "https://evil.trafficmanager.net/",
+        // Suffix confusion: ends with the magic string, wrong label boundary.
+        "https://smba.trafficmanager.net.evil.example/",
+        "https://attacker.example/",
+        // Userinfo smuggling: the authority is the attacker's.
+        "https://smba.trafficmanager.net@attacker.example/",
+        // Wrong scheme.
+        "http://smba.trafficmanager.net/",
+    ] {
+        let mut reference = conversation_reference(&fake, "acme");
+        reference["service_url"] = json!(host);
+
+        let resp = reqwest::Client::new()
+            .post(proc.rest_url("/v1/outbound"))
+            .bearer_auth(outbound_token(&issuer, "acme"))
+            .json(&json!({
+                "adapter": "msteams",
+                "to": "29:1abc",
+                "result": { "text": "exfil" },
+                "reference": reference,
+            }))
+            .send()
+            .await
+            .expect("POST /v1/outbound");
+
+        assert_eq!(
+            resp.status(),
+            403,
+            "`{host}` must not receive the bot token"
+        );
+    }
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        fake.captured().is_empty(),
+        "no forbidden destination may reach a connector"
+    );
+}

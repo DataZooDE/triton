@@ -2819,10 +2819,18 @@ struct TeamsConversationRef {
     #[serde(default)]
     user_id: String,
     /// The Entra tenant that owns the conversation — bound against the caller's
-    /// tenant in `authorize` (#113). Absent ⇒ no tenant binding is asserted here
-    /// (the endpoint's audience + scope still gate the call).
-    #[serde(default)]
-    tenant_id: Option<String>,
+    /// tenant in `authorize` (#113).
+    ///
+    /// REQUIRED, and not an `Option`. It used to be optional, with absent
+    /// meaning "no binding asserted" — but the reference is caller-supplied
+    /// JSON, so that let the caller decide whether to be bound: omit one
+    /// field and an `outbound:send` holder could deliver into any
+    /// conversation id it knew. A control the subject can switch off is not
+    /// a control (crew review of #327).
+    ///
+    /// Costs a genuine reference nothing: `conversation_reference_json`
+    /// always writes the real tenant.
+    tenant_id: String,
 }
 
 impl MsTeamsAdapter {
@@ -2842,6 +2850,28 @@ impl MsTeamsAdapter {
         if r.service_url.trim().is_empty() || r.conversation_id.trim().is_empty() {
             return Err(TritonError::Validation(
                 "msteams reference missing service_url / conversation_id".into(),
+            ));
+        }
+        if r.tenant_id.trim().is_empty() {
+            return Err(TritonError::Validation(
+                "msteams reference missing tenant_id: an out-of-band send must \
+                 name the tenant that owns the conversation, or the caller \
+                 chooses whether to be bound"
+                    .into(),
+            ));
+        }
+        // A conversation id becomes a PATH SEGMENT on the connector URL.
+        // Traversal or an embedded query would aim the POST — carrying a real
+        // bot token — at a different endpoint on the same host.
+        if r.conversation_id.contains('/')
+            || r.conversation_id.contains("..")
+            || r.conversation_id.contains('?')
+            || r.conversation_id.contains('#')
+        {
+            return Err(TritonError::Validation(
+                "msteams reference conversation_id may not contain `/`, `..`, \
+                 `?` or `#`: it is interpolated into the connector path"
+                    .into(),
             ));
         }
         Ok(r)
@@ -2874,12 +2904,10 @@ impl OutboundCourier for MsTeamsAdapter {
                 r.service_url
             )));
         }
-        if let Some(tenant) = &r.tenant_id
-            && tenant != &principal.tenant
-        {
+        if r.tenant_id != principal.tenant {
             return Err(TritonError::Forbidden(format!(
-                "conversation tenant `{tenant}` is not the caller's tenant `{}`",
-                principal.tenant
+                "conversation tenant `{}` is not the caller's tenant `{}`",
+                r.tenant_id, principal.tenant
             )));
         }
         Ok(())
@@ -2894,6 +2922,12 @@ impl OutboundCourier for MsTeamsAdapter {
         req: &OutboundRequest,
         principal: &Principal,
     ) -> Result<(), TritonError> {
+        // `OutboundCourier` is a PUBLIC trait: `deliver` is reachable
+        // without the endpoint that calls `authorize` first. Re-running the
+        // checks here costs one parse and removes the possibility that a
+        // future caller — or a reordering inside the endpoint — sends
+        // without them (crew review of #327).
+        self.authorize(req, principal).await?;
         let r = Self::parse_outbound_reference(req)?;
         let rendered = text_reply_message(&req.result);
         let body = surface_mapper::build_activity_body(
