@@ -101,22 +101,29 @@ fn activity_on(channel_id: &str) -> Value {
     })
 }
 
+/// `(status, body)`. The body matters: 401 is also what a wrong channel,
+/// a missing `aadObjectId`, a disallowed tenant and a rejected
+/// `serviceUrl` return, so a bare status assertion cannot tell which
+/// check fired — today's 401 would keep passing tomorrow for the wrong
+/// reason.
 async fn post_with(
     proc: &TritonProcess,
     fake: &FakeBotFramework,
     signed_service_url: &str,
     channel: &str,
-) -> reqwest::StatusCode {
+) -> (reqwest::StatusCode, String) {
     let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
     let jwt = fake.sign_jwt(claims_with_service_url(signed_service_url));
-    reqwest::Client::new()
+    let resp = reqwest::Client::new()
         .post(format!("http://{webhook}/msteams/webhook"))
         .header("Authorization", format!("Bearer {jwt}"))
         .json(&activity_on(channel))
         .send()
         .await
-        .expect("POST")
-        .status()
+        .expect("POST");
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    (status, body)
 }
 
 /// The hole: Direct Line transport, a body that says Teams.
@@ -129,7 +136,7 @@ async fn a_direct_line_transport_cannot_claim_the_teams_channel() {
     )
     .await;
 
-    let status = post_with(
+    let (status, body) = post_with(
         &proc,
         &fake,
         "https://directline.botframework.com/",
@@ -138,10 +145,12 @@ async fn a_direct_line_transport_cannot_claim_the_teams_channel() {
     .await;
 
     assert_eq!(
-        status, 401,
+        (status.as_u16(), body.as_str()),
+        (401, "channel mismatch"),
         "an Activity delivered on the Direct Line family must not be able \
          to claim `channelId: msteams` and mint an Entra principal from \
-         unsigned body fields; got {status}"
+         unsigned body fields — and must be refused by THIS check, not \
+         incidentally by another 401"
     );
 }
 
@@ -152,6 +161,43 @@ async fn a_direct_line_transport_cannot_claim_the_teams_channel() {
 // `azure_identity_refuses_to_boot_on_a_client_id_channel`). Any such test
 // would pass on the pre-existing channel gate and assert nothing about
 // this one.
+
+/// The bypass a crew review found in the first cut of this control.
+///
+/// `allowed_channel_ids` is lowercased at build time and compared with
+/// `eq_ignore_ascii_case`, so `"MSTEAMS"` passes the gate. But
+/// `expected_service_url_family` matched the RAW `channelId` against
+/// exact lowercase literals, returned `None`, and the `let … else` chain
+/// short-circuited — skipping the corroboration entirely. One character
+/// of case reopened the exact path this file exists to close.
+///
+/// The two comparisons have to agree on the same folded value, and the
+/// only way to keep them agreeing is to fold ONCE.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upper_case_channel_id_cannot_skip_the_corroboration() {
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_with(&fake, "manifest-msteams-azure.yaml"),
+    )
+    .await;
+
+    let (status, body) = post_with(
+        &proc,
+        &fake,
+        "https://directline.botframework.com/",
+        "MSTEAMS",
+    )
+    .await;
+
+    assert_eq!(
+        (status.as_u16(), body.as_str()),
+        (401, "channel mismatch"),
+        "`MSTEAMS` must be corroborated exactly like `msteams`; a case \
+         change must not turn the channel into one with no documented \
+         family and skip the check"
+    );
+}
 
 /// Teams over Teams keeps working — every documented region, so a new
 /// one Microsoft adds cannot be refused by an over-narrow path match.
@@ -174,11 +220,15 @@ async fn teams_regions_are_all_accepted_as_teams_transport() {
         // an outage.
         "https://smba.trafficmanager.net/antarctica/",
     ] {
-        let status = post_with(&proc, &fake, region, "msteams").await;
-        assert_ne!(
-            status, 401,
-            "`{region}` is Teams transport and must not be refused as a \
-             channel contradiction"
+        let (status, body) = post_with(&proc, &fake, region, "msteams").await;
+        // `assert_ne!(status, 401)` would also pass on a 400, a 500 or a
+        // panic-to-502 — i.e. on a regression that breaks Teams dispatch
+        // outright. Assert the success the sibling happy-path tests
+        // establish for this body shape.
+        assert_eq!(
+            status, 200,
+            "`{region}` is Teams transport and must dispatch normally; got \
+             {status}: {body}"
         );
     }
 }
@@ -196,10 +246,12 @@ async fn an_undocumented_channel_family_is_not_corroborated() {
     )
     .await;
 
-    let status = post_with(&proc, &fake, "https://smba.trafficmanager.net/amer/", "pva").await;
-    assert_ne!(
-        status, 401,
+    let (status, body) =
+        post_with(&proc, &fake, "https://smba.trafficmanager.net/amer/", "pva").await;
+    assert_eq!(
+        status, 200,
         "`pva` has no documented serviceUrl family, so it must pass the \
-         corroboration untouched rather than be refused on a guess"
+         corroboration untouched rather than be refused on a guess; got \
+         {status}: {body}"
     );
 }
