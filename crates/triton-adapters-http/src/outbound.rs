@@ -82,6 +82,11 @@ struct OutboundBody {
     /// `category`.
     #[serde(default)]
     variables: Vec<String>,
+    /// Optional channel-specific routing reference (e.g. a Teams
+    /// `conversationReference`) for adapters whose recipient is more than a
+    /// flat `to`. Ignored by adapters keyed solely on `to`.
+    #[serde(default)]
+    reference: Option<serde_json::Value>,
 }
 
 async fn outbound_send(
@@ -165,6 +170,7 @@ async fn outbound_send(
         result: body.result,
         category: body.category,
         variables: body.variables,
+        reference: body.reference,
     };
 
     // 5. Authz layer 2 (#113): recipient/tenant binding, behind the

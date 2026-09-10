@@ -23,6 +23,7 @@ pub use surface_mapper::RenderedMessage;
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::Router;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -31,7 +32,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
+use triton_core::{
+    Dispatcher, OutboundCourier, OutboundRequest, PostOutcome, Principal, TritonError,
+};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, OutboundKind, SignatureScheme};
 use triton_secrets::{ResolveError, SecretResolver};
 
@@ -197,6 +200,10 @@ pub struct MsTeamsAdapter {
     /// single-claimant — the path is fixed and `Router::merge` panics on
     /// an overlap, so triton-bin refuses a second claimant.
     canonical_path: bool,
+    /// Extra `serviceUrl` hosts the out-of-band courier will accept (beyond the
+    /// canonical Microsoft suffixes) — mirrors the verifier's inbound extras, so
+    /// a test fixture's `127.0.0.1` mock connector is reachable proactively too.
+    extra_service_url_hosts: Vec<String>,
     /// Agent-multiplexing router (host-provided, #315). When `Some`, an inbound
     /// message and a `__use_agent` chooser click route through it to pick WHICH
     /// agent handles the turn, overriding `inbound_tool`. `None` ⇒ legacy
@@ -526,6 +533,11 @@ impl MsTeamsAdapter {
         let openid_url = overrides
             .openid_url
             .unwrap_or_else(|| jwt_verifier::DEFAULT_OPENID_URL.to_string());
+        // Kept for the OUT-OF-BAND courier's serviceUrl allow-list check: an
+        // inbound reply trusts the serviceUrl by JWT derivation, but a proactive
+        // send validates the stored serviceUrl host against the same suffixes
+        // (plus any test-fixture extras) the verifier uses.
+        let extra_service_url_hosts = overrides.extra_service_url_hosts.clone();
         let mut verifier = JwtVerifier::new(openid_url, audience.clone())
             .with_extra_service_url_hosts(overrides.extra_service_url_hosts);
 
@@ -603,6 +615,7 @@ impl MsTeamsAdapter {
             per_tenant_limit,
             courier,
             canonical_path,
+            extra_service_url_hosts,
             router: None,
         })
     }
@@ -2694,7 +2707,22 @@ async fn post_activity(
     conversation_id: &str,
     body: &Value,
 ) -> Result<(u16, Option<String>), String> {
-    let base = verified.reply_base().trim_end_matches('/');
+    // Inbound reply: the serviceUrl is trusted-by-derivation (it rode inside the
+    // JWT the verifier just checked).
+    post_activity_to(adapter, verified.reply_base(), conversation_id, body).await
+}
+
+/// POST an activity to an explicit `service_url` — the out-of-band core the
+/// inbound [`post_activity`] and the proactive [`OutboundCourier`] both use.
+/// The caller is responsible for having validated `service_url` (inbound: JWT
+/// derivation; outbound: [`jwt_verifier::service_url_host_allowed_with_extras`]).
+async fn post_activity_to(
+    adapter: &MsTeamsAdapter,
+    service_url: &str,
+    conversation_id: &str,
+    body: &Value,
+) -> Result<(u16, Option<String>), String> {
+    let base = service_url.trim_end_matches('/');
     let url = format!("{}/v3/conversations/{}/activities", base, conversation_id);
     let access_token = adapter
         .token_client
@@ -2716,6 +2744,152 @@ async fn post_activity(
         .ok()
         .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_owned));
     Ok((status, id))
+}
+
+/// Audit tool label for an agent-initiated (proactive) send — matches the
+/// convention the other chat couriers use (`"outbound"`).
+const OUTBOUND_TOOL: &str = "outbound";
+
+/// A persisted Teams `conversationReference`: everything an OUT-OF-BAND send
+/// needs to reach the same conversation later. Captured on an inbound turn (by
+/// the host) and handed back in [`OutboundRequest::reference`]. Field names are
+/// the flattened, snake_case shape the host stores — not the raw Bot Framework
+/// camelCase envelope — so the persisted contract is explicit.
+#[derive(Debug, Clone, Deserialize)]
+struct TeamsConversationRef {
+    /// Per-tenant Bot Framework host (the reply base, e.g.
+    /// `https://smba.trafficmanager.net/emea/`).
+    service_url: String,
+    /// The conversation/thread id (`conversation.id`).
+    conversation_id: String,
+    /// The bot's own id — becomes `from` on the outbound activity.
+    #[serde(default)]
+    bot_id: String,
+    /// The recipient user's id — becomes `recipient` on the outbound activity.
+    #[serde(default)]
+    user_id: String,
+    /// The Entra tenant that owns the conversation — bound against the caller's
+    /// tenant in `authorize` (#113). Absent ⇒ no tenant binding is asserted here
+    /// (the endpoint's audience + scope still gate the call).
+    #[serde(default)]
+    tenant_id: Option<String>,
+}
+
+impl MsTeamsAdapter {
+    /// Parse + minimally validate the Teams conversationReference an out-of-band
+    /// send must carry. Fail closed (a missing/blank ref is a `Validation`
+    /// error) rather than silently dropping the send.
+    fn parse_outbound_reference(
+        req: &OutboundRequest,
+    ) -> Result<TeamsConversationRef, TritonError> {
+        let raw = req.reference.as_ref().ok_or_else(|| {
+            TritonError::Validation(
+                "msteams outbound requires a `reference` (Teams conversationReference)".into(),
+            )
+        })?;
+        let r: TeamsConversationRef = serde_json::from_value(raw.clone())
+            .map_err(|e| TritonError::Validation(format!("invalid msteams reference: {e}")))?;
+        if r.service_url.trim().is_empty() || r.conversation_id.trim().is_empty() {
+            return Err(TritonError::Validation(
+                "msteams reference missing service_url / conversation_id".into(),
+            ));
+        }
+        Ok(r)
+    }
+}
+
+#[async_trait]
+impl OutboundCourier for MsTeamsAdapter {
+    fn protocol(&self) -> &'static str {
+        PROTOCOL
+    }
+
+    /// #113 recipient/tenant binding for a proactive Teams send. The stored
+    /// `serviceUrl` host MUST still be Microsoft's (or a configured extra) —
+    /// re-checked before egress even though a captured ref was already
+    /// allow-listed — and, when the ref names a tenant, it MUST equal the
+    /// caller's: an agent may only message its own tenant's conversations.
+    async fn authorize(
+        &self,
+        req: &OutboundRequest,
+        principal: &Principal,
+    ) -> Result<(), TritonError> {
+        let r = Self::parse_outbound_reference(req)?;
+        if !jwt_verifier::service_url_host_allowed_with_extras(
+            &r.service_url,
+            &self.extra_service_url_hosts,
+        ) {
+            return Err(TritonError::Forbidden(format!(
+                "msteams serviceUrl host not allowed: {}",
+                r.service_url
+            )));
+        }
+        if let Some(tenant) = &r.tenant_id
+            && tenant != &principal.tenant
+        {
+            return Err(TritonError::Forbidden(format!(
+                "conversation tenant `{tenant}` is not the caller's tenant `{}`",
+                principal.tenant
+            )));
+        }
+        Ok(())
+    }
+
+    /// Render the agent's result and POST it to the stored conversation via the
+    /// Bot Connector, reusing the same token + surface-mapping path as an inbound
+    /// reply. Audit rides the dispatcher's `record_post` (ADR-6), sharing the
+    /// caller's `trace_id`.
+    async fn deliver(
+        &self,
+        req: &OutboundRequest,
+        principal: &Principal,
+    ) -> Result<(), TritonError> {
+        let r = Self::parse_outbound_reference(req)?;
+        let rendered = text_reply_message(&req.result);
+        let body = surface_mapper::build_activity_body(
+            &r.bot_id,
+            &r.conversation_id,
+            &r.user_id,
+            &rendered,
+        );
+        let started = std::time::Instant::now();
+        let outcome = post_activity_to(self, &r.service_url, &r.conversation_id, &body).await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        match outcome {
+            Ok((status, _id)) if (200..300).contains(&status) => {
+                self.dispatcher.record_post(
+                    OUTBOUND_TOOL,
+                    PROTOCOL,
+                    principal,
+                    latency_ms,
+                    Ok((status, PostOutcome::Posted, None)),
+                );
+                Ok(())
+            }
+            Ok((status, _)) => {
+                let err = TritonError::Provider(format!("msteams connector returned {status}"));
+                self.dispatcher.record_post(
+                    OUTBOUND_TOOL,
+                    PROTOCOL,
+                    principal,
+                    latency_ms,
+                    Err((&err, status, PostOutcome::Retry, None)),
+                );
+                Err(err)
+            }
+            Err(e) => {
+                let err = TritonError::Provider(format!("msteams connector: {e}"));
+                self.dispatcher.record_post(
+                    OUTBOUND_TOOL,
+                    PROTOCOL,
+                    principal,
+                    latency_ms,
+                    Err((&err, 0, PostOutcome::Retry, None)),
+                );
+                Err(err)
+            }
+        }
+    }
 }
 
 async fn post_reply(

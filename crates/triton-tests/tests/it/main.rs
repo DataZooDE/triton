@@ -104,6 +104,8 @@ mod msteams_channels;
 mod msteams_courier;
 #[path = "../msteams_federated.rs"]
 mod msteams_federated;
+#[path = "../msteams_outbound.rs"]
+mod msteams_outbound;
 #[path = "../msteams_report_image.rs"]
 mod msteams_report_image;
 #[path = "../msteams_theme.rs"]
