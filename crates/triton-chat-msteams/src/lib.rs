@@ -170,6 +170,16 @@ pub struct MsTeamsAdapter {
     /// Card actions and the inbound callback (issue #155).
     correlation_key: triton_correlation::KeyRing,
     identity: IdentityMode,
+    /// Channels this adapter serves, lowercased at build time.
+    ///
+    /// Adapter-level rather than per-identity-mode (#250 F11): the
+    /// question "did I agree to serve this channel?" is asked of the
+    /// transport, and the answer cannot depend on how identity is
+    /// resolved afterwards. For `azure` it comes from
+    /// `azure_identity.allowed_channel_ids`, so existing manifests keep
+    /// their meaning; for every other mode from an optional
+    /// `identity.allowed_channel_ids`, defaulting to Teams only.
+    allowed_channel_ids: Vec<String>,
     /// Manifest `tool`: where plain inbound text dispatches (default
     /// `echo`). Commands (`/narrate` etc.) keep their special routes.
     inbound_tool: String,
@@ -318,6 +328,8 @@ impl MsTeamsAdapter {
                     triton_chat_identity::SenderTable::parse(&table_json)
                         .map_err(BuildError::Identity)?,
                 )
+                // Channels come from `identity.allowed_channel_ids` for
+                // this mode; resolved below, after the match.
             }
             IdentityKind::Azure => {
                 let cfg_field = adapter
@@ -371,7 +383,10 @@ impl MsTeamsAdapter {
                         "identity.kind `azure` cannot serve channel `{bad}`: its \
                          `from.id` is client-chosen, so the Entra fields this \
                          strategy reads from the Activity body prove nothing. \
-                         Use `sender_table` or `upstream` for that channel."
+                         Use `upstream` for that channel — NOT `sender_table`, \
+                         which this message used to suggest: its key is \
+                         `from.id`, which is the very field the client \
+                         chooses there (#250 F11)."
                     )));
                 }
                 // #250: the tenant this strategy derives comes from
@@ -420,6 +435,64 @@ impl MsTeamsAdapter {
                 return Err(BuildError::Unsupported(format!(
                     "msteams adapter supports `identity.kind: sender_table` or `azure`; got {other:?}"
                 )));
+            }
+        };
+
+        // #250 F11: one channel allowlist for the adapter, whatever the
+        // identity mode.
+        //
+        // `azure` already declares its channels inside `azure_identity`,
+        // so it keeps that source and no existing manifest changes
+        // meaning. Every other mode reads an optional
+        // `identity.allowed_channel_ids` (a JSON array) and otherwise
+        // gets the Teams-only default — the same default `azure` has had
+        // since #250, and fail-closed: a deployment serving another
+        // channel must now say so, rather than serving it ungated.
+        let allowed_channel_ids: Vec<String> = match &identity {
+            IdentityMode::Azure(cfg) => cfg.allowed_channel_ids.clone(),
+            _ => {
+                let declared = match adapter.identity.credentials.get("allowed_channel_ids") {
+                    Some(field) => {
+                        let json = resolver
+                            .resolve(field)
+                            .await
+                            .map_err(|e| BuildError::Resolve("identity.allowed_channel_ids", e))?;
+                        serde_json::from_str::<Vec<String>>(&json)
+                            .map_err(|e| BuildError::TableParse(e.to_string()))?
+                    }
+                    None => default_allowed_channel_ids(),
+                };
+                let declared: Vec<String> = declared
+                    .into_iter()
+                    .map(|c| c.trim().to_ascii_lowercase())
+                    .collect();
+                if declared.is_empty() {
+                    return Err(BuildError::Unsupported(
+                        "identity.allowed_channel_ids is present but empty; that refuses \
+                         every Activity while looking configured. Omit it for the \
+                         Teams-only default, or name the channels this adapter serves."
+                            .into(),
+                    ));
+                }
+                // A client-chosen `from.id` is not an identity, and a
+                // sender table keyed on it is sender-id-as-password with
+                // a public password (#250 F11, measured). Refused for the
+                // same reason `azure` refuses it, and stated separately
+                // because the old `azure` message recommended exactly
+                // this combination.
+                if let Some(bad) = declared
+                    .iter()
+                    .find(|c| CLIENT_CHOSEN_ID_CHANNELS.contains(&c.as_str()))
+                {
+                    return Err(BuildError::Unsupported(format!(
+                        "this adapter cannot serve channel `{bad}`: its `from.id` is \
+                         chosen by the CLIENT, and every identity mode here keys on \
+                         that field, so a mapped sender id is guessable rather than \
+                         proven. Serving it needs an identity mode that does not read \
+                         the principal off the Activity body."
+                    )));
+                }
+                declared
             }
         };
 
@@ -520,6 +593,7 @@ impl MsTeamsAdapter {
             audience,
             correlation_key,
             identity,
+            allowed_channel_ids,
             inbound_tool: adapter.tool.clone(),
             dispatcher,
             verifier,
@@ -933,6 +1007,135 @@ fn resolve_sender(
         return Err((StatusCode::BAD_REQUEST, "missing from.id").into_response());
     };
 
+    // #250 crew F11 — the channel trust decision is made HERE, above the
+    // identity-mode match, for EVERY mode.
+    //
+    // It used to live inside the `azure` arm only, so a `sender_table`
+    // deployment made no channel decision at all: an Activity declaring
+    // `channelId: "directline"` carrying a mapped Teams sender id
+    // dispatched as that principal, status 200 (measured, not argued —
+    // `a_sender_table_makes_no_channel_trust_decision`). `from.id` is
+    // body metadata too, and on a channel where the CLIENT chooses it,
+    // a table lookup is sender-id-as-password with a public password.
+    //
+    // That also corrects the advice the old boot refusal gave: it told
+    // operators to serve client-chosen-id channels with `sender_table`
+    // "or `upstream`", which was wrong for `sender_table` for exactly
+    // this reason.
+    // Folded ONCE, and every comparison below uses this value.
+    //
+    // `allowed_channel_ids` is lowercased at build time, so the gate
+    // has to fold the inbound too — the gate must not turn on
+    // Microsoft's casing. The corroboration further down then has to
+    // fold the SAME way, and a crew review found that it did not: it
+    // matched the raw `channelId` against exact lowercase literals,
+    // so `"MSTEAMS"` passed the gate, returned `None` from
+    // `expected_service_url_family`, and skipped the corroboration
+    // entirely. One character of case reopened the path the
+    // corroboration exists to close.
+    //
+    // Two comparisons that must agree on a folded value cannot each
+    // fold their own way. Fold once, here.
+    let channel = activity
+        .channel_id
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let channel = channel.as_str();
+    if !adapter
+        .allowed_channel_ids
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(channel))
+    {
+        record_rejection(
+            adapter,
+            "-",
+            "-",
+            TritonError::Auth(format!(
+                "channelId {channel:?} is not on this adapter's \
+                     allowed_channel_ids {:?}",
+                adapter.allowed_channel_ids
+            )),
+        );
+        return Err((StatusCode::UNAUTHORIZED, "wrong channel").into_response());
+    }
+    // #250 crew F3: the declared channel must match the transport
+    // that actually delivered this.
+    //
+    // Everything the gate above read is UNSIGNED body metadata, so
+    // a deployment declaring Teams only is still reachable over any
+    // channel Microsoft will mint a token for: deliver over Direct
+    // Line — where `from.id` is client-chosen, which is why `azure`
+    // refuses to boot on a declared Direct Line channel — and write
+    // `"channelId": "msteams"` in the body. `from.aadObjectId` and
+    // `channelData.tenant.id` then become the principal.
+    //
+    // `serviceUrl` is the one field describing the transport rather
+    // than the sender's claim about it, and on a multi-tenant bot
+    // Microsoft SIGNS it into the connector token. Microsoft assigns
+    // those hosts by channel family, so a signed Direct Line host
+    // beside a body claiming `msteams` is a contradiction.
+    //
+    // Three deliberate limits, each a case where a check would look
+    // stronger than it is:
+    //
+    //  * Only when the value is ATTESTED. A single-tenant bot's
+    //    Entra token carries no `serviceurl` claim, so its reply
+    //    target is body-supplied too — corroborating one body field
+    //    against another proves nothing.
+    //  * Only for channels with a documented host family
+    //    (`expected_service_url_family`). No guessing.
+    //  * NOT for the tenant. That half of F3 is not deferred, it is
+    //    impossible: Microsoft assigns the host by REGION and every
+    //    tenant in a region shares one, so a host can never identify
+    //    a tenant.
+    // Say ONCE, on real traffic, when the corroboration does not
+    // apply.
+    //
+    // A crew review named the risk precisely: the code, the tests
+    // and realizations.md all read as though the forged-channel
+    // hole is closed, but the check needs an ATTESTED serviceUrl
+    // and a single-tenant Entra token carries no `serviceurl`
+    // claim at all — which is the shape agent-lab actually runs.
+    // So on that deployment the control never fires, and nothing
+    // said so.
+    //
+    // A boot-time line could not tell the truth here: the binary
+    // cannot know which token shape will arrive until one does.
+    // This fires on the first Activity that skips the check, which
+    // is the moment the fact becomes knowable. Once per process —
+    // an operator needs to know THAT it is inactive, not once per
+    // request.
+    if !verified.service_url_attested {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| {
+                println!(
+                    r#"{{"kind":"log","level":"warn","msg":"msteams: channel/serviceUrl corroboration INACTIVE — this Activity carried no signed `serviceurl` claim (single-tenant Entra bots carry none), so `channelId` is trusted from the unsigned body alone (#250/#319)","channel":"{}"}}"#,
+                    adapter.name.escape_default(),
+                );
+            });
+    }
+    if verified.service_url_attested
+            && let Some(url) = verified.service_url.as_deref()
+            // A fixture/local stand-in host is in no channel family.
+            && !adapter.verifier.is_extra_service_url_host(url)
+            && let Some(family) = expected_service_url_family(channel)
+            && !service_url_in_family(url, family)
+    {
+        record_rejection(
+            adapter,
+            "-",
+            "-",
+            TritonError::Auth(format!(
+                "channelId {channel:?} contradicts the signed \
+                     serviceUrl host, which is not in {family:?} — the \
+                     Activity was delivered on a different channel than \
+                     its body claims"
+            )),
+        );
+        return Err((StatusCode::UNAUTHORIZED, "channel mismatch").into_response());
+    }
+
     let (sub, scopes, tenant) = match &adapter.identity {
         IdentityMode::SenderTable(table) => match table.resolve(&from.id) {
             Some(r) => {
@@ -972,119 +1175,7 @@ fn resolve_sender(
             // awaited data collection; it does not, and saying so was
             // itself a small hazard — a deferral that reads as scheduled
             // gets scheduled.
-            // Folded ONCE, and every comparison below uses this value.
-            //
-            // `allowed_channel_ids` is lowercased at build time, so the gate
-            // has to fold the inbound too — the gate must not turn on
-            // Microsoft's casing. The corroboration further down then has to
-            // fold the SAME way, and a crew review found that it did not: it
-            // matched the raw `channelId` against exact lowercase literals,
-            // so `"MSTEAMS"` passed the gate, returned `None` from
-            // `expected_service_url_family`, and skipped the corroboration
-            // entirely. One character of case reopened the path the
-            // corroboration exists to close.
-            //
-            // Two comparisons that must agree on a folded value cannot each
-            // fold their own way. Fold once, here.
-            let channel = activity
-                .channel_id
-                .as_deref()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            let channel = channel.as_str();
-            if !cfg
-                .allowed_channel_ids
-                .iter()
-                .any(|c| c.eq_ignore_ascii_case(channel))
-            {
-                record_rejection(
-                    adapter,
-                    "-",
-                    "-",
-                    TritonError::Auth(format!(
-                        "channelId {channel:?} is not on this adapter's \
-                         allowed_channel_ids {:?}",
-                        cfg.allowed_channel_ids
-                    )),
-                );
-                return Err((StatusCode::UNAUTHORIZED, "wrong channel").into_response());
-            }
-            // #250 crew F3: the declared channel must match the transport
-            // that actually delivered this.
-            //
-            // Everything the gate above read is UNSIGNED body metadata, so
-            // a deployment declaring Teams only is still reachable over any
-            // channel Microsoft will mint a token for: deliver over Direct
-            // Line — where `from.id` is client-chosen, which is why `azure`
-            // refuses to boot on a declared Direct Line channel — and write
-            // `"channelId": "msteams"` in the body. `from.aadObjectId` and
-            // `channelData.tenant.id` then become the principal.
-            //
-            // `serviceUrl` is the one field describing the transport rather
-            // than the sender's claim about it, and on a multi-tenant bot
-            // Microsoft SIGNS it into the connector token. Microsoft assigns
-            // those hosts by channel family, so a signed Direct Line host
-            // beside a body claiming `msteams` is a contradiction.
-            //
-            // Three deliberate limits, each a case where a check would look
-            // stronger than it is:
-            //
-            //  * Only when the value is ATTESTED. A single-tenant bot's
-            //    Entra token carries no `serviceurl` claim, so its reply
-            //    target is body-supplied too — corroborating one body field
-            //    against another proves nothing.
-            //  * Only for channels with a documented host family
-            //    (`expected_service_url_family`). No guessing.
-            //  * NOT for the tenant. That half of F3 is not deferred, it is
-            //    impossible: Microsoft assigns the host by REGION and every
-            //    tenant in a region shares one, so a host can never identify
-            //    a tenant.
-            // Say ONCE, on real traffic, when the corroboration does not
-            // apply.
-            //
-            // A crew review named the risk precisely: the code, the tests
-            // and realizations.md all read as though the forged-channel
-            // hole is closed, but the check needs an ATTESTED serviceUrl
-            // and a single-tenant Entra token carries no `serviceurl`
-            // claim at all — which is the shape agent-lab actually runs.
-            // So on that deployment the control never fires, and nothing
-            // said so.
-            //
-            // A boot-time line could not tell the truth here: the binary
-            // cannot know which token shape will arrive until one does.
-            // This fires on the first Activity that skips the check, which
-            // is the moment the fact becomes knowable. Once per process —
-            // an operator needs to know THAT it is inactive, not once per
-            // request.
-            if !verified.service_url_attested {
-                static SAID: std::sync::Once = std::sync::Once::new();
-                SAID.call_once(|| {
-                    println!(
-                        r#"{{"kind":"log","level":"warn","msg":"msteams: channel/serviceUrl corroboration INACTIVE — this Activity carried no signed `serviceurl` claim (single-tenant Entra bots carry none), so `channelId` is trusted from the unsigned body alone (#250/#319)","channel":"{}"}}"#,
-                        adapter.name.escape_default(),
-                    );
-                });
-            }
-            if verified.service_url_attested
-                && let Some(url) = verified.service_url.as_deref()
-                // A fixture/local stand-in host is in no channel family.
-                && !adapter.verifier.is_extra_service_url_host(url)
-                && let Some(family) = expected_service_url_family(channel)
-                && !service_url_in_family(url, family)
-            {
-                record_rejection(
-                    adapter,
-                    "-",
-                    "-",
-                    TritonError::Auth(format!(
-                        "channelId {channel:?} contradicts the signed \
-                         serviceUrl host, which is not in {family:?} — the \
-                         Activity was delivered on a different channel than \
-                         its body claims"
-                    )),
-                );
-                return Err((StatusCode::UNAUTHORIZED, "channel mismatch").into_response());
-            }
+
             // sub = from.aadObjectId. Refuse rather than fall back to
             // the channel id: a message with no AAD object id can't
             // yield an Entra principal.

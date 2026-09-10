@@ -413,18 +413,13 @@ async fn an_unattested_activity_says_the_corroboration_did_not_apply() {
 /// an Activity declaring `channelId: "directline"`. The fixture maps
 /// `29:1abc` → `alice`/`acme`; the Activity below claims that id.
 ///
-/// IGNORED because it documents a gap that is not fixed yet, not a
-/// regression. Closing it is a config decision — a channel gate hoisted
-/// above the identity-mode match, or channel-qualified sender-table keys
-/// — either of which changes the manifest surface and every existing
-/// table. Whoever takes that on has their red test here: remove the
-/// `#[ignore]`.
+/// CLOSED by hoisting the channel trust decision above the identity-mode
+/// match, so every mode makes one. This is the red test for that fix.
 ///
 /// The remaining unknown is not the code path but the Azure side: an
 /// attacker still needs a valid Bot Framework token for THIS bot, which
 /// means the bot's registration must have a client-chosen-`from.id`
 /// channel enabled. That is a fact about the deployment, not the repo.
-#[ignore = "F11: confirmed gap — sender_table applies no channel gate; fix is a manifest decision"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_sender_table_makes_no_channel_trust_decision() {
     let fake = FakeBotFramework::start().await;
@@ -475,5 +470,43 @@ async fn a_sender_table_makes_no_channel_trust_decision() {
          in this identity mode, so a client-chosen `from.id` on a \
          Direct Line-family channel becomes a mapped principal. \
          (status was {status})"
+    );
+}
+
+/// A gate, not a wall.
+///
+/// Hoisting the channel decision fails closed — Teams only unless
+/// declared — which would be a regression dressed as a fix if a
+/// deployment could not then declare the channels it serves. `pva`
+/// (Copilot Studio) is not a client-chosen-`from.id` channel, so a
+/// sender table may serve it once it says so.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sender_table_may_declare_the_channels_it_serves() {
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_with(&fake, "manifest-msteams-sendertable-channels.yaml"),
+    )
+    .await;
+
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+    let jwt = fake.sign_jwt(claims_with_service_url(&fake.service_url()));
+    let mut activity = activity_on("pva");
+    activity["from"]["id"] = json!("29:1abc");
+    activity["serviceUrl"] = json!(fake.service_url());
+
+    let status = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&activity)
+        .send()
+        .await
+        .expect("POST")
+        .status();
+
+    assert_eq!(
+        status, 200,
+        "a declared channel must be served — otherwise the hoisted gate is \
+         a regression, not a fix"
     );
 }
