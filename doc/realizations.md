@@ -2024,3 +2024,33 @@ Three limits worth keeping in view when reading that check:
   belongs to no channel family; without that exemption the check reads
   every integration test as a contradiction — which is exactly how it
   first failed, taking three legitimate Teams tests down with it.
+
+### The remedy in the error message was the vulnerability (2026-09-10)
+
+`azure` refuses at boot to serve a Direct Line-family channel, because
+the Entra fields it reads are Activity body metadata and `from.id` there
+is client-chosen. The refusal told the operator what to do instead:
+
+> Use `sender_table` or `upstream` for that channel.
+
+`sender_table` keys on `from.id`. It is the *same field*, on the same
+channel, chosen by the same client. The message recommended a
+configuration with the identical defect, and it had sat there since #250
+being read as guidance.
+
+The gate was inside the `IdentityMode::Azure` arm, so a sender-table
+adapter made no channel trust decision at all. Measured before fixing: an
+Activity declaring `channelId: "directline"` carrying a mapped Teams
+sender id dispatched as that principal, 200 OK.
+
+Two things to carry forward:
+
+- **A control scoped to one branch of a match is scoped to one branch.**
+  "Did I agree to serve this channel?" is a question about the transport;
+  it cannot have a different answer depending on how identity is resolved
+  afterwards. It now sits above the match, for every mode.
+- **Remediation advice ages into a security claim.** Every "use X
+  instead" in an error message asserts that X is safe here. When the
+  reason X was unsafe applies to the alternative too, the message is a
+  vulnerability with a friendly tone. Re-read the fix suggestions in your
+  own error strings when the threat model changes.
