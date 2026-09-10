@@ -22,6 +22,8 @@ mod a2ui_flutter_fixtures;
 mod a2ui_parity;
 #[path = "../acc_hardening.rs"]
 mod acc_hardening;
+#[path = "../audit_operator_conjunction.rs"]
+mod audit_operator_conjunction;
 #[path = "../audit_reject_coalescing.rs"]
 mod audit_reject_coalescing;
 #[path = "../audit_retrieval.rs"]
