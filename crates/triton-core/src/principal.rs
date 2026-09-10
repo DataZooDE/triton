@@ -54,6 +54,16 @@ pub struct Principal {
     /// dispatches), in which case the field is omitted from the line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sender_ref: Option<String>,
+    /// The chat conversation this turn arrived on, as a channel-specific
+    /// reference an out-of-band send can later reach (Teams: the flattened
+    /// `conversationReference`). A chat adapter that can capture one sets it; it
+    /// rides the (in-process, embedded) dispatch into the upstream agent's turn
+    /// so a tool like `start_operation` can persist it and deliver a result back
+    /// to this conversation later. `None` off-chat or where no reference exists.
+    /// (A remote upstream would additionally need this forwarded as a header;
+    /// today it serves the in-process embedded host.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_ref: Option<serde_json::Value>,
 }
 
 /// Cap on a principal field accepted from an out-of-process identity
@@ -156,6 +166,7 @@ impl Principal {
             groups: self.groups.clone(),
             tenant: self.tenant.clone(),
             trace_id: self.trace_id.clone(),
+            conversation_ref: self.conversation_ref.clone(),
         }
     }
 }
@@ -170,4 +181,8 @@ pub struct ToolPrincipal {
     pub groups: Vec<String>,
     pub tenant: String,
     pub trace_id: String,
+    /// The turn's chat conversation reference (see [`Principal::conversation_ref`]),
+    /// so an in-process tool can attach it to durable work it starts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_ref: Option<serde_json::Value>,
 }

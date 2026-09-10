@@ -621,6 +621,7 @@ async fn serve_dashboard_png(
             raw_token: String::new(),
             trace_id: uuid::Uuid::new_v4().to_string(),
             sender_ref: None,
+            conversation_ref: None,
         };
         return match adapter
             .dispatcher
@@ -1271,6 +1272,7 @@ async fn handle_webhook(
         trace_id: uuid::Uuid::new_v4().to_string(),
         // #250: only under `upstream` — see Principal::sender_ref.
         sender_ref: identity_was_resolved_upstream.then(|| sender_name.to_string()),
+        conversation_ref: None,
     };
     let principal_for_post = principal.clone();
 

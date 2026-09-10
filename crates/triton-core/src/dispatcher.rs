@@ -1362,6 +1362,7 @@ mod tests {
             raw_token: String::new(),
             trace_id: "trace-test".into(),
             sender_ref: None,
+            conversation_ref: None,
         }
     }
 

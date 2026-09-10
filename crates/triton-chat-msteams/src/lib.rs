@@ -1282,6 +1282,7 @@ fn make_principal(sub: &str, scopes: &[String], tenant: &str) -> Principal {
         raw_token: String::new(),
         trace_id: uuid::Uuid::new_v4().to_string(),
         sender_ref: None,
+        conversation_ref: None,
     }
 }
 
@@ -1328,9 +1329,9 @@ async fn dispatch_message(
             pick: None,
             conversation_ref: Some(conversation_reference_json(
                 verified.reply_base(),
-                activity,
                 &conversation_id,
                 &recipient_id,
+                &sender.from_id,
                 &sender.tenant,
             )),
         };
@@ -1649,9 +1650,9 @@ async fn handle_callback(
             .unwrap_or_default();
         let conversation_ref = Some(conversation_reference_json(
             verified.reply_base(),
-            activity,
             &conversation_id,
             &bot_id,
+            &sender.from_id,
             &sender.tenant,
         ));
         let key = triton_chat_routing::ConvKey::msteams(conversation_id, "", sender.sub.clone());
@@ -1822,7 +1823,18 @@ async fn dispatch_and_post_reply(
     // helper is here for when `upstream` lands, where the resolver
     // replaces the asserted identity and the raw id becomes the only
     // way to tell an impersonation from the victim's own session.
-    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let mut principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    // T3 (async-ops): carry the Teams conversationReference into the agent's
+    // turn so a tool like `start_operation` can persist it and deliver a result
+    // back to this conversation later (the in-process embedded dispatch passes
+    // the Principal straight to the tool).
+    principal.conversation_ref = Some(conversation_reference_json(
+        verified.reply_base(),
+        conversation_id,
+        recipient_id,
+        &sender.from_id,
+        &sender.tenant,
+    ));
     let principal_for_post = principal.clone();
     // Direct render_report (the "Open report:" Execute): the chart URL
     // is minted from the INVOKED args — the result carries only a PNG.
@@ -2778,16 +2790,11 @@ const OUTBOUND_TOOL: &str = "outbound";
 /// `recipient`); `service_url` is the JWT-derived trusted reply base.
 fn conversation_reference_json(
     service_url: &str,
-    activity: &Activity,
     conversation_id: &str,
     bot_id: &str,
+    user_id: &str,
     tenant: &str,
 ) -> Value {
-    let user_id = activity
-        .from
-        .as_ref()
-        .map(|f| f.id.clone())
-        .unwrap_or_default();
     json!({
         // Self-describing: the delivery side (the agent's outbound-callback
         // receiver) routes to the matching triton adapter by this channel.
@@ -2929,13 +2936,33 @@ impl OutboundCourier for MsTeamsAdapter {
         // without them (crew review of #327).
         self.authorize(req, principal).await?;
         let r = Self::parse_outbound_reference(req)?;
-        let rendered = text_reply_message(&req.result);
-        let body = surface_mapper::build_activity_body(
+        // The SAME renderer the inbound reply path uses, not
+        // `text_reply_message`.
+        //
+        // This feature exists to deliver a FINISHED long-running operation
+        // back to the conversation that started it, and the archetypal
+        // such result asks for approval. `text_reply_message` drops every
+        // interactive component, so that prompt arrived as prose with
+        // nothing to click — and a render error became the literal text
+        // `(no content)` posted with `result: ok` (crew review of #327).
+        //
+        // `build_reply_body` also binds each control's correlation token
+        // to (tenant, recipient), which is what stops a proactively
+        // delivered card being a capability for whoever can see it
+        // (#250/#287). The recipient here is the stored `user_id`.
+        let chrome = fetch_chrome(self, principal).await;
+        let body = build_reply_body(
+            self,
             &r.bot_id,
             &r.conversation_id,
             &r.user_id,
-            &rendered,
-        );
+            &req.result,
+            None,
+            principal,
+            &chrome,
+            &r.tenant_id,
+        )
+        .await;
         let started = std::time::Instant::now();
         let outcome = post_activity_to(self, &r.service_url, &r.conversation_id, &body).await;
         let latency_ms = started.elapsed().as_millis() as u64;
@@ -3122,20 +3149,13 @@ mod tests {
     /// serviceUrl + tenant round-trip. This is the reference the host persists.
     #[test]
     fn conversation_reference_is_flattened_for_the_courier() {
-        let activity: Activity = serde_json::from_value(json!({
-            "type": "message",
-            "from": { "id": "29:user-alice" },
-            "conversation": { "id": "a:conv-1" },
-            "recipient": { "id": "28:bot-1" },
-            "text": "hi",
-        }))
-        .expect("activity");
-
+        // The caller flattens the inbound Activity: recipient (bot) → bot_id,
+        // from (user) → user_id.
         let r = conversation_reference_json(
             "https://smba.trafficmanager.net/emea/",
-            &activity,
             "a:conv-1",
             "28:bot-1",
+            "29:user-alice",
             "tenant-acme",
         );
         assert_eq!(r["channel"], "msteams");

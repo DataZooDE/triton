@@ -55,6 +55,7 @@ fn principal(tenant: &str, sub: &str) -> Principal {
         raw_token: String::new(),
         trace_id: format!("test-{sub}"),
         sender_ref: None,
+        conversation_ref: None,
     }
 }
 
@@ -194,6 +195,7 @@ fn pairing_principal() -> Principal {
         raw_token: String::new(),
         trace_id: "test-pairing".to_string(),
         sender_ref: None,
+        conversation_ref: None,
     }
 }
 

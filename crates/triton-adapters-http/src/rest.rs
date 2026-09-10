@@ -1063,6 +1063,7 @@ mod trace_scope_tests {
             raw_token: String::new(),
             trace_id: "t".into(),
             sender_ref: None,
+            conversation_ref: None,
         }
     }
 
