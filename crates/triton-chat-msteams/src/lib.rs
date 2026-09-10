@@ -1326,6 +1326,13 @@ async fn dispatch_message(
             tenant: &sender.tenant,
             caller_sub: &sender.sub,
             pick: None,
+            conversation_ref: Some(conversation_reference_json(
+                verified.reply_base(),
+                activity,
+                &conversation_id,
+                &recipient_id,
+                &sender.tenant,
+            )),
         };
         match router.route(ctx).await {
             triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
@@ -1635,6 +1642,18 @@ async fn handle_callback(
             .as_ref()
             .map(|c| c.id.clone())
             .unwrap_or_default();
+        let bot_id = activity
+            .recipient
+            .as_ref()
+            .map(|r| r.id.clone())
+            .unwrap_or_default();
+        let conversation_ref = Some(conversation_reference_json(
+            verified.reply_base(),
+            activity,
+            &conversation_id,
+            &bot_id,
+            &sender.tenant,
+        ));
         let key = triton_chat_routing::ConvKey::msteams(conversation_id, "", sender.sub.clone());
         let ctx = triton_chat_routing::RouteCtx {
             key,
@@ -1642,6 +1661,7 @@ async fn handle_callback(
             tenant: &sender.tenant,
             caller_sub: &sender.sub,
             pick: Some((id, msg.clone())),
+            conversation_ref,
         };
         match router.route(ctx).await {
             triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
@@ -2750,6 +2770,33 @@ async fn post_activity_to(
 /// convention the other chat couriers use (`"outbound"`).
 const OUTBOUND_TOOL: &str = "outbound";
 
+/// Serialize an inbound Teams `conversationReference` in the flattened shape the
+/// out-of-band courier consumes ([`TeamsConversationRef`]) — so the host can
+/// persist it against a long-running operation and later deliver the result
+/// back to this exact conversation. `bot_id` is the inbound `recipient` (the
+/// bot, → outbound `from`); the user is the inbound `from` (→ outbound
+/// `recipient`); `service_url` is the JWT-derived trusted reply base.
+fn conversation_reference_json(
+    service_url: &str,
+    activity: &Activity,
+    conversation_id: &str,
+    bot_id: &str,
+    tenant: &str,
+) -> Value {
+    let user_id = activity
+        .from
+        .as_ref()
+        .map(|f| f.id.clone())
+        .unwrap_or_default();
+    json!({
+        "service_url": service_url,
+        "conversation_id": conversation_id,
+        "bot_id": bot_id,
+        "user_id": user_id,
+        "tenant_id": tenant,
+    })
+}
+
 /// A persisted Teams `conversationReference`: everything an OUT-OF-BAND send
 /// needs to reach the same conversation later. Captured on an inbound turn (by
 /// the host) and handed back in [`OutboundRequest::reference`]. Field names are
@@ -3014,6 +3061,44 @@ mod tests {
         assert_eq!(strip_mention_prefix("plain message"), "plain message");
         // Leading whitespace tolerated.
         assert_eq!(strip_mention_prefix("   <at>@b</at>  hi"), "hi");
+    }
+
+    /// T2: the inbound Activity is flattened into exactly the shape the
+    /// out-of-band courier ([`TeamsConversationRef`]) parses — the inbound
+    /// `recipient` (bot) becomes `bot_id` (outbound `from`), the inbound `from`
+    /// (user) becomes `user_id` (outbound `recipient`), and the JWT-derived
+    /// serviceUrl + tenant round-trip. This is the reference the host persists.
+    #[test]
+    fn conversation_reference_is_flattened_for_the_courier() {
+        let activity: Activity = serde_json::from_value(json!({
+            "type": "message",
+            "from": { "id": "29:user-alice" },
+            "conversation": { "id": "a:conv-1" },
+            "recipient": { "id": "28:bot-1" },
+            "text": "hi",
+        }))
+        .expect("activity");
+
+        let r = conversation_reference_json(
+            "https://smba.trafficmanager.net/emea/",
+            &activity,
+            "a:conv-1",
+            "28:bot-1",
+            "tenant-acme",
+        );
+        assert_eq!(r["service_url"], "https://smba.trafficmanager.net/emea/");
+        assert_eq!(r["conversation_id"], "a:conv-1");
+        assert_eq!(r["bot_id"], "28:bot-1", "bot id → outbound `from`");
+        assert_eq!(
+            r["user_id"], "29:user-alice",
+            "inbound `from` → outbound `recipient`"
+        );
+        assert_eq!(r["tenant_id"], "tenant-acme");
+
+        // And it deserializes straight back into what the courier requires.
+        let parsed: TeamsConversationRef = serde_json::from_value(r).expect("round-trips");
+        assert_eq!(parsed.conversation_id, "a:conv-1");
+        assert_eq!(parsed.service_url, "https://smba.trafficmanager.net/emea/");
     }
 
     #[test]
