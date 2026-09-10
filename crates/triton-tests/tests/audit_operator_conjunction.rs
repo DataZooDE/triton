@@ -278,3 +278,45 @@ async fn the_operator_list_matches_the_tenant_too() {
 // `a2a_trace_authz.rs`, on the embedded host. Pinning `/v1/trace` itself
 // needs the harness to build the binary with `--features capture`, which
 // is a change to the harness, not to this file.
+
+/// The default is `local`, and `local` turns the conjunction OFF.
+///
+/// `TRITON_ENV` is `#[arg(long, env = "TRITON_ENV", default_value =
+/// "local")]`, and `is_named_operator` treats `local` as "named". So a
+/// deployment that simply never sets the variable — the default path, not
+/// a typo — hands the cross-tenant view to anyone whose issuer will mint
+/// `audit:read-all`. Every other test in this file sets `nonprod`
+/// explicitly, so nothing pinned the default.
+///
+/// This test does not argue the default should change; it records what it
+/// currently IS, so a change is a deliberate act with a failing test
+/// attached rather than a silent one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_unset_env_default_grants_the_view_on_the_scope_alone() {
+    let issuer = TestIssuer::start().await;
+    // Deliberately NO TRITON_ENV.
+    let env = HashMap::from([
+        ("TRITON_OIDC_ISSUER".to_string(), issuer.issuer_url()),
+        (
+            "TRITON_OIDC_AUDIENCE".to_string(),
+            "triton-test".to_string(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+
+    let acme = token_for(&issuer, "alice", "acme", "chat");
+    let claimant = token_for(&issuer, "ops", "ops", "audit:read-all");
+
+    dispatch_as(&proc, &acme, "acme-default").await;
+    dispatch_as(&proc, &claimant, "ops-default").await;
+
+    let seen = audit_tenants(&proc, &claimant).await;
+    assert!(
+        seen.iter().any(|t| t == "acme"),
+        "with TRITON_ENV unset the binary defaults to `local`, where the \
+         scope ALONE grants the cross-tenant view. If this assertion \
+         starts failing, the default changed — which may well be the right \
+         call, but it is a behaviour change and this is the test that says \
+         so; got {seen:?}"
+    );
+}
