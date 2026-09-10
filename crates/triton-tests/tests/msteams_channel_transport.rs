@@ -510,3 +510,49 @@ async fn a_sender_table_may_declare_the_channels_it_serves() {
          a regression, not a fix"
     );
 }
+
+/// End-to-end on the path that actually reaches the allowlist.
+///
+/// A single-tenant bot's Entra token carries no `serviceurl` claim, so
+/// the reply target comes from the UNSIGNED Activity body and
+/// `SERVICE_URL_HOST_SUFFIXES` is the only check between that body and a
+/// real Bot Connector bearer. The list used to admit the whole
+/// `trafficmanager.net` namespace — Azure Traffic Manager, where any
+/// subscription holder can register a profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_body_supplied_reply_target_on_a_registrable_host_is_refused() {
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_with(&fake, "manifest-msteams-azure.yaml"),
+    )
+    .await;
+
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+    // No `serviceurl` claim: the single-tenant shape.
+    let jwt = fake.sign_jwt(json!({
+        "iss": BOT_ISSUER,
+        "aud": AUDIENCE,
+        "exp": now_unix() + 600,
+        "iat": now_unix() - 5,
+    }));
+    let mut activity = activity_on("msteams");
+    activity["serviceUrl"] = json!("https://evil.trafficmanager.net/");
+
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&activity)
+        .send()
+        .await
+        .expect("POST");
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+
+    assert_eq!(
+        (status.as_u16(), body.as_str()),
+        (401, "unauthorized"),
+        "a body-supplied reply target on a customer-registrable host must \
+         be refused before any reply carries the bot token there"
+    );
+}

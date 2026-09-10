@@ -2054,3 +2054,37 @@ Two things to carry forward:
   reason X was unsafe applies to the alternative too, the message is a
   vulnerability with a friendly tone. Re-read the fix suggestions in your
   own error strings when the threat model changes.
+
+### An allowlist is only as narrow as the namespace it names (2026-09-10)
+
+`SERVICE_URL_HOST_SUFFIXES` was `[".botframework.com", ".trafficmanager.net"]`,
+which reads like "Microsoft's two host families". One of them is not.
+`trafficmanager.net` is Azure Traffic Manager: any subscription holder
+creates a profile and receives `<their-name>.trafficmanager.net`. So the
+list admitted an attacker-registrable host — measured, not argued:
+
+```
+https://evil.trafficmanager.net/   allowed=true
+https://trafficmanager.net/        allowed=true
+```
+
+This is a reply TARGET. The adapter POSTs there with a real Bot Connector
+bearer for the app, and on a single-tenant bot the value comes from the
+UNSIGNED Activity body, where this list is the only thing between the body
+and the token.
+
+Teams uses exactly one host under that namespace: `smba`. Naming it is not
+a narrowing of Microsoft's contract, it is a correction — the list was
+wider than the protocol it exists to describe.
+
+The rule to carry: **when an allowlist names a domain, ask who else can get
+a name in it.** "Vendor-owned" and "vendor-operated" are different
+properties, and cloud vendors sell subdomains of their own infrastructure
+namespaces (`*.trafficmanager.net`, `*.blob.core.windows.net`,
+`*.cloudapp.azure.com`, `*.s3.amazonaws.com`). A suffix match on any of
+those is a match on the vendor's customers, not on the vendor.
+
+Found by an agent-crew review of a proactive-delivery PR that reused this
+list for OUTBOUND egress — which is where it would have been worse still,
+since there the destination comes from a persisted, caller-supplied
+reference. The inbound weakness was already on `main`.

@@ -187,7 +187,23 @@ struct BotFrameworkClaims {
 ///   * `*.botframework.com` (channel-direct service URLs)
 ///   * `*.trafficmanager.net` (the Teams channel's documented
 ///     reply target, e.g. `https://smba.trafficmanager.net/teams/`)
-pub const SERVICE_URL_HOST_SUFFIXES: &[&str] = &[".botframework.com", ".trafficmanager.net"];
+pub const SERVICE_URL_HOST_SUFFIXES: &[&str] = &[
+    // Microsoft-operated, and not customer-registrable.
+    ".botframework.com",
+    // NOT `.trafficmanager.net`. That is Azure Traffic Manager: any
+    // subscription holder can create a profile and receive
+    // `<their-name>.trafficmanager.net`, so matching the namespace
+    // admitted an attacker-controlled host — to which this adapter POSTs
+    // a real Bot Connector bearer for the app. On a single-tenant bot the
+    // value comes from the UNSIGNED Activity body, where this list is the
+    // only check standing between that body and the token.
+    //
+    // Teams uses exactly one host under it. Naming that host is not a
+    // narrowing of Microsoft's contract, it is a correction: the list was
+    // wider than the protocol it exists to describe.
+    "smba.trafficmanager.net",
+    ".smba.trafficmanager.net",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum VerifyError {
@@ -538,6 +554,56 @@ mod tests {
     // a `serviceUrl` pointed at an attacker host (Bot Framework dev
     // playground); the adapter must refuse anything off Microsoft's
     // documented host shapes.
+
+    /// The allowlist admitted a namespace ANYONE can register in.
+    ///
+    /// `trafficmanager.net` is Azure Traffic Manager: a subscription
+    /// holder creates a profile and gets `<their-name>.trafficmanager.net`.
+    /// Matching the whole suffix therefore allowed an attacker-controlled
+    /// host, and this is a reply TARGET — the adapter POSTs there with a
+    /// real Bot Connector bearer for the app. On a single-tenant bot the
+    /// value comes from the UNSIGNED Activity body (`lib.rs`, the
+    /// `service_url_allowed(from_body)` arm), where this list is the only
+    /// thing standing between the body and the token.
+    ///
+    /// Teams uses exactly one host under that namespace — `smba` — so the
+    /// list was wider than the protocol it exists to describe. Measured
+    /// before the fix: `evil.trafficmanager.net` and bare
+    /// `trafficmanager.net` were both allowed.
+    #[test]
+    fn a_registrable_azure_namespace_is_not_a_microsoft_host() {
+        assert!(
+            !service_url_host_allowed("https://evil.trafficmanager.net/"),
+            "anyone can create a Traffic Manager profile; matching the \
+             whole namespace hands the bot token to whoever does"
+        );
+        assert!(
+            !service_url_host_allowed("https://trafficmanager.net/"),
+            "the apex is not a Microsoft service endpoint either"
+        );
+        // Same shape, other namespace: `botframework.com` subdomains are
+        // Microsoft-operated, not customer-registrable, so they stay.
+        assert!(service_url_host_allowed(
+            "https://smba.example.botframework.com/"
+        ));
+    }
+
+    /// Every documented Teams region must still pass, including one that
+    /// does not exist yet — the check is on the HOST, and Microsoft adds
+    /// regions in the PATH.
+    #[test]
+    fn every_teams_region_still_reaches_its_own_service_url() {
+        for u in [
+            "https://smba.trafficmanager.net/teams/",
+            "https://smba.trafficmanager.net/amer/",
+            "https://smba.trafficmanager.net/emea/",
+            "https://smba.trafficmanager.net/in/",
+            "https://smba.trafficmanager.net/antarctica/",
+            "https://smba.trafficmanager.net",
+        ] {
+            assert!(service_url_host_allowed(u), "{u} is Teams' own host");
+        }
+    }
 
     #[test]
     fn allows_documented_microsoft_service_urls() {
