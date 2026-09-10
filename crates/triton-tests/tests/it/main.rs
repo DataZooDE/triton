@@ -16,6 +16,8 @@
 mod a2a;
 #[path = "../a2a_spec.rs"]
 mod a2a_spec;
+#[path = "../a2a_trace_authz.rs"]
+mod a2a_trace_authz;
 #[path = "../a2ui_flutter_fixtures.rs"]
 mod a2ui_flutter_fixtures;
 #[path = "../a2ui_parity.rs"]

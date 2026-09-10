@@ -526,6 +526,32 @@ const fn default_limit() -> usize {
 /// `/v1/trace`. Without it a caller sees only their own tenant's rows.
 pub const AUDIT_READ_ALL_SCOPE: &str = "audit:read-all";
 
+/// Is this principal an operator the DEPLOYMENT named?
+///
+/// The one place the two-authority rule is written down. Both
+/// [`audit_visibility_in`] and [`may_read_trace`] gate on it, and they
+/// used to answer it independently — a duplicated `scope && (local ||
+/// contains)` in each. That is one line to get right and two places to
+/// forget: a crew review found that deleting the `named` half from
+/// `may_read_trace` left every `/v1/audit` test green while A2A
+/// `tasks/get` handed out other tenants' traces.
+///
+/// BOTH halves are required outside `local`: the scope is a claim only
+/// the ISSUER can mint, the list is writable only by the DEPLOYMENT.
+/// Neither alone hands out everyone's audit trail. In `local` the scope
+/// suffices, mirroring the dev-token gate (ADR-10 / factor X), so a dev
+/// loop can read its own trail without an env var.
+pub fn is_named_operator(
+    principal: &triton_core::principal::Principal,
+    operators: &std::collections::HashSet<(String, String)>,
+    env: &str,
+) -> bool {
+    let claims_scope = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE);
+    let named =
+        env == "local" || operators.contains(&(principal.tenant.clone(), principal.sub.clone()));
+    claims_scope && named
+}
+
 /// Which audit rows this principal may read (#282).
 ///
 /// An operator (holding [`AUDIT_READ_ALL_SCOPE`]) sees everything. Anyone
@@ -561,10 +587,7 @@ fn audit_visibility_in(
     // In `local` the scope alone still suffices, mirroring how the
     // dev-token path is already gated (ADR-10 / factor X) — otherwise
     // every local dev loop needs an env var to see its own audit trail.
-    let claims_scope = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE);
-    let is_local = env == "local";
-    let named = is_local || operators.contains(&(principal.tenant.clone(), principal.sub.clone()));
-    let operator = claims_scope && named;
+    let operator = is_named_operator(principal, operators, env);
     let tenant = principal.tenant.clone();
     // A reserved tenant is a shared marker, not a tenant: `-` is what
     // nearly every live OIDC caller carries and `pairing` is what every
@@ -670,11 +693,23 @@ pub fn may_read_trace(
     let tenant_scopable = !triton_core::principal::is_reserved_tenant(&principal.tenant);
     let sub = principal.sub.clone();
     let tenant = principal.tenant.clone();
-    let operator = principal.scopes.iter().any(|s| s == AUDIT_READ_ALL_SCOPE)
-        && (env == "local"
-            || operators.contains(&(principal.tenant.clone(), principal.sub.clone())));
+    let operator = is_named_operator(principal, operators, env);
+    // The subject match is TENANT-QUALIFIED. `AuditEntry.subject` is the
+    // bare `principal.sub` (`dispatcher.rs`), so comparing subjects alone
+    // let two principals who merely share a `sub` string read each
+    // other's traces across tenants — and this predicate gates A2A
+    // `tasks/get`, whose ids ARE trace ids and travel to the counterparty
+    // in every `message/send` reply. A colliding `sub` is ordinary: chat
+    // adapters derive it from platform sender ids, and two issuers can
+    // mint the same string.
+    //
+    // Pairing it keeps the case the comment above defends — a caller on a
+    // reserved tenant reading their OWN trace — because their entries
+    // carry that same reserved tenant, so the pair matches.
     let visible = AuditBuffer::recent_where(AUDIT_LIMIT_MAX, Some(trace_id), move |e| {
-        operator || e.subject == sub || (tenant_scopable && e.tenant == tenant)
+        operator
+            || (e.subject == sub && e.tenant == tenant)
+            || (tenant_scopable && e.tenant == tenant)
     });
     bodies_visible(&visible)
 }
