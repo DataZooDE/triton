@@ -339,3 +339,44 @@ async fn an_attacker_controlled_service_url_is_forbidden() {
         "no forbidden destination may reach a connector"
     );
 }
+
+/// A stale conversation reference must be DROPPED, not retried forever.
+///
+/// Teams answers 403/404 when the bot has been removed from a
+/// conversation, and for proactive delivery a stale reference is the
+/// expected steady state, not an exception. The courier marked EVERY
+/// non-2xx `PostOutcome::Retry` — including those — while the inbound
+/// reply path already classified correctly (`>= 500 || 429` retry, else
+/// drop). Same connector, same failures, two answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_conversation_is_dropped_not_retried() {
+    let fake = FakeBotFramework::start().await;
+    let issuer = TestIssuer::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &fake)).await;
+
+    // The bot is no longer in this conversation.
+    fake.set_activity_status(403);
+
+    let _ = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(outbound_token(&issuer, "acme"))
+        .json(&json!({
+            "adapter": "msteams",
+            "to": "29:1abc",
+            "result": { "text": "into a conversation the bot has left" },
+            "reference": conversation_reference(&fake, "acme"),
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+
+    let line = wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit" && v["phase"] == "post"
+    });
+    assert_eq!(
+        line["status_label"].as_str().unwrap_or_default(),
+        "dropped",
+        "a 403 from the connector means the reference is stale — retrying \
+         it forever is the one answer that cannot help; got {line}"
+    );
+}

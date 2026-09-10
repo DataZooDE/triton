@@ -516,6 +516,13 @@ struct FakeBotFrameworkState {
     /// client_assertion) rather than only that a token came back.
     token_requests: Mutex<Vec<String>>,
     access_token: String,
+    /// Status the activities route answers with. Default 200.
+    ///
+    /// A proactive send to a STALE `conversationReference` is the
+    /// expected steady state, and Teams answers 403/404 for it — so a
+    /// test has to be able to produce that, or the retry classification
+    /// is pinned by nothing.
+    activity_status: Mutex<u16>,
 }
 
 impl FakeBotFramework {
@@ -538,6 +545,7 @@ impl FakeBotFramework {
             captured: Mutex::new(Vec::new()),
             token_requests: Mutex::new(Vec::new()),
             access_token: access_token.to_string(),
+            activity_status: Mutex::new(200),
         });
 
         let discovery_body = json!({
@@ -639,6 +647,12 @@ impl FakeBotFramework {
     }
 
     /// Snapshot of every reply Activity the fixture captured.
+    /// Make the activities route answer `status` from now on — e.g. 403
+    /// for a conversation the bot has been removed from.
+    pub fn set_activity_status(&self, status: u16) {
+        *self.state.activity_status.lock().unwrap() = status;
+    }
+
     pub fn captured(&self) -> Vec<CapturedActivity> {
         self.state.captured.lock().unwrap().clone()
     }
@@ -654,7 +668,8 @@ async fn handle_activity_post(
     axum::extract::Path(conversation_id): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
-) -> Json<Value> {
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
     let bearer = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -665,7 +680,17 @@ async fn handle_activity_post(
         bearer,
         body,
     });
-    Json(json!({ "id": "stub-activity-id" }))
+    let status = *state.activity_status.lock().unwrap();
+    let code = axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK);
+    if code.is_success() {
+        (code, Json(json!({ "id": "stub-activity-id" }))).into_response()
+    } else {
+        (
+            code,
+            Json(json!({ "error": { "code": "BotNotInConversationRoster" } })),
+        )
+            .into_response()
+    }
 }
 
 // ---------- Google Chat REST API fake (#164 T1a) ----------

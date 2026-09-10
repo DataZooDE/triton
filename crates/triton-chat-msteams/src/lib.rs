@@ -2951,13 +2951,28 @@ impl OutboundCourier for MsTeamsAdapter {
                 Ok(())
             }
             Ok((status, _)) => {
+                // Classified like the inbound reply path, which this used
+                // to contradict: only 5xx and 429 are worth retrying.
+                //
+                // Teams answers 403/404 when the bot has been removed from
+                // a conversation, and for PROACTIVE delivery a stale
+                // `conversationReference` is the expected steady state
+                // rather than an exception — the whole point of the feature
+                // is sending to a conversation that ended long ago. Marking
+                // those `Retry` meant retrying the one failure that cannot
+                // succeed, forever.
+                let label = if status >= 500 || status == 429 {
+                    PostOutcome::Retry
+                } else {
+                    PostOutcome::Dropped
+                };
                 let err = TritonError::Provider(format!("msteams connector returned {status}"));
                 self.dispatcher.record_post(
                     OUTBOUND_TOOL,
                     PROTOCOL,
                     principal,
                     latency_ms,
-                    Err((&err, status, PostOutcome::Retry, None)),
+                    Err((&err, status, label, None)),
                 );
                 Err(err)
             }
