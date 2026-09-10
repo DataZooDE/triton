@@ -972,9 +972,26 @@ fn resolve_sender(
             // awaited data collection; it does not, and saying so was
             // itself a small hazard — a deferral that reads as scheduled
             // gets scheduled.
-            let channel = activity.channel_id.as_deref().unwrap_or_default();
-            // `allowed_channel_ids` was lowercased at build time; fold the
-            // inbound too so the gate cannot turn on Microsoft's casing.
+            // Folded ONCE, and every comparison below uses this value.
+            //
+            // `allowed_channel_ids` is lowercased at build time, so the gate
+            // has to fold the inbound too — the gate must not turn on
+            // Microsoft's casing. The corroboration further down then has to
+            // fold the SAME way, and a crew review found that it did not: it
+            // matched the raw `channelId` against exact lowercase literals,
+            // so `"MSTEAMS"` passed the gate, returned `None` from
+            // `expected_service_url_family`, and skipped the corroboration
+            // entirely. One character of case reopened the path the
+            // corroboration exists to close.
+            //
+            // Two comparisons that must agree on a folded value cannot each
+            // fold their own way. Fold once, here.
+            let channel = activity
+                .channel_id
+                .as_deref()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let channel = channel.as_str();
             if !cfg
                 .allowed_channel_ids
                 .iter()
