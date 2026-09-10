@@ -39,8 +39,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::FakeBotFramework;
+use triton_tests::{TritonProcess, locate_triton_binary};
 
 const AUDIENCE: &str = "triton-msteams-test-appid";
 const BOT_ISSUER: &str = "https://api.botframework.com";
@@ -253,5 +253,89 @@ async fn an_undocumented_channel_family_is_not_corroborated() {
         "`pva` has no documented serviceUrl family, so it must pass the \
          corroboration untouched rather than be refused on a guess; got \
          {status}: {body}"
+    );
+}
+
+/// The exemption's load-bearing premise, which rested on one untested
+/// `exit(2)`.
+///
+/// `is_extra_service_url_host` skips the corroboration for hosts named in
+/// `TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS`, and that is only safe
+/// because a non-`local` deployment cannot set them: `triton-bin`'s
+/// wiring refuses to boot. Three reviewers verified that by reading the
+/// code, which is exactly the kind of assurance a refactor erases without
+/// anyone noticing. Assert it instead.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn extra_service_url_hosts_refuse_to_boot_outside_local() {
+    let bin = locate_triton_binary();
+    let mut child = std::process::Command::new(&bin)
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0")
+        // The whole point: NOT `local`.
+        .env("TRITON_ENV", "nonprod")
+        .env(
+            "TRITON_MANIFEST_PATH",
+            manifest_path("manifest-msteams-azure-envref.yaml"),
+        )
+        // The full well-known URL: a non-`local` env has its own guard on
+        // this one, and it fires FIRST. Without it this test exits 2 for
+        // the wrong reason — which it did, twice, before the assertion on
+        // the message below caught it.
+        .env(
+            "TRITON_MSTEAMS_OPENID_URL",
+            "https://login.botframework.com/v1/.well-known/openidconfiguration",
+        )
+        // Satisfy the `env://` refs so the manifest validator passes and
+        // the boot reaches the guard under test. The literal-credential
+        // fixture exits earlier, for an unrelated reason — which is how
+        // the first version of this test "passed".
+        .env("MSTEAMS_TEST_AUDIENCE", "triton-msteams-test-appid")
+        .env("MSTEAMS_TEST_CLIENT_ID", "triton-msteams-test-appid")
+        .env("MSTEAMS_TEST_CLIENT_SECRET", "client-secret-for-test")
+        .env("MSTEAMS_TEST_CORRELATION_KEY", "correlation-key-for-test")
+        .env(
+            "MSTEAMS_TEST_AZURE_IDENTITY",
+            r#"{"allowed_tenants":["acme-tenant-guid"],"scopes":["chat"]}"#,
+        )
+        .env("TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS", "127.0.0.1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn triton");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        match child.try_wait().expect("try_wait") {
+            Some(s) => break s,
+            None if std::time::Instant::now() > deadline => {
+                let _ = child.kill();
+                panic!(
+                    "a non-`local` env with TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS \
+                     set MUST refuse boot — the channel-corroboration exemption \
+                     depends on it — but the binary kept running"
+                );
+            }
+            None => std::thread::sleep(Duration::from_millis(50)),
+        }
+    };
+    assert!(!status.success(), "must exit non-zero; got {status:?}");
+
+    let mut out = String::new();
+    if let Some(mut e) = child.stderr.take() {
+        use std::io::Read;
+        let _ = e.read_to_string(&mut out);
+    }
+    if let Some(mut o) = child.stdout.take() {
+        use std::io::Read;
+        let _ = o.read_to_string(&mut out);
+    }
+    assert!(
+        out.contains("EXTRA_SERVICE_URL_HOSTS"),
+        "the refusal must name the variable an operator has to remove; \
+         got: {out}"
     );
 }

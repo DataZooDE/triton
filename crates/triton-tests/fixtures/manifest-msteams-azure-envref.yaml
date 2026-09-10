@@ -1,0 +1,41 @@
+# A nonprod-shaped msteams manifest: every credential is an `env://` ref,
+# so the manifest validator does not refuse the boot for a literal
+# credential before the check under test is reached.
+#
+# Used by `extra_service_url_hosts_refuse_to_boot_outside_local`, which
+# needs a boot that gets FAR ENOUGH to reach the extras guard. With the
+# literal-credential sibling it exits earlier, for an unrelated reason —
+# a pass that would have proved nothing.
+version: "0.2"
+
+adapters:
+  msteams:
+    kind: ms_teams
+    inbound:
+      kind: webhook
+      signature: bot_framework_jwt
+      audience: env://MSTEAMS_TEST_AUDIENCE
+    outbound:
+      kind: bot_connector
+      client_id: env://MSTEAMS_TEST_CLIENT_ID
+      client_secret: env://MSTEAMS_TEST_CLIENT_SECRET
+    identity:
+      kind: azure
+      azure_identity: env://MSTEAMS_TEST_AZURE_IDENTITY
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: adaptive_card
+      selections: adaptive_card
+      forms: adaptive_card
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: env://MSTEAMS_TEST_CORRELATION_KEY
+
+tools:
+  echo:
+    surface_components: []
+  narrate:
+    surface_components: [text, narration, buttons]
