@@ -398,3 +398,82 @@ async fn an_unattested_activity_says_the_corroboration_did_not_apply() {
          where it does"
     );
 }
+
+/// F11 — does a sender-table deployment make ANY channel trust decision?
+///
+/// `allowed_channel_ids` and the #319 corroboration both live inside the
+/// `IdentityMode::Azure` arm. `IdentityMode::SenderTable` resolves from
+/// `from.id` alone. A crew security seat raised the consequence without
+/// verifying it: on a channel where the CLIENT chooses `from.id` — Direct
+/// Line, Web Chat — a valid Bot Framework token for this bot would then
+/// resolve to whatever principal the table maps that id to.
+///
+/// This test established reachability rather than assuming it, and the
+/// answer is YES: the adapter dispatched as `alice` with status 200 for
+/// an Activity declaring `channelId: "directline"`. The fixture maps
+/// `29:1abc` → `alice`/`acme`; the Activity below claims that id.
+///
+/// IGNORED because it documents a gap that is not fixed yet, not a
+/// regression. Closing it is a config decision — a channel gate hoisted
+/// above the identity-mode match, or channel-qualified sender-table keys
+/// — either of which changes the manifest surface and every existing
+/// table. Whoever takes that on has their red test here: remove the
+/// `#[ignore]`.
+///
+/// The remaining unknown is not the code path but the Azure side: an
+/// attacker still needs a valid Bot Framework token for THIS bot, which
+/// means the bot's registration must have a client-chosen-`from.id`
+/// channel enabled. That is a fact about the deployment, not the repo.
+#[ignore = "F11: confirmed gap — sender_table applies no channel gate; fix is a manifest decision"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sender_table_makes_no_channel_trust_decision() {
+    let fake = FakeBotFramework::start().await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_with(&fake, "manifest-msteams-test.yaml"),
+    )
+    .await;
+
+    let webhook = proc.chat_webhook_addr.expect("chat webhook listener");
+    let jwt = fake.sign_jwt(claims_with_service_url(&fake.service_url()));
+    let mut activity = activity_on("directline");
+    // The mapped Teams sender id, claimed from a Direct Line-shaped
+    // delivery. On Direct Line this field is client-chosen.
+    activity["from"]["id"] = json!("29:1abc");
+    activity["serviceUrl"] = json!(fake.service_url());
+
+    let status = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(&activity)
+        .send()
+        .await
+        .expect("POST")
+        .status();
+
+    // Did it dispatch as `alice`?
+    let dispatched_as_alice = {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let hit = proc.stdout_snapshot().iter().any(|l| {
+                l.contains("\"phase\":\"dispatch\"") && l.contains("\"subject\":\"alice\"")
+            });
+            if hit {
+                break true;
+            }
+            if std::time::Instant::now() > deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+
+    assert!(
+        !dispatched_as_alice,
+        "a sender-table adapter dispatched as `alice` for an Activity \
+         declaring `channelId: directline` — the channel is never checked \
+         in this identity mode, so a client-chosen `from.id` on a \
+         Direct Line-family channel becomes a mapped principal. \
+         (status was {status})"
+    );
+}
