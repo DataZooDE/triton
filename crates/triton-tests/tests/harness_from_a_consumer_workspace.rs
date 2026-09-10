@@ -66,6 +66,15 @@ fn the_rebuild_resolves_triton_bin_from_a_foreign_workspace() {
 /// green — but it pins the anchor so a future walk-up cannot creep back.
 #[test]
 fn the_located_binary_lives_in_tritons_own_target_dir() {
+    // `TRITON_BIN` deliberately points OUTSIDE this workspace — a CI job
+    // or a container image handing the harness a binary it built itself,
+    // which is the case the override exists for. Asserting the anchor
+    // would then contradict the feature added in the same PR, so skip
+    // rather than fail. (Caught by a crew review: the first version of
+    // this test failed for anyone using the override.)
+    if std::env::var_os("TRITON_BIN").is_some() {
+        return;
+    }
     let root = triton_tests::triton_workspace_root();
     let bin = triton_tests::locate_triton_binary();
     assert!(
@@ -78,5 +87,43 @@ fn the_located_binary_lives_in_tritons_own_target_dir() {
         bin.exists(),
         "located a path that does not exist: {}",
         bin.display()
+    );
+}
+
+/// The cheap, mutation-sensitive fence for the actual fix.
+///
+/// The full-build test above proves the command RUNS from a foreign cwd,
+/// but it is slow and it does not reproduce the vendored shape where the
+/// consumer is triton's PARENT. What made the 69 downstream tests fail
+/// was two specific arguments; assert those directly, so removing either
+/// one goes red in milliseconds.
+#[test]
+fn the_build_command_names_its_own_workspace_and_target_dir() {
+    let root = triton_tests::triton_workspace_root();
+    let cmd = triton_tests::triton_bin_build_command(false);
+    let argv: Vec<String> = cmd
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+
+    let manifest = root.join("Cargo.toml");
+    let target = root.join("target");
+
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--manifest-path" && w[1] == manifest.to_string_lossy()),
+        "the build must resolve `-p triton-bin` against THIS workspace, \
+         not the caller's; argv was {argv:?}"
+    );
+    assert!(
+        argv.windows(2)
+            .any(|w| w[0] == "--target-dir" && w[1] == target.to_string_lossy()),
+        "the build must write where `locate_triton_binary` looks, so a \
+         consumer's CARGO_TARGET_DIR cannot redirect it; argv was {argv:?}"
+    );
+    assert!(
+        argv.iter().any(|a| a == "--locked"),
+        "the build must not rewrite a consumer's vendored Cargo.lock; \
+         argv was {argv:?}"
     );
 }
