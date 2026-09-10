@@ -244,6 +244,7 @@ impl OidcVerifier {
             raw_token: raw_token.to_string(),
             trace_id: uuid::Uuid::new_v4().to_string(),
             sender_ref: None,
+            conversation_ref: None,
         })
     }
 
@@ -752,6 +753,7 @@ impl GoogleAccessTokenVerifier {
             raw_token: raw_token.to_string(),
             trace_id: uuid::Uuid::new_v4().to_string(),
             sender_ref: None,
+            conversation_ref: None,
         }
     }
 

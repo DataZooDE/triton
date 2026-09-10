@@ -976,6 +976,7 @@ async fn process_message(
         // already derived from this same id, so a second copy would just
         // put more personal data (a phone number, here) in the log.
         sender_ref: identity_was_resolved_upstream.then(|| sender_key.to_string()),
+        conversation_ref: None,
     };
 
     // Command parser mirrors Telegram's `route_command`: `/<tool>

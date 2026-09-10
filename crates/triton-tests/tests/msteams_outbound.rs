@@ -380,3 +380,76 @@ async fn a_stale_conversation_is_dropped_not_retried() {
          it forever is the one answer that cannot help; got {line}"
     );
 }
+
+/// A proactive send must carry the buttons its result carries.
+///
+/// This feature exists to deliver a FINISHED long-running operation back
+/// to the conversation that started it — and the archetypal such result
+/// is one asking for approval. The courier rendered through
+/// `text_reply_message`, which drops every interactive component, so the
+/// approval prompt arrived as prose with nothing to click. Worse, a
+/// render error became the literal text `(no content)` posted with
+/// `result: ok`.
+///
+/// `build_reply_body` is the inbound path's renderer and already binds
+/// each control's correlation token to (tenant, recipient), which is
+/// what keeps a proactively-delivered card from being a capability for
+/// whoever can see it (#250/#287).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_proactive_send_delivers_the_buttons_the_result_carries() {
+    let fake = FakeBotFramework::start().await;
+    let issuer = TestIssuer::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &fake)).await;
+
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(outbound_token(&issuer, "acme"))
+        .json(&json!({
+            "adapter": "msteams",
+            "to": "29:1abc",
+            "result": { "surface": { "components": [
+                { "kind": "text", "value": "The migration finished. Approve the cutover?" },
+                { "kind": "button", "label": "Approve cutover",
+                  "tool": "assistant", "args": { "message": "approve" } }
+            ] } },
+            "reference": conversation_reference(&fake, "acme"),
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+    assert!(resp.status().is_success(), "send failed: {}", resp.status());
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let sent = loop {
+        let c = fake.captured();
+        if !c.is_empty() {
+            break c;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("nothing reached the connector");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let body = serde_json::to_string(&sent[0].body).expect("serialise activity");
+
+    assert!(
+        body.contains("Approve cutover"),
+        "the approval button must survive proactive delivery — an approval \
+         request with nothing to click is the case this feature exists for; \
+         got {body}"
+    );
+    // The button must carry a signed correlation token, which is what
+    // proves it went through the SIGNING path rather than being rendered
+    // as decoration. `render_card_content` binds each token to
+    // (tenant, recipient), so a proactively delivered card is a
+    // capability for its recipient and nobody else.
+    assert!(
+        body.contains("ct"),
+        "the delivered control must carry a correlation token; got {body}"
+    );
+    assert!(
+        !body.contains("(no content)"),
+        "a render failure must not be posted as the literal text \
+         `(no content)`; got {body}"
+    );
+}

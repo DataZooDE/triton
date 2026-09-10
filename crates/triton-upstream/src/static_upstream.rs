@@ -842,6 +842,7 @@ impl UpstreamDispatch for StaticUpstream {
             raw_token: String::new(),
             trace_id: String::new(),
             sender_ref: None,
+            conversation_ref: None,
         };
         let bearer = match self.bearer(&principal) {
             Ok(b) => b,

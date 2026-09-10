@@ -991,6 +991,7 @@ async fn process_update(adapter: Arc<TelegramAdapter>, update: TelegramUpdate) -
         trace_id: uuid::Uuid::new_v4().to_string(),
         // #250: only under `upstream` — see Principal::sender_ref.
         sender_ref: identity_was_resolved_upstream.then(|| sender_key.to_string()),
+        conversation_ref: None,
     };
 
     let chat_id = message.chat.id;
@@ -1253,6 +1254,7 @@ async fn handle_form_outcome(
                 trace_id: uuid::Uuid::new_v4().to_string(),
                 // #250: see Principal::sender_ref.
                 sender_ref: identity_was_resolved_upstream.then(|| sender_key.to_string()),
+                conversation_ref: None,
             };
             let principal_for_post = principal.clone();
             dispatch_and_render(
@@ -1515,6 +1517,7 @@ async fn handle_callback_query(
         trace_id: uuid::Uuid::new_v4().to_string(),
         // #250: only under `upstream` — see Principal::sender_ref.
         sender_ref: identity_was_resolved_upstream.then(|| sender_key.to_string()),
+        conversation_ref: None,
     };
 
     // For private chats the post-back chat_id equals `from.id`;

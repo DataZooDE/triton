@@ -290,6 +290,7 @@ impl UpstreamResolver {
             // — so the resolver dispatch is auditable against the id it
             // was asked about, not only against the answer it gave.
             sender_ref: Some(sender_key.to_string()),
+            conversation_ref: None,
         };
         let args = serde_json::json!({ "platform": self.platform, "sender": sender_key });
         let dispatch = dispatcher
