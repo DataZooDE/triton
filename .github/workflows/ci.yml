@@ -61,28 +61,6 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --all-targets --workspace -- -D warnings
 
-      # Integration tests in `triton-tests` spawn real binaries
-      # (`triton` for the gateway; `triton-rasterizer` for the
-      # PNG sidecar). `cargo test --workspace` builds the test
-      # crates but does NOT build separate workspace binaries by
-      # default, so without these explicit builds the spawn-based
-      # tests panic with "could not locate `<name>` binary".
-      - name: cargo build --bins
-        run: cargo build --locked --bin triton --bin triton-rasterizer
-
-      - name: cargo test --workspace
-        env:
-          RUST_BACKTRACE: 1
-        run: cargo test --workspace --locked
-
-      # The dev-only `capture` feature (Explorer Trace view) is off in the
-      # default build, so the line above never exercises it. Run the embed
-      # trio tests with it enabled so the capture middleware — including
-      # the TS-04 "must not buffer SSE" guard — stays green.
-      - name: cargo test (capture feature)
-        env:
-          RUST_BACKTRACE: 1
-        run: cargo test --locked -p triton-embed --features capture
 
       # ACC-13 — exercise the external-consumer smoke as a
       # SEPARATE Cargo workspace so the harness's `pub` surface
@@ -109,11 +87,43 @@ jobs:
       # is a bigger change than this step is worth and would trade ~40s for
       # cache-budget pressure on a 10 GB per-repo limit. Left alone
       # deliberately; see doc/realizations.md §8.
-      - name: cargo test (external consumer smoke)
+      # ORDER MATTERS: this runs BEFORE `cargo build --bins`, which is the
+      # only moment in CI when `target/debug/triton` does not exist yet.
+      #
+      # The harness's "nothing built yet, build one" branch (#318) is what
+      # makes an embedding consumer's spawned-binary tests runnable at
+      # all — it is the fix for 69 tests that had never executed across
+      # two repos. Run after the binary exists, that branch is dead code
+      # no CI run ever touches, so the fence for the fix would be the fix
+      # itself never being exercised (crew review).
+      - name: cargo test (external consumer smoke, no prebuilt binary)
         env:
           RUST_BACKTRACE: 1
         working-directory: examples/consumer-smoke
         run: cargo test --locked
+
+      # Integration tests in `triton-tests` spawn real binaries
+      # (`triton` for the gateway; `triton-rasterizer` for the
+      # PNG sidecar). `cargo test --workspace` builds the test
+      # crates but does NOT build separate workspace binaries by
+      # default, so without these explicit builds the spawn-based
+      # tests panic with "could not locate `<name>` binary".
+      - name: cargo build --bins
+        run: cargo build --locked --bin triton --bin triton-rasterizer
+
+      - name: cargo test --workspace
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo test --workspace --locked
+
+      # The dev-only `capture` feature (Explorer Trace view) is off in the
+      # default build, so the line above never exercises it. Run the embed
+      # trio tests with it enabled so the capture middleware — including
+      # the TS-04 "must not buffer SSE" guard — stays green.
+      - name: cargo test (capture feature)
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo test --locked -p triton-embed --features capture
 
   flutter:
     name: flutter analyze + test + build web (a2ui_flutter, apps/explorer)

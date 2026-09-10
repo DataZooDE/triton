@@ -476,7 +476,21 @@ fn triton_binary_path() -> PathBuf {
     // (a CI job, a container image) and wants the harness to spawn
     // exactly that one. Checked first so it beats every heuristic.
     if let Some(p) = std::env::var_os("TRITON_BIN") {
-        return PathBuf::from(p);
+        let p = PathBuf::from(p);
+        // Validated, because a typo here is otherwise an opaque spawn
+        // failure several frames away, and because this override SKIPS
+        // the staleness guard below — an override that silently points at
+        // a stale binary re-creates the exact blind spot this harness
+        // exists to close (doc/realizations.md §7). Loud on the way in.
+        assert!(
+            p.is_file(),
+            "TRITON_BIN is set to `{}`, which is not a file. Point it at a \
+             built `triton` binary, or unset it and let the harness build \
+             one. NOTE: this override is NOT freshness-checked — you are \
+             telling the harness you know what that binary contains.",
+            p.display()
+        );
+        return p;
     }
     if let Some(p) = std::env::var_os("CARGO_BIN_EXE_triton") {
         // Set only when the test lives in the binary's own package; cargo
@@ -505,7 +519,14 @@ fn triton_binary_path() -> PathBuf {
     // it rather than telling the operator to. This is the difference
     // between a consumer running the no-mock integration tests and a
     // consumer reporting 57 failures that assert nothing (§9).
-    if let Err(e) = build_triton_bin(false) {
+    // Through the SAME OnceLock as the staleness rebuild. All test files
+    // compile into one `it` binary and `#[tokio::test]` cases run in
+    // parallel, so without it every thread that reaches this branch —
+    // which is exactly the fresh-consumer case it exists for — spawns its
+    // own `cargo build`. Cargo's lock serialises them, so nothing
+    // corrupts, but each waiter holds a test thread for a full cold
+    // build: the likeliest way this surfaces downstream is a CI timeout.
+    if let Err(e) = build_triton_bin_once(false) {
         panic!(
             "could not locate a `triton` binary under {} and building one failed:\n{e}\n\
              (build it yourself and point the harness at it with TRITON_BIN=/path/to/triton)",
@@ -553,6 +574,11 @@ pub fn triton_bin_build_command(release: bool) -> Command {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut cmd = Command::new(cargo);
     cmd.arg("build")
+        // `--locked`, because every CI invocation uses it: without it a
+        // consumer's `cargo test` can silently rewrite
+        // `vendor/triton/Cargo.lock`, leaving their submodule dirty and
+        // the binary under test diverging from the one CI builds.
+        .arg("--locked")
         .arg("--manifest-path")
         .arg(root.join("Cargo.toml"))
         .arg("--target-dir")
@@ -562,6 +588,15 @@ pub fn triton_bin_build_command(release: bool) -> Command {
         cmd.arg("--release");
     }
     cmd
+}
+
+/// [`build_triton_bin`], run at most once per test process.
+///
+/// Shared by the staleness rebuild and the "nothing built yet" branch so
+/// parallel test threads cannot each spawn a cold `cargo build`.
+fn build_triton_bin_once(release: bool) -> Result<(), String> {
+    static BUILT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    BUILT.get_or_init(|| build_triton_bin(release)).clone()
 }
 
 /// Run [`triton_bin_build_command`], returning cargo's stderr on failure.
@@ -617,12 +652,14 @@ fn ensure_fresh_binary(bin: &std::path::Path, workspace_root: &std::path::Path, 
         }
     }
 
-    static BUILT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
-    let outcome = BUILT.get_or_init(|| build_triton_bin(release));
-    if let Err(e) = outcome {
+    let outcome = build_triton_bin_once(release);
+    if let Err(e) = &outcome {
         panic!(
             "the `triton` binary looked stale and rebuilding it failed:\n{e}\n\
-             (run `cargo build -p triton-bin` yourself; see doc/realizations.md §7)"
+             (build it with `cargo build --locked --manifest-path {}/Cargo.toml \
+             -p triton-bin`, or point the harness at one you built with \
+             TRITON_BIN=/path/to/triton; see doc/realizations.md §7)",
+            workspace_root.display()
         );
     }
 }
