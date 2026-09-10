@@ -265,6 +265,13 @@ pub struct RouteCtx<'a> {
     /// Set when this turn is a chooser-button click: `(agent_id, replayed_msg)`
     /// decoded from a [`USE_AGENT_TOOL`] token. Bypasses `resolve`.
     pub pick: Option<(String, String)>,
+    /// The channel's conversation reference for a LATER out-of-band send, when
+    /// the adapter can capture one (Teams: the flattened `conversationReference`
+    /// — per-tenant `serviceUrl`, `conversation.id`, bot + user ids, tenant).
+    /// The host persists it against a long-running operation so its terminal
+    /// result can be delivered back to this exact conversation. `None` for a
+    /// channel or turn with no capturable reference.
+    pub conversation_ref: Option<serde_json::Value>,
 }
 
 /// The host-provided router: resolves which agent handles a turn, reading and

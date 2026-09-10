@@ -33,6 +33,14 @@ pub struct OutboundRequest {
     /// Ordered body variables substituted into the resolved template's
     /// placeholders ({{1}}, {{2}}, …). Only meaningful with `category`.
     pub variables: Vec<String>,
+    /// Optional channel-specific routing reference for adapters whose recipient
+    /// identity is more than a flat `to` string — chiefly a Teams
+    /// `conversationReference` (its per-tenant `serviceUrl`, `conversation.id`,
+    /// bot id and tenant), captured on an inbound turn and persisted so a later
+    /// proactive send can reach the same conversation out-of-band. Adapters
+    /// whose recipient is fully described by `to` (WhatsApp, Twilio, email)
+    /// ignore it; the Teams courier requires it.
+    pub reference: Option<Value>,
 }
 
 /// A chat adapter that can deliver an agent-initiated outbound message.

@@ -1222,7 +1222,15 @@ async fn main() -> std::io::Result<()> {
                                 canonical_claimed = true;
                             }
                             tracing::info!(adapter = %name, "msteams webhook adapter wired");
-                            let r = Arc::new(built).router();
+                            // Keep an Arc for the outbound courier registry
+                            // (proactive async-operation delivery) before
+                            // `router()` consumes one — mirrors the WhatsApp arm.
+                            let built = Arc::new(built);
+                            outbound_couriers.insert(
+                                name.to_string(),
+                                built.clone() as Arc<dyn triton_core::OutboundCourier>,
+                            );
+                            let r = built.router();
                             chat_router = Some(match chat_router.take() {
                                 Some(acc) => acc.merge(r),
                                 None => r,

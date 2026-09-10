@@ -1411,6 +1411,9 @@ async fn handle_webhook(
                 tenant: &tenant,
                 caller_sub: &sub,
                 pick,
+                // Google Chat replies synchronously on the webhook; proactive
+                // out-of-band delivery is not wired here yet.
+                conversation_ref: None,
             };
             match router.route(ctx).await {
                 triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
