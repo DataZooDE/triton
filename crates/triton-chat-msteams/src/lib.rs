@@ -2789,6 +2789,9 @@ fn conversation_reference_json(
         .map(|f| f.id.clone())
         .unwrap_or_default();
     json!({
+        // Self-describing: the delivery side (the agent's outbound-callback
+        // receiver) routes to the matching triton adapter by this channel.
+        "channel": "msteams",
         "service_url": service_url,
         "conversation_id": conversation_id,
         "bot_id": bot_id,
@@ -3086,6 +3089,7 @@ mod tests {
             "28:bot-1",
             "tenant-acme",
         );
+        assert_eq!(r["channel"], "msteams");
         assert_eq!(r["service_url"], "https://smba.trafficmanager.net/emea/");
         assert_eq!(r["conversation_id"], "a:conv-1");
         assert_eq!(r["bot_id"], "28:bot-1", "bot id → outbound `from`");
