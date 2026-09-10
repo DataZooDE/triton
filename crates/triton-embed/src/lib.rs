@@ -63,6 +63,18 @@ pub struct EmbedOpts {
     /// contract (ADR-0017's verification reads `oidc_issuer`), so
     /// multi-issuer adds a field rather than redefining one.
     pub oidc_providers: Vec<(String, String)>,
+    /// Operators holding the cross-tenant view of `/v1/audit`, `/v1/trace`
+    /// and A2A `tasks/get` — `(tenant, sub)` pairs.
+    ///
+    /// `None` means "read `TRITON_AUDIT_OPERATORS` from the process
+    /// environment", which is what a standalone deployment wants. A host
+    /// that embeds triton can pass them instead, which is the whole point:
+    /// this value used to be read by `router()` from the environment and
+    /// nowhere else, so an embedding host had no way to set it except by
+    /// mutating its own process env — the same shape as the denylist that
+    /// shipped dead (doc/realizations.md §9), and the reason the
+    /// conjunction had no embedded test.
+    pub audit_operators: Option<std::collections::HashSet<(String, String)>>,
     /// Optional fallback for opaque Google OAuth access tokens (Gemini
     /// Enterprise forwards these over A2A — they are not JWTs). Set with
     /// [`EmbedOpts::google_access`]. `None` = only JWTs are accepted.
@@ -75,6 +87,8 @@ impl Default for EmbedOpts {
             host: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port: 8088,
             env: "dev".to_string(),
+            // Unset: read `TRITON_AUDIT_OPERATORS` from the environment.
+            audit_operators: None,
             cors_origins: Vec::new(),
             oidc: Vec::new(),
             oidc_issuer: None,
@@ -221,6 +235,16 @@ impl EmbedOpts {
 
     /// Override the client ID advertised at `/v1/runtime` when it is not
     /// the same string as the audience.
+    /// Name the cross-tenant audit operators explicitly instead of
+    /// reading `TRITON_AUDIT_OPERATORS`. See the field's note.
+    pub fn audit_operators(
+        mut self,
+        operators: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.audit_operators = Some(operators.into_iter().collect());
+        self
+    }
+
     pub fn oidc_client_id(mut self, client_id: impl Into<String>) -> Self {
         self.oidc_client_id = Some(client_id.into());
         self
@@ -242,14 +266,26 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
     // never `serve_dispatcher`, so announcing only there left exactly the
     // hosts this stack was built for silent. Announced once per process:
     // a host that builds two routers should not warn twice.
+    // Resolved ONCE, and shared by every consumer below. It used to be
+    // three independent `from_env()` calls in this function — announce,
+    // REST, A2A — which is how a value can be announced and then not be
+    // the one enforced. One parse, one Arc.
+    let audit_operators: Arc<std::collections::HashSet<(String, String)>> = Arc::new(
+        opts.audit_operators
+            .clone()
+            .unwrap_or_else(|| triton_config::DeploymentConfig::from_env().audit_operators),
+    );
+    let announced_operators = audit_operators.clone();
+    let announced_env = opts.env.clone();
+    let announced_denied: Vec<String> = dispatcher.denied_principals().collect();
+    let announced_enforcing = dispatcher.is_enforcing();
     static ANNOUNCED: std::sync::Once = std::sync::Once::new();
-    ANNOUNCED.call_once(|| {
-        let cfg = triton_config::DeploymentConfig::from_env();
+    ANNOUNCED.call_once(move || {
         triton_config::announce(
-            &opts.env,
-            &cfg.audit_operators,
-            dispatcher.denied_principals(),
-            dispatcher.is_enforcing(),
+            &announced_env,
+            &announced_operators,
+            announced_denied.into_iter(),
+            announced_enforcing,
         );
     });
     let mut identity = IdentityProvider::with_verifiers(opts.oidc.clone(), false);
@@ -295,8 +331,8 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         identity: identity.clone(),
         manifest: None,
         metrics,
-        // Parsed once here, not per request (#306 crew F7).
-        audit_operators: Arc::new(triton_config::DeploymentConfig::from_env().audit_operators),
+        // Parsed once above, not per request (#306 crew F7).
+        audit_operators: audit_operators.clone(),
         // The embedded single-port host doesn't do static-upstream signing.
         oidc_signer: None,
     };
@@ -311,7 +347,7 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         tasks: InMemoryTaskStore::new(),
         identity,
         // #306 crew F1: `tasks/get` scopes on a trace id.
-        audit_operators: Arc::new(triton_config::DeploymentConfig::from_env().audit_operators),
+        audit_operators,
     };
 
     // The spec-A2A JSON-RPC route answers at the A2A BASE path itself

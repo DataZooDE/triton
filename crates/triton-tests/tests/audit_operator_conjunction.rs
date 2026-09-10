@@ -88,20 +88,32 @@ async fn dispatch_as(proc: &TritonProcess, token: &str, msg: &str) {
     assert!(resp.status().is_success(), "{}", resp.status());
 }
 
+/// The tenants visible to `token`.
+///
+/// Every step here fails LOUDLY on purpose. The first version sent the
+/// GET, decoded without checking the status, and did
+/// `unwrap_or_default()` on a missing `entries` — so a 500, a 401 or a
+/// renamed field all produced an empty vec, which is precisely what the
+/// two negative tests below assert. They would have passed while proving
+/// nothing (caught by a crew review, in the file whose own header
+/// complains about tests that cannot fail).
 async fn audit_tenants(proc: &TritonProcess, token: &str) -> Vec<String> {
-    let body: Value = reqwest::Client::new()
+    let resp = reqwest::Client::new()
         .get(proc.rest_url("/v1/audit?limit=200"))
         .bearer_auth(token)
         .send()
         .await
-        .expect("GET /v1/audit")
-        .json()
-        .await
-        .expect("decode audit");
+        .expect("GET /v1/audit");
+    assert_eq!(
+        resp.status(),
+        200,
+        "an authenticated caller must reach /v1/audit; an error here would \
+         otherwise read as `no rows visible`"
+    );
+    let body: Value = resp.json().await.expect("decode audit");
     body["entries"]
         .as_array()
-        .cloned()
-        .unwrap_or_default()
+        .expect("audit response must carry an `entries` array")
         .iter()
         .filter_map(|e| e["tenant"].as_str().map(str::to_string))
         .collect()
@@ -126,8 +138,17 @@ async fn the_scope_alone_does_not_grant_the_cross_tenant_view() {
 
     dispatch_as(&proc, &acme, "acme-one").await;
     dispatch_as(&proc, &globex, "globex-one").await;
+    // The claimant dispatches too, so "sees nothing" cannot masquerade as
+    // "correctly filtered".
+    dispatch_as(&proc, &claimant, "ops-one").await;
 
     let seen = audit_tenants(&proc, &claimant).await;
+    assert!(
+        seen.iter().any(|t| t == "ops"),
+        "the claimant must still see their OWN rows — an empty result \
+         would satisfy the assertion below without proving anything; got \
+         {seen:?}"
+    );
     assert!(
         !seen.iter().any(|t| t == "acme" || t == "globex"),
         "an unnamed caller holding `audit:read-all` must NOT see other \
@@ -159,8 +180,14 @@ async fn naming_a_principal_without_the_scope_grants_nothing() {
 
     dispatch_as(&proc, &acme, "acme-two").await;
     dispatch_as(&proc, &globex, "globex-two").await;
+    dispatch_as(&proc, &named_only, "ops-two").await;
 
     let seen = audit_tenants(&proc, &named_only).await;
+    assert!(
+        seen.iter().any(|t| t == "ops"),
+        "the named caller must still see their OWN rows, or the assertion \
+         below proves nothing; got {seen:?}"
+    );
     assert!(
         !seen.iter().any(|t| t == "acme" || t == "globex"),
         "being named in TRITON_AUDIT_OPERATORS must NOT by itself grant \
@@ -233,3 +260,21 @@ async fn the_operator_list_matches_the_tenant_too() {
          subject alone; got {seen:?}"
     );
 }
+
+// There is deliberately no `/v1/trace` bodies test here, though a crew
+// review asked for one.
+//
+// `/v1/trace` gates its `bodies` array on `may_read_trace`, but
+// `triton_core::trace::captured` is behind the `capture` cargo feature —
+// off by default and ALWAYS off in release — so the spawned binary these
+// tests drive returns an empty `bodies` array to everyone. A test
+// asserting "an unnamed scope-holder sees no bodies" would pass with
+// `may_read_trace` deleted entirely: vacuous by construction, which is
+// the failure this file exists to avoid. (Written, run, and removed on
+// discovering the owner sees nothing either.)
+//
+// The observable surface for `may_read_trace` is A2A `tasks/get`, which
+// gates on it without needing captured bodies. That is covered in
+// `a2a_trace_authz.rs`, on the embedded host. Pinning `/v1/trace` itself
+// needs the harness to build the binary with `--features capture`, which
+// is a change to the harness, not to this file.
