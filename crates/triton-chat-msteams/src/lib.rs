@@ -2508,6 +2508,7 @@ async fn courier_deliver(
         &recipient_id,
         &sender.from_id,
         &sender.tenant,
+        &adapter.correlation_key,
     ));
     let principal_for_post = principal.clone();
     // See dispatch_and_post_reply: direct render_report invocations get
