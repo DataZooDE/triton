@@ -123,6 +123,16 @@ pub struct AuditRecord<'a> {
     /// session; omitted where there is no platform sender.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender_ref: Option<&'a str>,
+    /// Where an OUTBOUND post went — the conversation/thread it reached.
+    ///
+    /// On an inbound turn the destination is implied: the reply goes back
+    /// to the conversation the request came from, and `trace_id` ties the
+    /// two together. An agent-initiated push has no inbound turn, so
+    /// without this the record says a send happened and to whom it was
+    /// attributed, but not which conversation received it — the first
+    /// question forensics asks about a proactive message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<&'a str>,
     /// How many further rejections this line stands for (#249).
     ///
     /// Anonymous rejections on a public path are coalesced into one line
@@ -235,6 +245,9 @@ pub struct AuditEntry {
     /// See [`AuditRecord::sender_ref`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sender_ref: Option<String>,
+    /// See [`AuditRecord::destination`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
     /// See [`AuditRecord::suppressed`]. Mirrored into the buffer because
     /// the operator tailing `/v1/audit` is precisely the person who needs
     /// to know the entry stands for more than one refusal.
@@ -257,6 +270,10 @@ impl<'a> From<&AuditRecord<'a>> for AuditEntry {
             tool: r.tool.to_string(),
             subject: clamp_audited(r.subject).into_owned(),
             tenant: clamp_audited(r.tenant).into_owned(),
+            // Clamped like every other attacker-influenceable field: a
+            // conversation id arrives on a caller-supplied reference
+            // (#284).
+            destination: r.destination.map(|d| clamp_audited(d).into_owned()),
             latency_ms: r.latency_ms,
             status: r.status,
             status_label: r.status_label,
@@ -386,6 +403,7 @@ mod rejection_reason_tests {
             error_detail: Some("bot framework jwt: jwt issuer does not match".into()),
             ttfb_ms: None,
             sender_ref: None,
+            destination: None,
             suppressed: None,
             trace_id: "t-1",
         };
@@ -420,6 +438,7 @@ mod rejection_reason_tests {
             error_detail: None,
             ttfb_ms: None,
             sender_ref: None,
+            destination: None,
             suppressed: None,
             trace_id: "t-2",
         };

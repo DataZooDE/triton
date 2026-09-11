@@ -996,6 +996,7 @@ impl Dispatcher {
             // A boundary rejection happens before a Principal exists, so
             // there is no resolved identity to contrast a raw sender with.
             sender_ref: None,
+            destination: None,
             suppressed,
             trace_id,
         });
@@ -1020,6 +1021,26 @@ impl Dispatcher {
         principal: &Principal,
         latency_ms: u64,
         outcome: PostResult<'_>,
+    ) {
+        self.record_post_to(tool_name, protocol, principal, latency_ms, outcome, None);
+    }
+
+    /// [`record_post`], naming WHERE the post went.
+    ///
+    /// An inbound reply needs no destination: it goes back to the
+    /// conversation the request came from, and `trace_id` ties them
+    /// together. An agent-initiated push has no inbound turn, so without
+    /// this the record says a send happened and to whom it was
+    /// attributed, but not which conversation received it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_post_to(
+        &self,
+        tool_name: &str,
+        protocol: &str,
+        principal: &Principal,
+        latency_ms: u64,
+        outcome: PostResult<'_>,
+        destination: Option<&str>,
     ) {
         // FR-AU-1 v0.2: chat post audit MUST carry a `status_label`
         // from the closed set `{posted, retry, dropped}` — enforced by
@@ -1056,6 +1077,7 @@ impl Dispatcher {
             error_detail: None,
             ttfb_ms: None,
             sender_ref: principal.sender_ref.as_deref(),
+            destination,
             suppressed: None,
             trace_id: &principal.trace_id,
         });
@@ -1130,6 +1152,7 @@ impl Dispatcher {
             error_detail: None,
             ttfb_ms: None,
             sender_ref: principal.sender_ref.as_deref(),
+            destination: None,
             suppressed: None,
             trace_id: &principal.trace_id,
         });
@@ -1177,6 +1200,7 @@ impl Dispatcher {
             error_detail: None,
             ttfb_ms: None,
             sender_ref: principal.sender_ref.as_deref(),
+            destination: None,
             suppressed: None,
             trace_id: &principal.trace_id,
         });
@@ -1277,6 +1301,7 @@ fn emit_stream_audit(a: StreamAudit<'_>) {
         error_detail: None,
         ttfb_ms: a.ttfb_ms,
         sender_ref: a.sender_ref,
+        destination: None,
         suppressed: None,
         trace_id: a.trace_id,
     });

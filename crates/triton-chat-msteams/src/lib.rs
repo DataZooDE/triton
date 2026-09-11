@@ -2968,12 +2968,13 @@ impl OutboundCourier for MsTeamsAdapter {
         let latency_ms = started.elapsed().as_millis() as u64;
         match outcome {
             Ok((status, _id)) if (200..300).contains(&status) => {
-                self.dispatcher.record_post(
+                self.dispatcher.record_post_to(
                     OUTBOUND_TOOL,
                     PROTOCOL,
                     principal,
                     latency_ms,
                     Ok((status, PostOutcome::Posted, None)),
+                    Some(&r.conversation_id),
                 );
                 Ok(())
             }
@@ -2994,23 +2995,25 @@ impl OutboundCourier for MsTeamsAdapter {
                     PostOutcome::Dropped
                 };
                 let err = TritonError::Provider(format!("msteams connector returned {status}"));
-                self.dispatcher.record_post(
+                self.dispatcher.record_post_to(
                     OUTBOUND_TOOL,
                     PROTOCOL,
                     principal,
                     latency_ms,
                     Err((&err, status, label, None)),
+                    Some(&r.conversation_id),
                 );
                 Err(err)
             }
             Err(e) => {
                 let err = TritonError::Provider(format!("msteams connector: {e}"));
-                self.dispatcher.record_post(
+                self.dispatcher.record_post_to(
                     OUTBOUND_TOOL,
                     PROTOCOL,
                     principal,
                     latency_ms,
                     Err((&err, 0, PostOutcome::Retry, None)),
+                    Some(&r.conversation_id),
                 );
                 Err(err)
             }
