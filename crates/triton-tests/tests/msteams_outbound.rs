@@ -72,14 +72,40 @@ fn outbound_token(issuer: &TestIssuer, tenant: &str) -> String {
 
 /// The persisted conversationReference the host would have captured on the
 /// inbound turn and stored against the operation.
+/// The key the fixture manifest gives the adapter.
+const TEST_CORRELATION_KEY: &str = "correlation-key-for-test";
+
+/// A reference as the ADAPTER would have minted it on an inbound turn:
+/// sealed, so its fields are server-asserted rather than caller-written.
+///
+/// Holding the key here models the server, not an attacker — an attacker
+/// has only whatever seal it was handed. `an_unsealed_reference_is_refused`
+/// covers what happens without one.
 fn conversation_reference(fake: &FakeBotFramework, tenant: &str) -> Value {
-    json!({
+    sealed_reference(fake, tenant, "a:conv-1", "29:1abc")
+}
+
+fn sealed_reference(
+    fake: &FakeBotFramework,
+    tenant: &str,
+    conversation_id: &str,
+    user_id: &str,
+) -> Value {
+    let payload = json!({
         "service_url": fake.service_url(),
-        "conversation_id": "a:conv-1",
+        "conversation_id": conversation_id,
         "bot_id": "28:bot-1",
-        "user_id": "29:1abc",
+        "user_id": user_id,
         "tenant_id": tenant,
-    })
+    });
+    let sealed = triton_correlation::encode_with_cap(
+        "__conversation_ref",
+        &payload,
+        TEST_CORRELATION_KEY.as_bytes(),
+        4096,
+    )
+    .expect("seal the reference");
+    json!({ "channel": "msteams", "ref": sealed })
 }
 
 /// The happy path: a proactive msteams send renders + posts the activity to the
@@ -236,108 +262,105 @@ fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-/// A reference that names NO tenant must be refused.
+/// A seal this adapter did not mint is refused.
 ///
-/// `tenant_id` was `Option<String>`, and absent meant "no binding
-/// asserted" — so omitting one field turned the cross-tenant check off
-/// entirely. The reference is caller-supplied JSON, so the caller chose
-/// whether to be bound. An `outbound:send` holder could deliver into any
-/// conversation id it knew by leaving the field out.
-///
-/// The minting side (`conversation_reference_json`) always writes the
-/// real tenant, so requiring it costs a genuine reference nothing.
+/// The seal is the whole trust boundary now, so the case that matters is
+/// a reference that LOOKS sealed. Signed with another key, it must not
+/// open — otherwise "sealed" would mean "has a `ref` field".
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_reference_without_a_tenant_is_forbidden() {
+async fn a_reference_sealed_with_another_key_is_refused() {
     let fake = FakeBotFramework::start().await;
     let issuer = TestIssuer::start().await;
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &fake)).await;
 
-    let mut reference = conversation_reference(&fake, "acme");
-    reference.as_object_mut().unwrap().remove("tenant_id");
+    let payload = json!({
+        "service_url": fake.service_url(),
+        "conversation_id": "a:conv-1",
+        "bot_id": "28:bot-1",
+        "user_id": "29:1abc",
+        "tenant_id": "acme",
+    });
+    let forged = triton_correlation::encode_with_cap(
+        "__conversation_ref",
+        &payload,
+        b"an-attackers-key-not-the-adapters",
+        4096,
+    )
+    .expect("forge");
 
     let resp = reqwest::Client::new()
         .post(proc.rest_url("/v1/outbound"))
-        .bearer_auth(outbound_token(&issuer, "globex"))
+        .bearer_auth(outbound_token(&issuer, "acme"))
         .json(&json!({
             "adapter": "msteams",
             "to": "29:1abc",
-            "result": { "text": "unbound" },
-            "reference": reference,
+            "result": { "text": "forged" },
+            "reference": { "channel": "msteams", "ref": forged },
         }))
         .send()
         .await
         .expect("POST /v1/outbound");
 
-    // 400, not 403, and the difference is the point: a reference with no
-    // tenant is MALFORMED, while a reference naming someone else's tenant
-    // is FORBIDDEN. Asserting the mode rather than "some 4xx" keeps the
-    // two distinguishable — `cross_tenant_conversation_is_forbidden`
-    // pins 403 for the other one.
     assert_eq!(
         resp.status(),
-        400,
-        "a reference with no tenant must be refused as malformed, not \
-         treated as unbound — otherwise omitting a field disables the check"
+        403,
+        "a seal signed with another key must not open"
     );
-
     std::thread::sleep(Duration::from_millis(300));
     assert!(
         fake.captured().is_empty(),
-        "a forbidden outbound must not post to the connector"
+        "nothing may reach the connector"
     );
 }
 
-/// The destination host is caller-supplied, and the adapter POSTs there
-/// with a real Bot Connector bearer for the app. Anything off Microsoft's
-/// operated hosts is an exfiltration target.
+/// A caller cannot redirect the post by naming a host.
 ///
-/// `evil.trafficmanager.net` is the case that mattered: until #329 the
-/// allowlist matched the whole Azure Traffic Manager namespace, which
-/// anyone with a subscription can register a name in.
+/// The reply target used to be a caller-written field screened against
+/// an allow-list — a screen worth getting right because the adapter POSTs
+/// there with a real Bot Connector bearer. It now rides INSIDE the seal,
+/// so a host written beside the seal is not read at all. The property is
+/// no longer "the bad host is rejected" but "the caller's host is
+/// irrelevant", which is the stronger one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn an_attacker_controlled_service_url_is_forbidden() {
+async fn a_host_named_outside_the_seal_is_ignored() {
     let fake = FakeBotFramework::start().await;
     let issuer = TestIssuer::start().await;
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &fake)).await;
 
-    for host in [
-        "https://evil.trafficmanager.net/",
-        // Suffix confusion: ends with the magic string, wrong label boundary.
-        "https://smba.trafficmanager.net.evil.example/",
-        "https://attacker.example/",
-        // Userinfo smuggling: the authority is the attacker's.
-        "https://smba.trafficmanager.net@attacker.example/",
-        // Wrong scheme.
-        "http://smba.trafficmanager.net/",
-    ] {
-        let mut reference = conversation_reference(&fake, "acme");
-        reference["service_url"] = json!(host);
+    let mut reference = conversation_reference(&fake, "acme");
+    // Beside the seal, not inside it.
+    reference["service_url"] = json!("https://evil.trafficmanager.net/");
 
-        let resp = reqwest::Client::new()
-            .post(proc.rest_url("/v1/outbound"))
-            .bearer_auth(outbound_token(&issuer, "acme"))
-            .json(&json!({
-                "adapter": "msteams",
-                "to": "29:1abc",
-                "result": { "text": "exfil" },
-                "reference": reference,
-            }))
-            .send()
-            .await
-            .expect("POST /v1/outbound");
-
-        assert_eq!(
-            resp.status(),
-            403,
-            "`{host}` must not receive the bot token"
-        );
-    }
-
-    std::thread::sleep(Duration::from_millis(300));
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(outbound_token(&issuer, "acme"))
+        .json(&json!({
+            "adapter": "msteams",
+            "to": "29:1abc",
+            "result": { "text": "where does this go?" },
+            "reference": reference,
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
     assert!(
-        fake.captured().is_empty(),
-        "no forbidden destination may reach a connector"
+        resp.status().is_success(),
+        "the sealed send is valid: {}",
+        resp.status()
     );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let sent = loop {
+        let c = fake.captured();
+        if !c.is_empty() {
+            break c;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("the post went somewhere other than the sealed host");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(sent.len(), 1, "exactly one post, to the sealed host");
 }
 
 /// A stale conversation reference must be DROPPED, not retried forever.
@@ -438,14 +461,32 @@ async fn a_proactive_send_delivers_the_buttons_the_result_carries() {
          request with nothing to click is the case this feature exists for; \
          got {body}"
     );
-    // The button must carry a signed correlation token, which is what
-    // proves it went through the SIGNING path rather than being rendered
-    // as decoration. `render_card_content` binds each token to
-    // (tenant, recipient), so a proactively delivered card is a
-    // capability for its recipient and nobody else.
+    // The button must carry a token that DECODES against the recipient's
+    // binding — that is what proves it went through the signing path.
+    //
+    // This assertion used to be `body.contains("ct")`, which can never
+    // fail: "ct" is a substring of "Action" and "actions", both present
+    // in every Adaptive Card. It passed on a card with no token at all
+    // (verified). I described it as proof; it was decoration.
+    let token = sent[0].body["attachments"][0]["content"]["actions"]
+        .as_array()
+        .and_then(|a| a.iter().find_map(|x| x["data"]["ct"].as_str()))
+        .unwrap_or_else(|| panic!("no correlation token on the delivered control: {body}"));
+    let decoded = triton_correlation::decode_bound_any(
+        token,
+        &triton_correlation::KeyRing::single(TEST_CORRELATION_KEY.as_bytes()).expect("key ring"),
+        4096,
+        triton_correlation::Binding {
+            platform: "msteams",
+            tenant: "acme",
+            sender: "29:1abc",
+        },
+    );
     assert!(
-        body.contains("ct"),
-        "the delivered control must carry a correlation token; got {body}"
+        decoded.is_ok(),
+        "the token must decode against (tenant acme, recipient 29:1abc) — \
+         a proactively delivered card is a capability for its recipient \
+         and nobody else; got {decoded:?}"
     );
     assert!(
         !body.contains("(no content)"),
@@ -489,5 +530,60 @@ async fn the_outbound_audit_names_its_destination() {
         line["destination"].as_str().unwrap_or_default(),
         "a:conv-1",
         "the post record must name the conversation it reached; got {line}"
+    );
+}
+
+/// The tenant binding must bind the CONVERSATION, not the caller to
+/// itself.
+///
+/// `authorize` compares the reference's `tenant_id` with the caller's
+/// tenant — but the caller writes BOTH the reference's tenant and its
+/// conversation id. Requiring `tenant_id` removed the "leave it out"
+/// route and nothing else: a globex caller can still write
+/// `tenant_id: "globex"` next to an ACME conversation id and pass.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_self_asserted_tenant_does_not_unlock_another_tenants_conversation() {
+    let fake = FakeBotFramework::start().await;
+    let issuer = TestIssuer::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &fake)).await;
+
+    // Hand-written, exactly as a caller would: its own tenant beside
+    // someone else's conversation. Under the old contract this passed
+    // with 202, because `authorize` compared two fields the caller wrote.
+    let reference = json!({
+        "channel": "msteams",
+        "service_url": fake.service_url(),
+        "conversation_id": "a:acme-private-thread",
+        "bot_id": "28:bot-1",
+        "user_id": "29:1abc",
+        "tenant_id": "globex",
+    });
+
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(outbound_token(&issuer, "globex"))
+        .json(&json!({
+            "adapter": "msteams",
+            "to": "29:1abc",
+            "result": { "text": "into someone else's conversation" },
+            "reference": reference,
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+
+    // 400: a hand-written reference carries no seal at all, so it is
+    // MALFORMED rather than forbidden. `a_reference_sealed_with_another_key_is_refused`
+    // pins 403 for the case that looks like a seal and is not.
+    assert_eq!(
+        resp.status(),
+        400,
+        "an unsealed reference must be refused outright: its fields are \
+         caller-written, so nothing in it can bind anything"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        fake.captured().is_empty(),
+        "nothing may reach the connector"
     );
 }

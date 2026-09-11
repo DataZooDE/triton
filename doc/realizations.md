@@ -2089,10 +2089,14 @@ list for OUTBOUND egress — which is where it would have been worse still,
 since there the destination comes from a persisted, caller-supplied
 reference. The inbound weakness was already on `main`.
 
-### A control the caller can switch off is not a control (2026-09-10)
+### A required field is not a bound one (2026-09-10, corrected 2026-09-11)
 
-The proactive-Teams courier bound an out-of-band send to a tenant like
-this:
+**This entry was wrong when first written, and the correction is the
+lesson.** It originally claimed the proactive-Teams tenant binding was
+closed by making one field required. It was not. A later review found the
+hole still open, and measured it: 202 where 403 was required.
+
+The courier bound an out-of-band send like this:
 
 ```rust
 tenant_id: Option<String>,   // absent ⇒ no binding asserted
@@ -2100,26 +2104,44 @@ tenant_id: Option<String>,   // absent ⇒ no binding asserted
 if let Some(tenant) = &r.tenant_id && tenant != &principal.tenant { refuse }
 ```
 
-The reference is caller-supplied JSON. So the caller decided whether to be
-bound: omit one field and the cross-tenant check disappeared, letting an
-`outbound:send` holder deliver into any conversation id it knew. The
-cross-tenant test passed throughout, because it supplied the field.
+The first fix made `tenant_id` required, on the reasoning that `Option`
+on attacker-controlled input means the attacker may choose absent. True,
+and not enough — **the caller writes the reference's tenant AND its
+conversation id.** The check compared the caller's own tenant with a
+value the caller had just written next to someone else's conversation.
+Requiring the field removed the "leave it out" route and left the binding
+self-asserted.
 
-`Option` is the shape of the bug. An optional field on attacker-controlled
-input means "the attacker may choose absent", and `if let Some(...)` then
-reads as a check while being a request. It is required now — which costs a
-genuine reference nothing, since the minting side always writes the real
-tenant.
+Why it fooled me: the shape read like a fix. A field went from optional
+to required, a red test went from failing to passing, and the diff looked
+like tightening. What I never asked was **where each side of the
+comparison came from**. Both sides came from the caller. A comparison
+between two attacker-supplied values is not a check no matter how
+mandatory its operands are.
 
-Two more from the same review, worth the same suspicion next time:
+The real fix is to move the fields out of the caller's reach: the
+reference is now SEALED with an HMAC from the correlation key ring at
+mint, and opened at delivery. The tenant, conversation, recipient and
+reply host are all server-observed on the inbound turn, so the delivery
+side compares one caller value (the token's tenant) against one server
+value (the seal's) — which is what a binding is.
 
-- **A public trait method reachable without its gate.** `deliver` is on the
-  public `OutboundCourier` trait and only the endpoint called `authorize`
-  first. It re-runs the checks itself now; a gate one call site away from
-  the thing it guards is a convention, not a control.
-- **An id interpolated into a URL path.** `conversation_id` is
-  caller-supplied and becomes a path segment on the connector URL, so `..`
-  or `/` aimed a POST carrying a real bot token at a different endpoint.
+Three things fell out of sealing, and they are the reason to prefer it
+over more validation:
 
-The distinguishing habit: for every field on inbound data, ask *what
-happens when it is absent*, not only *what happens when it is hostile*.
+- The `serviceUrl` allow-list check on the outbound path **disappeared**.
+  Re-checking a value we signed ourselves only suggested it might not be
+  ours.
+- The `conversation_id` character screen (`/`, `..`, `?`, `#`)
+  **disappeared**, replaced by building the URL with
+  `path_segments_mut().push()`. The screen was bypassable anyway —
+  `%2e%2e`, `%2F` and `\` all survive a literal-character filter and the
+  parser turns them into real segments afterwards. Screening an alphabet
+  is guessing; encoding one segment is not.
+- `MsTeamsAdapter::extra_service_url_hosts` became dead and was removed.
+
+The general rule: **for every comparison in an authorization path, name
+the source of each side.** If both sides trace back to the same
+untrusted writer, the comparison is decoration. Sealing is how you give
+one side a different author.
+

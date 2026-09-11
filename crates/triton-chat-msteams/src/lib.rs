@@ -203,7 +203,6 @@ pub struct MsTeamsAdapter {
     /// Extra `serviceUrl` hosts the out-of-band courier will accept (beyond the
     /// canonical Microsoft suffixes) — mirrors the verifier's inbound extras, so
     /// a test fixture's `127.0.0.1` mock connector is reachable proactively too.
-    extra_service_url_hosts: Vec<String>,
     /// Agent-multiplexing router (host-provided, #315). When `Some`, an inbound
     /// message and a `__use_agent` chooser click route through it to pick WHICH
     /// agent handles the turn, overriding `inbound_tool`. `None` ⇒ legacy
@@ -537,7 +536,6 @@ impl MsTeamsAdapter {
         // inbound reply trusts the serviceUrl by JWT derivation, but a proactive
         // send validates the stored serviceUrl host against the same suffixes
         // (plus any test-fixture extras) the verifier uses.
-        let extra_service_url_hosts = overrides.extra_service_url_hosts.clone();
         let mut verifier = JwtVerifier::new(openid_url, audience.clone())
             .with_extra_service_url_hosts(overrides.extra_service_url_hosts);
 
@@ -615,7 +613,6 @@ impl MsTeamsAdapter {
             per_tenant_limit,
             courier,
             canonical_path,
-            extra_service_url_hosts,
             router: None,
         })
     }
@@ -1333,6 +1330,7 @@ async fn dispatch_message(
                 &recipient_id,
                 &sender.from_id,
                 &sender.tenant,
+                &adapter.correlation_key,
             )),
         };
         match router.route(ctx).await {
@@ -1654,6 +1652,7 @@ async fn handle_callback(
             &bot_id,
             &sender.from_id,
             &sender.tenant,
+            &adapter.correlation_key,
         ));
         let key = triton_chat_routing::ConvKey::msteams(conversation_id, "", sender.sub.clone());
         let ctx = triton_chat_routing::RouteCtx {
@@ -1834,6 +1833,7 @@ async fn dispatch_and_post_reply(
         recipient_id,
         &sender.from_id,
         &sender.tenant,
+        &adapter.correlation_key,
     ));
     let principal_for_post = principal.clone();
     // Direct render_report (the "Open report:" Execute): the chart URL
@@ -2754,8 +2754,19 @@ async fn post_activity_to(
     conversation_id: &str,
     body: &Value,
 ) -> Result<(u16, Option<String>), String> {
-    let base = service_url.trim_end_matches('/');
-    let url = format!("{}/v3/conversations/{}/activities", base, conversation_id);
+    // Built through the URL parser, not by string interpolation.
+    //
+    // `conversation_id` becomes a PATH SEGMENT. Interpolating it and then
+    // screening for `/`, `..`, `?` and `#` screens the wrong alphabet:
+    // `%2e%2e`, `%2F` and `\` all survive that filter and are turned into
+    // real segments by the parser afterwards. `push` percent-encodes the
+    // value as one segment, so there is no filter to get wrong.
+    let mut url = url::Url::parse(service_url).map_err(|e| format!("msteams serviceUrl: {e}"))?;
+    url.path_segments_mut()
+        .map_err(|_| "msteams serviceUrl cannot be a base".to_string())?
+        .pop_if_empty()
+        .extend(["v3", "conversations", conversation_id, "activities"]);
+    let url = url.to_string();
     let access_token = adapter
         .token_client
         .access_token()
@@ -2782,6 +2793,11 @@ async fn post_activity_to(
 /// convention the other chat couriers use (`"outbound"`).
 const OUTBOUND_TOOL: &str = "outbound";
 
+/// Marker for the sealed conversationReference token.
+const CONVERSATION_REF_MARKER: &str = "__conversation_ref";
+/// Generous: five short ids and a URL.
+const CONVERSATION_REF_CAP: usize = 4096;
+
 /// Serialize an inbound Teams `conversationReference` in the flattened shape the
 /// out-of-band courier consumes ([`TeamsConversationRef`]) — so the host can
 /// persist it against a long-running operation and later deliver the result
@@ -2794,16 +2810,38 @@ fn conversation_reference_json(
     bot_id: &str,
     user_id: &str,
     tenant: &str,
+    key: &triton_correlation::KeyRing,
 ) -> Value {
-    json!({
-        // Self-describing: the delivery side (the agent's outbound-callback
-        // receiver) routes to the matching triton adapter by this channel.
-        "channel": "msteams",
+    // SEALED. Every field here is server-observed on the inbound turn: the
+    // tenant Teams asserted, the conversation it arrived on, the recipient,
+    // and a `serviceUrl` already checked against the host allow-list. The
+    // seal is what keeps them true when the reference comes back hours
+    // later from a caller.
+    //
+    // Unsealed, the delivery side could only compare caller-written fields
+    // with each other — `authorize` checked the reference's tenant against
+    // the CALLER's tenant, and the caller wrote both. A caller could name
+    // its own tenant beside another tenant's conversation and pass
+    // (measured: 202 where 403 was required).
+    let payload = json!({
         "service_url": service_url,
         "conversation_id": conversation_id,
         "bot_id": bot_id,
         "user_id": user_id,
         "tenant_id": tenant,
+    });
+    let sealed = triton_correlation::encode_with_cap(
+        CONVERSATION_REF_MARKER,
+        &payload,
+        key.signing(),
+        CONVERSATION_REF_CAP,
+    )
+    .unwrap_or_default();
+    json!({
+        // Self-describing: the delivery side (the agent's outbound-callback
+        // receiver) routes to the matching triton adapter by this channel.
+        "channel": "msteams",
+        "ref": sealed,
     })
 }
 
@@ -2841,47 +2879,52 @@ struct TeamsConversationRef {
 }
 
 impl MsTeamsAdapter {
-    /// Parse + minimally validate the Teams conversationReference an out-of-band
-    /// send must carry. Fail closed (a missing/blank ref is a `Validation`
-    /// error) rather than silently dropping the send.
-    fn parse_outbound_reference(
+    /// Open the sealed Teams `conversationReference`.
+    ///
+    /// ONE check, because there is only one thing to check: did we mint
+    /// this? The seal is an HMAC over the fields observed on the inbound
+    /// turn, so a valid one makes the tenant, the conversation, the
+    /// recipient and the reply host server-asserted — and an invalid one
+    /// makes every field worthless at once.
+    ///
+    /// That is why this replaced a list of per-field validations. Those
+    /// could only compare caller-written values with each other: the old
+    /// `authorize` checked the reference's tenant against the CALLER's
+    /// tenant, and the caller wrote both, so a caller could name its own
+    /// tenant beside another tenant's conversation and pass. Requiring
+    /// the field removed one route and left the binding self-asserted —
+    /// a required field is not a bound one.
+    fn open_sealed_reference(
+        &self,
         req: &OutboundRequest,
     ) -> Result<TeamsConversationRef, TritonError> {
-        let raw = req.reference.as_ref().ok_or_else(|| {
-            TritonError::Validation(
-                "msteams outbound requires a `reference` (Teams conversationReference)".into(),
-            )
+        let sealed = req
+            .reference
+            .as_ref()
+            .and_then(|r| r.get("ref"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                TritonError::Validation(
+                    "msteams outbound requires a sealed `reference.ref` minted by this \
+                     adapter on the inbound turn"
+                        .into(),
+                )
+            })?;
+        let (marker, payload) = triton_correlation::decode_with_cap(
+            sealed,
+            self.correlation_key.signing(),
+            CONVERSATION_REF_CAP,
+        )
+        .map_err(|_| {
+            TritonError::Forbidden("msteams conversationReference seal is invalid".into())
         })?;
-        let r: TeamsConversationRef = serde_json::from_value(raw.clone())
-            .map_err(|e| TritonError::Validation(format!("invalid msteams reference: {e}")))?;
-        if r.service_url.trim().is_empty() || r.conversation_id.trim().is_empty() {
-            return Err(TritonError::Validation(
-                "msteams reference missing service_url / conversation_id".into(),
+        if marker != CONVERSATION_REF_MARKER {
+            return Err(TritonError::Forbidden(
+                "sealed token is not a conversationReference".into(),
             ));
         }
-        if r.tenant_id.trim().is_empty() {
-            return Err(TritonError::Validation(
-                "msteams reference missing tenant_id: an out-of-band send must \
-                 name the tenant that owns the conversation, or the caller \
-                 chooses whether to be bound"
-                    .into(),
-            ));
-        }
-        // A conversation id becomes a PATH SEGMENT on the connector URL.
-        // Traversal or an embedded query would aim the POST — carrying a real
-        // bot token — at a different endpoint on the same host.
-        if r.conversation_id.contains('/')
-            || r.conversation_id.contains("..")
-            || r.conversation_id.contains('?')
-            || r.conversation_id.contains('#')
-        {
-            return Err(TritonError::Validation(
-                "msteams reference conversation_id may not contain `/`, `..`, \
-                 `?` or `#`: it is interpolated into the connector path"
-                    .into(),
-            ));
-        }
-        Ok(r)
+        serde_json::from_value(payload)
+            .map_err(|e| TritonError::Validation(format!("malformed sealed reference: {e}")))
     }
 }
 
@@ -2896,25 +2939,35 @@ impl OutboundCourier for MsTeamsAdapter {
     /// re-checked before egress even though a captured ref was already
     /// allow-listed — and, when the ref names a tenant, it MUST equal the
     /// caller's: an agent may only message its own tenant's conversations.
+    /// May this caller push into this conversation?
+    ///
+    /// Two facts, and both now come from a source the caller cannot
+    /// write: the seal supplies the conversation's tenant, and the token
+    /// supplies the caller's. The host allow-list check that used to live
+    /// here is gone — the `serviceUrl` inside a seal was already checked
+    /// on the inbound turn, and re-checking a value we signed ourselves
+    /// only suggested it might not be ours.
     async fn authorize(
         &self,
         req: &OutboundRequest,
         principal: &Principal,
     ) -> Result<(), TritonError> {
-        let r = Self::parse_outbound_reference(req)?;
-        if !jwt_verifier::service_url_host_allowed_with_extras(
-            &r.service_url,
-            &self.extra_service_url_hosts,
-        ) {
-            return Err(TritonError::Forbidden(format!(
-                "msteams serviceUrl host not allowed: {}",
-                r.service_url
-            )));
-        }
+        let r = self.open_sealed_reference(req)?;
         if r.tenant_id != principal.tenant {
             return Err(TritonError::Forbidden(format!(
-                "conversation tenant `{}` is not the caller's tenant `{}`",
+                "conversation belongs to tenant `{}`, caller is `{}`",
                 r.tenant_id, principal.tenant
+            )));
+        }
+        // The outbound contract's `to` is redundant for Teams — the
+        // recipient is sealed. Refuse a disagreement rather than silently
+        // preferring one: a caller that names a different recipient has
+        // misunderstood the contract, and guessing which they meant is
+        // how a message reaches the wrong person.
+        if !req.to.is_empty() && req.to != r.user_id {
+            return Err(TritonError::Forbidden(format!(
+                "`to` names `{}` but the sealed conversation's recipient is `{}`",
+                req.to, r.user_id
             )));
         }
         Ok(())
@@ -2935,7 +2988,7 @@ impl OutboundCourier for MsTeamsAdapter {
         // future caller — or a reordering inside the endpoint — sends
         // without them (crew review of #327).
         self.authorize(req, principal).await?;
-        let r = Self::parse_outbound_reference(req)?;
+        let r = self.open_sealed_reference(req)?;
         // The SAME renderer the inbound reply path uses, not
         // `text_reply_message`.
         //
@@ -3145,36 +3198,49 @@ mod tests {
         assert_eq!(strip_mention_prefix("   <at>@b</at>  hi"), "hi");
     }
 
-    /// T2: the inbound Activity is flattened into exactly the shape the
-    /// out-of-band courier ([`TeamsConversationRef`]) parses — the inbound
-    /// `recipient` (bot) becomes `bot_id` (outbound `from`), the inbound `from`
-    /// (user) becomes `user_id` (outbound `recipient`), and the JWT-derived
-    /// serviceUrl + tenant round-trip. This is the reference the host persists.
+    /// The reference the host persists is SEALED, and opens only with the
+    /// adapter's own key.
+    ///
+    /// It used to be a flat JSON object the courier re-validated field by
+    /// field. Those validations could only compare caller-written values
+    /// with each other, so they bound nothing; the seal replaced them.
     #[test]
-    fn conversation_reference_is_flattened_for_the_courier() {
-        // The caller flattens the inbound Activity: recipient (bot) → bot_id,
-        // from (user) → user_id.
+    fn conversation_reference_is_sealed_and_opens_with_our_key() {
+        let key = triton_correlation::KeyRing::single(b"a-test-correlation-key").unwrap();
         let r = conversation_reference_json(
             "https://smba.trafficmanager.net/emea/",
             "a:conv-1",
             "28:bot-1",
             "29:user-alice",
             "tenant-acme",
+            &key,
         );
         assert_eq!(r["channel"], "msteams");
-        assert_eq!(r["service_url"], "https://smba.trafficmanager.net/emea/");
-        assert_eq!(r["conversation_id"], "a:conv-1");
-        assert_eq!(r["bot_id"], "28:bot-1", "bot id → outbound `from`");
-        assert_eq!(
-            r["user_id"], "29:user-alice",
-            "inbound `from` → outbound `recipient`"
+        // The fields are INSIDE the seal, not beside it — a caller must
+        // not be able to read or rewrite them.
+        assert!(
+            r.get("tenant_id").is_none(),
+            "fields must not sit beside the seal"
         );
-        assert_eq!(r["tenant_id"], "tenant-acme");
+        assert!(r.get("service_url").is_none());
 
-        // And it deserializes straight back into what the courier requires.
-        let parsed: TeamsConversationRef = serde_json::from_value(r).expect("round-trips");
-        assert_eq!(parsed.conversation_id, "a:conv-1");
-        assert_eq!(parsed.service_url, "https://smba.trafficmanager.net/emea/");
+        let sealed = r["ref"].as_str().expect("sealed token");
+        let (marker, payload) =
+            triton_correlation::decode_with_cap(sealed, key.signing(), CONVERSATION_REF_CAP)
+                .expect("opens with our key");
+        assert_eq!(marker, CONVERSATION_REF_MARKER);
+        assert_eq!(payload["conversation_id"], "a:conv-1");
+        assert_eq!(payload["bot_id"], "28:bot-1", "bot id → outbound `from`");
+        assert_eq!(payload["user_id"], "29:user-alice");
+        assert_eq!(payload["tenant_id"], "tenant-acme");
+
+        // Another key does not open it.
+        let other = triton_correlation::KeyRing::single(b"a-different-correlation-key").unwrap();
+        assert!(
+            triton_correlation::decode_with_cap(sealed, other.signing(), CONVERSATION_REF_CAP)
+                .is_err(),
+            "a seal must not open with a key that did not mint it"
+        );
     }
 
     #[test]
