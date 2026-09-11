@@ -453,3 +453,41 @@ async fn a_proactive_send_delivers_the_buttons_the_result_carries() {
          `(no content)`; got {body}"
     );
 }
+
+/// The outbound audit line must name WHERE the push went.
+///
+/// For an inbound turn the destination is implied — the reply goes back
+/// to the conversation the request came from, and `trace_id` ties the
+/// two together. An agent-initiated push has no inbound turn, so the
+/// record said a send happened, to whom it was attributed, and nothing
+/// about which conversation received it. That is the one question
+/// forensics asks first about a proactive message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_outbound_audit_names_its_destination() {
+    let fake = FakeBotFramework::start().await;
+    let issuer = TestIssuer::start().await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &fake)).await;
+
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(outbound_token(&issuer, "acme"))
+        .json(&json!({
+            "adapter": "msteams",
+            "to": "29:1abc",
+            "result": { "text": "the operation finished" },
+            "reference": conversation_reference(&fake, "acme"),
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+    assert!(resp.status().is_success(), "send failed: {}", resp.status());
+
+    let line = wait_for_audit(&proc, Duration::from_secs(5), |v| {
+        v["kind"] == "audit" && v["phase"] == "post"
+    });
+    assert_eq!(
+        line["destination"].as_str().unwrap_or_default(),
+        "a:conv-1",
+        "the post record must name the conversation it reached; got {line}"
+    );
+}

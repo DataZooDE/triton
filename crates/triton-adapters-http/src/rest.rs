@@ -1044,6 +1044,7 @@ mod trace_scope_tests {
             error_detail: None,
             ttfb_ms: None,
             sender_ref: None,
+            destination: None,
             suppressed: None,
             trace_id: "t-1".into(),
         }
