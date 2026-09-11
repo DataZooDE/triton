@@ -2495,7 +2495,20 @@ async fn courier_deliver(
     // helper is here for when `upstream` lands, where the resolver
     // replaces the asserted identity and the raw id becomes the only
     // way to tell an impersonation from the victim's own session.
-    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let mut principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    // T3 (async-ops): carry the Teams conversationReference into the agent's
+    // turn so a tool like `start_operation` can persist it and deliver the
+    // (terminal + progress) result back to THIS conversation later. The inline
+    // path (dispatch_and_post_reply) already sets this, but the ASYNC courier is
+    // what production runs (TRITON_MSTEAMS_ASYNC) and it DROPPED it — so a
+    // Teams-started operation was pull-only and never pushed its result back.
+    principal.conversation_ref = Some(conversation_reference_json(
+        verified.reply_base(),
+        &conversation_id,
+        &recipient_id,
+        &sender.from_id,
+        &sender.tenant,
+    ));
     let principal_for_post = principal.clone();
     // See dispatch_and_post_reply: direct render_report invocations get
     // their chart URL minted from the invoked args, pre-dispatch.
