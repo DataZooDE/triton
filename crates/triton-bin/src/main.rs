@@ -37,6 +37,13 @@ const BINARY_SHA: &str = env!("TRITON_BUILD_SHA");
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    // ACC-8 is a property of THIS PROCESS: how long from entry to serving.
+    // Measured here rather than by a test's wall clock, which on a loaded
+    // machine measures the machine (18.2 s against a 1 s target on
+    // 2026-09-12, with the binary itself starting in milliseconds).
+    // Operators get the number too — a cold start that drifts is a
+    // deploy-time symptom nobody currently sees.
+    let started = std::time::Instant::now();
     init_tracing();
     let settings = Arc::new(Settings::from_args());
 
@@ -117,6 +124,7 @@ async fn main() -> std::io::Result<()> {
         env = %settings.env,
         binary_sha = BINARY_SHA,
         drain_deadline_secs = settings.drain_deadline.as_secs(),
+        startup_ms = started.elapsed().as_millis() as u64,
         "triton: listeners bound",
     );
 

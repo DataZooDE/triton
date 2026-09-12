@@ -31,7 +31,37 @@ impl RasterizerProcess {
         Self::spawn_with(Duration::from_secs(5)).await
     }
 
+    /// Spawn, retrying the one failure `free_tcp_port` makes possible.
+    ///
+    /// The port is chosen by binding `:0`, reading the number and dropping the
+    /// listener — so between that drop and the child's bind, another test in
+    /// this binary can take it. The child then exits at once with
+    /// `Address already in use`, which surfaced as
+    /// `triton-rasterizer exited early` under the full suite on 2026-09-12 and
+    /// passed in isolation. `TritonProcess` has retried this since
+    /// `doc/realizations.md` §7; this fixture mirrors it, and like that one it
+    /// retries ONLY the collision — any other early exit is a real bug and
+    /// still fails fast.
     pub async fn spawn_with(deadline: Duration) -> Self {
+        const ATTEMPTS: u32 = 5;
+        for attempt in 0..ATTEMPTS {
+            match Self::try_spawn(deadline).await {
+                Ok(p) => return p,
+                Err(stderr) => {
+                    assert!(
+                        crate::stderr_indicates_addr_in_use(&stderr),
+                        "triton-rasterizer exited early (not AddrInUse); stderr:\n{}",
+                        stderr.join("\n")
+                    );
+                    // Brief backoff lets the OS recycle ephemeral ports.
+                    tokio::time::sleep(Duration::from_millis(50 * (attempt + 1) as u64)).await;
+                }
+            }
+        }
+        panic!("triton-rasterizer lost the port race {ATTEMPTS} times running");
+    }
+
+    async fn try_spawn(deadline: Duration) -> Result<Self, Vec<String>> {
         let port = free_tcp_port();
         let bin = rasterizer_binary_path();
 
@@ -66,8 +96,8 @@ impl RasterizerProcess {
             stderr_join: Some(stderr_join),
             addr,
         };
-        proc.wait_for_ready(deadline).await;
-        proc
+        proc.wait_for_ready(deadline).await?;
+        Ok(proc)
     }
 
     pub fn url(&self) -> String {
@@ -82,7 +112,9 @@ impl RasterizerProcess {
         self.stderr.lock().unwrap().clone()
     }
 
-    async fn wait_for_ready(&mut self, deadline: Duration) {
+    /// `Err(stderr)` when the child exited before serving — the caller
+    /// decides whether that is a lost port race (retry) or a real fault.
+    async fn wait_for_ready(&mut self, deadline: Duration) -> Result<(), Vec<String>> {
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(500))
             .build()
@@ -94,8 +126,9 @@ impl RasterizerProcess {
                 && let Ok(Some(status)) = child.try_wait()
             {
                 self.child = None;
-                let stderr = self.stderr.lock().unwrap().join("\n");
-                panic!("triton-rasterizer exited early ({status}); stderr:\n{stderr}");
+                let stderr = self.stderr.lock().unwrap().clone();
+                let _ = status;
+                return Err(stderr);
             }
             if client
                 .get(&healthz)
@@ -104,7 +137,7 @@ impl RasterizerProcess {
                 .map(|r| r.status().is_success())
                 .unwrap_or(false)
             {
-                return;
+                return Ok(());
             }
             if start.elapsed() > deadline {
                 let stderr = self.stderr.lock().unwrap().join("\n");
