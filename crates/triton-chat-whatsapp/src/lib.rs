@@ -424,17 +424,40 @@ impl OutboundCourier for WhatsAppAdapter {
         PROTOCOL
     }
 
-    /// #113 recipient/tenant binding. `sender_table` adapters: `to` MUST
-    /// be a known recipient whose tenant matches the caller's — an agent
-    /// can only message its own tenant's users. `upstream` adapters have
-    /// no static table; we trust the caller's verified `tenant` (the
-    /// agent owns its tenant's users) — a deliberately weaker posture,
-    /// gated by the dedicated audience + scope at the endpoint.
+    /// #113 recipient binding: a proactive send must name a recipient this
+    /// adapter actually knows, and the two identity modes differ in who
+    /// knows them.
+    ///
+    /// `sender_table`: the recipient is in the operator-enumerated table and
+    /// its tenant matches the caller's — an agent messages its own tenant's
+    /// users.
+    ///
+    /// `upstream`: the resolver is the authority, and it may legitimately
+    /// place the recipient in a DIFFERENT tenant from the caller's. That is
+    /// deliberate, not a gap: `outbound_mint_tenant` then mints the button
+    /// correlation token for the RECIPIENT's tenant, because the recipient is
+    /// who taps it (#287). Requiring the two to match would collapse that
+    /// distinction and break every proactive button. What this mode binds
+    /// instead is resolvability: an unknown recipient has nobody vouching for
+    /// it and is refused. Before that check, an unresolvable recipient was
+    /// accepted and sent to — measured at 202.
+    ///
+    /// Both modes refuse an EMPTY caller tenant outright. `""` is not a
+    /// tenant, and it is exactly the principal the async-ops delivery
+    /// callback builds when an operation recorded no `channel_tenant`
+    /// (DataZooDE/triton#332) — the one shape that must never resolve to
+    /// "carry on".
     async fn authorize(
         &self,
         req: &OutboundRequest,
         principal: &Principal,
     ) -> Result<(), TritonError> {
+        if principal.tenant.trim().is_empty() {
+            return Err(TritonError::Forbidden(format!(
+                "recipient {} is not in tenant `{}`",
+                req.to, principal.tenant
+            )));
+        }
         match &self.identity {
             IdentityMode::SenderTable(table) => match table.get(&req.to) {
                 Some(claims) if claims.tenant == principal.tenant => Ok(()),
@@ -447,7 +470,16 @@ impl OutboundCourier for WhatsAppAdapter {
                     req.to
                 ))),
             },
-            IdentityMode::Upstream(_) => Ok(()),
+            // Refuse rather than surface the resolver's own error: "unknown
+            // recipient" and "resolver unavailable" must read the same, or a
+            // refusal enumerates who exists.
+            IdentityMode::Upstream(up) => match up.resolve(&self.dispatcher, &req.to).await {
+                Ok(_) => Ok(()),
+                Err(_) => Err(TritonError::Forbidden(format!(
+                    "recipient {} could not be resolved for this adapter",
+                    req.to
+                ))),
+            },
         }
     }
 

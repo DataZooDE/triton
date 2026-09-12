@@ -62,13 +62,17 @@ fn env_for(issuer: &TestIssuer, whatsapp: &FakeWhatsAppApi) -> HashMap<String, S
 }
 
 fn outbound_token(issuer: &TestIssuer) -> String {
+    outbound_token_for(issuer, "acme")
+}
+
+fn outbound_token_for(issuer: &TestIssuer, tenant: &str) -> String {
     issuer.sign_jwt(json!({
         "iss": issuer.issuer_url(),
         "sub": "carl-agent",
         "aud": OUTBOUND_AUDIENCE,
         "exp": now() + 60,
         "iat": now(),
-        "tenant": "acme",
+        "tenant": tenant,
         "scope": "outbound:send",
     }))
 }
@@ -235,4 +239,39 @@ fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
         }
         std::thread::sleep(Duration::from_millis(30));
     }
+}
+
+/// An EMPTY caller tenant matches nothing in `sender_table` mode either. The
+/// table's entries all carry a real tenant, so this fails closed today as a
+/// property of the operator's data; asserted here it becomes a property of the
+/// code. The `upstream` half of the same adapter is pinned in
+/// `whatsapp_upstream_outbound.rs`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_caller_tenant_is_forbidden() {
+    let issuer = TestIssuer::start().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &whatsapp)).await;
+
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(outbound_token_for(&issuer, ""))
+        .json(&json!({
+            "adapter": "whatsapp",
+            "to": KNOWN_WA_ID,
+            "category": "utility",
+            "result": { "text": "x" },
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    assert_eq!(status, 403, "an empty tenant must be refused: {body}");
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        whatsapp.captured().is_empty(),
+        "nothing may reach the platform for an empty-tenant caller"
+    );
 }

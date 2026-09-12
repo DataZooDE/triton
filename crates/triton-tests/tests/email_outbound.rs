@@ -226,6 +226,41 @@ async fn cross_tenant_recipient_is_forbidden() {
     );
 }
 
+/// An EMPTY caller tenant matches nothing. This courier fails closed here only
+/// because no enrolled sender carries an empty tenant — true of the operator's
+/// data, not yet of the code, so pin it. The async-ops delivery callback builds
+/// exactly this principal when an operation records no `channel_tenant`
+/// (DataZooDE/triton#332), and "" must not quietly match anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_caller_tenant_is_forbidden() {
+    let issuer = TestIssuer::start().await;
+    let email = FakeEmailApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(&issuer, &email)).await;
+
+    let token = token_full(&issuer, OUTBOUND_AUDIENCE, "", "outbound:send");
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "adapter": "email",
+            "to": KNOWN_EMAIL,
+            "result": { "surface": { "components": [ { "kind": "text", "value": "x" } ] } },
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    assert_eq!(status, 403, "an empty tenant must be refused: {body}");
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        email.captured().is_empty(),
+        "nothing may reach the API for an empty-tenant caller"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn missing_outbound_scope_is_forbidden() {
     let issuer = TestIssuer::start().await;

@@ -29,6 +29,16 @@ adapters:
       selections: inline_keyboard
       forms: numbered_prompts
       dashboard: rasterised_png
+    # A configured template category, so a proactive send OUTSIDE the
+    # 24-hour service window gets as far as the courier's authorize.
+    # Without one, such a send is refused 400 ("no template configured")
+    # before any tenant is compared — which silently made the
+    # unresolvable-recipient test in whatsapp_upstream_outbound.rs pass
+    # for a reason that had nothing to do with resolution.
+    templates:
+      utility:
+        name: carl_reminder
+        language: en
     rate_limit:
       messages_per_sec: 25
       burst: 50
