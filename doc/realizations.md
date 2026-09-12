@@ -2145,3 +2145,76 @@ the source of each side.** If both sides trace back to the same
 untrusted writer, the comparison is decoration. Sealing is how you give
 one side a different author.
 
+
+### A suite of refusals certifies broken code (2026-09-12)
+
+The tenant chain (§ *A required field is not a bound one*) ended with
+four tests on agent-template's async-delivery callback: a matching
+tenant is authorized, and absent / blank / other-tenant are each
+refused. Three refusals and one positive control.
+
+Then I audited the other four `OutboundCourier`s and tried to bind
+WhatsApp's `upstream` identity mode, which answered `Ok(())` for every
+proactive send. I wrote the obvious rule — recipient tenant must equal
+caller tenant — and an existing test stopped it:
+`outbound_buttons_are_minted_for_the_recipients_tenant` (#287) sets the
+resolver to answer `globex` while the caller's token says `acme`, on
+purpose, and asserts the button's correlation token is minted for the
+**recipient's** tenant "or every click on a proactive message dies as a
+forged token". Cross-tenant sending there is intended: the resolver, not
+the caller's tenant, is the authority on who may be messaged — which is
+precisely why `outbound_mint_tenant` has a separate branch for it. My
+rule would have made those two values always identical and collapsed the
+distinction.
+
+What the mode actually lacked was a **resolvability** check. An
+unresolvable recipient was accepted and delivered: 202.
+
+Three things worth keeping:
+
+- **A refusal-only suite cannot tell a strict rule from a broken one.**
+  Reverting the read to its pre-fix form left all three refusals green
+  and failed only the positive control — because the old read found
+  nothing after sealing, so *every* delivery was refused. A suite of
+  refusals would have pronounced code correct while it refused all
+  legitimate traffic. Every authorization suite needs a test that
+  something is *allowed*, and it has to assert the allowed thing really
+  happened, not merely that the status was not 403.
+
+- **A test that fails when you tighten a rule may be the specification.**
+  The instinct is to update the test to match the new code. Read what it
+  asserts and why first: #287's premise was chosen deliberately, and the
+  comment said what breaks without it.
+
+- **Check WHY a new test passes, not just that it does.** The
+  unresolvable-recipient test passed on its first run — because the
+  fixture manifest had no `utility` template, so the send was refused
+  400 ("no template configured") before any binding ran. Fixing the
+  fixture turned it honestly red at 202 and the finding was real. That
+  was the fourth vacuous assertion in two days; the reliable habit is to
+  print the actual status and message once and read it, and to revert
+  each guard separately and watch the matching test go red.
+
+### A baseline that still runs the new code is not a baseline (2026-09-11)
+
+Bumping heron's `vendor/agent-template` broke one test. To decide whether
+the bump caused it I checked the submodule back out at main's pin and
+re-ran: same failure, so I reported it as pre-existing — in a PR body.
+
+The checkout was `git checkout <old-sha>` inside `vendor/agent-template`
+and nothing else. That submodule has submodules of its own, and
+`vendor/escurel` stayed on the **new** commit, which is where the
+behaviour change actually lived. The "baseline" ran the new escurel
+against the old agent-template and reproduced the failure for the same
+reason the bump did.
+
+`git submodule update --init --recursive` after the checkout gives a real
+baseline: old pin passes, new pin fails. The change was mine after all —
+the new escurel refuses the `""` create sentinel on a page that already
+exists, and the test's own comment ("the alpina target does not exist")
+was wrong about the fixture `world()` seeds.
+
+**When bisecting across a nested submodule, recurse, and confirm the
+inner pin moved back** (`git submodule status`) before trusting either
+result. A one-line check that prints the wrong answer is worse than no
+check, because it ends up in a PR body as a claim.
