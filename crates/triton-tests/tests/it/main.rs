@@ -201,3 +201,5 @@ mod whatsapp_single_port;
 mod whatsapp_template;
 #[path = "../whatsapp_upstream_identity.rs"]
 mod whatsapp_upstream_identity;
+#[path = "../whatsapp_upstream_outbound.rs"]
+mod whatsapp_upstream_outbound;

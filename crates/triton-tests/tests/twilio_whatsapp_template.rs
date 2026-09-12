@@ -62,13 +62,17 @@ fn env_for(port: u16, issuer: &TestIssuer, twilio: &FakeTwilioApi) -> HashMap<St
 }
 
 fn outbound_token(issuer: &TestIssuer) -> String {
+    outbound_token_for(issuer, "acme")
+}
+
+fn outbound_token_for(issuer: &TestIssuer, tenant: &str) -> String {
     issuer.sign_jwt(json!({
         "iss": issuer.issuer_url(),
         "sub": "carl-agent",
         "aud": OUTBOUND_AUDIENCE,
         "exp": now() + 60,
         "iat": now(),
-        "tenant": "acme",
+        "tenant": tenant,
         "scope": "outbound:send",
     }))
 }
@@ -130,6 +134,43 @@ async fn category_send_uses_content_template() {
         v["kind"] == "audit" && v["phase"] == "post" && v["protocol"] == "messenger:twilio_whatsapp"
     });
     assert_eq!(post_audit["status_label"], "posted");
+}
+
+/// An EMPTY caller tenant matches nothing. This courier fails closed only
+/// because no enrolled sender carries an empty tenant — a property of the
+/// operator's table, not of the code, until asserted here. The async-ops
+/// delivery callback builds exactly this principal when an operation records
+/// no `channel_tenant` (DataZooDE/triton#332).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_empty_caller_tenant_is_forbidden() {
+    let port = triton_tests::free_tcp_port();
+    let issuer = TestIssuer::start().await;
+    let twilio = FakeTwilioApi::start().await;
+    let proc =
+        TritonProcess::spawn_with_env(Duration::from_secs(5), env_for(port, &issuer, &twilio))
+            .await;
+
+    let resp = reqwest::Client::new()
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(outbound_token_for(&issuer, ""))
+        .json(&json!({
+            "adapter": "twilio-whatsapp",
+            "to": KNOWN_WA_NUMBER,
+            "category": "utility",
+            "variables": ["Alice", "9am"],
+        }))
+        .send()
+        .await
+        .expect("POST /v1/outbound");
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    assert_eq!(status, 403, "an empty tenant must be refused: {body}");
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        twilio.captured().is_empty(),
+        "nothing may reach the API for an empty-tenant caller"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
