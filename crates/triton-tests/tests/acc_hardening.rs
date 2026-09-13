@@ -72,14 +72,46 @@ async fn acc2_sigterm_during_inflight_call_does_not_drop_request() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn acc8_cold_start_health_within_one_second() {
-    // ACC-8 target is 1 s; the harness's spawn waits for /healthz
-    // already, so measure the spawn time itself.
-    let start = Instant::now();
-    let _proc = TritonProcess::spawn_with_env(Duration::from_secs(5), HashMap::new()).await;
-    let elapsed = start.elapsed();
+    // ACC-8 is about the BINARY's cold start, so read the number the binary
+    // itself reports rather than timing the spawn from here.
+    //
+    // A wall clock in this process measures the machine: under the full
+    // suite, ~500 tests spawn binaries in parallel and this read 18.2 s
+    // against a 2 s bound on 2026-09-12, while the binary started in
+    // milliseconds. It passed alone and failed in the suite — a red that
+    // means "the runner is busy" teaches people to re-run, and a suite where
+    // re-running is routine cannot report a real regression.
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), HashMap::new()).await;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let bound = loop {
+        if let Some(l) = proc
+            .stdout_snapshot()
+            .into_iter()
+            .find(|l| l.contains("listeners bound"))
+        {
+            break l;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the binary must log `listeners bound` once it is serving"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let startup_ms: u64 = serde_json::from_str::<Value>(&bound)
+        .ok()
+        .and_then(|v| {
+            v["fields"]["startup_ms"]
+                .as_u64()
+                .or(v["startup_ms"].as_u64())
+        })
+        .unwrap_or_else(|| panic!("the `listeners bound` line must carry startup_ms: {bound}"));
+
     assert!(
-        elapsed < Duration::from_secs(2),
-        "cold-start /healthz took {elapsed:?}, ACC-8 target is < 1 s (debug builds get a 2 s buffer)"
+        startup_ms < 2000,
+        "ACC-8: the binary reported a {startup_ms} ms cold start; the target \
+         is < 1 s (debug builds get a 2 s buffer). This is the process's own \
+         measurement, so it is a real regression rather than a busy runner."
     );
 }
 

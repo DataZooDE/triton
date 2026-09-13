@@ -437,7 +437,7 @@ pub fn free_tcp_port() -> u16 {
 /// `io::Error::last_os_error()` formatted via tokio/std — on linux
 /// it surfaces as `kind: AddrInUse`. Match conservatively so we
 /// never retry on an unrelated failure.
-fn stderr_indicates_addr_in_use(stderr: &[String]) -> bool {
+pub(crate) fn stderr_indicates_addr_in_use(stderr: &[String]) -> bool {
     stderr
         .iter()
         .any(|line| line.contains("AddrInUse") || line.contains("Address already in use"))
