@@ -79,6 +79,17 @@ pub struct EmbedOpts {
     /// Enterprise forwards these over A2A — they are not JWTs). Set with
     /// [`EmbedOpts::google_access`]. `None` = only JWTs are accepted.
     pub google_access: Option<Arc<GoogleAccessTokenVerifier>>,
+    /// The self-signer for the JWTs this host mints to its OWN static
+    /// upstreams (workload→workload, no Vault). When `Some`, the REST adapter
+    /// serves `/.well-known/openid-configuration` + `/.well-known/jwks.json`
+    /// from it, so an upstream can discover this host as an OIDC issuer and
+    /// verify the tokens it mints. `None` (the default) leaves those routes
+    /// 404, exactly as before. The standalone `triton-bin` already wires this
+    /// through `RestState`; the embedded host could not, because `router()`
+    /// hard-coded `oidc_signer: None` — an embedded host that reaches a static
+    /// upstream (e.g. the DataZoo agent → anofox-evolve) therefore had no way
+    /// to be an issuer at all. Set with [`EmbedOpts::oidc_signer`].
+    pub oidc_signer: Option<Arc<triton_identity::JwtSigner>>,
 }
 
 impl Default for EmbedOpts {
@@ -97,6 +108,7 @@ impl Default for EmbedOpts {
             oidc_providers: Vec::new(),
             spec_a2a: None,
             google_access: None,
+            oidc_signer: None,
         }
     }
 }
@@ -120,6 +132,14 @@ impl EmbedOpts {
         self.google_access = Some(Arc::new(GoogleAccessTokenVerifier::new(
             audience, allowed_hd,
         )));
+        self
+    }
+
+    /// Set the self-signer that makes this host an OIDC issuer for the JWTs it
+    /// mints to its own static upstreams: the REST adapter then serves
+    /// `/.well-known/openid-configuration` + `/.well-known/jwks.json` from it.
+    pub fn oidc_signer(mut self, signer: Arc<triton_identity::JwtSigner>) -> Self {
+        self.oidc_signer = Some(signer);
         self
     }
 
@@ -333,8 +353,10 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         metrics,
         // Parsed once above, not per request (#306 crew F7).
         audit_operators: audit_operators.clone(),
-        // The embedded single-port host doesn't do static-upstream signing.
-        oidc_signer: None,
+        // When the embedding host sets a self-signer (it reaches a static
+        // upstream and must be an OIDC issuer that upstream can verify), serve
+        // discovery + JWKS from it; otherwise those routes stay 404 as before.
+        oidc_signer: opts.oidc_signer.clone(),
     };
     let mcp_state = McpState {
         dispatcher: dispatcher.clone(),

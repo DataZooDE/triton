@@ -48,3 +48,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tokio = { workspace = true }
 async-trait = "0.1"
 futures = { workspace = true }
+# Generate a throwaway RSA keypair in the self-signer wiring test (mirrors
+# triton-identity's own signer tests — this module never generates keys itself).
+rsa = "0.9"
+rand = "0.8"
+base64 = "0.22"
