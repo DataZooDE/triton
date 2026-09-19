@@ -193,14 +193,8 @@ async fn the_agent_card_is_public_and_describes_the_endpoint() {
         );
         // The oidc alternative is an accepted way to satisfy `security`.
         let security = card["security"].as_array().expect("security");
-        assert!(
-            security.iter().any(|s| s.get("bearer").is_some()),
-            "{card}"
-        );
-        assert!(
-            security.iter().any(|s| s.get("oidc_0").is_some()),
-            "{card}"
-        );
+        assert!(security.iter().any(|s| s.get("bearer").is_some()), "{card}");
+        assert!(security.iter().any(|s| s.get("oidc_0").is_some()), "{card}");
     }
 }
 
