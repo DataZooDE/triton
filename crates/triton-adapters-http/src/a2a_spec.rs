@@ -221,8 +221,16 @@ async fn agent_card(State(state): State<CardState>) -> Response {
         // its "Dynamic" auth mode builds a connection's login settings FROM
         // this: without it the wizard fails `RegisterDynamicClient… ServerUrl
         // … missing` (observed 2026-09-19) because a bare `bearer` scheme
-        // names no server. One scheme per accepted issuer; a caller satisfies
-        // `security` with the bearer OR any one oidc alternative.
+        // names no server.
+        //
+        // Crucially, `security` lists ONLY the wire authentication scheme (`bearer`).
+        // Listing `oidc_<n>` as runtime requirements in `security` breaks OpenAPI
+        // consumers (including Microsoft Copilot Studio / Power Platform custom
+        // connectors), because `openIdConnect` is a discovery mechanism rather
+        // than a request-level authorization scheme. When listed in `security`,
+        // Power Platform's runtime dispatcher attempts to resolve an unexecutable
+        // auth requirement and aborts with SystemError before dispatching any
+        // HTTP request.
         let mut schemes = serde_json::Map::new();
         schemes.insert(
             "bearer".to_owned(),
@@ -238,23 +246,22 @@ async fn agent_card(State(state): State<CardState>) -> Response {
                     .join("; or "),
             }),
         );
-        let mut security = vec![json!({ "bearer": [] })];
-        for (i, (iss, _aud)) in state.oidc_providers.iter().enumerate() {
+        for (i, (iss, aud)) in state.oidc_providers.iter().enumerate() {
             let name = format!("oidc_{i}");
             schemes.insert(
                 name.clone(),
                 json!({
                     "type": "openIdConnect",
+                    "description": format!("OpenID Connect discovery for {iss} (audience {aud})"),
                     "openIdConnectUrl": format!(
                         "{}/.well-known/openid-configuration",
                         iss.trim_end_matches('/'),
                     ),
                 }),
             );
-            security.push(json!({ name: [] }));
         }
         card["securitySchemes"] = Value::Object(schemes);
-        card["security"] = Value::Array(security);
+        card["security"] = json!([{ "bearer": [] }]);
     }
 
     (StatusCode::OK, Json(card)).into_response()
