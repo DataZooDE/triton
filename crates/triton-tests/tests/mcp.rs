@@ -371,6 +371,74 @@ async fn tools_call_passes_through_meta_ui_resource_uri() {
     );
 }
 
+/// A tool returning an A2UI surface (prose + a `report` component carrying a
+/// public `image_url`) must have its MCP `content[0].text` FLATTENED to the
+/// same human-readable Markdown the spec-A2A face serves — prose followed by
+/// `![chart](image_url)` — not the raw envelope JSON. A text-bubble MCP host
+/// (Copilot Studio's MCP tool) then renders the convergence chart inline
+/// instead of its model re-summarising the JSON into a dead `ui://` stub. The
+/// typed envelope stays intact under `structuredContent` for structured
+/// clients (parity with REST/A2A).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tools_call_flattens_surface_to_prose_and_chart() {
+    let agent = FakeAgent::start_returning(json!({
+        "surface": {
+            "components": [
+                { "kind": "text", "value": "Best combined score reached -2.41 by generation 12." },
+                { "kind": "report", "report_id": "evolve-run-report",
+                  "image_url": "https://agent-lab.data-zoo.de/report/img/TOKEN" }
+            ]
+        }
+    }))
+    .await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        HashMap::from([
+            ("TRITON_ENV".to_string(), "nonprod".to_string()),
+            (
+                "TRITON_STATIC_UPSTREAMS".to_string(),
+                format!("render_report={}", agent.host_port()),
+            ),
+        ]),
+    )
+    .await;
+
+    let (status, body) = rpc_request(
+        &proc,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": { "name": "render_report", "arguments": { "experiment": "demo-run" } }
+        }),
+        Some("dev-token"),
+    )
+    .await;
+    assert!(status.is_success(), "status: {status}, body: {body}");
+
+    let text = body["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("content[0].text missing: {body}"));
+    // Prose + inline chart image, NOT raw JSON.
+    assert!(
+        text.contains("Best combined score reached -2.41 by generation 12."),
+        "prose not flattened into content: {text}"
+    );
+    assert!(
+        text.contains("![chart](https://agent-lab.data-zoo.de/report/img/TOKEN)"),
+        "chart image not rendered as Markdown in content: {text}"
+    );
+    assert!(
+        !text.trim_start().starts_with('{'),
+        "content is still raw envelope JSON: {text}"
+    );
+    // Structured clients still get the full typed envelope, unchanged.
+    assert!(
+        body["result"]["structuredContent"]["result"]["surface"]["components"].is_array(),
+        "structured envelope changed: {body}"
+    );
+}
+
 /// Issue #143 (B): `resources/read` of an upstream-owned `ui://` URI
 /// proxies to the owning upstream and returns its bundle bytes; an
 /// unknown owner still errors; the proxied call carries the minted
