@@ -986,7 +986,7 @@ async fn doc_open_parts(
     parts
 }
 
-fn sources_markdown(result: &Value) -> Option<String> {
+pub(crate) fn sources_markdown(result: &Value) -> Option<String> {
     let components = result.get("surface")?.get("components")?.as_array()?;
     let links: Vec<String> = components
         .iter()
@@ -1005,7 +1005,7 @@ fn sources_markdown(result: &Value) -> Option<String> {
     (!links.is_empty()).then(|| format!("Sources: {}", links.join(" · ")))
 }
 
-fn reply_text(result: &Value) -> String {
+pub(crate) fn reply_text(result: &Value) -> String {
     for key in ["text", "message", "answer"] {
         if let Some(s) = result.get(key).and_then(Value::as_str) {
             return s.to_string();

@@ -357,14 +357,24 @@ async fn tools_call(
                 .and_then(|m| m.get("tool_trace"))
                 .filter(|t| t.is_array())
                 .cloned();
+            // Flatten the tool's A2UI surface to human-readable Markdown
+            // BEFORE the A2UI wrap rewrites `d.result` — the same prose the
+            // spec-A2A face serves (prose + `![chart](image_url)` + clickable
+            // sources). An MCP host with a text bubble (Copilot Studio's MCP
+            // tool, ChatGPT) then shows a real summary and renders the
+            // convergence chart inline, instead of the raw envelope JSON its
+            // model would otherwise re-summarise into a dead `ui://` stub.
+            // Structured clients still get the full typed envelope in
+            // `structuredContent` below, unchanged.
+            let reply_text = crate::a2a_spec::reply_text(&d.result);
             if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
                 return rpc_error(id, code_for(&e), &e.to_string());
             }
             // MCP's `tools/call` result carries `content` (text-shaped
             // for UI display) and `structuredContent` (typed value).
-            // We serialise the canonical envelope into both so a
-            // text-only MCP client sees something sensible and a
-            // structured client gets the same dict REST/A2A get.
+            // `content` is the flattened prose+chart+sources (above);
+            // `structuredContent` is the canonical typed envelope, the
+            // same dict REST/A2A get.
             let env_v = envelope(&d);
             let mut meta = json!({ "trace_id": trace_id });
             if let Some(ui) = ui_meta {
@@ -376,7 +386,7 @@ async fn tools_call(
             rpc_ok(
                 id,
                 json!({
-                    "content": [{ "type": "text", "text": env_v.to_string() }],
+                    "content": [{ "type": "text", "text": reply_text }],
                     "structuredContent": env_v,
                     "isError": false,
                     "_meta": meta
