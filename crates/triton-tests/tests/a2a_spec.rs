@@ -191,10 +191,19 @@ async fn the_agent_card_is_public_and_describes_the_endpoint() {
             format!("{}/.well-known/openid-configuration", iss.issuer_url()),
             "{card}"
         );
-        // The oidc alternative is an accepted way to satisfy `security`.
+        // The wire requirement in `security` is strictly the `bearer` scheme.
+        // OIDC discovery schemes (`oidc_<n>`) are defined in `securitySchemes`
+        // for authorization server discovery, but must NOT be listed as wire
+        // requirements in `security` because OpenAPI/Power Platform dispatchers
+        // do not implement a request-level `openIdConnect` auth handler and will
+        // crash before dispatching HTTP calls.
         let security = card["security"].as_array().expect("security");
-        assert!(security.iter().any(|s| s.get("bearer").is_some()), "{card}");
-        assert!(security.iter().any(|s| s.get("oidc_0").is_some()), "{card}");
+        assert_eq!(security.len(), 1, "{card}");
+        assert!(security[0].get("bearer").is_some(), "{card}");
+        assert!(
+            !security.iter().any(|s| s.get("oidc_0").is_some()),
+            "{card}"
+        );
     }
 }
 
