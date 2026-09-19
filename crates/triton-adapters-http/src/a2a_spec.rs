@@ -208,8 +208,25 @@ async fn agent_card(State(state): State<CardState>) -> Response {
     });
 
     if !state.oidc_providers.is_empty() {
-        card["securitySchemes"] = json!({
-            "bearer": {
+        // Two ways to advertise the same accepted credential:
+        //
+        // `bearer` (an `http`/`JWT` scheme) states, in prose, which
+        // issuer/audience a caller that ALREADY HOLDS a token must bring.
+        // It is what GE and hand-configured callers read.
+        //
+        // `oidc_<n>` (`openIdConnect` schemes) give a caller that must first
+        // OBTAIN a token a machine-readable OpenID Connect discovery URL —
+        // `<issuer>/.well-known/openid-configuration`, which resolves to the
+        // authorization + token endpoints. Copilot Studio's A2A connector in
+        // its "Dynamic" auth mode builds a connection's login settings FROM
+        // this: without it the wizard fails `RegisterDynamicClient… ServerUrl
+        // … missing` (observed 2026-09-19) because a bare `bearer` scheme
+        // names no server. One scheme per accepted issuer; a caller satisfies
+        // `security` with the bearer OR any one oidc alternative.
+        let mut schemes = serde_json::Map::new();
+        schemes.insert(
+            "bearer".to_owned(),
+            json!({
                 "type": "http",
                 "scheme": "bearer",
                 "bearerFormat": "JWT",
@@ -219,9 +236,25 @@ async fn agent_card(State(state): State<CardState>) -> Response {
                     .map(|(iss, aud)| format!("issuer {iss} / audience {aud}"))
                     .collect::<Vec<_>>()
                     .join("; or "),
-            }
-        });
-        card["security"] = json!([{ "bearer": [] }]);
+            }),
+        );
+        let mut security = vec![json!({ "bearer": [] })];
+        for (i, (iss, _aud)) in state.oidc_providers.iter().enumerate() {
+            let name = format!("oidc_{i}");
+            schemes.insert(
+                name.clone(),
+                json!({
+                    "type": "openIdConnect",
+                    "openIdConnectUrl": format!(
+                        "{}/.well-known/openid-configuration",
+                        iss.trim_end_matches('/'),
+                    ),
+                }),
+            );
+            security.push(json!({ name: [] }));
+        }
+        card["securitySchemes"] = Value::Object(schemes);
+        card["security"] = Value::Array(security);
     }
 
     (StatusCode::OK, Json(card)).into_response()

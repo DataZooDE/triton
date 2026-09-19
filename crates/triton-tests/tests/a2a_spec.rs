@@ -178,6 +178,29 @@ async fn the_agent_card_is_public_and_describes_the_endpoint() {
             .unwrap();
         assert!(desc.contains(&iss.issuer_url()), "{desc}");
         assert!(desc.contains(AUD), "{desc}");
+
+        // Alongside the prose `bearer` scheme, each accepted issuer is also
+        // advertised as a machine-readable OpenID Connect scheme, so a client
+        // that must first OBTAIN a token (Copilot Studio's "Dynamic" A2A auth)
+        // can discover the authorization server instead of failing with a
+        // missing ServerUrl. The discovery URL is the issuer's well-known doc.
+        let oidc = &card["securitySchemes"]["oidc_0"];
+        assert_eq!(oidc["type"], "openIdConnect", "{card}");
+        assert_eq!(
+            oidc["openIdConnectUrl"],
+            format!("{}/.well-known/openid-configuration", iss.issuer_url()),
+            "{card}"
+        );
+        // The oidc alternative is an accepted way to satisfy `security`.
+        let security = card["security"].as_array().expect("security");
+        assert!(
+            security.iter().any(|s| s.get("bearer").is_some()),
+            "{card}"
+        );
+        assert!(
+            security.iter().any(|s| s.get("oidc_0").is_some()),
+            "{card}"
+        );
     }
 }
 
