@@ -713,6 +713,7 @@ pub fn build_document_dialog(structured: &Value) -> Value {
         }));
     }
     serde_json::json!({
+        "header": { "title": title },
         "sections": [ { "header": title, "widgets": widgets } ]
     })
 }
@@ -733,7 +734,9 @@ pub fn build_document_dialog(structured: &Value) -> Value {
 pub fn dialog_response(card: Value, workspace_addon: bool) -> Value {
     if workspace_addon {
         serde_json::json!({
-            "action": { "navigations": [ { "pushCard": card } ] }
+            "renderActions": {
+                "action": { "navigations": [ { "pushCard": card } ] }
+            }
         })
     } else {
         serde_json::json!({
@@ -1798,9 +1801,9 @@ mod tests {
         assert!(classic["actionResponse"]["dialogAction"]["dialog"]["body"]["sections"].is_array());
         // Workspace Add-on: RenderActions navigation pushCard (the classic
         // actionResponse is rejected by the add-on host with "Could not load
-        // dialog"). The card rides `action.navigations[0].pushCard`.
+        // dialog"). The card rides `renderActions.action.navigations[0].pushCard`.
         let addon = dialog_response(card, true);
         assert!(addon.get("actionResponse").is_none());
-        assert!(addon["action"]["navigations"][0]["pushCard"]["sections"].is_array());
+        assert!(addon["renderActions"]["action"]["navigations"][0]["pushCard"]["sections"].is_array());
     }
 }
