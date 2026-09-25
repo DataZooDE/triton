@@ -1357,17 +1357,24 @@ async fn handle_webhook(
             let rargs = serde_json::json!({
                 "report_id": "document", "params": { "skill": skill, "id": id }
             });
-            match adapter
+            let render_fut = adapter
                 .dispatcher
-                .invoke("render_report", rargs, principal, PROTOCOL)
-                .await
-            {
-                Ok(d) => surface_mapper::build_document_dialog(
+                .invoke("render_report", rargs, principal, PROTOCOL);
+            match tokio::time::timeout(std::time::Duration::from_millis(4000), render_fut).await {
+                Ok(Ok(d)) => surface_mapper::build_document_dialog(
                     find_document_structured(&d.result).unwrap_or(&Value::Null),
                 ),
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(error = %e, "google_chat open-doc render failed");
-                    surface_mapper::build_document_dialog(&Value::Null)
+                    surface_mapper::build_document_dialog(&serde_json::json!({
+                        "document": { "id": format!("{skill} · {id}") }
+                    }))
+                }
+                Err(_) => {
+                    tracing::warn!("google_chat open-doc render timed out (>4s)");
+                    surface_mapper::build_document_dialog(&serde_json::json!({
+                        "document": { "id": format!("{skill} · {id}") }
+                    }))
                 }
             }
         };
