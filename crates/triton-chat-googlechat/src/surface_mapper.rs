@@ -280,6 +280,100 @@ fn to_google_chat(md: &str) -> String {
     out.join("\n")
 }
 
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Normalise markdown into Cards v2 HTML for `textParagraph` widgets in
+/// Google Chat cards and dialogs.
+///
+/// Google Chat card widgets do NOT parse markdown; they support a strict
+/// subset of HTML tags (`<b>`, `<i>`, `<font color="...">`, `<a>`, `<br>`).
+/// Plain text is HTML-escaped (`&`, `<`, `>`). Fenced code blocks (` ```...``` `)
+/// are formatted with `<font color="#0b57d0">` and `<br>` line breaks.
+pub fn to_card_html(md: &str) -> String {
+    use std::sync::LazyLock;
+    static HEADER: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\s{0,3}#{1,6}\s+(.*?)\s*$").unwrap());
+    static BULLET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\s*)[-*]\s+(.*)$").unwrap());
+    static CODE_FENCE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\s*```.*$").unwrap());
+    static LINK: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(([^)\s]+)\)").unwrap());
+    static BOLD_STAR: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\*\*([^*\n]+)\*\*").unwrap());
+    static BOLD_UNDER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"__([^_\n]+)__").unwrap());
+    static ITALIC_STAR: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(^|\s)\*([^*\s\n][^*\n]*?)\*($|\s)").unwrap());
+    static ITALIC_UNDER: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(^|\s)_([^_\s\n][^_\n]*?)_($|\s)").unwrap());
+    static INLINE_CODE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"`([^`\n]+)`").unwrap());
+
+    fn format_inline(s: &str) -> String {
+        let escaped = html_escape(s);
+        let with_code = INLINE_CODE.replace_all(&escaped, "<font color=\"#0b57d0\">$1</font>");
+        let with_links = LINK.replace_all(&with_code, "<a href=\"$2\">$1</a>");
+        let with_bold = BOLD_STAR.replace_all(&with_links, "<b>$1</b>");
+        let with_bold = BOLD_UNDER.replace_all(&with_bold, "<b>$1</b>");
+        let with_italic = ITALIC_STAR.replace_all(&with_bold, "$1<i>$2</i>$3");
+        let with_italic = ITALIC_UNDER.replace_all(&with_italic, "$1<i>$2</i>$3");
+        with_italic.into_owned()
+    }
+
+    let mut out: Vec<String> = Vec::new();
+    let mut in_code_block = false;
+    let mut code_lines: Vec<String> = Vec::new();
+
+    for raw in md.lines() {
+        if CODE_FENCE.is_match(raw) {
+            if in_code_block {
+                if !code_lines.is_empty() {
+                    let formatted = format!(
+                        "<font color=\"#0b57d0\">{}</font>",
+                        code_lines.join("<br>")
+                    );
+                    out.push(formatted);
+                    code_lines.clear();
+                }
+                in_code_block = false;
+            } else {
+                in_code_block = true;
+            }
+            continue;
+        }
+
+        if in_code_block {
+            code_lines.push(html_escape(raw));
+            continue;
+        }
+
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            if out.last().map(|s| !s.is_empty()).unwrap_or(false) {
+                out.push(String::new());
+            }
+            continue;
+        }
+
+        if let Some(c) = HEADER.captures(raw) {
+            out.push(format!("<b>{}</b>", format_inline(&c[1])));
+        } else if let Some(c) = BULLET.captures(raw) {
+            out.push(format!("• {}", format_inline(&c[2])));
+        } else {
+            out.push(format_inline(raw));
+        }
+    }
+
+    if in_code_block && !code_lines.is_empty() {
+        out.push(format!(
+            "<font color=\"#0b57d0\">{}</font>",
+            code_lines.join("<br>")
+        ));
+    }
+
+    out.join("<br>")
+}
+
 /// UTF-8-safe truncation at the largest char boundary `<= max`.
 fn truncate_to_char_boundary(s: &str, max: usize) -> &str {
     if s.len() <= max {
@@ -677,7 +771,7 @@ pub fn build_document_dialog(structured: &Value) -> Value {
             && !md.trim().is_empty()
         {
             widgets.push(serde_json::json!({
-                "textParagraph": { "text": to_google_chat(md) }
+                "textParagraph": { "text": to_card_html(md) }
             }));
         }
         if let Some(events) = inst.get("events").and_then(Value::as_array)
@@ -695,15 +789,17 @@ pub fn build_document_dialog(structured: &Value) -> Value {
                         .cloned()
                         .collect::<Vec<_>>()
                         .join(" \u{b7} ");
+                    let ttl_esc = html_escape(ttl);
+                    let meta_esc = html_escape(&meta);
                     if meta.is_empty() {
-                        format!("• {ttl}")
+                        format!("• {ttl_esc}")
                     } else {
-                        format!("• *{ttl}* — {meta}")
+                        format!("• <b>{ttl_esc}</b> — {meta_esc}")
                     }
                 })
                 .collect();
             widgets.push(serde_json::json!({
-                "textParagraph": { "text": format!("*Activity*\n{}", lines.join("\n")) }
+                "textParagraph": { "text": format!("<b>Activity</b><br>{}", lines.join("<br>")) }
             }));
         }
     }
@@ -1789,7 +1885,7 @@ mod tests {
             w["textParagraph"]["text"]
                 .as_str()
                 .unwrap_or("")
-                .contains("*Activity*")
+                .contains("<b>Activity</b>")
         }));
 
         // Classic Chat app: actionResponse.type = DIALOG with dialogAction body.
@@ -1803,5 +1899,15 @@ mod tests {
         let addon = dialog_response(card, true);
         assert!(addon.get("actionResponse").is_none());
         assert!(addon["action"]["navigations"][0]["pushCard"]["sections"].is_array());
+    }
+
+    #[test]
+    fn card_html_converts_headers_bold_code_and_escapes() {
+        let md = "# Optimization run demo-run\n\nFound a packing that fits every item into 12 bins (best score -2.4).\n\n## Winning program\n\n```sql\nSELECT bin, item FROM plan WHERE weight < 10;\n```";
+        let html = to_card_html(md);
+        assert!(html.contains("<b>Optimization run demo-run</b>"));
+        assert!(html.contains("<b>Winning program</b>"));
+        assert!(html.contains("<font color=\"#0b57d0\">SELECT bin, item FROM plan WHERE weight &lt; 10;</font>"));
+        assert!(!html.contains("```"));
     }
 }
