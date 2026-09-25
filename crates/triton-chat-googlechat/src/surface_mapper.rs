@@ -713,34 +713,36 @@ pub fn build_document_dialog(structured: &Value) -> Value {
         }));
     }
     serde_json::json!({
-        "header": { "title": title },
         "sections": [ { "header": title, "widgets": widgets } ]
     })
 }
 
 /// The `CARD_CLICKED` response that opens `card` as a Chat modal dialog.
 ///
-/// Both classic / dedicated Chat apps and Google Workspace Add-ons handling
-/// a button with `interaction: "OPEN_DIALOG"` must respond with an `actionResponse`
-/// of type `DIALOG` wrapping `dialogAction.dialog.body`:
+/// The envelope depends on the app's deployment flavor (same split as
+/// [`wrap_message`]):
+///   * **Workspace Add-on** (`workspace_addon = true`) — an `action` object
+///     with navigation `pushCard`; the classic `actionResponse.type=DIALOG`
+///     is rejected by the add-on host ("Could not load dialog … the response
+///     is invalid").
+///   * **classic / dedicated Chat app** — `actionResponse.type=DIALOG` with
+///     `dialogAction.dialog.body`.
 ///
-/// ```json
-/// {
-///   "actionResponse": {
-///     "type": "DIALOG",
-///     "dialogAction": { "dialog": { "body": <card> } }
-///   }
-/// }
-/// ```
-///
-/// `card` is a `GoogleAppsCardV1` card (`{header: {…}, sections:[…]}`).
-pub fn dialog_response(card: Value, _workspace_addon: bool) -> Value {
-    serde_json::json!({
-        "actionResponse": {
-            "type": "DIALOG",
-            "dialogAction": { "dialog": { "body": card } },
-        }
-    })
+/// `card` is a `GoogleAppsCardV1` card (`{sections:[…]}`) — the same shape in
+/// both flavors; only the wrapper differs.
+pub fn dialog_response(card: Value, workspace_addon: bool) -> Value {
+    if workspace_addon {
+        serde_json::json!({
+            "action": { "navigations": [ { "pushCard": card } ] }
+        })
+    } else {
+        serde_json::json!({
+            "actionResponse": {
+                "type": "DIALOG",
+                "dialogAction": { "dialog": { "body": card } },
+            }
+        })
+    }
 }
 
 /// A `Dashboard` lifted off a surface for Cards v2 rendering: its title
@@ -1795,9 +1797,11 @@ mod tests {
         assert_eq!(classic["actionResponse"]["type"], "DIALOG");
         assert!(classic["actionResponse"]["dialogAction"]["dialog"]["body"]["sections"].is_array());
 
-        // Workspace Add-on: also uses actionResponse.type = DIALOG for OPEN_DIALOG interactions.
+        // Workspace Add-on: RenderActions navigation pushCard (the classic
+        // actionResponse is rejected by the add-on host with "Could not load
+        // dialog"). The card rides `action.navigations[0].pushCard`.
         let addon = dialog_response(card, true);
-        assert_eq!(addon["actionResponse"]["type"], "DIALOG");
-        assert!(addon["actionResponse"]["dialogAction"]["dialog"]["body"]["sections"].is_array());
+        assert!(addon.get("actionResponse").is_none());
+        assert!(addon["action"]["navigations"][0]["pushCard"]["sections"].is_array());
     }
 }
