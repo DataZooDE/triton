@@ -241,10 +241,11 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     // that hang under the top Column, in surface order.
     let mut flat: Vec<Value> = Vec::new();
     let mut root_children: Vec<String> = Vec::new();
-    // Buttons are collected here and laid out in a single horizontal Row (chips)
-    // rather than stacked full-width down the Column — matching the Teams/Chat
-    // action-chip row. (Sources are not in the card — see the `sources` arm.)
-    let mut button_ids: Vec<String> = Vec::new();
+    // Action buttons (re-asks, follow-ups) and source buttons are collected
+    // separately so secondary document buttons never crowd out or misalign
+    // the primary action chips.
+    let mut action_btn_ids: Vec<String> = Vec::new();
+    let mut source_btn_ids: Vec<String> = Vec::new();
     // Predicted-GE-id → re-ask question, for this card's follow-up buttons.
     let mut qmap: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut n = 0usize;
@@ -324,7 +325,7 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                     "color": "primary",
                     "action": { "event": { "name": tool, "context": {} } },
                 }));
-                button_ids.push(btn_id);
+                action_btn_ids.push(btn_id);
             }
             // Sources: with the Canvas feature OFF (default) they ride the
             // prose bubble as Markdown links (`reply_text`) — GE's basic
@@ -359,17 +360,27 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                         n,
                         format!("{DOC_OPEN_SENTINEL}{label}\u{1}{skill}\u{1}{doc_id}\u{1}{url}"),
                     );
+                    // Shorten long labels cleanly so they don't overprint
+                    let display_label = if label.len() > 24 {
+                        format!("{}…", &label[..23])
+                    } else {
+                        label.to_string()
+                    };
                     // Outlined (not filled) so a source reads as a secondary,
                     // link-like action, distinct from the solid follow-ups.
                     flat.push(json!({
                         "id": btn_id.clone(),
                         "component": "MaterialButton",
-                        "label": format!("Open: {label}"),
+                        "label": format!("Open: {display_label}"),
                         "variant": "outlined",
                         "color": "primary",
                         "action": { "event": { "name": "open_doc", "context": {} } },
                     }));
-                    button_ids.push(btn_id);
+                    source_btn_ids.push(btn_id);
+                    // Cap source buttons in the card to at most 2 so they never crowd out action buttons
+                    if source_btn_ids.len() >= 2 {
+                        break;
+                    }
                 }
             }
             _ => {}
@@ -380,10 +391,26 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     // gap, so cramming 4 buttons in one row squeezes them and long labels wrap
     // inside a fixed-height pill (visible "overprinting"). Chunk into rows of
     // two so each button gets room; the rows stack in the outer Column.
-    for (k, chunk) in button_ids.chunks(2).enumerate() {
-        let row_id = format!("btn-row-{k}");
+    // Action buttons are laid out first, followed by secondary source buttons
+    // in their own row, keeping the layout clean and balanced.
+    let mut row_idx = 0;
+    for chunk in action_btn_ids.chunks(2) {
+        let row_id = format!("btn-row-{row_idx}");
+        row_idx += 1;
         flat.push(json!({
-            "id": row_id,
+            "id": row_id.clone(),
+            "component": "MaterialRow",
+            "children": chunk,
+            "justify": "start",
+            "align": "stretch",
+        }));
+        root_children.push(row_id);
+    }
+    for chunk in source_btn_ids.chunks(2) {
+        let row_id = format!("btn-row-{row_idx}");
+        row_idx += 1;
+        flat.push(json!({
+            "id": row_id.clone(),
             "component": "MaterialRow",
             "children": chunk,
             "justify": "start",

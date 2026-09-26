@@ -334,7 +334,7 @@ pub fn build_activity_body(
         "conversation": { "id": conversation_id },
         "recipient": { "id": recipient_id },
         "text": msg.text,
-        "textFormat": "plain",
+        "textFormat": "markdown",
     })
 }
 
