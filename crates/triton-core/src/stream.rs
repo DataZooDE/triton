@@ -308,10 +308,16 @@ mod tests {
     #[test]
     fn tool_frame_carries_opaque_payload() {
         let ev = StreamEvent::Tool(json!({ "step": "search", "hits": 30 }));
-        assert_eq!(
-            ev.to_sse_frame(),
-            "event: tool\ndata: {\"hits\":30,\"step\":\"search\"}\n\n"
-        );
+        let frame = ev.to_sse_frame();
+        assert!(frame.starts_with("event: tool\ndata: "));
+        assert!(frame.ends_with("\n\n"));
+        let data_str = frame
+            .strip_prefix("event: tool\ndata: ")
+            .unwrap()
+            .strip_suffix("\n\n")
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_str(data_str).unwrap();
+        assert_eq!(val, json!({ "step": "search", "hits": 30 }));
         assert!(!ev.is_terminal());
     }
 

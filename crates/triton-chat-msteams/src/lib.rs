@@ -2406,6 +2406,15 @@ fn route_command(text: &str, default_tool: &str) -> (String, Value) {
                     serde_json::json!({ "message": subject }),
                 );
             }
+            "help" => {
+                return ("help".to_string(), serde_json::json!({}));
+            }
+            "feedback" => {
+                return (
+                    "feedback".to_string(),
+                    serde_json::json!({ "text": subject }),
+                );
+            }
             _ => {}
         }
     }
@@ -3268,5 +3277,16 @@ mod tests {
         // The plain-text fallback honours the configured tool.
         let (t, _) = route_command("hello world", "assistant");
         assert_eq!(t, "assistant");
+    }
+
+    #[test]
+    fn route_command_help_and_feedback() {
+        let (t, args) = route_command("/help", "assistant");
+        assert_eq!(t, "help");
+        assert_eq!(args, serde_json::json!({}));
+
+        let (t, args) = route_command("/feedback great job", "assistant");
+        assert_eq!(t, "feedback");
+        assert_eq!(args, serde_json::json!({ "text": "great job" }));
     }
 }
