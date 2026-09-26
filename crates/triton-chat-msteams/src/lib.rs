@@ -1335,6 +1335,28 @@ async fn dispatch_message(
         };
         match router.route(ctx).await {
             triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
+                if text.trim().is_empty() {
+                    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+                    let info = format!("Switched to **{agent_id}**. You can now ask questions directly, or type `/whoami` to inspect active bindings.");
+                    let msg = surface_mapper::RenderedMessage::text_only(info);
+                    let body = surface_mapper::build_activity_body(
+                        &recipient_id,
+                        &conversation_id,
+                        &sender.from_id,
+                        &msg,
+                    );
+                    post_reply(
+                        adapter,
+                        verified,
+                        triton_chat_routing::USE_AGENT_TOOL,
+                        &principal,
+                        &conversation_id,
+                        body,
+                        0,
+                    )
+                    .await;
+                    return StatusCode::OK.into_response();
+                }
                 route_command(&text, &agent_id)
             }
             triton_chat_routing::RouteOutcome::Chooser {
@@ -2671,12 +2693,18 @@ async fn courier_deliver(
                 dispatch_latency_ms,
                 Err((&e, 0, PostOutcome::Dropped, Some("error_response"))),
             );
+            let user_msg = match e.class() {
+                "tool" => "I encountered an issue processing that request with our data tools. Please check your query parameters or try again in a moment.",
+                "rate_limited" => "The service is temporarily busy. Please wait a moment and try again.",
+                "auth" => "Authentication or authorization check failed for this request.",
+                _ => "An unexpected error occurred while processing your request. Please try again.",
+            };
             let notice = serde_json::json!({
                 "type": "message",
                 "from": { "id": recipient_id },
                 "conversation": { "id": conversation_id },
                 "recipient": { "id": sender.from_id },
-                "text": format!("(error: {})", e.class()),
+                "text": user_msg,
                 "textFormat": "plain",
             });
             if let Err(err) = post_activity(&adapter, &verified, &conversation_id, &notice).await {

@@ -144,15 +144,13 @@ fn header_container(theme: &CardChrome) -> Option<Value> {
 }
 
 /// Hard ceiling on the Activity `text` body. The Bot Framework
-/// documented limit is ~28 KB; we keep Telegram's 4096-byte safe
-/// ceiling so chat-channel adapters share one truncation budget and
-/// operator dashboards stay comparable.
-pub const MSTEAMS_TEXT_MAX_BYTES: usize = 4096;
+/// documented limit is ~28 KB; we use 24 KB (24,576 bytes) so rich executive
+/// markdown reports, KPI tables, and charts render fully without truncation
+/// while remaining safely under the ~28 KB platform ceiling.
+pub const MSTEAMS_TEXT_MAX_BYTES: usize = 24576;
 
-/// Sentinel appended when we truncate to fit
-/// [`MSTEAMS_TEXT_MAX_BYTES`]. Square brackets make it visibly an
-/// adapter artefact, not tool output.
-const TRUNCATION_SENTINEL: &str = "\n\n[truncated — content exceeded the 4096-byte Activity cap]";
+/// Sentinel appended when we truncate to fit [`MSTEAMS_TEXT_MAX_BYTES`].
+const TRUNCATION_SENTINEL: &str = "\n\n*(Content truncated for chat display. View full report for complete details.)*";
 
 /// Rendered plain-text Teams Activity body. The interactive projection
 /// builds Adaptive Card attachments separately (see
@@ -627,6 +625,53 @@ fn execute_action(title: &str, token: &str) -> Value {
     })
 }
 
+/// Format a cited document's action title for Teams buttons.
+/// Replaces raw internal labels like `query · supplier_reliability_detail` or
+/// `disruption · baltic-plant-fire` with executive-ready titles like
+/// `Data: Supplier Reliability Detail` or `Incident: Baltic Plant Fire`.
+pub fn humanize_doc_action_title(label: &str) -> String {
+    if let Some((skill, id)) = label.split_once(" \u{b7} ") {
+        let skill_clean = skill.trim();
+        let id_clean = id.trim().replace(['_', '-'], " ");
+        let id_title = id_clean
+            .split_whitespace()
+            .map(|w| {
+                let mut chars = w.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        match skill_clean {
+            "disruption" => format!("Incident: {id_title}"),
+            "query" => format!("Data: {id_title}"),
+            "evolve_experiment" => format!("Experiment: {id_title}"),
+            "account" => format!("Account: {id_title}"),
+            "report" => format!("Report: {id_title}"),
+            _ => {
+                let skill_title = skill_clean
+                    .split(['_', '-'])
+                    .filter(|s| !s.is_empty())
+                    .map(|w| {
+                        let mut chars = w.chars();
+                        match chars.next() {
+                            None => String::new(),
+                            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{skill_title}: {id_title}")
+            }
+        }
+    } else {
+        format!("Open: {label}")
+    }
+}
+
 /// One `Action.Submit` that opens a Teams **task-module dialog**. The
 /// `msteams.type = "task/fetch"` marker makes Teams send a `task/fetch`
 /// invoke carrying `data` (with our signed `ct` token) instead of a normal
@@ -928,7 +973,7 @@ pub fn build_adaptive_card(
                 actions.push(execute_action(label, token));
             }
             InteractiveSpec::OpenDoc { label, .. } => {
-                actions.push(task_fetch_action(&format!("Open: {label}"), token));
+                actions.push(task_fetch_action(&humanize_doc_action_title(label), token));
             }
             InteractiveSpec::Selection {
                 prompt,
@@ -1096,7 +1141,7 @@ mod tests {
 
     #[test]
     fn oversized_text_is_truncated_below_cap() {
-        let big = "x".repeat(10_000);
+        let big = "x".repeat(MSTEAMS_TEXT_MAX_BYTES + 1000);
         let s = Surface {
             components: vec![Component::Text {
                 pills: Default::default(),
@@ -1552,7 +1597,31 @@ mod tests {
         assert_eq!(action["type"], "Action.Submit");
         assert_eq!(action["data"]["msteams"]["type"], "task/fetch");
         assert_eq!(action["data"][TOKEN_DATA_KEY], "TOKEN");
-        assert_eq!(action["title"], "Open: account · beverages");
+        assert_eq!(action["title"], "Account: Beverages");
+    }
+
+    #[test]
+    fn test_humanize_doc_action_title() {
+        assert_eq!(
+            humanize_doc_action_title("disruption · baltic-plant-fire"),
+            "Incident: Baltic Plant Fire"
+        );
+        assert_eq!(
+            humanize_doc_action_title("query · supplier_reliability_detail"),
+            "Data: Supplier Reliability Detail"
+        );
+        assert_eq!(
+            humanize_doc_action_title("evolve_experiment · demo-run"),
+            "Experiment: Demo Run"
+        );
+        assert_eq!(
+            humanize_doc_action_title("account · beverages"),
+            "Account: Beverages"
+        );
+        assert_eq!(
+            humanize_doc_action_title("plain-label"),
+            "Open: plain-label"
+        );
     }
 
     #[test]
