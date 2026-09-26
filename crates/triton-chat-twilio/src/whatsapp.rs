@@ -658,11 +658,23 @@ fn log_deferrals(tool_name: &str, rendered: &RenderedMessage) {
 fn route_command(text: &str, default_tool: &str) -> (String, serde_json::Value) {
     if let Some(rest) = text.strip_prefix('/') {
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
-        if tool == "narrate" {
-            return (
-                "narrate".to_string(),
-                serde_json::json!({ "subject": subject }),
-            );
+        match tool {
+            "narrate" => {
+                return (
+                    "narrate".to_string(),
+                    serde_json::json!({ "subject": subject }),
+                );
+            }
+            "help" => {
+                return ("help".to_string(), serde_json::json!({}));
+            }
+            "feedback" => {
+                return (
+                    "feedback".to_string(),
+                    serde_json::json!({ "text": subject }),
+                );
+            }
+            _ => {}
         }
     }
     (

@@ -328,10 +328,8 @@ pub fn to_card_html(md: &str) -> String {
         if CODE_FENCE.is_match(raw) {
             if in_code_block {
                 if !code_lines.is_empty() {
-                    let formatted = format!(
-                        "<font color=\"#0b57d0\">{}</font>",
-                        code_lines.join("<br>")
-                    );
+                    let formatted =
+                        format!("<font color=\"#0b57d0\">{}</font>", code_lines.join("<br>"));
                     out.push(formatted);
                     code_lines.clear();
                 }
@@ -1907,7 +1905,9 @@ mod tests {
         let html = to_card_html(md);
         assert!(html.contains("<b>Optimization run demo-run</b>"));
         assert!(html.contains("<b>Winning program</b>"));
-        assert!(html.contains("<font color=\"#0b57d0\">SELECT bin, item FROM plan WHERE weight &lt; 10;</font>"));
+        assert!(html.contains(
+            "<font color=\"#0b57d0\">SELECT bin, item FROM plan WHERE weight &lt; 10;</font>"
+        ));
         assert!(!html.contains("```"));
     }
 }

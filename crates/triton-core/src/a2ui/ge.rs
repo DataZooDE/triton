@@ -95,6 +95,7 @@ pub fn doc_iframe_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
         std::env::var("TRITON_GE_DOC_IFRAME")
+            .or_else(|_| std::env::var("TRITON_GE_DOC_CANVAS"))
             .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
             .unwrap_or(false)
     })

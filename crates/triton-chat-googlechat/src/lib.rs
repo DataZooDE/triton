@@ -2238,9 +2238,8 @@ fn is_valid_user_sender(name: &str) -> bool {
 /// Strip a leading `@bot ` mention if present, then route by the
 /// first word. Mirrors Telegram's `route_command`: `/<tool> <rest>`
 /// goes to `tool` with `{ subject: rest }` for narrate, `help` (no
-/// args) for help, otherwise falls through to the manifest-configured
-/// default tool. `feedback` isn't recognized yet — it lands once the
-/// dispatcher-level `feedback` tool exists (datazoo-agent-template#164).
+/// args) for help, `feedback` (`{ text: rest }`), otherwise falls through
+/// to the manifest-configured default tool.
 fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     let trimmed = text
         .trim_start_matches("@bot ")
@@ -2256,6 +2255,12 @@ fn route_command(text: &str, default_tool: &str) -> (String, Value) {
         }
         if tool == "help" {
             return ("help".to_string(), serde_json::json!({}));
+        }
+        if tool == "feedback" {
+            return (
+                "feedback".to_string(),
+                serde_json::json!({ "text": subject }),
+            );
         }
     }
     (
@@ -2402,12 +2407,26 @@ mod tests {
     }
 
     #[test]
-    fn route_command_falls_through_to_default_for_unrecognized_slash_words() {
+    fn route_command_recognizes_slash_feedback() {
         let (tool, args) = route_command("/feedback great app!", "assistant");
-        assert_eq!(tool, "assistant", "feedback isn't wired yet (#164)");
+        assert_eq!(tool, "feedback");
+        assert_eq!(args, serde_json::json!({ "text": "great app!" }));
+    }
+
+    #[test]
+    fn route_command_recognizes_slash_feedback_empty_body() {
+        let (tool, args) = route_command("/feedback", "assistant");
+        assert_eq!(tool, "feedback");
+        assert_eq!(args, serde_json::json!({ "text": "" }));
+    }
+
+    #[test]
+    fn route_command_falls_through_to_default_for_unrecognized_slash_words() {
+        let (tool, args) = route_command("/unknowncmd great app!", "assistant");
+        assert_eq!(tool, "assistant");
         assert_eq!(
             args,
-            serde_json::json!({ "message": "/feedback great app!" })
+            serde_json::json!({ "message": "/unknowncmd great app!" })
         );
     }
 

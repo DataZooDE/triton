@@ -1582,6 +1582,8 @@ fn route_command(text: &str, default_tool: &str) -> (String, Value) {
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
         match tool {
             "narrate" => return ("narrate".to_string(), json!({ "subject": subject })),
+            "help" => return ("help".to_string(), json!({})),
+            "feedback" => return ("feedback".to_string(), json!({ "text": subject })),
             // Dev-only command, gated on the same feature as the
             // dev-only `EmptySurface` tool itself. Without the gate
             // a production build would reserve `/empty` and route
