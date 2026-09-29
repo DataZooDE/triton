@@ -120,10 +120,17 @@ the **real** `triton` binary over real HTTP with real signed JWTs (e.g.
 `FakeGoogleJwks` serves a real cert). Pre-push gate:
 
 ```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+scripts/install-hooks.sh   # once per clone: enables .githooks/pre-push
+scripts/check.sh           # what the hook runs; `--list` shows the steps
 ```
+
+`scripts/check.sh` runs `cargo fmt --check` first, then clippy
+(`-D warnings`), the external-consumer smoke, `cargo test --workspace`, the
+`capture`-feature tests and the Flutter analyze + test of
+`packages/a2ui_flutter` and `apps/explorer`. CI calls the same steps, so the
+two cannot drift. The release web build (`scripts/check.sh flutter-web`) is
+CI-only by default. The hook can be bypassed (`git push --no-verify`); CI
+remains the required gate.
 
 ## License
 

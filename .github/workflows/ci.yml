@@ -55,11 +55,13 @@ jobs:
           restore-keys: |
             cargo-${{ runner.os }}-
 
+      # Every command below is a step of scripts/check.sh, the same script the
+      # local pre-push hook runs — change a command there, not here.
       - name: cargo fmt --check
-        run: cargo fmt --all -- --check
+        run: scripts/check.sh fmt
 
       - name: cargo clippy
-        run: cargo clippy --all-targets --workspace -- -D warnings
+        run: scripts/check.sh clippy
 
 
       # ACC-13 — exercise the external-consumer smoke as a
@@ -99,8 +101,7 @@ jobs:
       - name: cargo test (external consumer smoke, no prebuilt binary)
         env:
           RUST_BACKTRACE: 1
-        working-directory: examples/consumer-smoke
-        run: cargo test --locked
+        run: scripts/check.sh consumer-smoke
 
       # Integration tests in `triton-tests` spawn real binaries
       # (`triton` for the gateway; `triton-rasterizer` for the
@@ -109,12 +110,12 @@ jobs:
       # default, so without these explicit builds the spawn-based
       # tests panic with "could not locate `<name>` binary".
       - name: cargo build --bins
-        run: cargo build --locked --bin triton --bin triton-rasterizer
+        run: scripts/check.sh bins
 
       - name: cargo test --workspace
         env:
           RUST_BACKTRACE: 1
-        run: cargo test --workspace --locked
+        run: scripts/check.sh test
 
       # The dev-only `capture` feature (Explorer Trace view) is off in the
       # default build, so the line above never exercises it. Run the embed
@@ -123,15 +124,12 @@ jobs:
       - name: cargo test (capture feature)
         env:
           RUST_BACKTRACE: 1
-        run: cargo test --locked -p triton-embed --features capture
+        run: scripts/check.sh capture
 
   flutter:
     name: flutter analyze + test + build web (a2ui_flutter, apps/explorer)
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: apps/explorer
     steps:
       - uses: actions/checkout@v4
 
@@ -191,29 +189,15 @@ jobs:
       # The shared renderer is analysed and tested in its own package
       # first, so a failure there is reported as the package's, not as the
       # app's. Same order escurel's explore.yml uses for its kit.
-      - name: a2ui_flutter — flutter pub get
-        working-directory: packages/a2ui_flutter
-        run: flutter pub get
+      # Each step is pub get + analyze + test (scripts/check.sh).
+      - name: a2ui_flutter — flutter analyze + test
+        run: scripts/check.sh flutter-a2ui
 
-      - name: a2ui_flutter — flutter analyze
-        working-directory: packages/a2ui_flutter
-        run: flutter analyze
-
-      - name: a2ui_flutter — flutter test
-        working-directory: packages/a2ui_flutter
-        run: flutter test
-
-      - name: flutter pub get
-        run: flutter pub get
-
-      - name: flutter analyze
-        run: flutter analyze
-
-      - name: flutter test
-        run: flutter test
+      - name: apps/explorer — flutter analyze + test
+        run: scripts/check.sh flutter-explorer
 
       - name: flutter build web --release
         # `--no-wasm-dry-run` skips the extra wasm compile the toolchain runs
         # alongside dart2js; we don't ship --wasm, and the double compile
         # spikes peak memory enough to OOM-kill dart2js on the CI runner.
-        run: flutter build web --release --no-wasm-dry-run
+        run: scripts/check.sh flutter-web

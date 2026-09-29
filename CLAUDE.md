@@ -100,8 +100,10 @@ before touching deployment or runtime surface.
 
 When you believe a task is done:
 
-1. `cargo fmt --check && cargo clippy --all-targets -- -D warnings`
-2. `cargo test --workspace` — all green.
+1. `scripts/check.sh` — fmt, clippy, consumer smoke, workspace +
+   `capture` tests, Flutter analyze/test; all green. The same script is
+   the pre-push hook (`scripts/install-hooks.sh` once per clone) and CI.
+2. Never push with `--no-verify` to get past a red gate.
 3. The increment's **integration test** runs as part of `cargo test`
    AND has been verified by running the binary by hand at least once.
 4. Commit (Co-Authored-By trailer), push, open PR, paste the
