@@ -1337,7 +1337,9 @@ async fn dispatch_message(
             triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
                 if text.trim().is_empty() {
                     let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
-                    let info = format!("Switched to **{agent_id}**. You can now ask questions directly, or type `/whoami` to inspect active bindings.");
+                    let info = format!(
+                        "Switched to **{agent_id}**. You can now ask questions directly, or type `/whoami` to inspect active bindings."
+                    );
                     let msg = surface_mapper::RenderedMessage::text_only(info);
                     let body = surface_mapper::build_activity_body(
                         &recipient_id,
@@ -2694,10 +2696,16 @@ async fn courier_deliver(
                 Err((&e, 0, PostOutcome::Dropped, Some("error_response"))),
             );
             let user_msg = match e.class() {
-                "tool" => "I encountered an issue processing that request with our data tools. Please check your query parameters or try again in a moment.",
-                "rate_limited" => "The service is temporarily busy. Please wait a moment and try again.",
+                "tool" => {
+                    "I encountered an issue processing that request with our data tools. Please check your query parameters or try again in a moment."
+                }
+                "rate_limited" => {
+                    "The service is temporarily busy. Please wait a moment and try again."
+                }
                 "auth" => "Authentication or authorization check failed for this request.",
-                _ => "An unexpected error occurred while processing your request. Please try again.",
+                _ => {
+                    "An unexpected error occurred while processing your request. Please try again."
+                }
             };
             let notice = serde_json::json!({
                 "type": "message",

@@ -150,7 +150,8 @@ fn header_container(theme: &CardChrome) -> Option<Value> {
 pub const MSTEAMS_TEXT_MAX_BYTES: usize = 24576;
 
 /// Sentinel appended when we truncate to fit [`MSTEAMS_TEXT_MAX_BYTES`].
-const TRUNCATION_SENTINEL: &str = "\n\n*(Content truncated for chat display. View full report for complete details.)*";
+const TRUNCATION_SENTINEL: &str =
+    "\n\n*(Content truncated for chat display. View full report for complete details.)*";
 
 /// Rendered plain-text Teams Activity body. The interactive projection
 /// builds Adaptive Card attachments separately (see
@@ -659,7 +660,9 @@ pub fn humanize_doc_action_title(label: &str) -> String {
                         let mut chars = w.chars();
                         match chars.next() {
                             None => String::new(),
-                            Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                            Some(first) => {
+                                first.to_uppercase().collect::<String>() + chars.as_str()
+                            }
                         }
                     })
                     .collect::<Vec<_>>()
