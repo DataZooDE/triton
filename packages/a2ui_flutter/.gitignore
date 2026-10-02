@@ -43,3 +43,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# A library package: its lockfile is not committed (Dart convention).
+# `flutter pub get` in scripts/check.sh creates it locally.
+/pubspec.lock

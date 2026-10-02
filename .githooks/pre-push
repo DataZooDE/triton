@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# .githooks/pre-push — run the local gate before a push leaves this machine.
+#
+# Installed by `scripts/install-hooks.sh` (sets core.hooksPath=.githooks).
+# The checks themselves live in `scripts/check.sh`, which CI calls too, so
+# this hook and the workflow cannot drift apart. CI stays the required gate:
+# `git push --no-verify` skips this hook, and nothing server-side trusts it.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+head="$(git rev-parse HEAD)"
+
+pushing=0
+other_ref=0
+# stdin: <local ref> <local sha> <remote ref> <remote sha>, one line per ref.
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  [[ "$local_sha" =~ ^0+$ ]] && continue # branch deletion: nothing to check
+  pushing=1
+  [ "$local_sha" = "$head" ] || other_ref=1
+done
+[ "$pushing" = 1 ] || exit 0
+
+# The checks run against the WORKING TREE, not the pushed commits.
+if [ "$other_ref" = 1 ]; then
+  echo "pre-push: warning: pushing a commit other than HEAD; checking HEAD's working tree" >&2
+fi
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "pre-push: warning: uncommitted changes are included in what gets checked" >&2
+fi
+
+exec "$root/scripts/check.sh" pre-push
