@@ -16,6 +16,7 @@
 //!   on every reply attempt — no other audit emission.
 
 pub mod jwt_verifier;
+pub mod md_card;
 pub mod surface_mapper;
 pub mod token_client;
 
@@ -2234,13 +2235,17 @@ fn render_card_content(
 ) -> Option<Value> {
     let specs = surface_mapper::interactive_from_result(result);
     let dashboard = surface_mapper::dashboard_from_result(result);
-    if specs.is_empty() && dashboard.is_none() && image_url.is_none() {
-        return None;
-    }
     let text = match surface_mapper::try_render_surface(result) {
         Some(Ok(r)) => r.text,
         _ => String::new(),
     };
+    // A reply with headings or tables gets a card even with no controls:
+    // the card renders them as compact native elements, where Teams'
+    // own Markdown renderer would use title-size headings (md_card).
+    let rich = md_card::is_rich_markdown(&text);
+    if specs.is_empty() && dashboard.is_none() && image_url.is_none() && !rich {
+        return None;
+    }
     let signed: Vec<(surface_mapper::InteractiveSpec, String)> = specs
         .into_iter()
         .filter_map(|spec| {
@@ -2270,7 +2275,7 @@ fn render_card_content(
         .collect();
     // Every interactive control dropped, no dashboard, no image →
     // nothing to put on a card; fall back to text.
-    if signed.is_empty() && dashboard.is_none() && image_url.is_none() {
+    if signed.is_empty() && dashboard.is_none() && image_url.is_none() && !rich {
         return None;
     }
     Some(surface_mapper::build_adaptive_card(
