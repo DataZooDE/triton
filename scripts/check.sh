@@ -61,10 +61,11 @@ flutter_version_note() {
 # Newer Flutter SDKs rewrite tracked files on `pub get` (3.47 adds analyzer
 # excludes to analysis_options.yaml). A check must not leave the tree dirty,
 # so restore any tracked file under the package that was clean beforehand.
+# Restore on failure too: a failed analyze must not leave the rewrite behind.
 flutter_package() {
-  local before after f
+  local before after f rc=0
   before="$(git diff --name-only -- "$1")"
-  (cd "$1" && flutter pub get && flutter analyze && flutter test) || return 1
+  (cd "$1" && flutter pub get && flutter analyze && flutter test) || rc=$?
   after="$(git diff --name-only -- "$1")"
   for f in $after; do
     if ! grep -qxF "$f" <<<"$before"; then
@@ -72,6 +73,7 @@ flutter_package() {
       git checkout -- "$f"
     fi
   done
+  return "$rc"
 }
 
 step_flutter_a2ui() {
