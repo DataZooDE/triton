@@ -280,6 +280,35 @@ fn to_google_chat(md: &str) -> String {
     out.join("\n")
 }
 
+/// [`to_google_chat`] for callers outside the renderer (the table split
+/// renders its lead sentence as message text).
+pub fn chat_text(md: &str) -> String {
+    to_google_chat(md)
+}
+
+/// The answer's raw Markdown: every `Text` component, joined. `None` when
+/// there is no surface, or when sources render as a text line (dialog off),
+/// so a caller that re-lays out the answer never drops them.
+pub fn answer_markdown(result: &Value) -> Option<String> {
+    let surface = extract_surface(result).ok()?;
+    let has_source_line = surface
+        .components
+        .iter()
+        .any(|c| matches!(c, Component::Sources { items } if !items.is_empty()));
+    if has_source_line && !doc_dialog_enabled() {
+        return None;
+    }
+    let texts: Vec<&str> = surface
+        .components
+        .iter()
+        .filter_map(|c| match c {
+            Component::Text { value, .. } => Some(value.as_str()),
+            _ => None,
+        })
+        .collect();
+    (!texts.is_empty()).then(|| texts.join("\n\n"))
+}
+
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -913,6 +942,32 @@ pub fn build_interactive_card(
     theme: &CardChrome,
     click_endpoint: Option<&str>,
 ) -> Value {
+    build_interactive_card_with_answer(
+        text,
+        &[],
+        dashboard,
+        dashboard_image_url,
+        signed,
+        workspace_addon,
+        theme,
+        click_endpoint,
+    )
+}
+
+/// [`build_interactive_card`] with the answer's own card sections (tables
+/// as aligned rows, see `table_card`) placed first, above the chart and
+/// the actions.
+#[allow(clippy::too_many_arguments)]
+pub fn build_interactive_card_with_answer(
+    text: &str,
+    answer_sections: &[Value],
+    dashboard: Option<&DashboardData>,
+    dashboard_image_url: Option<&str>,
+    signed: &[(InteractiveSpec, String)],
+    workspace_addon: bool,
+    theme: &CardChrome,
+    click_endpoint: Option<&str>,
+) -> Value {
     // What `onClick.action.function` must BE depends on the app's
     // deployment flavor (found via Google's own Chat error log, #635):
     //   * classic Chat app — an opaque function NAME, echoed back on the
@@ -1021,6 +1076,7 @@ pub fn build_interactive_card(
     if let Some(banner) = logo_banner_section(theme) {
         sections.push(banner);
     }
+    sections.extend(answer_sections.iter().cloned());
     if let Some(d) = dashboard {
         sections.push(dashboard_section(d, dashboard_image_url));
     }
@@ -1423,6 +1479,43 @@ mod tests {
                 ["message"]["text"],
             serde_json::json!("answer")
         );
+    }
+
+    #[test]
+    fn answer_markdown_joins_the_text_components() {
+        let result = serde_json::json!({
+            "surface": { "components": [
+                { "kind": "text", "value": "Lead." },
+                { "kind": "button", "label": "Ask again",
+                  "tool": "assistant", "args": { "question": "redo?" } },
+                { "kind": "text", "value": "| A | B |\n| - | - |\n| x | 1 |" }
+            ] }
+        });
+        assert_eq!(
+            answer_markdown(&result).as_deref(),
+            Some("Lead.\n\n| A | B |\n| - | - |\n| x | 1 |")
+        );
+        assert!(answer_markdown(&serde_json::json!({ "echo": "x" })).is_none());
+    }
+
+    #[test]
+    fn answer_sections_come_before_the_chart_and_the_actions() {
+        let answer = serde_json::json!({ "header": "Suppliers", "widgets": [ { "divider": {} } ] });
+        let dash: DashboardData = (String::new(), Vec::new());
+        let body = build_interactive_card_with_answer(
+            "Baltic is the risk.",
+            std::slice::from_ref(&answer),
+            Some(&dash),
+            Some("https://img.example/c.png"),
+            &[],
+            false,
+            &CardChrome::default(),
+            None,
+        );
+        assert_eq!(body["text"], "Baltic is the risk.");
+        let sections = body["cardsV2"][0]["card"]["sections"].as_array().unwrap();
+        assert_eq!(sections[0], answer);
+        assert!(sections[1]["widgets"][0].get("image").is_some());
     }
 
     #[test]

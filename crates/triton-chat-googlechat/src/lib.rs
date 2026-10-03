@@ -34,6 +34,7 @@
 
 pub mod jwt_verifier;
 pub mod surface_mapper;
+pub mod table_card;
 pub mod token_minter;
 pub mod wif_minter;
 pub use surface_mapper::RenderedMessage;
@@ -1746,11 +1747,22 @@ async fn build_reply_message(
     // tapped/submitted (Google renders no user message for a
     // click), so the chat history stays legible across several
     // buttons. Italic, on its own line, above the answer.
+    // A Markdown table has no Google Chat text form (it shows as raw
+    // `| … |` rows). Such an answer keeps its lead sentence as the message
+    // text and moves the rest, tables as aligned rows, into the card
+    // (table_card).
+    let rich = surface_mapper::answer_markdown(dispatch_result)
+        .and_then(|md| table_card::rich_answer(&md));
+    let answer_text = match &rich {
+        Some(r) => surface_mapper::chat_text(&r.lead_md),
+        None => rendered.text.clone(),
+    };
+    let answer_sections: Vec<Value> = rich.map(|r| r.sections).unwrap_or_default();
     let reply_text = match &action_echo {
         Some(echo) if !echo.is_empty() => {
-            format!("*↳ {}*\n\n{}", echo.replace('*', "\\*"), rendered.text)
+            format!("*↳ {}*\n\n{}", echo.replace('*', "\\*"), answer_text)
         }
-        _ => rendered.text.clone(),
+        _ => answer_text,
     };
     // Render the Dashboard (if any): a rasterised chart PNG when
     // we can mint a reachable image URL (Triton serves it on
@@ -1834,11 +1846,12 @@ async fn build_reply_message(
             _ => String::new(),
         };
         surface_mapper::image_reply_card(&caption, url, workspace_addon, &chrome)
-    } else if signed.is_empty() && dashboard.is_none() {
+    } else if signed.is_empty() && dashboard.is_none() && answer_sections.is_empty() {
         surface_mapper::text_reply_body(&reply_text, workspace_addon)
     } else {
-        surface_mapper::build_interactive_card(
+        surface_mapper::build_interactive_card_with_answer(
             &reply_text,
+            &answer_sections,
             dashboard.as_ref(),
             dash_img.as_deref(),
             &signed,
