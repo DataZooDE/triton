@@ -945,9 +945,10 @@ pub fn build_adaptive_card(
 ) -> Value {
     let mut body: Vec<Value> = Vec::new();
     body.extend(header_container(chrome));
-    if !text.is_empty() {
-        body.push(json!({ "type": "TextBlock", "text": text, "wrap": true }));
-    }
+    // Headings, tables and rules map to compact native elements; plain prose
+    // stays one TextBlock (crate::md_card).
+    let rich = crate::md_card::markdown_to_body(text);
+    body.extend(rich.elements);
     // Chart: a NATIVE interactive Adaptive Card chart (Teams) when we have a
     // Vega spec to map; it carries a `fallback` Image so chart-incapable hosts
     // still show the rasterized PNG. Otherwise the plain signed-image PNG.
@@ -1031,17 +1032,23 @@ pub fn build_adaptive_card(
     // readable `fallbackText` so a host capped below 1.5 shows the prose rather
     // than nothing. Chartless cards stay at the 1.4 floor (unchanged for every
     // other surface this ingress serves).
-    let (version, chart_present) = match chart {
-        Some(_) => (CHART_CARD_VERSION, true),
-        None => (ADAPTIVE_CARD_VERSION, false),
+    // A native `Table` needs 1.5 too, with the same fallback.
+    let needs_1_5 = chart.is_some() || rich.has_table;
+    let version = if needs_1_5 {
+        CHART_CARD_VERSION
+    } else {
+        ADAPTIVE_CARD_VERSION
     };
     let mut card = json!({
         "type": "AdaptiveCard",
         "$schema": ADAPTIVE_CARD_SCHEMA,
         "version": version,
         "body": body,
+        // Use the conversation's width: a report squeezed into the default
+        // narrow card wraps every table column.
+        "msteams": { "width": "Full" },
     });
-    if chart_present && !text.is_empty() {
+    if needs_1_5 && !text.is_empty() {
         card["fallbackText"] = json!(text);
     }
     if !actions.is_empty() {
