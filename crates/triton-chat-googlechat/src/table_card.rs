@@ -11,7 +11,10 @@
 //!   and becomes its header (emoji and inline-code id tags stripped). Prose
 //!   becomes a `textParagraph`. A table becomes a bold header row, a
 //!   divider, then one `columns` row per line: the first cell left, the other
-//!   cells joined with " · " and aligned right.
+//!   cells joined with " · " and aligned right. Tables with four or more
+//!   columns keep only the second cell (the key metric) on the right; the
+//!   remaining cells go on a muted second line under the first cell as
+//!   "Header: value · Header: value", so the right column never wraps.
 //!
 //! Replies without a table are left alone (`rich_answer` returns `None`).
 
@@ -21,6 +24,13 @@ use crate::surface_mapper::to_card_html;
 
 /// At most this many body rows per table; Chat caps a card's widget count.
 const MAX_TABLE_ROWS: usize = 25;
+
+/// From this many columns on, a row shows only the second cell on the right;
+/// the others go on a muted second line under the first cell.
+const WIDE_TABLE_COLUMNS: usize = 4;
+
+/// Google's secondary-text grey for the detail line of a wide table row.
+const DETAIL_COLOR: &str = "#80868b";
 
 pub struct RichAnswer {
     /// Markdown before the first heading, table or rule; may be empty.
@@ -166,11 +176,45 @@ impl Builder {
             }
         };
         let first = |cells: &[String]| cells.first().map(|c| html(c)).unwrap_or_default();
+        // Two columns get roughly equal width in Chat, so with four or more
+        // cells the joined right side wraps. Keep only the key metric (the
+        // second cell) on the right and move the rest under the first cell as
+        // a muted "Header: value · …" line.
+        let wide = header.len() >= WIDE_TABLE_COLUMNS;
+        let second = |cells: &[String]| cells.get(1).map(|c| html(c)).unwrap_or_default();
+        let details = |cells: &[String]| -> String {
+            cells
+                .iter()
+                .enumerate()
+                .skip(2)
+                .filter_map(|(n, c)| {
+                    let v = html(c);
+                    if v.is_empty() {
+                        return None;
+                    }
+                    let h = header.get(n).map(|h| html(h)).unwrap_or_default();
+                    Some(if h.is_empty() { v } else { format!("{h}: {v}") })
+                })
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        let body_row = |cells: &[String]| -> Value {
+            if !wide {
+                return row(first(cells), rest(cells));
+            }
+            let mut left = first(cells);
+            let d = details(cells);
+            if !d.is_empty() {
+                left = format!("{left}<br><font color=\"{DETAIL_COLOR}\">{d}</font>");
+            }
+            row(left, second(cells))
+        };
+        let header_right = if wide { second(header) } else { rest(header) };
         self.widgets
-            .push(row(bold(first(header)), bold(rest(header))));
+            .push(row(bold(first(header)), bold(header_right)));
         self.widgets.push(json!({ "divider": {} }));
         for r in rows.iter().take(MAX_TABLE_ROWS) {
-            self.widgets.push(row(first(r), rest(r)));
+            self.widgets.push(body_row(r));
         }
         if rows.len() > MAX_TABLE_ROWS {
             let more = rows.len() - MAX_TABLE_ROWS;
@@ -282,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn a_table_becomes_aligned_two_column_rows() {
+    fn a_wide_table_keeps_the_key_metric_right_and_details_under_the_name() {
         let r = rich_answer(ANSWER).unwrap();
         let w = r.sections[0]["widgets"].as_array().unwrap();
         // header row, divider, two body rows
@@ -291,15 +335,26 @@ mod tests {
             row_texts(&w[0]),
             (
                 "<b>Supplier</b>".to_string(),
-                "<b>On-Time Rate · Lead Time (Median / P90) · Risk Level</b>".to_string()
+                "<b>On-Time Rate</b>".to_string()
             )
         );
         assert!(w[1].get("divider").is_some());
         assert_eq!(
+            row_texts(&w[2]),
+            (
+                "Nordwind Logistics<br><font color=\"#80868b\">\
+                 Lead Time (Median / P90): 4.0 / 5.4 days · Risk Level: Moderate</font>"
+                    .to_string(),
+                "88.9%".to_string()
+            )
+        );
+        assert_eq!(
             row_texts(&w[3]),
             (
-                "<b>Baltic Components</b>".to_string(),
-                "55.6% · 7.0 / 12.2 days · High".to_string()
+                "<b>Baltic Components</b><br><font color=\"#80868b\">\
+                 Lead Time (Median / P90): 7.0 / 12.2 days · Risk Level: High</font>"
+                    .to_string(),
+                "55.6%".to_string()
             )
         );
         let right = &w[2]["columns"]["columnItems"][1];
@@ -307,6 +362,46 @@ mod tests {
         assert_eq!(right["horizontalSizeStyle"], "FILL_MINIMUM_SPACE");
         // No raw Markdown table syntax survives anywhere.
         assert!(!serde_json::to_string(&r.sections).unwrap().contains("| "));
+    }
+
+    #[test]
+    fn a_wide_table_skips_empty_detail_cells() {
+        let r =
+            rich_answer("| A | B | C | D |\n| - | - | - | - |\n| x | 1 |  | d |\n| y | 2 | | |")
+                .unwrap();
+        let w = r.sections[0]["widgets"].as_array().unwrap();
+        assert_eq!(
+            row_texts(&w[2]),
+            (
+                "x<br><font color=\"#80868b\">D: d</font>".to_string(),
+                "1".to_string()
+            )
+        );
+        // No details at all: no second line.
+        assert_eq!(row_texts(&w[3]), ("y".to_string(), "2".to_string()));
+    }
+
+    #[test]
+    fn a_three_column_table_joins_the_rest_on_the_right() {
+        let r =
+            rich_answer("| Supplier | Rate | Risk |\n| --- | --- | --- |\n| Acme | 90% | Low |")
+                .unwrap();
+        let w = r.sections[0]["widgets"].as_array().unwrap();
+        assert_eq!(
+            row_texts(&w[0]),
+            (
+                "<b>Supplier</b>".to_string(),
+                "<b>Rate · Risk</b>".to_string()
+            )
+        );
+        assert_eq!(
+            row_texts(&w[2]),
+            ("Acme".to_string(), "90% · Low".to_string())
+        );
+        assert_eq!(
+            w[2]["columns"]["columnItems"][0]["horizontalSizeStyle"],
+            "FILL_AVAILABLE_SPACE"
+        );
     }
 
     #[test]
