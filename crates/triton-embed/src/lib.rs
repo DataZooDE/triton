@@ -57,6 +57,16 @@ pub struct EmbedOpts {
     /// route and the card unmounted, so the surface is exactly what it
     /// was before spec-A2A existed. Set it with [`EmbedOpts::spec_a2a`].
     pub spec_a2a: Option<SpecA2aConfig>,
+    /// Per-agent spec-A2A faces (one Agent Card + JSON-RPC endpoint per
+    /// agent, at `/a2a/<slug>`), so a platform that registers ONE card per
+    /// agent (Gemini Enterprise) can address each roster agent directly.
+    /// Each entry's `a2a_path` is `/a2a/<slug>`. Its `public_url` and
+    /// `version` are NOT its own: they are taken from [`Self::spec_a2a`]
+    /// when the router is built, so the cards cannot disagree about the
+    /// origin. **Requires `spec_a2a`**: without the primary config these
+    /// entries are ignored (a warning is logged) — there is no public URL
+    /// to advertise. Add entries with [`EmbedOpts::spec_a2a_agent`].
+    pub spec_a2a_agents: Vec<SpecA2aConfig>,
     /// Every accepted `(issuer, audience)` pair, for `/v1/runtime`,
     /// including when there is only one. The three scalars above keep
     /// reporting the FIRST pair unchanged — they are a published
@@ -107,6 +117,7 @@ impl Default for EmbedOpts {
             oidc_client_id: None,
             oidc_providers: Vec::new(),
             spec_a2a: None,
+            spec_a2a_agents: Vec::new(),
             google_access: None,
             oidc_signer: None,
         }
@@ -253,6 +264,44 @@ impl EmbedOpts {
         self
     }
 
+    /// Add a per-agent spec-A2A face: JSON-RPC at `POST /a2a/<slug>`
+    /// dispatching prose to `tool`, and an Agent Card at
+    /// `/a2a/<slug>/.well-known/<name>` (every spelling the primary card
+    /// serves) whose `url` is `<public_url>/a2a/<slug>` and whose
+    /// name/description are this agent's. Auth is the same verifier stack
+    /// as the root `/a2a`.
+    ///
+    /// `slug` must be `[a-z0-9-]+` and not reserved
+    /// ([`a2a_spec::validate_agent_slug`]); a bad or duplicate slug is an
+    /// error here, at boot, rather than a route that silently never
+    /// matches. The public URL and version come from [`Self::spec_a2a`]
+    /// when the router is built; without it the agents are ignored (see
+    /// the field's note). The root `/a2a` and root card are unchanged.
+    pub fn spec_a2a_agent(
+        mut self,
+        name: impl Into<String>,
+        description: impl Into<String>,
+        slug: impl Into<String>,
+        tool: impl Into<String>,
+    ) -> anyhow::Result<Self> {
+        let slug = slug.into();
+        a2a_spec::validate_agent_slug(&slug)?;
+        let a2a_path = format!("/a2a/{slug}");
+        if self.spec_a2a_agents.iter().any(|a| a.a2a_path == a2a_path) {
+            anyhow::bail!("a2a agent slug `{slug}` is configured twice");
+        }
+        self.spec_a2a_agents.push(SpecA2aConfig {
+            name: name.into(),
+            description: description.into(),
+            // Filled from the primary `spec_a2a` config in `router()`.
+            version: String::new(),
+            public_url: String::new(),
+            a2a_path,
+            default_tool: tool.into(),
+        });
+        Ok(self)
+    }
+
     /// Override the client ID advertised at `/v1/runtime` when it is not
     /// the same string as the audience.
     /// Name the cross-tenant audit operators explicitly instead of
@@ -380,14 +429,51 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
     // Studio's runtime resolves the card relative to the registered
     // endpoint URL, not the origin (see a2a_spec::card_router).
     let a2a_router = match &opts.spec_a2a {
-        Some(cfg) => a2a::router(a2a_state.clone())
-            .merge(a2a_spec::jsonrpc_router(a2a_state, Arc::new(cfg.clone())))
-            .merge(a2a_spec::card_router_nested(a2a_spec::card_state(
-                cfg.clone(),
-                dispatcher_for_card.clone(),
-                opts.oidc_providers.clone(),
-            ))),
-        None => a2a::router(a2a_state),
+        Some(cfg) => {
+            let mut r = a2a::router(a2a_state.clone())
+                .merge(a2a_spec::jsonrpc_router(
+                    a2a_state.clone(),
+                    Arc::new(cfg.clone()),
+                ))
+                .merge(a2a_spec::card_router_nested(a2a_spec::card_state(
+                    cfg.clone(),
+                    dispatcher_for_card.clone(),
+                    opts.oidc_providers.clone(),
+                )));
+            // Per-agent faces at `/a2a/<slug>`: same state (identity, task
+            // store) as the root route, origin + version from the primary.
+            for agent in &opts.spec_a2a_agents {
+                let slug = agent.a2a_path.trim_start_matches("/a2a/");
+                let agent_cfg = SpecA2aConfig {
+                    public_url: cfg.public_url.clone(),
+                    version: cfg.version.clone(),
+                    ..agent.clone()
+                };
+                let card = a2a_spec::card_state(
+                    agent_cfg,
+                    dispatcher_for_card.clone(),
+                    opts.oidc_providers.clone(),
+                );
+                match a2a_spec::agent_router(slug, a2a_state.clone(), card) {
+                    Ok(agent_router) => r = r.merge(agent_router),
+                    // Unreachable through `spec_a2a_agent` (it validates);
+                    // only a hand-built `spec_a2a_agents` entry gets here.
+                    Err(e) => eprintln!(
+                        r#"{{"kind":"log","level":"warn","msg":"skipping a2a agent","error":"{e}"}}"#
+                    ),
+                }
+            }
+            r
+        }
+        None => {
+            if !opts.spec_a2a_agents.is_empty() {
+                eprintln!(
+                    r#"{{"kind":"log","level":"warn","msg":"spec_a2a_agents ignored: spec_a2a (public URL) is not configured","count":{}}}"#,
+                    opts.spec_a2a_agents.len()
+                );
+            }
+            a2a::router(a2a_state)
+        }
     };
 
     let mut app = rest::router(rest_state)
