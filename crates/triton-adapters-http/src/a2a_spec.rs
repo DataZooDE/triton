@@ -141,6 +141,85 @@ pub fn jsonrpc_router(state: A2aState, config: Arc<SpecA2aConfig>) -> Router {
         .with_state(SpecState { a2a: state, config })
 }
 
+/// Why a per-agent slug was refused. See [`validate_agent_slug`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidAgentSlug(pub String);
+
+impl std::fmt::Display for InvalidAgentSlug {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InvalidAgentSlug {}
+
+/// Slugs that would shadow, or be confused with, routes the A2A nest
+/// already serves (`/a2a/message:send`, `/a2a/.well-known/*`). The
+/// character rule below already excludes `:` and `.`; these are the
+/// plain-word names reserved for the base surface.
+const RESERVED_SLUGS: &[&str] = &["message", "tasks", "well-known"];
+
+/// A per-agent slug must be `[a-z0-9-]+`, must not start or end with `-`,
+/// and must not be a reserved name. The character rule is what keeps a
+/// per-agent route from ever colliding with a Triton route under the same
+/// `/a2a` nest: every existing one contains `:` (`message:send`) or `.`
+/// (`.well-known`), and a slug can contain neither.
+pub fn validate_agent_slug(slug: &str) -> Result<(), InvalidAgentSlug> {
+    if slug.is_empty() || slug.len() > 64 {
+        return Err(InvalidAgentSlug(format!(
+            "a2a agent slug `{slug}` must be 1-64 characters"
+        )));
+    }
+    if !slug
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err(InvalidAgentSlug(format!(
+            "a2a agent slug `{slug}` may contain only [a-z0-9-]"
+        )));
+    }
+    if slug.starts_with('-') || slug.ends_with('-') {
+        return Err(InvalidAgentSlug(format!(
+            "a2a agent slug `{slug}` must not start or end with `-`"
+        )));
+    }
+    if RESERVED_SLUGS.contains(&slug) {
+        return Err(InvalidAgentSlug(format!(
+            "a2a agent slug `{slug}` is reserved"
+        )));
+    }
+    Ok(())
+}
+
+/// One agent's own spec-A2A face, to be merged into the router nested
+/// under `/a2a`: JSON-RPC at `/<slug>` (→ `POST /a2a/<slug>`) dispatching
+/// prose to that agent's `default_tool`, and its Agent Card at every
+/// [`CARD_FILENAMES`] spelling under `/<slug>/.well-known/` — the
+/// endpoint-relative location Copilot Studio's runtime resolves, and the
+/// only one a per-agent card can have (the origin root belongs to the
+/// primary card).
+///
+/// The JSON-RPC route shares `state` — the SAME `IdentityProvider` and
+/// task store as the root `/a2a` route — so auth and `tasks/get` scoping
+/// are identical. Routes are static (one per configured slug), so an
+/// unconfigured slug is a plain 404.
+pub fn agent_router(
+    slug: &str,
+    state: A2aState,
+    card: CardState,
+) -> Result<Router, InvalidAgentSlug> {
+    validate_agent_slug(slug)?;
+    let mut cards = Router::new();
+    for name in CARD_FILENAMES {
+        cards = cards.route(&format!("/{slug}/.well-known/{name}"), get(agent_card));
+    }
+    let config = card.config.clone();
+    Ok(Router::new()
+        .route(&format!("/{slug}"), post(jsonrpc))
+        .with_state(SpecState { a2a: state, config })
+        .merge(cards.with_state(card)))
+}
+
 #[derive(Clone)]
 struct SpecState {
     a2a: A2aState,
@@ -1267,5 +1346,38 @@ mod reply_text_tests {
         assert_eq!(found["document"]["id"], "beverages");
         // A result with neither key yields None.
         assert!(find_document_structured(&serde_json::json!({ "rows": [] })).is_none());
+    }
+}
+
+#[cfg(test)]
+mod agent_slug_tests {
+    use super::validate_agent_slug;
+
+    #[test]
+    fn roster_style_slugs_are_accepted() {
+        for ok in ["sales", "supply-planner", "agent2", "a"] {
+            assert!(validate_agent_slug(ok).is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn slugs_that_could_collide_with_base_routes_are_rejected() {
+        // Every existing route under the `/a2a` nest contains `:` or `.`.
+        for bad in [
+            "message:send",
+            ".well-known",
+            "well-known",
+            "message",
+            "tasks",
+            "",
+            "A",
+            "a_b",
+            "a/b",
+            "-a",
+            "a-",
+            &"x".repeat(65),
+        ] {
+            assert!(validate_agent_slug(bad).is_err(), "`{bad}`");
+        }
     }
 }
