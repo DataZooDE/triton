@@ -20,13 +20,13 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::{
     FakeGcpSts, FakeGoogleChatApi, FakeGoogleJwks, FakeGoogleOAuth, FakeIamCredentials,
     GoogleChatSentMessage, attacker_signing_key, external_account_key_json,
     service_account_decoding_key, service_account_key_json,
 };
 use triton_tests::upstream_fixture::FakeAgent;
+use triton_tests::{TestIssuer, TritonProcess};
 
 const AUDIENCE: &str = "1234567890";
 const GOOGLE_ISS: &str = "chat@system.gserviceaccount.com";
@@ -1378,6 +1378,127 @@ fn async_manifest_path() -> String {
 /// not service-account-shaped, so it rides verbatim (the deliberate
 /// escape hatch next to the T1b minter path below).
 const COURIER_STATIC_TOKEN: &str = "google-chat-courier-static-token";
+
+fn proactive_token(issuer: &TestIssuer, tenant: &str) -> String {
+    let now = unix_now();
+    issuer.sign_jwt(json!({
+        "iss": issuer.issuer_url(), "sub": "async-ops-courier",
+        "aud": "outbound-local", "iat": now, "exp": now + 600,
+        "tenant": tenant, "scope": "outbound:send",
+    }))
+}
+
+fn sealed_googlechat_ref() -> Value {
+    let payload = json!({
+        "space": "spaces/AAA", "thread": "spaces/AAA/threads/THREAD1",
+        "sender": "users/99", "tenant_id": "acme",
+    });
+    let sealed = triton_correlation::encode_with_cap(
+        "__conversation_ref",
+        &payload,
+        b"correlation-key-for-test",
+        4096,
+    )
+    .unwrap();
+    json!({ "channel": "googlechat", "ref": sealed })
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn proactive_googlechat_requires_sealed_tenant_and_replies_in_thread() {
+    let jwks = FakeGoogleJwks::start().await;
+    let chat_api = FakeGoogleChatApi::start().await;
+    let upstream = FakeAgent::start_echoing().await;
+    let issuer = TestIssuer::start().await;
+    let mut env = courier_env(&jwks, &chat_api, &upstream, true);
+    env.insert("TRITON_OIDC_ISSUER".into(), issuer.issuer_url());
+    env.insert("TRITON_OIDC_AUDIENCE".into(), "agents-local".into());
+    env.insert("TRITON_OUTBOUND_AUDIENCE".into(), "outbound-local".into());
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let client = reqwest::Client::new();
+    let body = json!({
+        "adapter": "google_chat", "to": "users/99",
+        "result": { "text": "scenario finished" },
+        "reference": sealed_googlechat_ref(),
+    });
+
+    let absent = client
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(proactive_token(&issuer, "acme"))
+        .json(&json!({ "adapter": "google_chat", "to": "users/99", "result": "hello" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(absent.status(), 403);
+
+    let mismatch = client
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(proactive_token(&issuer, "globex"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mismatch.status(), 403);
+    assert!(chat_api.captured().is_empty());
+
+    let response = client
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(proactive_token(&issuer, "acme"))
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 202);
+    let sent = wait_for_chat_post(&chat_api, Duration::from_secs(5));
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].space, "spaces/AAA");
+    assert_eq!(sent[0].body["thread"]["name"], "spaces/AAA/threads/THREAD1");
+    assert_eq!(
+        sent[0].reply_option.as_deref(),
+        Some("REPLY_MESSAGE_OR_FAIL")
+    );
+    assert!(
+        sent[0].body["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("scenario finished")
+    );
+
+    let mut card_body = body;
+    card_body["result"] = json!({ "surface": { "components": [
+        { "kind": "narration", "text": "Ready for review" },
+        { "kind": "button", "label": "Hand to analyst", "tool": "analyst", "args": {} }
+    ] } });
+    let response = client
+        .post(proc.rest_url("/v1/outbound"))
+        .bearer_auth(proactive_token(&issuer, "acme"))
+        .json(&card_body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 202);
+    let cards = wait_for_chat_posts(&chat_api, 2, Duration::from_secs(5));
+    let widgets = cards[1].body["cardsV2"][0]["card"]["sections"][0]["widgets"]
+        .as_array()
+        .expect("card widgets");
+    let token = widgets
+        .iter()
+        .find_map(|w| {
+            w["buttonList"]["buttons"][0]["onClick"]["action"]["parameters"][0]["value"].as_str()
+        })
+        .expect("signed action");
+    let (tool, _) = triton_correlation::decode_bound(
+        token,
+        b"correlation-key-for-test",
+        1536,
+        triton_correlation::Binding {
+            platform: "google_chat",
+            tenant: "acme",
+            sender: "users/99",
+        },
+    )
+    .unwrap();
+    assert_eq!(tool, "analyst");
+}
 
 /// Env for the async-courier tests: the `answer` inbound tool routes
 /// to `upstream` via the static-upstream map, and the courier POSTs

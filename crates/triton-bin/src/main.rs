@@ -1025,7 +1025,14 @@ async fn main() -> std::io::Result<()> {
                     {
                         Ok(built) => {
                             tracing::info!(adapter = %name, "google_chat webhook adapter wired");
-                            let r = Arc::new(built).router();
+                            let built = Arc::new(built);
+                            if settings.google_chat_async {
+                                outbound_couriers.insert(
+                                    name.to_string(),
+                                    built.clone() as Arc<dyn triton_core::OutboundCourier>,
+                                );
+                            }
+                            let r = built.router();
                             chat_router = Some(match chat_router.take() {
                                 Some(acc) => acc.merge(r),
                                 None => r,

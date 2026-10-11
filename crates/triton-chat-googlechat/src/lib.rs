@@ -1,11 +1,10 @@
 //! v0.2 PR 33 — Google Chat (formerly Hangouts Chat) adapter.
 //!
 //! Google Chat posts events to our webhook with a Google-signed JWT
-//! in the `Authorization: Bearer …` header. Unlike Telegram (which
-//! POSTs back via a courier) Google Chat reads the HTTP 200 body of
-//! our webhook as the reply ("synchronous-response" pattern); for
-//! PR 33 we use only this pattern so the adapter has no outbound
-//! HTTP call.
+//! in the `Authorization: Bearer …` header. The default reply rides
+//! in the webhook's HTTP 200 body. With the async courier enabled,
+//! the adapter also sends through the Chat REST API and can deliver
+//! a later result to a sealed conversation reference.
 //!
 //! Scope (PR 33):
 //!
@@ -42,6 +41,7 @@ pub use surface_mapper::RenderedMessage;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use base64::Engine as _;
 
 use axum::Router;
@@ -52,7 +52,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use serde::Deserialize;
 use serde_json::Value;
-use triton_core::{Dispatcher, PostOutcome, Principal, TritonError};
+use triton_core::{
+    Dispatcher, OutboundCourier, OutboundRequest, PostOutcome, Principal, TritonError,
+};
 use triton_manifest::{Adapter, AdapterKind, IdentityKind, SignatureScheme};
 use triton_secrets::{ResolveError, SecretResolver};
 
@@ -115,6 +117,37 @@ const PROTOCOL_RESOLVE: &str = "messenger:google_chat:identity";
 /// force a large allocate + MAC). 1.5 KiB comfortably fits a tool name +
 /// a modest args object signed and base64'd.
 const CARD_CORRELATION_CAP: usize = 1536;
+const CONVERSATION_REF_MARKER: &str = "__conversation_ref";
+const CONVERSATION_REF_CAP: usize = 4096;
+const OUTBOUND_TOOL: &str = "outbound";
+
+#[derive(Debug, Deserialize)]
+struct GoogleChatConversationRef {
+    space: String,
+    thread: String,
+    sender: String,
+    tenant_id: String,
+}
+
+fn conversation_reference_json(
+    space: &str,
+    thread: &str,
+    sender: &str,
+    tenant: &str,
+    key: &triton_correlation::KeyRing,
+) -> Value {
+    let payload = serde_json::json!({
+        "space": space, "thread": thread, "sender": sender, "tenant_id": tenant,
+    });
+    let sealed = triton_correlation::encode_with_cap(
+        CONVERSATION_REF_MARKER,
+        &payload,
+        key.signing(),
+        CONVERSATION_REF_CAP,
+    )
+    .unwrap_or_default();
+    serde_json::json!({ "channel": "googlechat", "ref": sealed })
+}
 
 /// Correlation-token cap for a dashboard image URL. A dashboard spec
 /// (title + up to a few dozen tiles) signed + base64'd is larger than a
@@ -742,6 +775,22 @@ struct GoogleChatEvent {
     /// reply at `{api_base}/v1/{space.name}/messages`.
     #[serde(default)]
     space: Option<GoogleChatSpace>,
+    #[serde(default)]
+    thread: Option<GoogleChatThread>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleChatThread {
+    name: String,
+}
+
+impl GoogleChatEvent {
+    fn thread_name(&self) -> Option<&str> {
+        self.thread
+            .as_ref()
+            .or_else(|| self.message.as_ref().and_then(|m| m.thread.as_ref()))
+            .map(|t| t.name.as_str())
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -865,6 +914,8 @@ struct GoogleChatMessage {
     text: Option<String>,
     #[serde(default)]
     sender: Option<GoogleChatSender>,
+    #[serde(default)]
+    thread: Option<GoogleChatThread>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -964,6 +1015,9 @@ fn normalize_addon_event(raw: Value) -> Value {
     }
     if let Some(space) = payload.get("space").or_else(|| chat.get("space")) {
         out.insert("space".to_string(), space.clone());
+    }
+    if let Some(thread) = payload.get("thread").or_else(|| chat.get("thread")) {
+        out.insert("thread".to_string(), thread.clone());
     }
     // `commonEventObject.parameters` / `.formInputs` use exactly the
     // field names the classic `common` object uses, so the button-click
@@ -1082,6 +1136,7 @@ async fn handle_webhook(
     // Captured before the match below partially consumes `event`: the
     // #164 async courier needs the space to address its reply POST.
     let space_name: Option<String> = event.space.as_ref().and_then(|s| s.name.clone());
+    let thread_name = event.thread_name().map(str::to_owned);
     // Captured for the courier ack below: a button click must be answered
     // with a click-shaped body, not a message-shaped one.
     let is_card_click = event.kind == "CARD_CLICKED";
@@ -1273,7 +1328,22 @@ async fn handle_webhook(
         trace_id: uuid::Uuid::new_v4().to_string(),
         // #250: only under `upstream` — see Principal::sender_ref.
         sender_ref: identity_was_resolved_upstream.then(|| sender_name.to_string()),
-        conversation_ref: None,
+        conversation_ref: if adapter.courier.enabled {
+            space_name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|space| {
+                    conversation_reference_json(
+                        space,
+                        thread_name.as_deref().unwrap_or(""),
+                        sender_name,
+                        &tenant,
+                        &adapter.correlation_key,
+                    )
+                })
+        } else {
+            None
+        },
     };
     let principal_for_post = principal.clone();
 
@@ -1413,7 +1483,15 @@ async fn handle_webhook(
         });
         if was_message || pick.is_some() {
             let space = space_name.clone().unwrap_or_default();
-            let key = triton_chat_routing::ConvKey::googlechat(space, "", sub.clone());
+            let key = triton_chat_routing::ConvKey::googlechat(
+                space,
+                if adapter.courier.enabled {
+                    thread_name.clone().unwrap_or_default()
+                } else {
+                    String::new()
+                },
+                sub.clone(),
+            );
             let text_for_route = routing_text.clone().unwrap_or_default();
             let ctx = triton_chat_routing::RouteCtx {
                 key,
@@ -1421,9 +1499,7 @@ async fn handle_webhook(
                 tenant: &tenant,
                 caller_sub: &sub,
                 pick,
-                // Google Chat replies synchronously on the webhook; proactive
-                // out-of-band delivery is not wired here yet.
-                conversation_ref: None,
+                conversation_ref: principal.conversation_ref.clone(),
             };
             match router.route(ctx).await {
                 triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
@@ -2102,12 +2178,157 @@ async fn courier_reply(
     }
 }
 
+impl GoogleChatAdapter {
+    fn open_sealed_reference(
+        &self,
+        req: &OutboundRequest,
+    ) -> Result<GoogleChatConversationRef, TritonError> {
+        let sealed = req
+            .reference
+            .as_ref()
+            .and_then(|r| r.get("ref"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                TritonError::Forbidden(
+                    "googlechat outbound requires an inbound sealed reference".into(),
+                )
+            })?;
+        let (marker, payload) = triton_correlation::decode_with_cap_any(
+            sealed,
+            &self.correlation_key,
+            CONVERSATION_REF_CAP,
+        )
+        .map_err(|_| {
+            TritonError::Forbidden("googlechat conversation reference seal is invalid".into())
+        })?;
+        if marker != CONVERSATION_REF_MARKER {
+            return Err(TritonError::Forbidden(
+                "sealed token is not a conversation reference".into(),
+            ));
+        }
+        let r: GoogleChatConversationRef = serde_json::from_value(payload)
+            .map_err(|_| TritonError::Forbidden("malformed sealed reference".into()))?;
+        if !r.space.starts_with("spaces/")
+            || !r.thread.is_empty() && !r.thread.starts_with(&format!("{}/threads/", r.space))
+            || !r.sender.starts_with("users/")
+            || r.tenant_id.is_empty()
+        {
+            return Err(TritonError::Forbidden("malformed sealed reference".into()));
+        }
+        Ok(r)
+    }
+}
+
+#[async_trait]
+impl OutboundCourier for GoogleChatAdapter {
+    fn protocol(&self) -> &'static str {
+        PROTOCOL
+    }
+
+    async fn authorize(
+        &self,
+        req: &OutboundRequest,
+        principal: &Principal,
+    ) -> Result<(), TritonError> {
+        if !self.courier.enabled {
+            return Err(TritonError::Forbidden(
+                "googlechat outbound courier is disabled".into(),
+            ));
+        }
+        let r = self.open_sealed_reference(req)?;
+        if r.tenant_id != principal.tenant || !req.to.is_empty() && req.to != r.sender {
+            return Err(TritonError::Forbidden(
+                "googlechat outbound tenant or recipient mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn deliver(
+        &self,
+        req: &OutboundRequest,
+        principal: &Principal,
+    ) -> Result<(), TritonError> {
+        self.authorize(req, principal).await?;
+        let r = self.open_sealed_reference(req)?;
+        let base = public_base(&HeaderMap::new());
+        let body = build_reply_message(
+            self,
+            base.as_deref(),
+            OUTBOUND_TOOL,
+            &req.result,
+            &None,
+            principal,
+            &r.sender,
+            false,
+            None,
+        )
+        .await
+        .map_err(|e| TritonError::Provider(format!("googlechat outbound render: {e:?}")))?;
+        let started = std::time::Instant::now();
+        let outcome = send_chat_message_in_thread(self, &r.space, Some(&r.thread), &body).await;
+        let latency_ms = started.elapsed().as_millis() as u64;
+        match outcome {
+            Ok((status, _)) if (200..300).contains(&status) => {
+                self.dispatcher.record_post_to(
+                    OUTBOUND_TOOL,
+                    PROTOCOL,
+                    principal,
+                    latency_ms,
+                    Ok((status, PostOutcome::Posted, None)),
+                    Some(&r.space),
+                );
+                Ok(())
+            }
+            Ok((status, _)) => {
+                let label = if status >= 500 || status == 429 {
+                    PostOutcome::Retry
+                } else {
+                    PostOutcome::Dropped
+                };
+                let err =
+                    TritonError::Provider(format!("googlechat messages POST status {status}"));
+                self.dispatcher.record_post_to(
+                    OUTBOUND_TOOL,
+                    PROTOCOL,
+                    principal,
+                    latency_ms,
+                    Err((&err, status, label, None)),
+                    Some(&r.space),
+                );
+                Err(err)
+            }
+            Err(message) => {
+                let err = TritonError::Provider(format!("googlechat messages POST: {message}"));
+                self.dispatcher.record_post_to(
+                    OUTBOUND_TOOL,
+                    PROTOCOL,
+                    principal,
+                    latency_ms,
+                    Err((&err, 0, PostOutcome::Retry, None)),
+                    Some(&r.space),
+                );
+                Err(err)
+            }
+        }
+    }
+}
+
 /// Raw create-message POST: `POST {api_base}/v1/{space}/messages` with
 /// the reply as a plain `{text}` Message. Returns the HTTP status, or
 /// the transport error as a string.
 async fn send_chat_message(
     adapter: &GoogleChatAdapter,
     space: &str,
+    body: &Value,
+) -> Result<(u16, Option<String>), String> {
+    send_chat_message_in_thread(adapter, space, None, body).await
+}
+
+async fn send_chat_message_in_thread(
+    adapter: &GoogleChatAdapter,
+    space: &str,
+    thread: Option<&str>,
     body: &Value,
 ) -> Result<(u16, Option<String>), String> {
     // #164 bearer acquisition: static token verbatim (T1a escape
@@ -2133,11 +2354,14 @@ async fn send_chat_message(
         adapter.courier.api_base.trim_end_matches('/'),
         space
     );
-    let resp = adapter
-        .http
-        .post(&url)
-        .bearer_auth(token)
-        .json(body)
+    let mut request = adapter.http.post(&url).bearer_auth(token);
+    let mut threaded_body = body.clone();
+    if let Some(thread) = thread.filter(|t| !t.is_empty()) {
+        threaded_body["thread"] = serde_json::json!({ "name": thread });
+        request = request.query(&[("messageReplyOption", "REPLY_MESSAGE_OR_FAIL")]);
+    }
+    let resp = request
+        .json(&threaded_body)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -2327,6 +2551,49 @@ fn record_rejection(adapter: &GoogleChatAdapter, sub: &str, tenant: &str, e: Tri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversation_reference_seals_thread_and_tenant() {
+        let key = triton_correlation::KeyRing::parse("test-correlation-key").unwrap();
+        let event: GoogleChatEvent = serde_json::from_value(serde_json::json!({
+            "type": "MESSAGE",
+            "space": { "name": "spaces/abc" },
+            "message": {
+                "text": "start",
+                "sender": { "name": "users/77" },
+                "thread": { "name": "spaces/abc/threads/xyz" }
+            }
+        }))
+        .unwrap();
+        let reference = conversation_reference_json(
+            event.space.as_ref().unwrap().name.as_deref().unwrap(),
+            event.thread_name().unwrap(),
+            event
+                .message
+                .as_ref()
+                .unwrap()
+                .sender
+                .as_ref()
+                .unwrap()
+                .name
+                .as_deref()
+                .unwrap(),
+            "acme",
+            &key,
+        );
+        assert_eq!(reference["channel"], "googlechat");
+        let (marker, payload) = triton_correlation::decode_with_cap(
+            reference["ref"].as_str().unwrap(),
+            key.signing(),
+            CONVERSATION_REF_CAP,
+        )
+        .unwrap();
+        assert_eq!(marker, CONVERSATION_REF_MARKER);
+        assert_eq!(payload["space"], "spaces/abc");
+        assert_eq!(payload["thread"], "spaces/abc/threads/xyz");
+        assert_eq!(payload["sender"], "users/77");
+        assert_eq!(payload["tenant_id"], "acme");
+    }
 
     fn enrol_table() -> IdentityMode {
         let mut t = HashMap::new();
