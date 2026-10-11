@@ -712,6 +712,7 @@ pub struct GoogleChatSentMessage {
     /// On a PATCH: the message resource name being updated
     /// (`spaces/{space}/messages/{id}`).
     pub message: Option<String>,
+    pub reply_option: Option<String>,
 }
 
 struct GoogleChatApiState {
@@ -781,6 +782,7 @@ impl FakeGoogleChatApi {
 async fn handle_chat_message_post(
     State(state): State<Arc<GoogleChatApiState>>,
     Path(space): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
     headers: axum::http::HeaderMap,
     Json(body): Json<Value>,
 ) -> axum::response::Response {
@@ -796,6 +798,7 @@ async fn handle_chat_message_post(
         body,
         method: "POST".to_string(),
         message: None,
+        reply_option: query.get("messageReplyOption").cloned(),
     });
     let status =
         axum::http::StatusCode::from_u16(state.status).unwrap_or(axum::http::StatusCode::OK);
@@ -828,6 +831,7 @@ async fn handle_chat_message_patch(
         body,
         method: "PATCH".to_string(),
         message: Some(name.clone()),
+        reply_option: None,
     });
     let status =
         axum::http::StatusCode::from_u16(state.status).unwrap_or(axum::http::StatusCode::OK);

@@ -2218,3 +2218,14 @@ was wrong about the fixture `world()` seeds.
 inner pin moved back** (`git submodule status`) before trusting either
 result. A one-line check that prints the wrong answer is worse than no
 check, because it ends up in a PR body as a claim.
+
+### A chat turn can lose its reference twice (2026-10-11)
+
+Google Chat's principal and its agent-routing context each carried a separate
+`conversation_ref` field. Capturing a sealed reference on the principal alone
+still left the host router seeing `None`, so an agent could run without a
+persistable reply destination. When adding a channel's outbound courier, test
+the inbound turn through both handoff paths and keep their reference values
+identical. Thread identity also has to reach the Chat create-message request
+with `messageReplyOption`, since a `thread` body field alone starts a new
+thread under the API's default option.
