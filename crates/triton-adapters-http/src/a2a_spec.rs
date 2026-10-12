@@ -559,6 +559,7 @@ async fn message_send(
         .get("message")
         .and_then(|m| m.get("contextId"))
         .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let trace_id = principal.trace_id.clone();
@@ -596,9 +597,11 @@ async fn message_send(
     let vega_principal = principal.clone();
     let tasks = state.a2a.tasks.clone();
     let task_trace = trace_id.clone();
+    let context_for_dispatch = context_id.clone();
     let handle = tokio::spawn(async move {
+        let context_id = context_for_dispatch;
         let out = dispatcher
-            .invoke(&tool, json!({ "message": text }), principal, "a2a")
+            .invoke(&tool, json!({ "message": text, "_triton_protocol": "a2a", "_triton_a2a_context_id": context_id }), principal, "a2a")
             .await;
         match &out {
             Ok(d) => tasks.record_entry(
@@ -659,8 +662,8 @@ async fn message_send(
 /// Spec `message/stream` (#635 P6): SSE of JSON-RPC responses — the
 /// initial Task (`working`), a `TaskArtifactUpdateEvent` per token
 /// delta (append: true; from the in-process streaming seam when the
-/// tool opts in, else nothing until the end), the full reply as a
-/// last-chunk artifact, and a terminal `TaskStatusUpdateEvent`
+/// tool opts in, else nothing until the end), a completed prose artifact,
+/// an optional separate A2UI artifact, and a terminal `TaskStatusUpdateEvent`
 /// (`final: true`, closing the stream per spec). Task state is
 /// recorded exactly as message/send records it, so `tasks/get` works
 /// on streamed turns too.
@@ -692,6 +695,7 @@ async fn message_stream(
         .get("message")
         .and_then(|m| m.get("contextId"))
         .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
@@ -742,10 +746,11 @@ async fn message_stream(
     // consumes `principal`).
     let vega_dispatcher = state.a2a.dispatcher.clone();
     let vega_principal = principal.clone();
+    let context_for_dispatch = context_id.clone();
     let events = match state
         .a2a
         .dispatcher
-        .invoke_streaming(&tool, json!({ "message": text }), principal, "a2a", None)
+        .invoke_streaming(&tool, json!({ "message": text, "_triton_protocol": "a2a", "_triton_a2a_context_id": context_for_dispatch }), principal, "a2a", None)
         .await
     {
         Ok(ev) => ev,
@@ -769,6 +774,7 @@ async fn message_stream(
     }));
 
     let artifact_id = uuid::Uuid::new_v4().to_string();
+    let a2ui_artifact_id = uuid::Uuid::new_v4().to_string();
     let task_for_frames = trace_id.clone();
     let ctx_for_frames = context_id.clone();
     let rpc_frames = rpc.clone();
@@ -788,6 +794,7 @@ async fn message_stream(
             let task_for_frames = task_for_frames.clone();
             let ctx_for_frames = ctx_for_frames.clone();
             let artifact_id = artifact_id.clone();
+            let a2ui_artifact_id = a2ui_artifact_id.clone();
             let tasks = tasks.clone();
             let streamed = streamed.clone();
             let vega_dispatcher = vega_dispatcher.clone();
@@ -821,11 +828,10 @@ async fn message_stream(
                             Some(&reply),
                             None,
                         );
-                        // Final artifact carries the text part (every client) AND,
-                        // when the surface has renderable components, the A2UI
-                        // DataParts (GE renders the card; text-only clients ignore
-                        // them). Skip the full text when we streamed it as deltas
-                        // (else it duplicates).
+                        // Keep the prose and A2UI as separate artifacts. Token
+                        // deltas append to the prose artifact; putting A2UI in
+                        // its last chunk makes clients merge structured parts
+                        // into an already-rendered text artifact.
                         let mut frames = Vec::new();
                         // Streamed prose loses the clickable sources line (only in
                         // the final `reply`, which we skip); emit it as one more
@@ -842,14 +848,21 @@ async fn message_stream(
                                 },
                             })));
                         }
-                        let mut parts: Vec<Value> = Vec::new();
-                        if !did_stream {
-                            parts.push(json!({ "kind": "text", "text": reply }));
-                        }
-                        if let Some(msgs) = triton_core::a2ui::ge::build_messages(&v) {
-                            parts.extend(triton_core::a2ui::ge::data_parts(msgs));
-                        }
-                        if !parts.is_empty() {
+                        if did_stream {
+                            // Close the text artifact before publishing the UI
+                            // artifact, even when there were no source links.
+                            frames.push(rpc_frames(json!({
+                                "kind": "artifact-update",
+                                "taskId": task_for_frames,
+                                "contextId": ctx_for_frames,
+                                "append": true,
+                                "lastChunk": true,
+                                "artifact": {
+                                    "artifactId": artifact_id,
+                                    "parts": [{ "kind": "text", "text": "" }],
+                                },
+                            })));
+                        } else {
                             frames.push(rpc_frames(json!({
                                 "kind": "artifact-update",
                                 "taskId": task_for_frames,
@@ -857,7 +870,19 @@ async fn message_stream(
                                 "lastChunk": true,
                                 "artifact": {
                                     "artifactId": artifact_id,
-                                    "parts": parts,
+                                    "parts": [{ "kind": "text", "text": reply }],
+                                },
+                            })));
+                        }
+                        if let Some(msgs) = triton_core::a2ui::ge::build_messages(&v) {
+                            frames.push(rpc_frames(json!({
+                                "kind": "artifact-update",
+                                "taskId": task_for_frames,
+                                "contextId": ctx_for_frames,
+                                "lastChunk": true,
+                                "artifact": {
+                                    "artifactId": a2ui_artifact_id,
+                                    "parts": triton_core::a2ui::ge::data_parts(msgs),
                                 },
                             })));
                         }

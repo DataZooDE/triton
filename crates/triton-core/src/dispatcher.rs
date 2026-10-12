@@ -1167,6 +1167,38 @@ impl Dispatcher {
         }
     }
 
+    /// Only the embedded Peacock proxy's deliberately bounded, content-free
+    /// provider messages may enter the public audit record. Other provider
+    /// errors may include URLs, request bodies, or credentials.
+    fn safe_dispatch_error_detail(error: &TritonError) -> Option<String> {
+        let TritonError::Provider(message) = error else {
+            return None;
+        };
+        const SAFE: &[&str] = &[
+            "embedded peacock render queue timed out",
+            "embedded peacock render queue closed",
+            "embedded peacock request timeout",
+            "embedded peacock request connect",
+            "embedded peacock request transport",
+            "embedded peacock response decode",
+        ];
+        if SAFE.contains(&message.as_str()) {
+            return Some(message.clone());
+        }
+        let (status, kind) = message
+            .strip_prefix("embedded peacock render_report status ")?
+            .split_once(" error=")?;
+        if status
+            .parse::<u16>()
+            .ok()
+            .is_some_and(|s| (100..=599).contains(&s))
+            && ["auth", "validation", "data", "render", "unknown"].contains(&kind)
+        {
+            return Some(message.clone());
+        }
+        None
+    }
+
     fn audit_dispatch(
         &self,
         tool_name: &str,
@@ -1197,7 +1229,10 @@ impl Dispatcher {
             status,
             status_label: None,
             status_detail: None,
-            error_detail: None,
+            error_detail: outcome
+                .as_ref()
+                .err()
+                .and_then(Self::safe_dispatch_error_detail),
             ttfb_ms: None,
             sender_ref: principal.sender_ref.as_deref(),
             destination: None,
