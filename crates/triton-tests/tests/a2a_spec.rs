@@ -27,6 +27,41 @@ const PUBLIC_URL: &str = "https://agent.example.test";
 /// text-extraction path is exercised rather than a bare string.
 struct AssistantTool;
 
+struct StreamingRichTool;
+
+#[async_trait]
+impl Tool for StreamingRichTool {
+    fn name(&self) -> &'static str {
+        "streaming_rich"
+    }
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+    async fn invoke(&self, _args: Value, _p: &ToolPrincipal) -> Result<Value, TritonError> {
+        unreachable!("streaming tool must use invoke_streaming")
+    }
+    async fn invoke_streaming(
+        &self,
+        _args: Value,
+        _p: &ToolPrincipal,
+    ) -> Result<futures::stream::BoxStream<'static, triton_core::stream::StreamEvent>, TritonError>
+    {
+        use futures::StreamExt as _;
+        use triton_core::stream::StreamEvent;
+        Ok(futures::stream::iter(vec![
+            StreamEvent::Token("A supplier summary.".into()),
+            StreamEvent::Done(json!({ "surface": { "components": [
+                { "kind": "text", "value": "A supplier summary." },
+                { "kind": "report", "report_id": "sales",
+                  "image_url": "https://agent.example.test/report/img/tok" },
+                { "kind": "button", "label": "Follow up", "tool": "assistant",
+                  "args": { "message": "detail" } }
+            ] } })),
+        ])
+        .boxed())
+    }
+}
+
 #[async_trait]
 impl Tool for AssistantTool {
     fn name(&self) -> &'static str {
@@ -34,6 +69,11 @@ impl Tool for AssistantTool {
     }
     async fn invoke(&self, args: Value, _p: &ToolPrincipal) -> Result<Value, TritonError> {
         let msg = args.get("message").and_then(Value::as_str).unwrap_or("");
+        if msg == "show-context" {
+            return Ok(
+                json!({ "surface": { "text": format!("{}:{}", args["_triton_protocol"].as_str().unwrap_or(""), args["_triton_a2a_context_id"].as_str().unwrap_or("")) } }),
+            );
+        }
         if msg == "boom" {
             return Err(TritonError::Validation("tool refused".into()));
         }
@@ -67,6 +107,7 @@ fn claims(iss: &str) -> Value {
 async fn serve(opts: EmbedOpts) -> String {
     let mut reg = ToolRegistry::new();
     reg.register(Arc::new(AssistantTool));
+    reg.register(Arc::new(StreamingRichTool));
     let dispatcher = Arc::new(Dispatcher::new(
         Arc::new(reg),
         "test".to_string(),
@@ -89,6 +130,18 @@ async fn spec_host() -> (TestIssuer, String) {
         "Answers questions.",
         PUBLIC_URL,
         "assistant",
+    ))
+    .await;
+    (iss, base)
+}
+
+async fn streaming_rich_host() -> (TestIssuer, String) {
+    let iss = TestIssuer::start().await;
+    let base = serve(EmbedOpts::dev().oidc(iss.issuer_url(), AUD, None).spec_a2a(
+        "DataZoo Agent",
+        "Answers questions.",
+        PUBLIC_URL,
+        "streaming_rich",
     ))
     .await;
     (iss, base)
@@ -235,6 +288,28 @@ async fn a_supplied_context_id_is_echoed_back() {
 
     let (_, body) = rpc(&base, &token, req).await;
     assert_eq!(body["result"]["contextId"], "ctx-42");
+}
+
+/// The effective A2A context reaches the dispatched tool on both methods.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn context_id_reaches_tool_on_send_and_stream() {
+    let (iss, base) = spec_host().await;
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let mut request = send("show-context");
+    request["params"]["message"]["contextId"] = json!("session-42");
+    let (_, body) = rpc(&base, &token, request.clone()).await;
+    assert_eq!(body["result"]["parts"][0]["text"], "a2a:session-42");
+
+    request["method"] = json!("message/stream");
+    let response = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await
+        .expect("POST stream");
+    let stream = response.text().await.expect("stream body");
+    assert!(stream.contains("a2a:session-42"), "{stream}");
 }
 
 /// The task recorded by message/send is retrievable by tasks/get, and an
@@ -642,6 +717,34 @@ async fn message_stream_emits_task_artifact_final() {
         .filter_map(|l| l.strip_prefix("data: "))
         .filter_map(|d| serde_json::from_str(d).ok())
         .collect();
+    let rich_events: Vec<&Value> = rframes.iter().map(|f| &f["result"]).collect();
+    assert_eq!(rich_events[0]["kind"], "task", "{rbody}");
+    assert_eq!(
+        rich_events.last().unwrap()["kind"],
+        "status-update",
+        "{rbody}"
+    );
+    assert_eq!(rich_events.last().unwrap()["final"], true, "{rbody}");
+    let artifacts: Vec<&Value> = rich_events
+        .iter()
+        .copied()
+        .filter(|e| e["kind"] == "artifact-update")
+        .collect();
+    assert_eq!(artifacts.len(), 2, "text then A2UI before final: {rbody}");
+    assert_eq!(artifacts[0]["artifact"]["parts"][0]["kind"], "text");
+    assert!(
+        artifacts[1]["artifact"]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["kind"] == "data")
+    );
+    assert_ne!(
+        artifacts[0]["artifact"]["artifactId"], artifacts[1]["artifact"]["artifactId"],
+        "prose and A2UI must be distinct artifacts"
+    );
+    assert_eq!(artifacts[0]["lastChunk"], true);
+    assert_eq!(artifacts[1]["lastChunk"], true);
     let data_parts: Vec<&Value> = rframes
         .iter()
         .filter_map(|f| f["result"]["artifact"]["parts"].as_array())
@@ -668,6 +771,64 @@ async fn message_stream_emits_task_artifact_final() {
     assert!(comps.iter().any(|c| c["component"] == "MaterialCard"));
     assert!(comps.iter().any(|c| c["component"] == "Image"));
     assert!(comps.iter().any(|c| c["component"] == "MaterialButton"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn streamed_text_closes_before_a2ui_artifact_and_final_status() {
+    let (iss, base) = streaming_rich_host().await;
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 10, "method": "message/stream",
+            "params": { "message": {
+                "kind": "message", "role": "user", "messageId": "m-stream-rich",
+                "parts": [{ "kind": "text", "text": "rich" }],
+            } },
+        }))
+        .send()
+        .await
+        .expect("POST stream");
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.expect("stream body");
+    let frames: Vec<Value> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .map(|d| serde_json::from_str(d).expect("JSON-RPC frame"))
+        .collect();
+    assert_eq!(
+        frames.len(),
+        5,
+        "task, token, text close, UI, final: {body}"
+    );
+    let events: Vec<&Value> = frames.iter().map(|f| &f["result"]).collect();
+    assert_eq!(events[0]["kind"], "task");
+    assert_eq!(
+        events[1]["artifact"]["parts"][0]["text"],
+        "A supplier summary."
+    );
+    assert_eq!(events[1]["append"], true);
+    assert_eq!(events[2]["lastChunk"], true);
+    assert_eq!(events[2]["artifact"]["parts"][0]["kind"], "text");
+    assert_eq!(
+        events[1]["artifact"]["artifactId"],
+        events[2]["artifact"]["artifactId"]
+    );
+    assert_ne!(
+        events[2]["artifact"]["artifactId"],
+        events[3]["artifact"]["artifactId"]
+    );
+    assert_eq!(events[3]["lastChunk"], true);
+    assert!(
+        events[3]["artifact"]["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|p| p["kind"] == "data")
+    );
+    assert_eq!(events[4]["kind"], "status-update");
+    assert_eq!(events[4]["final"], true);
 }
 
 /// #306 crew F1: a spec-A2A task id IS the trace id, and `tasks/get`
