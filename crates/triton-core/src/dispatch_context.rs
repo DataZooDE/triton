@@ -35,6 +35,19 @@ impl DispatchContext {
     }
 }
 
+/// What an adapter adds to the context the dispatcher derives on its own
+/// (#352). Spec A2A uses it: its surface depends on the extensions the
+/// client activated on *this* request, and it carries per-turn metadata.
+#[derive(Debug, Clone, Default)]
+pub struct ContextOverrides {
+    /// Written into object args under `_triton` (e.g. `protocol`,
+    /// `a2a_context_id`, `agent`), for in-process tools and remote agents
+    /// alike. Replaces whatever a caller put under that key.
+    pub triton_meta: serde_json::Map<String, serde_json::Value>,
+    /// A request-scoped surface, in place of the channel's registered one.
+    pub surface: Option<Arc<SurfaceDescriptor>>,
+}
+
 /// Map an adapter's audit `protocol` label to the channel name agents see.
 ///
 /// * `messenger:<adapter>` and `messenger:<adapter>:<role>` (e.g. the

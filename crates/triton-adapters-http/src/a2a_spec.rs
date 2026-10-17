@@ -419,10 +419,7 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     tracing::info!(x_a2a_extensions = ?inbound_ext, "a2a inbound extension activation");
-    let echo_a2ui = inbound_ext
-        .as_deref()
-        .map(|h| h.contains(triton_core::a2ui::ge::EXTENSION_URI))
-        .unwrap_or(false);
+    let echo_a2ui = activates_a2ui(inbound_ext.as_deref());
 
     let req: RpcRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
@@ -433,8 +430,8 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
     }
 
     let mut resp = match req.method.as_str() {
-        "message/send" => message_send(state, principal, req).await,
-        "message/stream" => message_stream(state, principal, req).await,
+        "message/send" => message_send(state, principal, req, echo_a2ui).await,
+        "message/stream" => message_stream(state, principal, req, echo_a2ui).await,
         "tasks/get" => tasks_get(state, req, &principal),
         // Named explicitly so a caller learns which methods exist rather
         // than only that this one does not.
@@ -452,6 +449,43 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
         resp.headers_mut().insert("x-a2a-extensions", v);
     }
     resp
+}
+
+/// Did the client activate the A2UI extension? `X-A2A-Extensions` is a
+/// comma-separated list of extension URIs; one must equal the A2UI URI
+/// exactly. A substring match would let `…/v0.9-not-really` (or any URI that
+/// merely embeds it) switch the turn to native components.
+fn activates_a2ui(header: Option<&str>) -> bool {
+    header.is_some_and(|h| {
+        h.split(',')
+            .any(|uri| uri.trim() == triton_core::a2ui::ge::EXTENSION_URI)
+    })
+}
+
+/// The per-turn context spec A2A adds to a dispatch (#352): `_triton`
+/// metadata (`protocol`, `a2a_context_id`, and `agent` for a `/a2a/<slug>`
+/// face) and the surface, which depends on whether *this* request activated
+/// A2UI. Without A2UI the channel's registered `a2a` surface applies.
+fn turn_context(
+    config: &SpecA2aConfig,
+    context_id: &str,
+    a2ui: bool,
+) -> triton_core::ContextOverrides {
+    let mut meta = serde_json::Map::new();
+    meta.insert("protocol".into(), json!("a2a"));
+    meta.insert("a2a_context_id".into(), json!(context_id));
+    if let Some(slug) = config.a2a_path.strip_prefix("/a2a/") {
+        meta.insert("agent".into(), json!(slug));
+    }
+    triton_core::ContextOverrides {
+        triton_meta: meta,
+        surface: a2ui.then(|| {
+            std::sync::Arc::new(triton_core::SurfaceDescriptor::from_profile(
+                &triton_core::surface::A2A_A2UI,
+                None,
+            ))
+        }),
+    }
 }
 
 /// Does the client want the Task back immediately instead of blocking
@@ -543,6 +577,7 @@ async fn message_send(
     state: SpecState,
     principal: triton_core::Principal,
     req: RpcRequest,
+    a2ui: bool,
 ) -> Response {
     let Some(text) = text_from_params(&req.params) else {
         return rpc_error(
@@ -598,10 +633,16 @@ async fn message_send(
     let tasks = state.a2a.tasks.clone();
     let task_trace = trace_id.clone();
     let context_for_dispatch = context_id.clone();
+    let overrides = turn_context(&state.config, &context_for_dispatch, a2ui);
     let handle = tokio::spawn(async move {
-        let context_id = context_for_dispatch;
         let out = dispatcher
-            .invoke(&tool, json!({ "message": text, "_triton_protocol": "a2a", "_triton_a2a_context_id": context_id }), principal, "a2a")
+            .invoke_with(
+                &tool,
+                json!({ "message": text }),
+                principal,
+                "a2a",
+                overrides,
+            )
             .await;
         match &out {
             Ok(d) => tasks.record_entry(
@@ -671,6 +712,7 @@ async fn message_stream(
     state: SpecState,
     principal: triton_core::Principal,
     req: RpcRequest,
+    a2ui: bool,
 ) -> Response {
     use futures::StreamExt as _;
 
@@ -750,7 +792,14 @@ async fn message_stream(
     let events = match state
         .a2a
         .dispatcher
-        .invoke_streaming(&tool, json!({ "message": text, "_triton_protocol": "a2a", "_triton_a2a_context_id": context_for_dispatch }), principal, "a2a", None)
+        .invoke_streaming_with(
+            &tool,
+            json!({ "message": text }),
+            principal,
+            "a2a",
+            None,
+            turn_context(&state.config, &context_for_dispatch, a2ui),
+        )
         .await
     {
         Ok(ev) => ev,

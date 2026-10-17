@@ -23,7 +23,7 @@ use futures::stream::{self, BoxStream};
 use serde_json::{Value, json};
 
 use crate::audit::{AuditPhase, AuditRecord, PostOutcome, emit, now_rfc3339};
-use crate::dispatch_context::DispatchContext;
+use crate::dispatch_context::{ContextOverrides, DispatchContext};
 use crate::error::TritonError;
 use crate::metrics::Metrics;
 use crate::principal::Principal;
@@ -531,6 +531,16 @@ impl Dispatcher {
         &self.surfaces
     }
 
+    /// The context for one dispatch: the channel from `protocol`, its
+    /// registered surface unless the adapter supplied a request-scoped one.
+    fn context(&self, protocol: &str, overrides: &ContextOverrides) -> DispatchContext {
+        let mut ctx = DispatchContext::for_protocol(protocol, &self.surfaces);
+        if let Some(surface) = &overrides.surface {
+            ctx.surface = Some(surface.clone());
+        }
+        ctx
+    }
+
     pub fn env(&self) -> &str {
         &self.env
     }
@@ -660,6 +670,28 @@ impl Dispatcher {
         protocol: &str,
         a2ui: Option<crate::A2uiVersion>,
     ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        self.invoke_streaming_with(
+            tool_name,
+            args,
+            principal,
+            protocol,
+            a2ui,
+            ContextOverrides::default(),
+        )
+        .await
+    }
+
+    /// [`Self::invoke_streaming`] with adapter-supplied context (#352): a
+    /// request-scoped surface and `_triton` metadata.
+    pub async fn invoke_streaming_with(
+        &self,
+        tool_name: &str,
+        args: Value,
+        principal: Principal,
+        protocol: &str,
+        a2ui: Option<crate::A2uiVersion>,
+        overrides: ContextOverrides,
+    ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
         // #287: same gate as `invoke`. Streaming is a second entry point
         // into the same dispatch, so a check on one alone is no check.
         if self.is_denied(&principal) {
@@ -681,7 +713,8 @@ impl Dispatcher {
         }
         // #352: `_triton` is Triton's reserved key. Whatever a caller put
         // there is dropped, so it can't forge the hint an agent receives.
-        let args = strip_reserved(args);
+        let args = prepare_args(args, &overrides);
+        let ctx = self.context(protocol, &overrides);
         let started = Instant::now();
 
         // In-process tools that OPT IN to streaming (#635 P5) ride the
@@ -693,7 +726,7 @@ impl Dispatcher {
         {
             let returns_a2ui = tool.returns_a2ui();
             let tp = principal.to_tool_principal();
-            return match tool.invoke_streaming(args, &tp).await {
+            return match tool.invoke_streaming_with_context(args, &tp, &ctx).await {
                 Err(e) => Err(self.fail(
                     tool_name,
                     protocol,
@@ -743,7 +776,7 @@ impl Dispatcher {
         // single terminal `Done`. A pre-first-byte error audits inline.
         if let Some(tool) = self.registry.get(tool_name) {
             let returns_a2ui = tool.returns_a2ui();
-            let outcome = self.run(tool_name, args, &principal, protocol).await;
+            let outcome = self.run(tool_name, args, &principal, &ctx).await;
             let latency_ms = started.elapsed().as_millis() as u64;
             self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
             let value = outcome?;
@@ -756,7 +789,7 @@ impl Dispatcher {
             return Ok(stream::once(async move { done }).boxed());
         }
         if self.upstream.is_none() {
-            let outcome = self.run(tool_name, args, &principal, protocol).await;
+            let outcome = self.run(tool_name, args, &principal, &ctx).await;
             let latency_ms = started.elapsed().as_millis() as u64;
             self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
             let value = outcome?;
@@ -766,7 +799,6 @@ impl Dispatcher {
         // Upstream path. A 200 stream defers its single audit line to
         // termination; a pre-first-byte error audits inline and returns.
         let upstream = self.upstream.as_ref().expect("upstream present");
-        let ctx = DispatchContext::for_protocol(protocol, &self.surfaces);
         match upstream
             .invoke_streaming(tool_name, args, &principal, &ctx)
             .await
@@ -832,6 +864,26 @@ impl Dispatcher {
         principal: Principal,
         protocol: &str,
     ) -> Result<Dispatch, TritonError> {
+        self.invoke_with(
+            tool_name,
+            args,
+            principal,
+            protocol,
+            ContextOverrides::default(),
+        )
+        .await
+    }
+
+    /// [`Self::invoke`] with adapter-supplied context (#352): a
+    /// request-scoped surface and `_triton` metadata.
+    pub async fn invoke_with(
+        &self,
+        tool_name: &str,
+        args: Value,
+        principal: Principal,
+        protocol: &str,
+        overrides: ContextOverrides,
+    ) -> Result<Dispatch, TritonError> {
         // #287: before anything runs, and before the tool name is even
         // looked up — a revoked principal must not be able to probe the
         // registry either.
@@ -854,9 +906,10 @@ impl Dispatcher {
         }
         // #352: `_triton` is Triton's reserved key. Whatever a caller put
         // there is dropped, so it can't forge the hint an agent receives.
-        let args = strip_reserved(args);
+        let args = prepare_args(args, &overrides);
+        let ctx = self.context(protocol, &overrides);
         let started = Instant::now();
-        let outcome = self.run(tool_name, args, &principal, protocol).await;
+        let outcome = self.run(tool_name, args, &principal, &ctx).await;
         let latency_ms = started.elapsed().as_millis() as u64;
         self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
         let returns_a2ui = self
@@ -1144,7 +1197,7 @@ impl Dispatcher {
         tool_name: &str,
         args: Value,
         principal: &Principal,
-        protocol: &str,
+        ctx: &DispatchContext,
     ) -> Result<Value, TritonError> {
         // In-process tool wins. Falls back to the upstream router
         // for tools not present in the registry (PR 9). When no
@@ -1156,7 +1209,8 @@ impl Dispatcher {
             // we can translate to TritonError::Tool — keeps the
             // "one audit line per invocation" guarantee.
             let tp = principal.to_tool_principal();
-            let join = tokio::spawn(async move { tool.invoke(args, &tp).await });
+            let ctx = ctx.clone();
+            let join = tokio::spawn(async move { tool.invoke_with_context(args, &tp, &ctx).await });
             return match join.await {
                 Ok(result) => result,
                 Err(join_err) => {
@@ -1172,8 +1226,7 @@ impl Dispatcher {
             };
         }
         if let Some(upstream) = &self.upstream {
-            let ctx = DispatchContext::for_protocol(protocol, &self.surfaces);
-            return upstream.invoke(tool_name, args, principal, &ctx).await;
+            return upstream.invoke(tool_name, args, principal, ctx).await;
         }
         Err(TritonError::Validation(format!(
             "unknown tool: {tool_name}"
@@ -1420,6 +1473,21 @@ pub const RESERVED_ARGS_KEY: &str = "_triton";
 fn strip_reserved(mut args: Value) -> Value {
     if let Some(map) = args.as_object_mut() {
         map.remove(RESERVED_ARGS_KEY);
+    }
+    args
+}
+
+/// Args as every tool sees them: the caller's `_triton` dropped, then the
+/// adapter's metadata (if any) written under it.
+fn prepare_args(args: Value, overrides: &ContextOverrides) -> Value {
+    let mut args = strip_reserved(args);
+    if !overrides.triton_meta.is_empty()
+        && let Some(map) = args.as_object_mut()
+    {
+        map.insert(
+            RESERVED_ARGS_KEY.to_string(),
+            Value::Object(overrides.triton_meta.clone()),
+        );
     }
     args
 }

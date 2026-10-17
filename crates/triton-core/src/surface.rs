@@ -148,6 +148,17 @@ pub const A2A: SurfaceProfile = SurfaceProfile {
     guidance: "A2A client: the answer is shown as markdown prose with an inline chart image. Buttons are not shown.",
 };
 
+/// A2A with the A2UI extension active (e.g. Gemini Enterprise): the client
+/// renders native A2UI components, so buttons, tables and charts all work.
+/// Same `a2a` channel; chosen per request from the activated extensions.
+pub const A2A_A2UI: SurfaceProfile = SurfaceProfile {
+    channel: "a2a",
+    buttons: true,
+    charts: Charts::Native,
+    guidance: "A2A client with A2UI (e.g. Gemini Enterprise): native components. Markdown, tables, buttons and charts all render.",
+    ..A2A
+};
+
 /// Version of the descriptor wire shape. Bump it, and document the change in
 /// `doc/architecture.md`, whenever a field changes meaning or is removed.
 pub const DESCRIPTOR_VERSION: u32 = 1;
