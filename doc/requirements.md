@@ -195,7 +195,8 @@ on implementation details not pinned below.
   MUST NOT forward the inbound principal raw to the platform.
   *(M-OUTBOUND-1; ADR-11.)*
 - **FR-A-9 (v0.2)** The surface mapper MUST be a pure function of
-  `(envelope, adapter.<name>.degrade, SurfaceLimits)`; the
+  `(envelope, the adapter's SurfaceProfile)` (#352: caps live in each
+  chat crate's `SURFACE` const; `degrade` is validation-only); the
   `PlatformMessage` produced for the same envelope MUST be
   byte-equal across two runs against the same adapter. *(M-MAP-1.)*
 - **FR-A-10 (v0.2)** The surface mapper MUST enforce documented
@@ -258,6 +259,13 @@ on implementation details not pinned below.
   pairwise application of the two adapters' `degrade`-rule
   inverses. *(M-PARITY-MULTI-1; the chat-channel analogue of
   FR-A-4.)*
+- **FR-A-16 (#352)** Each chat channel's surface capabilities MUST be
+  declared exactly once, as the crate's `pub const SURFACE:
+  SurfaceProfile`, and the channel's mapper MUST read its numeric caps
+  (text size, button count) from that const. The profile Triton hints to
+  upstream agents (FR-U-8) is that same const, so the hint cannot drift
+  from what the mapper enforces. *(`tests/surface_profile.rs` per chat
+  crate.)*
 
 ### 5.2 Dispatcher (FR-D)
 
@@ -442,6 +450,17 @@ on implementation details not pinned below.
   otherwise make a distinction — admitting an un-enrolled sender under a
   pairing scope — and then discard it. It does not relieve an upstream
   of FR-U-6.
+- **FR-U-8 (#352)** Every upstream dispatch MUST carry the channel the
+  turn will be rendered on as `X-Triton-Channel`, and every tool
+  dispatch with object args MUST carry the channel's versioned surface
+  descriptor as `_triton.surface` (architecture §8.7.1), unless an
+  operator turned the body field off
+  (`TRITON_STATIC_UPSTREAM_SURFACE_HINT=off`). The hint is
+  ADVERTISED, NOT AUTHORITATIVE: it MUST NOT be an authorization input
+  or appear in the minted bearer. `_triton` is reserved, and a
+  caller-supplied value MUST be dropped before dispatch. An upstream that
+  ignores the hint MUST receive byte-identical channel output
+  (`surface_baseline.rs` pins pre-#352 payloads). *(`surface_hint.rs`.)*
 
 ### 5.5 Audit (FR-AU)
 
@@ -775,7 +794,7 @@ is the canonical mapping; the messenger paper's
 | M-IDENT-1         | FR-I-1, FR-I-6 (Principal shape preservation)          | IMPL — PASS         |
 | M-SIG-1           | FR-I-8 (closed-set signature schemes)                  | IMPL — PASS         |
 | M-MAP-1           | FR-A-9, FR-A-13 (mapper purity, parity)                | IMPL — PASS         |
-| M-RICHNESS-1      | FR-A-10 (SurfaceLimits at mapper edge)                 | IMPL — PASS         |
+| M-RICHNESS-1      | FR-A-10 (caps at mapper edge, from SurfaceProfile)     | IMPL — PASS         |
 | M-RASTER-1        | FR-A-11 (Rasterizer for dashboard components)          | IMPL — PASS         |
 | M-CORRELATION-1   | FR-A-12, FR-A-14, FR-A-15 (token round-trip; rotation; sender binding) | IMPL — PASS |
 | M-MANIFEST-1      | FR-L-4 (closed-set boot validation)                    | PAPER — PASS        |

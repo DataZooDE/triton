@@ -1519,6 +1519,45 @@ a trap the next developer should not have to step in.
   security question into a deployment-topology choice, which is a
   decision someone can actually make.
 
+- **The spec described a single source of truth the code never had
+  (#352, 2026-10-17).** Issue #352 asked to derive the upstream hint
+  "from the adapter's existing `SurfaceLimits` and `degrade` table, so
+  there is one source of truth". Neither existed: `SurfaceLimits` and
+  the shared `triton-chat-surface` mapper live only in docs copied from
+  the experiment repo, every chat crate kept loose constants, and no
+  mapper reads `degrade` (it is coverage validation). So "derive from
+  the table" first meant *building* the table: one `SurfaceProfile` const
+  per crate that the mapper itself reads.
+  The general move: before building on a named abstraction, grep for
+  its definition. Docs that cite a type are not evidence the type exists.
+- **Hint-on vs hint-off is not a regression gate.** Comparing a new
+  feature switched on against itself switched off proves only that the
+  two new modes agree; both share any regression the change introduced.
+  The real gate for "an agent that ignores the hint gets today's output"
+  was pinning the platform payloads from the code *before* the first
+  production change (`surface_baseline.rs`, commit 1c35dd2) and diffing
+  every later step against them. Capture the baseline first, in its own
+  commit.
+- **A signed button that does not fit is dropped, quietly.** The first
+  baseline surface used `tool: "assistant"` with `{"message": "EMEA
+  detail"}` button args. The correlation token overflowed the 64-byte
+  Telegram/WhatsApp callback cap, so both channels deferred every button
+  (a log line, nothing on screen). The baseline then pinned "no buttons"
+  and never exercised the buttons path. When a fixture's output is
+  suspiciously plain, check the adapter's deferral counters before
+  pinning it.
+- **A boot-refusal test must not wait for exit.** Testing "an invalid
+  config refuses boot" with `Command::output()` hangs the whole suite on
+  the red run: until the check exists, the binary boots and serves
+  forever. Spawn, poll `try_wait` against a deadline, kill on timeout,
+  then assert the exit code (`surface_hint.rs::boot_and_wait_for_exit`).
+- **A recycled ephemeral port can deliver another test's request.**
+  Under the parallel suite a FakeAgent once recorded a request with no
+  `X-Triton-Tool` at all. A process from another test, still shutting
+  down, was posting to a dropped fake whose port this agent had reused.
+  Assertions about "the first request the upstream saw" should select
+  requests by a header every real dispatch carries, not by index.
+
 ---
 
 ## 8. CI/CD build-time traps (2026-08-30)

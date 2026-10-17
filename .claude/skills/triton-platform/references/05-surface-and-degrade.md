@@ -10,26 +10,32 @@ you design surfaces that survive degradation. Source:
 
 ## The richness spectrum
 
-The same surface lands differently depending on the channel
-(`doc/architecture.md` §8.7 table):
+Each chat crate has its own mapper (`crates/triton-chat-*/src/surface_mapper.rs`)
+and declares what its channel can show once, as `pub const SURFACE:
+SurfaceProfile` (#352). The mapper reads its caps from that const, and
+Triton sends the same profile to your agent as `_triton.surface`, so you
+can see these caps at runtime instead of hard-coding them:
 
-| Adapter | Native vocabulary | What `degrade` does |
-|---|---|---|
-| Signal | text + media | buttons/selections/forms → **numbered prompts** |
-| WhatsApp Web | text + media + quote + reactions | numbered prompts; text chunked at 4000 chars |
-| **Google Chat** | **full Cards v2**: markdown text, buttons/selection/form (signed `CARD_CLICKED` callbacks + click echo), dashboard/report as inline chart **images**, card chrome branded via the report upstream's `get_theme` | `card_v2` for controls, `rasterised_png` for dashboards; inline `report` expands natively (#152–#169, #176) |
-| Telegram | text + media + inline keyboards | native inline keyboard; ≤ 8 buttons/row |
-| Discord | text + media + components v2 | native components; ≤ 25-item select |
-| MS Teams | text + Adaptive Cards | near-lossless Adaptive Card projection |
+| Channel | Text cap | Tables | Buttons | Charts (`report`) |
+|---|---|---|---|---|
+| WhatsApp (Cloud + Web bridge) | 4096 B | raw text | 3 reply buttons, rest deferred | dropped |
+| Twilio WhatsApp / RCS | 1600 B | raw text | deferred | dropped |
+| Signal | 2000 B | raw text | deferred | dropped |
+| Telegram | 4096 B | raw text | inline keyboard | dropped |
+| Discord | 2000 B | raw text | ≤ 25 components | dropped |
+| Google Chat | 32 000 B | Cards v2 table | card buttons | image |
+| MS Teams | 24 576 B | Adaptive Card table | card actions | native chart |
+| Email | 512 000 B | HTML | links | inline image |
 
-`sources` degrades to one "Sources: …" label line on every chat channel;
-`report` is dropped where no image can be hosted (the sibling button
-remains the affordance).
+Dashboards are rasterised to an image on WhatsApp, Telegram and Discord.
+`sources` degrades to one "Sources: …" label line on the text-first
+channels. Source of truth: `doc/architecture.md` §8.7 and §8.7.1.
 
 ## `degrade` rule keys (per component type)
 
 The manifest's `adapter.<name>.degrade` maps each component type to a
-rule. Observed values (`crates/triton-tests/fixtures/manifest-valid.yaml`):
+rule. It is **validation-only**: boot checks coverage (FR-L-5), but no
+mapper reads it. Observed values (`crates/triton-tests/fixtures/manifest-valid.yaml`):
 
 - `text`, `narration`, `sources`, `report`: `passthrough`
 - `buttons`, `selections`: `inline_keyboard` (Telegram),
@@ -37,30 +43,22 @@ rule. Observed values (`crates/triton-tests/fixtures/manifest-valid.yaml`):
   `numbered_prompts` (text-first)
 - `forms`: `numbered_prompts`, `components_v2` or `card_v2`
 - `dashboard`: `rasterised_png` (delegated to the report upstream via
-  `TRITON_RASTERIZE_UPSTREAM=render_a2ui_to_png` — peacock renders,
+  `TRITON_RASTERIZE_UPSTREAM=render_a2ui_to_png`: peacock renders,
   Triton transports)
 
 Every component type your tool declares in `surface_components` must
 have a rule in **every** chat adapter, or boot fails (FR-L-5; →
 `references/03`).
 
-## SurfaceLimits — caps you must respect
+## Caps you must respect
 
-The mapper enforces per-platform caps at its edge and will reject or
-reshape oversize surfaces (FR-A-10, M-RICHNESS-1):
+Read them from `_triton.surface` rather than this page. Two that bite:
 
-- **Discord**: 25-item selection cap → oversize selects are rejected
-  with `UnsupportedSurface`.
-- **Telegram**: 8 buttons per row → larger button rows paginate into
-  multiple `ButtonSet` fragments (label on the first page only).
-- **WhatsApp Web**: 4000-char text chunk → long text splits into
-  multiple `Text` fragments.
-
-Design implication: keep selection lists ≤ 25 items if you target
-Discord; keep button rows small. If you exceed a cap, the surface is
-reshaped (text/buttons) or rejected (selections) — a `dashboard`
-without a configured rasteriser on a text-first adapter is also
-rejected with `UnsupportedSurface`.
+- **A correlation token must fit the platform's callback cap**
+  (64 bytes on Telegram and WhatsApp). A button whose `tool` + `args`
+  are too long is **deferred**: logged as a warning, never shown. Keep
+  follow-up button args tiny.
+- **Text over the cap is truncated** with a sentinel line, not split.
 
 ## Dashboards need a rasteriser
 
