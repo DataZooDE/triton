@@ -122,6 +122,14 @@ fn pin(name: &str, mut produced: Value) {
     );
 }
 
+/// One driven turn: the upstream that answered it, the platform payload the
+/// channel produced, and the process kept alive until the caller is done.
+pub struct Turn {
+    pub agent: FakeAgent,
+    pub payload: Value,
+    _proc: TritonProcess,
+}
+
 fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {
@@ -135,10 +143,9 @@ fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn whatsapp_cloud_payload_is_pinned() {
+pub async fn drive_whatsapp_cloud(surface: Value) -> Turn {
     const APP_SECRET: &str = "whatsapp-app-secret-for-test";
-    let agent = FakeAgent::start_returning(rich_surface()).await;
+    let agent = FakeAgent::start_returning(surface).await;
     let whatsapp = FakeWhatsAppApi::start().await;
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
@@ -188,16 +195,16 @@ async fn whatsapp_cloud_payload_is_pinned() {
         let all = whatsapp.captured();
         if all.len() > sent.len() { all } else { sent }
     };
-    pin(
-        "whatsapp_cloud.json",
-        Value::Array(sent.into_iter().map(|m| m.body).collect()),
-    );
+    Turn {
+        payload: Value::Array(sent.into_iter().map(|m| m.body).collect()),
+        agent,
+        _proc: proc,
+    }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn telegram_payload_is_pinned() {
+pub async fn drive_telegram(surface: Value) -> Turn {
     const SECRET: &str = "secret-resolved-from-vault";
-    let agent = FakeAgent::start_returning(rich_surface()).await;
+    let agent = FakeAgent::start_returning(surface).await;
     let telegram = FakeTelegramApi::start().await;
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
@@ -250,15 +257,15 @@ async fn telegram_payload_is_pinned() {
         (!v.is_empty()).then_some(v)
     });
     std::thread::sleep(Duration::from_millis(500));
-    pin(
-        "telegram.json",
-        Value::Array(telegram.captured().into_iter().map(|m| m.body).collect()),
-    );
+    Turn {
+        payload: Value::Array(telegram.captured().into_iter().map(|m| m.body).collect()),
+        agent,
+        _proc: proc,
+    }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn signal_payload_is_pinned() {
-    let agent = FakeAgent::start_returning(rich_surface()).await;
+pub async fn drive_signal(surface: Value) -> Turn {
+    let agent = FakeAgent::start_returning(surface).await;
     let signald = FakeSignald::start().await;
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
@@ -272,7 +279,7 @@ async fn signal_payload_is_pinned() {
             format!("assistant={}", agent.host_port()),
         ),
     ]);
-    let _proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
     signald
         .wait_for_type("subscribe", Duration::from_secs(5))
         .await
@@ -287,12 +294,15 @@ async fn signal_payload_is_pinned() {
         .wait_for_type("send", Duration::from_secs(5))
         .await
         .expect("send line");
-    pin("signal.json", send.value);
+    Turn {
+        payload: send.value,
+        agent,
+        _proc: proc,
+    }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn discord_slash_command_payload_is_pinned() {
-    let agent = FakeAgent::start_returning(rich_surface()).await;
+pub async fn drive_discord(surface: Value) -> Turn {
+    let agent = FakeAgent::start_returning(surface).await;
     let signing = SigningKey::generate(&mut OsRng);
     let pk_hex = hex::encode(signing.verifying_key().as_bytes());
     let env = HashMap::from([
@@ -350,12 +360,15 @@ async fn discord_slash_command_payload_is_pinned() {
         .await
         .expect("POST slash");
     assert!(resp.status().is_success(), "{}", resp.status());
-    pin("discord.json", resp.json().await.expect("interaction json"));
+    Turn {
+        payload: resp.json().await.expect("interaction json"),
+        agent,
+        _proc: proc,
+    }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn google_chat_sync_reply_is_pinned() {
-    let agent = FakeAgent::start_returning(rich_surface()).await;
+pub async fn drive_google_chat(surface: Value) -> Turn {
+    let agent = FakeAgent::start_returning(surface).await;
     let jwks = FakeGoogleJwks::start().await;
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
@@ -402,13 +415,16 @@ async fn google_chat_sync_reply_is_pinned() {
         .await
         .expect("POST webhook");
     assert!(resp.status().is_success(), "{}", resp.status());
-    pin("google_chat.json", resp.json().await.expect("reply json"));
+    Turn {
+        payload: resp.json().await.expect("reply json"),
+        agent,
+        _proc: proc,
+    }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn msteams_group_chat_payload_is_pinned() {
+pub async fn drive_msteams(surface: Value) -> Turn {
     let fake = FakeBotFramework::start().await;
-    let agent = FakeAgent::start_returning(rich_surface()).await;
+    let agent = FakeAgent::start_returning(surface).await;
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         (
@@ -468,5 +484,48 @@ async fn msteams_group_chat_payload_is_pinned() {
             .map(|a| a.body)
             .find(|b| b["type"] == "message")
     });
-    pin("msteams.json", reply);
+    Turn {
+        payload: reply,
+        agent,
+        _proc: proc,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whatsapp_cloud_payload_is_pinned() {
+    pin(
+        "whatsapp_cloud.json",
+        drive_whatsapp_cloud(rich_surface()).await.payload,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn telegram_payload_is_pinned() {
+    pin(
+        "telegram.json",
+        drive_telegram(rich_surface()).await.payload,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signal_payload_is_pinned() {
+    pin("signal.json", drive_signal(rich_surface()).await.payload);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn discord_slash_command_payload_is_pinned() {
+    pin("discord.json", drive_discord(rich_surface()).await.payload);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn google_chat_sync_reply_is_pinned() {
+    pin(
+        "google_chat.json",
+        drive_google_chat(rich_surface()).await.payload,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn msteams_group_chat_payload_is_pinned() {
+    pin("msteams.json", drive_msteams(rich_surface()).await.payload);
 }
