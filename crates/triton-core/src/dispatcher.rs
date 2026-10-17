@@ -23,6 +23,7 @@ use futures::stream::{self, BoxStream};
 use serde_json::{Value, json};
 
 use crate::audit::{AuditPhase, AuditRecord, PostOutcome, emit, now_rfc3339};
+use crate::dispatch_context::DispatchContext;
 use crate::error::TritonError;
 use crate::metrics::Metrics;
 use crate::principal::Principal;
@@ -46,11 +47,14 @@ pub type PostResult<'a> = Result<
 
 #[async_trait]
 pub trait UpstreamDispatch: Send + Sync {
+    /// `ctx` carries where the turn will be rendered (#352). It is
+    /// presentation metadata for the agent, never an identity input.
     async fn invoke(
         &self,
         tool: &str,
         args: Value,
         principal: &Principal,
+        ctx: &DispatchContext,
     ) -> Result<Value, TritonError>;
 
     /// Streaming counterpart of [`Self::invoke`] (issue #132).
@@ -70,8 +74,9 @@ pub trait UpstreamDispatch: Send + Sync {
         tool: &str,
         args: Value,
         principal: &Principal,
+        ctx: &DispatchContext,
     ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
-        let value = self.invoke(tool, args, principal).await?;
+        let value = self.invoke(tool, args, principal, ctx).await?;
         Ok(stream::once(async move { StreamEvent::Done(value) }).boxed())
     }
 
@@ -81,8 +86,13 @@ pub trait UpstreamDispatch: Send + Sync {
     /// same registry used for tool dispatch. The default has no upstream
     /// and reports the URI as unknown (the in-process registry serves
     /// only the `ui://triton/...` stub, handled in the adapter).
-    async fn read_resource(&self, uri: &str, principal: &Principal) -> Result<Value, TritonError> {
-        let _ = principal;
+    async fn read_resource(
+        &self,
+        uri: &str,
+        principal: &Principal,
+        ctx: &DispatchContext,
+    ) -> Result<Value, TritonError> {
+        let _ = (principal, ctx);
         Err(TritonError::Validation(format!(
             "unknown resource uri: {uri}"
         )))
@@ -98,8 +108,9 @@ pub trait UpstreamDispatch: Send + Sync {
         uri: &str,
         record: Value,
         principal: &Principal,
+        ctx: &DispatchContext,
     ) -> Result<Value, TritonError> {
-        let _ = (record, principal);
+        let _ = (record, principal, ctx);
         Err(TritonError::Validation(format!(
             "unknown resource uri: {uri}"
         )))
@@ -711,7 +722,7 @@ impl Dispatcher {
         // single terminal `Done`. A pre-first-byte error audits inline.
         if let Some(tool) = self.registry.get(tool_name) {
             let returns_a2ui = tool.returns_a2ui();
-            let outcome = self.run(tool_name, args, &principal).await;
+            let outcome = self.run(tool_name, args, &principal, protocol).await;
             let latency_ms = started.elapsed().as_millis() as u64;
             self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
             let value = outcome?;
@@ -724,7 +735,7 @@ impl Dispatcher {
             return Ok(stream::once(async move { done }).boxed());
         }
         if self.upstream.is_none() {
-            let outcome = self.run(tool_name, args, &principal).await;
+            let outcome = self.run(tool_name, args, &principal, protocol).await;
             let latency_ms = started.elapsed().as_millis() as u64;
             self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
             let value = outcome?;
@@ -734,7 +745,11 @@ impl Dispatcher {
         // Upstream path. A 200 stream defers its single audit line to
         // termination; a pre-first-byte error audits inline and returns.
         let upstream = self.upstream.as_ref().expect("upstream present");
-        match upstream.invoke_streaming(tool_name, args, &principal).await {
+        let ctx = DispatchContext::for_protocol(protocol);
+        match upstream
+            .invoke_streaming(tool_name, args, &principal, &ctx)
+            .await
+        {
             Err(e) => Err(self.fail(
                 tool_name,
                 protocol,
@@ -817,7 +832,7 @@ impl Dispatcher {
             }
         }
         let started = Instant::now();
-        let outcome = self.run(tool_name, args, &principal).await;
+        let outcome = self.run(tool_name, args, &principal, protocol).await;
         let latency_ms = started.elapsed().as_millis() as u64;
         self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
         let returns_a2ui = self
@@ -867,7 +882,11 @@ impl Dispatcher {
         }
         let started = Instant::now();
         let outcome = match &self.upstream {
-            Some(upstream) => upstream.read_resource(uri, &principal).await,
+            Some(upstream) => {
+                upstream
+                    .read_resource(uri, &principal, &DispatchContext::for_protocol("mcp"))
+                    .await
+            }
             None => Err(TritonError::Validation(format!(
                 "unknown resource uri: {uri}"
             ))),
@@ -909,7 +928,16 @@ impl Dispatcher {
         }
         let started = Instant::now();
         let outcome = match &self.upstream {
-            Some(upstream) => upstream.update_model_context(uri, record, &principal).await,
+            Some(upstream) => {
+                upstream
+                    .update_model_context(
+                        uri,
+                        record,
+                        &principal,
+                        &DispatchContext::for_protocol("mcp"),
+                    )
+                    .await
+            }
             None => Err(TritonError::Validation(format!(
                 "unknown resource uri: {uri}"
             ))),
@@ -1088,6 +1116,7 @@ impl Dispatcher {
         tool_name: &str,
         args: Value,
         principal: &Principal,
+        protocol: &str,
     ) -> Result<Value, TritonError> {
         // In-process tool wins. Falls back to the upstream router
         // for tools not present in the registry (PR 9). When no
@@ -1115,7 +1144,8 @@ impl Dispatcher {
             };
         }
         if let Some(upstream) = &self.upstream {
-            return upstream.invoke(tool_name, args, principal).await;
+            let ctx = DispatchContext::for_protocol(protocol);
+            return upstream.invoke(tool_name, args, principal, &ctx).await;
         }
         Err(TritonError::Validation(format!(
             "unknown tool: {tool_name}"
@@ -1405,6 +1435,7 @@ mod tests {
             _tool: &str,
             _args: Value,
             _principal: &Principal,
+            _ctx: &DispatchContext,
         ) -> Result<Value, TritonError> {
             Ok(json!({ "surface": { "components": [] } }))
         }

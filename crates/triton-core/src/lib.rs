@@ -15,6 +15,7 @@ use serde::Serialize;
 
 pub mod a2ui;
 pub mod audit;
+pub mod dispatch_context;
 pub mod dispatcher;
 pub mod error;
 pub mod metrics;
@@ -26,6 +27,7 @@ pub mod tool;
 pub mod trace;
 
 pub use audit::PostOutcome;
+pub use dispatch_context::DispatchContext;
 pub use dispatcher::{Dispatch, Dispatcher, UpstreamDispatch, envelope};
 pub use error::TritonError;
 pub use metrics::Metrics;

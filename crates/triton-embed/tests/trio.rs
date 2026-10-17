@@ -202,7 +202,7 @@ async fn capture_does_not_buffer_an_sse_response() {
     use futures::StreamExt;
     use futures::stream::{self, BoxStream};
     use std::time::Duration;
-    use triton_core::{Principal, StreamEvent, UpstreamDispatch};
+    use triton_core::{DispatchContext, Principal, StreamEvent, UpstreamDispatch};
 
     /// Upstream whose streaming response yields a `tool` frame then hangs.
     struct SlowStreamUpstream;
@@ -214,6 +214,7 @@ async fn capture_does_not_buffer_an_sse_response() {
             _tool: &str,
             _args: Value,
             _p: &Principal,
+            _ctx: &DispatchContext,
         ) -> Result<Value, TritonError> {
             Ok(json!({ "surface": { "components": [] } }))
         }
@@ -222,6 +223,7 @@ async fn capture_does_not_buffer_an_sse_response() {
             _tool: &str,
             _args: Value,
             _p: &Principal,
+            _ctx: &DispatchContext,
         ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
             let s = stream::once(async { StreamEvent::Tool(json!({ "step": "search" })) })
                 .chain(stream::pending());
