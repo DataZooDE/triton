@@ -7,6 +7,10 @@
 //! must never reach a JWT claim or an authorization decision, so it travels
 //! beside the identity, not inside it.
 
+use std::sync::Arc;
+
+use crate::surface::{SurfaceDescriptor, SurfaceRegistry};
+
 /// What the upstream router may tell an agent about where its answer goes.
 /// Non-authoritative rendering advice: an agent that ignores it keeps
 /// working, and the adapter's surface mapper still degrades the reply.
@@ -15,15 +19,19 @@ pub struct DispatchContext {
     /// Normalised channel label, e.g. `whatsapp`, `msteams`, `googlechat`,
     /// `rest`, `mcp`, `a2a`. Sent upstream as `X-Triton-Channel`.
     pub channel: String,
+    /// What the channel can show, sent as `_triton.surface`. `None` for a
+    /// channel with no registered profile.
+    pub surface: Option<Arc<SurfaceDescriptor>>,
 }
 
 impl DispatchContext {
     /// Derive the context from the adapter's audit `protocol` label, which
-    /// every adapter already passes to the dispatcher.
-    pub fn for_protocol(protocol: &str) -> Self {
-        Self {
-            channel: channel_for_protocol(protocol),
-        }
+    /// every adapter already passes to the dispatcher, and look the channel
+    /// up in `surfaces`.
+    pub fn for_protocol(protocol: &str, surfaces: &SurfaceRegistry) -> Self {
+        let channel = channel_for_protocol(protocol);
+        let surface = surfaces.get(&channel);
+        Self { channel, surface }
     }
 }
 

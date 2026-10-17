@@ -191,6 +191,11 @@ pub struct StaticUpstream {
     /// otherwise pin the connection forever. The stream is failed closed
     /// once it runs past this regardless of how steadily bytes arrive.
     stream_max_duration: Duration,
+    /// #352: write the channel's surface descriptor into `_triton.surface`
+    /// of object args. On by default; `TRITON_STATIC_UPSTREAM_SURFACE_HINT=off`
+    /// turns it off for an agent that rejects unknown args. The
+    /// `X-Triton-Channel` header is sent either way.
+    surface_hint: bool,
 }
 
 impl StaticUpstream {
@@ -240,7 +245,37 @@ impl StaticUpstream {
             circuit_cooldown,
             stream_idle_timeout,
             stream_max_duration,
+            surface_hint: true,
         }
+    }
+
+    /// Turn the `_triton.surface` body field on or off (#352).
+    pub fn with_surface_hint(mut self, on: bool) -> Self {
+        self.surface_hint = on;
+        self
+    }
+
+    /// Args as sent upstream: object args get the channel's descriptor under
+    /// `_triton.surface` (the dispatcher already removed any caller-supplied
+    /// `_triton`). Non-object args can't carry a field and go out unchanged;
+    /// the header alone tells the agent the channel.
+    fn with_hint(&self, mut args: Value, ctx: &DispatchContext) -> Value {
+        if !self.surface_hint {
+            return args;
+        }
+        let (Some(surface), Some(map)) = (&ctx.surface, args.as_object_mut()) else {
+            return args;
+        };
+        let reserved = map
+            .entry(triton_core::dispatcher::RESERVED_ARGS_KEY)
+            .or_insert_with(|| Value::Object(Default::default()));
+        if let Some(reserved) = reserved.as_object_mut() {
+            reserved.insert(
+                "surface".to_string(),
+                serde_json::to_value(surface.as_ref()).unwrap_or(Value::Null),
+            );
+        }
+        args
     }
 
     /// Attach a JWT signer: every dispatch now carries a freshly-minted RS256
@@ -409,6 +444,7 @@ impl StaticUpstream {
             .get(tool)
             .ok_or_else(|| TritonError::Validation(format!("unknown tool: {tool}")))?;
         let bearer = self.bearer(principal)?;
+        let args = self.with_hint(args, ctx);
         let resp = self
             .http
             .post(format!("http://{ep}/"))
@@ -745,6 +781,7 @@ impl UpstreamDispatch for StaticUpstream {
             }
         };
         let bearer = self.bearer(principal)?;
+        let args = self.with_hint(args, ctx);
 
         let send = self
             .http_stream

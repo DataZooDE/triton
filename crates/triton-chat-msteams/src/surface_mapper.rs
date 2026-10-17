@@ -161,13 +161,13 @@ pub const SURFACE: SurfaceProfile = SurfaceProfile {
     max_buttons: None,
     charts: Charts::Native,
     images: true,
-    max_text_bytes: 24576,
+    max_text_bytes: Some(24576),
     streaming: true,
     subject_line: false,
     guidance: "Microsoft Teams: Adaptive Card. Markdown emphasis, narrow tables (wide ones wrap badly), buttons and native charts work.",
 };
 
-pub const MSTEAMS_TEXT_MAX_BYTES: usize = SURFACE.max_text_bytes;
+pub const MSTEAMS_TEXT_MAX_BYTES: usize = SURFACE.text_cap();
 
 /// Sentinel appended when we truncate to fit [`MSTEAMS_TEXT_MAX_BYTES`].
 const TRUNCATION_SENTINEL: &str =

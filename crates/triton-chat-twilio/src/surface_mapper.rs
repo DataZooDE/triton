@@ -29,7 +29,7 @@ pub const SURFACE_WHATSAPP: SurfaceProfile = SurfaceProfile {
     max_buttons: None,
     charts: Charts::None,
     images: false,
-    max_text_bytes: 1600,
+    max_text_bytes: Some(1600),
     streaming: false,
     subject_line: false,
     guidance: "WhatsApp via Twilio: one short plain-text message under 1600 characters. No tables, buttons or charts.",
@@ -42,7 +42,7 @@ pub const SURFACE_RCS: SurfaceProfile = SurfaceProfile {
     ..SURFACE_WHATSAPP
 };
 
-pub const TWILIO_TEXT_MAX_BYTES: usize = SURFACE_WHATSAPP.max_text_bytes;
+pub const TWILIO_TEXT_MAX_BYTES: usize = SURFACE_WHATSAPP.text_cap();
 
 const TRUNCATION_SENTINEL: &str = "\n\n[truncated — content exceeded Twilio's 1600-byte limit]";
 

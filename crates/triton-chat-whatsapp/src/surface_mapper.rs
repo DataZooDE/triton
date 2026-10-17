@@ -44,13 +44,13 @@ pub const SURFACE: SurfaceProfile = SurfaceProfile {
     max_buttons: Some(3),
     charts: Charts::None,
     images: true,
-    max_text_bytes: 4096,
+    max_text_bytes: Some(4096),
     streaming: false,
     subject_line: false,
     guidance: "WhatsApp: plain short text with *bold*/_italic_ only. No tables or charts; at most 3 short follow-up buttons; keep it to a few short paragraphs.",
 };
 
-pub const WHATSAPP_TEXT_MAX_BYTES: usize = SURFACE.max_text_bytes;
+pub const WHATSAPP_TEXT_MAX_BYTES: usize = SURFACE.text_cap();
 
 /// Sentinel appended when we truncate to fit
 /// [`WHATSAPP_TEXT_MAX_BYTES`]. Bracketed so it's visibly an

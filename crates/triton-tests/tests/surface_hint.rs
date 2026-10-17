@@ -584,3 +584,155 @@ async fn outbound_delivery_redispatch_carries_the_delivery_channel() {
     assert_eq!(tools[0].as_deref(), Some("get_theme"));
     assert_eq!(first_channel(&theme).as_deref(), Some("msteams"));
 }
+
+// ── #352 step 3: the capability descriptor in `_triton.surface` ─────────────
+
+/// The JSON body of the agent's first recorded dispatch (see
+/// [`first_channel`] for why only dispatches count).
+fn first_body(agent: &FakeAgent) -> serde_json::Value {
+    wait_for(Duration::from_secs(5), || {
+        let headers = agent.headers_seen();
+        let bodies = agent.bodies_seen();
+        headers
+            .iter()
+            .position(|h| h.contains_key("X-Triton-Tool") || h.contains_key("X-Triton-MCP"))
+            .and_then(|i| bodies.get(i).cloned())
+    })
+}
+
+fn surface_of(agent: &FakeAgent) -> serde_json::Value {
+    let body = first_body(agent);
+    let surface = body["_triton"]["surface"].clone();
+    assert!(surface.is_object(), "no _triton.surface in {body}");
+    assert_eq!(surface["v"], 1, "descriptor is versioned: {surface}");
+    surface
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn whatsapp_turn_carries_its_surface_descriptor() {
+    let turn = crate::surface_baseline::drive_whatsapp_cloud(text_surface()).await;
+    let body = first_body(&turn.agent);
+    assert_eq!(
+        body["message"], "revenue please",
+        "the original args are untouched"
+    );
+    let s = surface_of(&turn.agent);
+    assert_eq!(s["channel"], "whatsapp");
+    assert_eq!(s["buttons"], json!({ "supported": true, "max": 3 }));
+    assert_eq!(s["tables"], "text");
+    assert_eq!(s["markdown"], "basic");
+    assert_eq!(s["max_text_bytes"], 4096);
+    assert!(
+        s["guidance"]
+            .as_str()
+            .is_some_and(|g| g.starts_with("WhatsApp")),
+        "{s}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signal_turn_advertises_no_buttons() {
+    let turn = crate::surface_baseline::drive_signal(text_surface()).await;
+    let s = surface_of(&turn.agent);
+    assert_eq!(s["channel"], "signal");
+    assert_eq!(s["buttons"], json!({ "supported": false, "max": null }));
+    assert_eq!(s["markdown"], "none");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn msteams_turn_advertises_native_tables_and_charts() {
+    let turn = crate::surface_baseline::drive_msteams(text_surface()).await;
+    let s = surface_of(&turn.agent);
+    assert_eq!(s["channel"], "msteams");
+    assert_eq!(s["tables"], "native");
+    assert_eq!(s["charts"], "native");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn google_chat_turn_advertises_streaming() {
+    let turn = crate::surface_baseline::drive_google_chat(text_surface()).await;
+    let s = surface_of(&turn.agent);
+    assert_eq!(s["channel"], "googlechat");
+    assert_eq!(s["streaming"], true);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rest_turn_advertises_the_full_surface() {
+    let agent = FakeAgent::start_echoing().await;
+    let triton = triton_with(&agent, &[]).await;
+    reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/assistant"))
+        .bearer_auth("dev-token")
+        .json(&json!({ "message": "hi" }))
+        .send()
+        .await
+        .expect("POST");
+    let s = surface_of(&agent);
+    assert_eq!(s["channel"], "rest");
+    assert_eq!(s["tables"], "native");
+    assert_eq!(s["buttons"]["supported"], true);
+    assert_eq!(
+        s["max_text_bytes"],
+        serde_json::Value::Null,
+        "no Triton cap"
+    );
+}
+
+/// The kill-switch drops the body field for an agent that rejects unknown
+/// args. The header is not part of the body, so it stays.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hint_kill_switch_drops_the_body_field_but_keeps_the_header() {
+    let agent = FakeAgent::start_echoing().await;
+    let triton = triton_with(
+        &agent,
+        &[("TRITON_STATIC_UPSTREAM_SURFACE_HINT", "off".to_string())],
+    )
+    .await;
+    reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/assistant"))
+        .bearer_auth("dev-token")
+        .json(&json!({ "message": "hi" }))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(first_body(&agent), json!({ "message": "hi" }));
+    assert_eq!(first_channel(&agent).as_deref(), Some("rest"));
+}
+
+/// Triton owns `_triton`: a caller can't forge the descriptor (or smuggle
+/// anything else under the reserved key) to the agent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_caller_supplied_triton_key_is_replaced() {
+    let agent = FakeAgent::start_echoing().await;
+    let triton = triton_with(&agent, &[]).await;
+    reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/assistant"))
+        .bearer_auth("dev-token")
+        .json(&json!({
+            "message": "hi",
+            "_triton": { "surface": { "channel": "email" }, "smuggled": true }
+        }))
+        .send()
+        .await
+        .expect("POST");
+    let body = first_body(&agent);
+    assert_eq!(body["_triton"]["surface"]["channel"], "rest", "{body}");
+    assert!(body["_triton"].get("smuggled").is_none(), "{body}");
+}
+
+/// Non-object args can't carry a field: the body is forwarded unchanged and
+/// the header alone carries the channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_object_args_are_forwarded_unchanged() {
+    let agent = FakeAgent::start_echoing().await;
+    let triton = triton_with(&agent, &[]).await;
+    reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/assistant"))
+        .bearer_auth("dev-token")
+        .json(&json!(["a", 1]))
+        .send()
+        .await
+        .expect("POST");
+    assert_eq!(first_body(&agent), json!(["a", 1]));
+    assert_eq!(first_channel(&agent).as_deref(), Some("rest"));
+}

@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::FakeWhatsAppApi;
-use triton_tests::upstream_fixture::FakeAgent;
+use triton_tests::upstream_fixture::{FakeAgent, without_hint};
 
 const APP_SECRET: &str = "whatsapp-app-secret-for-test";
 const KNOWN_WA_ID: &str = "491701234567";
@@ -99,7 +99,7 @@ async fn plain_text_dispatches_to_manifest_configured_upstream_tool() {
         (!v.is_empty()).then_some(v)
     });
     assert_eq!(
-        bodies[0],
+        without_hint(&bodies[0]),
         json!({ "message": "hello there" }),
         "upstream agent must receive the plain-text args"
     );

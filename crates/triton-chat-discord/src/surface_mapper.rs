@@ -46,13 +46,13 @@ pub const SURFACE: SurfaceProfile = SurfaceProfile {
     max_buttons: Some(DISCORD_BUTTONS_PER_ROW * DISCORD_MAX_ROWS),
     charts: Charts::None,
     images: true,
-    max_text_bytes: 2000,
+    max_text_bytes: Some(2000),
     streaming: false,
     subject_line: false,
     guidance: "Discord: short plain text under 2000 characters (markdown is escaped). No tables; up to 25 buttons; dashboards arrive as an image.",
 };
 
-pub const DISCORD_CONTENT_MAX_BYTES: usize = SURFACE.max_text_bytes;
+pub const DISCORD_CONTENT_MAX_BYTES: usize = SURFACE.text_cap();
 
 const TRUNCATION_SENTINEL: &str = "\n\n*(truncated — exceeded Discord's 2000-byte content cap)*";
 

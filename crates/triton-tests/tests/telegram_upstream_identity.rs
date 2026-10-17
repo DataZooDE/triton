@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::FakeTelegramApi;
-use triton_tests::upstream_fixture::FakeAgent;
+use triton_tests::upstream_fixture::{FakeAgent, without_hint};
 
 const SECRET: &str = "webhook-secret-for-test";
 /// Not present in any sender table — only the resolver knows it.
@@ -102,7 +102,7 @@ async fn upstream_identity_resolves_principal_and_dispatches_with_it() {
         (!v.is_empty()).then_some(v)
     });
     assert_eq!(
-        resolver_bodies[0],
+        without_hint(&resolver_bodies[0]),
         json!({ "platform": "telegram", "sender": UNKNOWN_USER_ID.to_string() }),
         "resolver must receive {{platform, sender}}"
     );
@@ -135,7 +135,12 @@ async fn upstream_identity_resolves_principal_and_dispatches_with_it() {
         let v = agent.bodies_seen();
         (!v.is_empty()).then_some(v)
     });
-    assert_eq!(agent_bodies[0], json!({ "message": "hello via resolver" }));
+    assert_eq!(
+        without_hint(&agent_bodies[0]),
+        json!({ "message": "hello via resolver" })
+    );
+    // #352: plus the rendering hint for the channel the turn is for.
+    assert_eq!(agent_bodies[0]["_triton"]["surface"]["channel"], "telegram");
 
     // ... and the reply was couriered back to the platform.
     let sent = wait_for(Duration::from_secs(3), || {

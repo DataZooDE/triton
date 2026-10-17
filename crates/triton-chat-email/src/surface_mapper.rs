@@ -39,13 +39,13 @@ pub const SURFACE: SurfaceProfile = SurfaceProfile {
     max_buttons: None,
     charts: Charts::Image,
     images: true,
-    max_text_bytes: 512_000,
+    max_text_bytes: Some(512_000),
     streaming: false,
     subject_line: true,
     guidance: "Email: the richest surface. Full markdown, tables, links and an inline chart; the first line becomes the subject, so make it a good one.",
 };
 
-pub const EMAIL_HTML_MAX_BYTES: usize = SURFACE.max_text_bytes;
+pub const EMAIL_HTML_MAX_BYTES: usize = SURFACE.text_cap();
 
 const TRUNCATION_SENTINEL_HTML: &str =
     "<p style=\"color:#999\"><em>[truncated — message exceeded the email size limit]</em></p>";

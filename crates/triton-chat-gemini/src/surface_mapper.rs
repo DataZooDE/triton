@@ -37,13 +37,13 @@ pub const SURFACE: SurfaceProfile = SurfaceProfile {
     max_buttons: None,
     charts: Charts::Caption,
     images: false,
-    max_text_bytes: 8000,
+    max_text_bytes: Some(8000),
     streaming: false,
     subject_line: false,
     guidance: "Gemini Enterprise: a markdown answer card. Tables render; buttons are dropped and charts become a one-line caption.",
 };
 
-pub const GEMINI_TEXT_MAX_BYTES: usize = SURFACE.max_text_bytes;
+pub const GEMINI_TEXT_MAX_BYTES: usize = SURFACE.text_cap();
 
 const TRUNCATION_SENTINEL: &str = "\n\n[truncated — content exceeded Gemini's 8000-byte cap]";
 

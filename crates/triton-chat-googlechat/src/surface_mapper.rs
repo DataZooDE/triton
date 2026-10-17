@@ -89,13 +89,13 @@ pub const SURFACE: SurfaceProfile = SurfaceProfile {
     max_buttons: None,
     charts: Charts::Image,
     images: true,
-    max_text_bytes: 32_000,
+    max_text_bytes: Some(32_000),
     streaming: true,
     subject_line: false,
     guidance: "Google Chat: concise text with basic emphasis. Tables become cards (keep them to about 4 columns); buttons and chart images work.",
 };
 
-pub const GOOGLE_CHAT_TEXT_MAX_BYTES: usize = SURFACE.max_text_bytes;
+pub const GOOGLE_CHAT_TEXT_MAX_BYTES: usize = SURFACE.text_cap();
 
 const TRUNCATION_SENTINEL: &str =
     "\n\n[truncated — content exceeded Google Chat's 32,000-byte limit]";

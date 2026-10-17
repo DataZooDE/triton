@@ -479,3 +479,14 @@ fn sse_response_slow_drip(frames: Vec<String>) -> axum::response::Response {
         .body(body)
         .unwrap()
 }
+
+/// A recorded request body without Triton's reserved `_triton` key (#352):
+/// the args the *caller* sent, for contract assertions that predate the
+/// surface hint. Assert on `_triton` separately where it matters.
+pub fn without_hint(body: &Value) -> Value {
+    let mut body = body.clone();
+    if let Some(map) = body.as_object_mut() {
+        map.remove("_triton");
+    }
+    body
+}

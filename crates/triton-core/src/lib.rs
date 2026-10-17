@@ -35,7 +35,7 @@ pub use metrics::Metrics;
 pub use outbound::{OutboundCourier, OutboundRequest};
 pub use principal::{Principal, ToolPrincipal};
 pub use stream::{Finalized, StreamEvent, Termination, Timing};
-pub use surface::SurfaceProfile;
+pub use surface::{SurfaceDescriptor, SurfaceProfile, SurfaceRegistry};
 pub use tool::{Tool, ToolDescriptor, ToolRegistry};
 
 /// A2UI envelope version requested by the caller (FR-A-3). Per ADR-4

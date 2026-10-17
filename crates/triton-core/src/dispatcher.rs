@@ -28,6 +28,7 @@ use crate::error::TritonError;
 use crate::metrics::Metrics;
 use crate::principal::Principal;
 use crate::stream::{Finalized, StreamEvent, Termination, Timing};
+use crate::surface::SurfaceRegistry;
 use crate::tool::{ToolDescriptor, ToolRegistry};
 
 /// Hook the dispatcher calls when the in-process registry doesn't
@@ -164,6 +165,10 @@ pub struct Dispatcher {
     /// tools it maps to. Empty by default, so a deployment that declares
     /// nothing behaves exactly as before.
     scope_restrictions: HashMap<String, HashSet<String>>,
+    /// #352: what each channel can show, sent to upstream agents as a
+    /// rendering hint. Defaults to the HTTP trio; the host adds its chat
+    /// channels with [`Dispatcher::with_surfaces`].
+    surfaces: Arc<SurfaceRegistry>,
 }
 
 /// Everything a dispatcher enforces that is not a tool: who is revoked,
@@ -379,6 +384,7 @@ impl Dispatcher {
             // crate reads no environment: `triton-config` does.
             denied: controls.denied_principals,
             scope_restrictions: controls.scope_restrictions,
+            surfaces: Arc::new(SurfaceRegistry::with_trio_defaults()),
         }
     }
 
@@ -511,6 +517,18 @@ impl Dispatcher {
     pub fn with_upstream(mut self, upstream: Arc<dyn UpstreamDispatch>) -> Self {
         self.upstream = Some(upstream);
         self
+    }
+
+    /// Replace the channel → surface registry (#352). The host builds it
+    /// from its chat crates' `SURFACE` profiles plus operator overrides.
+    pub fn with_surfaces(mut self, surfaces: SurfaceRegistry) -> Self {
+        self.surfaces = Arc::new(surfaces);
+        self
+    }
+
+    /// The channel → surface registry, for discovery (`GET /v1/manifest`).
+    pub fn surfaces(&self) -> &SurfaceRegistry {
+        &self.surfaces
     }
 
     pub fn env(&self) -> &str {
@@ -661,6 +679,9 @@ impl Dispatcher {
                 Ok(_) => unreachable!("constructed as Err"),
             }
         }
+        // #352: `_triton` is Triton's reserved key. Whatever a caller put
+        // there is dropped, so it can't forge the hint an agent receives.
+        let args = strip_reserved(args);
         let started = Instant::now();
 
         // In-process tools that OPT IN to streaming (#635 P5) ride the
@@ -745,7 +766,7 @@ impl Dispatcher {
         // Upstream path. A 200 stream defers its single audit line to
         // termination; a pre-first-byte error audits inline and returns.
         let upstream = self.upstream.as_ref().expect("upstream present");
-        let ctx = DispatchContext::for_protocol(protocol);
+        let ctx = DispatchContext::for_protocol(protocol, &self.surfaces);
         match upstream
             .invoke_streaming(tool_name, args, &principal, &ctx)
             .await
@@ -831,6 +852,9 @@ impl Dispatcher {
                 Ok(_) => unreachable!("constructed as Err"),
             }
         }
+        // #352: `_triton` is Triton's reserved key. Whatever a caller put
+        // there is dropped, so it can't forge the hint an agent receives.
+        let args = strip_reserved(args);
         let started = Instant::now();
         let outcome = self.run(tool_name, args, &principal, protocol).await;
         let latency_ms = started.elapsed().as_millis() as u64;
@@ -884,7 +908,11 @@ impl Dispatcher {
         let outcome = match &self.upstream {
             Some(upstream) => {
                 upstream
-                    .read_resource(uri, &principal, &DispatchContext::for_protocol("mcp"))
+                    .read_resource(
+                        uri,
+                        &principal,
+                        &DispatchContext::for_protocol("mcp", &self.surfaces),
+                    )
                     .await
             }
             None => Err(TritonError::Validation(format!(
@@ -934,7 +962,7 @@ impl Dispatcher {
                         uri,
                         record,
                         &principal,
-                        &DispatchContext::for_protocol("mcp"),
+                        &DispatchContext::for_protocol("mcp", &self.surfaces),
                     )
                     .await
             }
@@ -1144,7 +1172,7 @@ impl Dispatcher {
             };
         }
         if let Some(upstream) = &self.upstream {
-            let ctx = DispatchContext::for_protocol(protocol);
+            let ctx = DispatchContext::for_protocol(protocol, &self.surfaces);
             return upstream.invoke(tool_name, args, principal, &ctx).await;
         }
         Err(TritonError::Validation(format!(
@@ -1381,6 +1409,19 @@ pub fn envelope(dispatch: &Dispatch) -> Value {
         "trace_id": dispatch.trace_id,
         "latency_ms": dispatch.latency_ms,
     })
+}
+
+/// The reserved args key Triton writes its own metadata under (#352).
+pub const RESERVED_ARGS_KEY: &str = "_triton";
+
+/// Drop a caller-supplied [`RESERVED_ARGS_KEY`] from object args. Triton owns
+/// that key: the upstream router writes the rendering hint there, and a
+/// caller must not be able to forge it or smuggle anything else under it.
+fn strip_reserved(mut args: Value) -> Value {
+    if let Some(map) = args.as_object_mut() {
+        map.remove(RESERVED_ARGS_KEY);
+    }
+    args
 }
 
 #[cfg(test)]

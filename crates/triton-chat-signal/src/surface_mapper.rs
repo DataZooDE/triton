@@ -41,13 +41,13 @@ pub const SURFACE: SurfaceProfile = SurfaceProfile {
     max_buttons: None,
     charts: Charts::None,
     images: false,
-    max_text_bytes: 2000,
+    max_text_bytes: Some(2000),
     streaming: false,
     subject_line: false,
     guidance: "Signal: plain unformatted text only. No markdown, tables, buttons or charts; keep it short.",
 };
 
-pub const SIGNAL_TEXT_MAX_BYTES: usize = SURFACE.max_text_bytes;
+pub const SIGNAL_TEXT_MAX_BYTES: usize = SURFACE.text_cap();
 
 const TRUNCATION_SENTINEL: &str = "\n\n[truncated — content exceeded Signal's 2000-byte cap]";
 

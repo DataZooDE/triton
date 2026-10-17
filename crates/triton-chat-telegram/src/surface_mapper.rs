@@ -50,13 +50,13 @@ pub const SURFACE: SurfaceProfile = SurfaceProfile {
     max_buttons: None,
     charts: Charts::None,
     images: true,
-    max_text_bytes: 4096,
+    max_text_bytes: Some(4096),
     streaming: false,
     subject_line: false,
     guidance: "Telegram: plain text (markdown shows literally). No tables; follow-up buttons work; dashboards arrive as an image.",
 };
 
-pub const TELEGRAM_TEXT_MAX_BYTES: usize = SURFACE.max_text_bytes;
+pub const TELEGRAM_TEXT_MAX_BYTES: usize = SURFACE.text_cap();
 
 /// Telegram `sendPhoto.caption` cap. Documented at 1024 bytes
 /// (UTF-16 code units, conservatively bounded as 1024 bytes for

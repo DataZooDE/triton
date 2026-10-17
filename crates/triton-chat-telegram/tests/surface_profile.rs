@@ -18,7 +18,7 @@ fn surface_profile_is_pinned() {
         max_buttons: None,
         charts: Charts::None,
         images: true,
-        max_text_bytes: 4096,
+        max_text_bytes: Some(4096),
         streaming: false,
         subject_line: false,
         guidance: SURFACE.guidance,
