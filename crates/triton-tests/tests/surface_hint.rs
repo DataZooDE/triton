@@ -855,3 +855,65 @@ fn over_long_env_guidance_refuses_boot() {
         "say why: {logs}"
     );
 }
+
+// ── #352 step 6: discovery for proactive workers ────────────────────────────
+
+/// A background worker composing a proactive push writes the message before
+/// any dispatch exists to hint it, so it reads the delivery channel's
+/// descriptor from `GET /v1/manifest`. This is also the email test: email
+/// never dispatches upstream, so discovery is where its `subject_line` shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_manifest_endpoint_lists_every_channel_surface() {
+    let agent = FakeAgent::start_echoing().await;
+    let triton = triton_with(&agent, &[]).await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(triton.rest_url("/v1/manifest"))
+        .bearer_auth("dev-token")
+        .send()
+        .await
+        .expect("GET /v1/manifest")
+        .json()
+        .await
+        .expect("json");
+
+    assert_eq!(
+        body["loaded"], false,
+        "listed even with no manifest: {body}"
+    );
+    let surfaces = &body["surfaces"];
+    assert_eq!(surfaces["email"]["subject_line"], true, "{surfaces}");
+    assert_eq!(surfaces["whatsapp"]["buttons"]["max"], 3);
+    assert_eq!(surfaces["signal"]["buttons"]["supported"], false);
+    assert_eq!(surfaces["rest"]["channel"], "rest");
+    for (channel, s) in surfaces.as_object().expect("surfaces map") {
+        assert_eq!(s["v"], 1, "{channel}");
+        assert_eq!(&s["channel"], channel, "keyed by its own channel");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_manifest_endpoint_shows_guidance_overrides() {
+    let agent = FakeAgent::start_echoing().await;
+    let triton = triton_with(
+        &agent,
+        &[(
+            "TRITON_MANIFEST_PATH",
+            fixture("manifest-surface-guidance-whatsapp.yaml"),
+        )],
+    )
+    .await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(triton.rest_url("/v1/manifest"))
+        .bearer_auth("dev-token")
+        .send()
+        .await
+        .expect("GET /v1/manifest")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(body["loaded"], true);
+    assert_eq!(
+        body["surfaces"]["whatsapp"]["guidance"],
+        "Operator says: two sentences, no lists."
+    );
+}

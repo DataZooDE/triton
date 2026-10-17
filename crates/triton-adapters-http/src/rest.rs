@@ -493,13 +493,29 @@ async fn manifest_view(State(state): State<RestState>, parts: Parts) -> Response
         );
         return error_response(&e, None);
     }
+    // #352: every channel's surface descriptor, keyed by channel, so a
+    // worker composing a proactive push can tailor it to the delivery
+    // channel. Listed with or without a manifest: the trio and the chat
+    // profiles exist either way.
+    let surfaces: serde_json::Map<String, Value> = state
+        .dispatcher
+        .surfaces()
+        .all()
+        .map(|(channel, d)| {
+            (
+                channel.to_string(),
+                serde_json::to_value(d).unwrap_or(Value::Null),
+            )
+        })
+        .collect();
     match &state.manifest {
         Some(m) => Json(json!({
             "loaded": true,
             "manifest": &**m,
+            "surfaces": surfaces,
         }))
         .into_response(),
-        None => Json(json!({ "loaded": false })).into_response(),
+        None => Json(json!({ "loaded": false, "surfaces": surfaces })).into_response(),
     }
 }
 
