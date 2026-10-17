@@ -142,6 +142,8 @@ mod sigterm;
 mod static_upstream;
 #[path = "../streaming.rs"]
 mod streaming;
+#[path = "../surface_baseline.rs"]
+mod surface_baseline;
 #[path = "../surface_render.rs"]
 mod surface_render;
 #[path = "../telegram.rs"]

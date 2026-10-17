@@ -1,0 +1,98 @@
+{
+  "cardsV2": [
+    {
+      "card": {
+        "sections": [
+          {
+            "widgets": [
+              {
+                "buttonList": {
+                  "buttons": [
+                    {
+                      "onClick": {
+                        "action": {
+                          "function": "agent_action",
+                          "parameters": [
+                            {
+                              "key": "ct",
+                              "value": "<redacted>"
+                            },
+                            {
+                              "key": "lbl",
+                              "value": "Drill into EMEA"
+                            }
+                          ]
+                        }
+                      },
+                      "text": "Drill into EMEA",
+                      "type": "FILLED_TONAL"
+                    },
+                    {
+                      "onClick": {
+                        "action": {
+                          "function": "agent_action",
+                          "parameters": [
+                            {
+                              "key": "ct",
+                              "value": "<redacted>"
+                            },
+                            {
+                              "key": "lbl",
+                              "value": "Drill into APAC"
+                            }
+                          ]
+                        }
+                      },
+                      "text": "Drill into APAC",
+                      "type": "FILLED_TONAL"
+                    },
+                    {
+                      "onClick": {
+                        "action": {
+                          "function": "agent_action",
+                          "parameters": [
+                            {
+                              "key": "ct",
+                              "value": "<redacted>"
+                            },
+                            {
+                              "key": "lbl",
+                              "value": "Drill into AMER"
+                            }
+                          ]
+                        }
+                      },
+                      "text": "Drill into AMER",
+                      "type": "FILLED_TONAL"
+                    },
+                    {
+                      "onClick": {
+                        "action": {
+                          "function": "agent_action",
+                          "parameters": [
+                            {
+                              "key": "ct",
+                              "value": "<redacted>"
+                            },
+                            {
+                              "key": "lbl",
+                              "value": "Compare to Q2"
+                            }
+                          ]
+                        }
+                      },
+                      "text": "Compare to Q2",
+                      "type": "FILLED_TONAL"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "cardId": "agent-actions"
+    }
+  ],
+  "text": "*Q3 revenue* by region:\n\n| Region | Revenue | Growth |\n|---|---|---|\n| EMEA | 1.2M | +4% |\n| APAC | 0.8M | +9% |\n| AMER | 2.1M | -1% |\n\n_APAC is growing fastest._\n\nSources: Revenue report"
+}

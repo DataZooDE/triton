@@ -1,0 +1,39 @@
+[
+  {
+    "interactive": {
+      "action": {
+        "buttons": [
+          {
+            "reply": {
+              "id": "<redacted>",
+              "title": "Drill into EMEA"
+            },
+            "type": "reply"
+          },
+          {
+            "reply": {
+              "id": "<redacted>",
+              "title": "Drill into APAC"
+            },
+            "type": "reply"
+          },
+          {
+            "reply": {
+              "id": "<redacted>",
+              "title": "Drill into AMER"
+            },
+            "type": "reply"
+          }
+        ]
+      },
+      "body": {
+        "text": "**Q3 revenue** by region:\n\n| Region | Revenue | Growth |\n|---|---|---|\n| EMEA | 1.2M | +4% |\n| APAC | 0.8M | +9% |\n| AMER | 2.1M | -1% |\n\n_APAC is growing fastest._\n\nSources: Revenue report"
+      },
+      "type": "button"
+    },
+    "messaging_product": "whatsapp",
+    "recipient_type": "individual",
+    "to": "491701234567",
+    "type": "interactive"
+  }
+]

@@ -1,0 +1,245 @@
+{
+  "attachments": [
+    {
+      "content": {
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "actions": [
+          {
+            "data": {
+              "ct": "<redacted>"
+            },
+            "title": "Drill into EMEA",
+            "type": "Action.Execute",
+            "verb": "agentAction"
+          },
+          {
+            "data": {
+              "ct": "<redacted>"
+            },
+            "title": "Drill into APAC",
+            "type": "Action.Execute",
+            "verb": "agentAction"
+          },
+          {
+            "data": {
+              "ct": "<redacted>"
+            },
+            "title": "Drill into AMER",
+            "type": "Action.Execute",
+            "verb": "agentAction"
+          },
+          {
+            "data": {
+              "ct": "<redacted>"
+            },
+            "title": "Compare to Q2",
+            "type": "Action.Execute",
+            "verb": "agentAction"
+          }
+        ],
+        "body": [
+          {
+            "text": "**Q3 revenue** by region:",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "columns": [
+              {
+                "horizontalCellContentAlignment": "Left",
+                "width": 2
+              },
+              {
+                "horizontalCellContentAlignment": "Left",
+                "width": 2
+              },
+              {
+                "horizontalCellContentAlignment": "Right",
+                "width": 1
+              }
+            ],
+            "firstRowAsHeaders": true,
+            "rows": [
+              {
+                "cells": [
+                  {
+                    "items": [
+                      {
+                        "text": "Region",
+                        "type": "TextBlock",
+                        "weight": "Bolder",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  },
+                  {
+                    "items": [
+                      {
+                        "text": "Revenue",
+                        "type": "TextBlock",
+                        "weight": "Bolder",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  },
+                  {
+                    "items": [
+                      {
+                        "text": "Growth",
+                        "type": "TextBlock",
+                        "weight": "Bolder",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  }
+                ],
+                "style": "emphasis",
+                "type": "TableRow"
+              },
+              {
+                "cells": [
+                  {
+                    "items": [
+                      {
+                        "text": "EMEA",
+                        "type": "TextBlock",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  },
+                  {
+                    "items": [
+                      {
+                        "text": "1.2M",
+                        "type": "TextBlock",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  },
+                  {
+                    "items": [
+                      {
+                        "text": "+4%",
+                        "type": "TextBlock",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  }
+                ],
+                "type": "TableRow"
+              },
+              {
+                "cells": [
+                  {
+                    "items": [
+                      {
+                        "text": "APAC",
+                        "type": "TextBlock",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  },
+                  {
+                    "items": [
+                      {
+                        "text": "0.8M",
+                        "type": "TextBlock",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  },
+                  {
+                    "items": [
+                      {
+                        "text": "+9%",
+                        "type": "TextBlock",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  }
+                ],
+                "type": "TableRow"
+              },
+              {
+                "cells": [
+                  {
+                    "items": [
+                      {
+                        "text": "AMER",
+                        "type": "TextBlock",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  },
+                  {
+                    "items": [
+                      {
+                        "text": "2.1M",
+                        "type": "TextBlock",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  },
+                  {
+                    "items": [
+                      {
+                        "text": "-1%",
+                        "type": "TextBlock",
+                        "wrap": true
+                      }
+                    ],
+                    "type": "TableCell"
+                  }
+                ],
+                "type": "TableRow"
+              }
+            ],
+            "showGridLines": false,
+            "spacing": "Medium",
+            "type": "Table"
+          },
+          {
+            "spacing": "Medium",
+            "text": "_APAC is growing fastest._",
+            "type": "TextBlock",
+            "wrap": true
+          },
+          {
+            "spacing": "Small",
+            "text": "Sources: Revenue report",
+            "type": "TextBlock",
+            "wrap": true
+          }
+        ],
+        "fallbackText": "**Q3 revenue** by region:\n\n| Region | Revenue | Growth |\n|---|---|---|\n| EMEA | 1.2M | +4% |\n| APAC | 0.8M | +9% |\n| AMER | 2.1M | -1% |\n\n_APAC is growing fastest._\n\nSources: Revenue report",
+        "msteams": {
+          "width": "Full"
+        },
+        "type": "AdaptiveCard",
+        "version": "1.5"
+      },
+      "contentType": "application/vnd.microsoft.card.adaptive"
+    }
+  ],
+  "conversation": {
+    "id": "a:conv-1"
+  },
+  "from": {
+    "id": "28:bot-1"
+  },
+  "recipient": {
+    "id": "29:1abc"
+  },
+  "type": "message"
+}

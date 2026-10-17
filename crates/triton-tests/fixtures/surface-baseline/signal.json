@@ -1,0 +1,9 @@
+{
+  "messageBody": "**Q3 revenue** by region:\n\n| Region | Revenue | Growth |\n|---|---|---|\n| EMEA | 1.2M | +4% |\n| APAC | 0.8M | +9% |\n| AMER | 2.1M | -1% |\n\n_APAC is growing fastest._\n\nSources: Revenue report",
+  "recipientAddress": {
+    "number": "+15559999999",
+    "uuid": "00000000-0000-0000-0000-000000000001"
+  },
+  "type": "send",
+  "username": "+15551234567"
+}
