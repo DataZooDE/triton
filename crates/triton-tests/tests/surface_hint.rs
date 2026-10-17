@@ -736,3 +736,122 @@ async fn non_object_args_are_forwarded_unchanged() {
     assert_eq!(first_body(&agent), json!(["a", 1]));
     assert_eq!(first_channel(&agent).as_deref(), Some("rest"));
 }
+
+// ── #352 step 4: operator-tunable guidance ──────────────────────────────────
+
+/// What a binary expected to refuse boot did: its exit code (`None` if it
+/// was still running at the deadline and had to be killed, i.e. it booted)
+/// and everything it logged.
+struct BootOutcome {
+    code: Option<i32>,
+    logs: String,
+}
+
+/// Start the binary and wait (bounded) for it to exit. A red test must fail,
+/// not hang: a binary that wrongly boots is killed at the deadline.
+fn boot_and_wait_for_exit(env: &[(&str, String)]) -> BootOutcome {
+    use std::io::Read;
+    let mut cmd = std::process::Command::new(triton_tests::locate_triton_binary());
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", "0")
+        .env("TRITON_A2A_PORT", "0")
+        .env("TRITON_REST_PORT", "0")
+        .env("TRITON_METRICS_PORT", "0")
+        .env("TRITON_CHAT_WEBHOOK_PORT", "0");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn triton");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let code = loop {
+        if let Some(status) = child.try_wait().expect("wait") {
+            break status.code();
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    let mut logs = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut logs);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut logs);
+    }
+    BootOutcome { code, logs }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn manifest_guidance_overrides_the_channel_default() {
+    let turn = crate::surface_baseline::drive_whatsapp_cloud_with(
+        "manifest-surface-guidance-whatsapp.yaml",
+        text_surface(),
+    )
+    .await;
+    let s = surface_of(&turn.agent);
+    assert_eq!(s["guidance"], "Operator says: two sentences, no lists.");
+    assert_eq!(s["buttons"]["max"], 3, "only the guidance is overridden");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn env_guidance_overrides_the_mcp_default() {
+    let agent = FakeAgent::start_echoing().await;
+    let triton = triton_with(
+        &agent,
+        &[(
+            "TRITON_SURFACE_GUIDANCE_MCP",
+            "MCP host: answer in one paragraph.".to_string(),
+        )],
+    )
+    .await;
+    reqwest::Client::new()
+        .post(format!("http://{}/", triton.mcp_addr))
+        .bearer_auth("dev-token")
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "assistant", "arguments": { "message": "hi" } }
+        }))
+        .send()
+        .await
+        .expect("POST mcp");
+    let s = surface_of(&agent);
+    assert_eq!(s["channel"], "mcp");
+    assert_eq!(s["guidance"], "MCP host: answer in one paragraph.");
+}
+
+#[test]
+fn over_long_manifest_guidance_refuses_boot() {
+    let out = boot_and_wait_for_exit(&[
+        ("TRITON_ENV", "local".to_string()),
+        (
+            "TRITON_MANIFEST_PATH",
+            fixture("manifest-surface-guidance-too-long.yaml"),
+        ),
+    ]);
+    assert_eq!(out.code, Some(2), "boot must be refused");
+    let logs = out.logs;
+    assert!(logs.contains("surface_guidance"), "say why: {logs}");
+}
+
+#[test]
+fn over_long_env_guidance_refuses_boot() {
+    let out = boot_and_wait_for_exit(&[
+        ("TRITON_ENV", "local".to_string()),
+        ("TRITON_SURFACE_GUIDANCE_REST", "x".repeat(1001)),
+    ]);
+    assert_eq!(out.code, Some(2), "boot must be refused");
+    let logs = out.logs;
+    assert!(
+        logs.contains("TRITON_SURFACE_GUIDANCE_REST"),
+        "say why: {logs}"
+    );
+}

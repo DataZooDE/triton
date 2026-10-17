@@ -144,15 +144,17 @@ fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
 }
 
 pub async fn drive_whatsapp_cloud(surface: Value) -> Turn {
+    drive_whatsapp_cloud_with("manifest-whatsapp-cloud-inbound-tool.yaml", surface).await
+}
+
+/// [`drive_whatsapp_cloud`] against another fixture manifest.
+pub async fn drive_whatsapp_cloud_with(manifest: &str, surface: Value) -> Turn {
     const APP_SECRET: &str = "whatsapp-app-secret-for-test";
     let agent = FakeAgent::start_returning(surface).await;
     let whatsapp = FakeWhatsAppApi::start().await;
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
-        (
-            "TRITON_MANIFEST_PATH".to_string(),
-            fixture("manifest-whatsapp-cloud-inbound-tool.yaml"),
-        ),
+        ("TRITON_MANIFEST_PATH".to_string(), fixture(manifest)),
         ("TRITON_WHATSAPP_API_BASE".to_string(), whatsapp.url()),
         (
             "TRITON_STATIC_UPSTREAMS".to_string(),

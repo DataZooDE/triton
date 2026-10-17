@@ -63,7 +63,19 @@ pub struct Adapter {
     /// adapters that don't model templates.
     #[serde(default)]
     pub templates: BTreeMap<TemplateCategory, TemplateDecl>,
+    /// #352: operator override for the one-line rendering guidance upstream
+    /// agents receive in `_triton.surface.guidance` for this adapter's
+    /// channel. Tunable without a release; the channel's built-in default
+    /// applies when absent. Presentation advice only, never authority.
+    /// Capped at [`MAX_SURFACE_GUIDANCE_CHARS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface_guidance: Option<String>,
 }
+
+/// #352: the most characters a `surface_guidance` override may hold. It is
+/// sent on every upstream call and pasted into agents' prompts, so it must
+/// stay a line, not a document.
+pub const MAX_SURFACE_GUIDANCE_CHARS: usize = 1000;
 
 /// WhatsApp Cloud API template category (Meta's closed set). The agent
 /// hints one of these; Triton maps it to a Meta-approved template.
@@ -520,6 +532,16 @@ pub enum ManifestError {
          would refuse every message. Set a positive value (FR-L-4)"
     )]
     ZeroRateLimit { adapter: String, field: String },
+    /// #352: a `surface_guidance` override over the cap.
+    #[error(
+        "adapter `{adapter}`: surface_guidance is {chars} characters; the cap is \
+         {max} (it rides every upstream call and lands in agents' prompts)"
+    )]
+    SurfaceGuidanceTooLong {
+        adapter: String,
+        chars: usize,
+        max: usize,
+    },
 }
 
 // ---------- API ----------
@@ -597,6 +619,20 @@ impl Manifest {
                     adapter: adapter_name.clone(),
                     field: field.to_string(),
                 });
+            }
+        }
+
+        // #352: a guidance override stays one line's worth of prompt.
+        for (adapter_name, adapter) in &self.adapters {
+            if let Some(g) = &adapter.surface_guidance {
+                let chars = g.chars().count();
+                if chars > MAX_SURFACE_GUIDANCE_CHARS {
+                    return Err(ManifestError::SurfaceGuidanceTooLong {
+                        adapter: adapter_name.clone(),
+                        chars,
+                        max: MAX_SURFACE_GUIDANCE_CHARS,
+                    });
+                }
             }
         }
 
