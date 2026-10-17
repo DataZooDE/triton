@@ -26,11 +26,31 @@
 
 use serde_json::{Value, json};
 use triton_core::a2ui::{Component, DashboardTile, Surface, extract_surface};
+use triton_core::surface::{Charts, Markdown, SurfaceProfile, Tables};
 
 /// WhatsApp `text.body` hard limit. Same byte-conservative reading
 /// as Telegram's TELEGRAM_TEXT_MAX_BYTES (UTF-8 length ≤ UTF-16
 /// length).
-pub const WHATSAPP_TEXT_MAX_BYTES: usize = 4096;
+/// WhatsApp Cloud API (and the WhatsApp Web bridge): plain text, up to three reply buttons.
+///
+/// The single source of truth for this channel's caps (#352): the mapper below
+/// reads them from here, and Triton advertises the same profile to upstream
+/// agents as a rendering hint.
+pub const SURFACE: SurfaceProfile = SurfaceProfile {
+    channel: "whatsapp",
+    markdown: Markdown::Basic,
+    tables: Tables::Text,
+    buttons: true,
+    max_buttons: Some(3),
+    charts: Charts::None,
+    images: true,
+    max_text_bytes: 4096,
+    streaming: false,
+    subject_line: false,
+    guidance: "WhatsApp: plain short text with *bold*/_italic_ only. No tables or charts; at most 3 short follow-up buttons; keep it to a few short paragraphs.",
+};
+
+pub const WHATSAPP_TEXT_MAX_BYTES: usize = SURFACE.max_text_bytes;
 
 /// Sentinel appended when we truncate to fit
 /// [`WHATSAPP_TEXT_MAX_BYTES`]. Bracketed so it's visibly an
@@ -72,7 +92,7 @@ pub struct RenderedMessage {
 }
 
 /// WhatsApp Cloud API interactive limits (Meta-documented).
-const MAX_REPLY_BUTTONS: usize = 3;
+const MAX_REPLY_BUTTONS: usize = SURFACE.button_cap();
 const MAX_LIST_ROWS: usize = 10;
 const BUTTON_TITLE_MAX: usize = 20;
 const LIST_ROW_TITLE_MAX: usize = 24;

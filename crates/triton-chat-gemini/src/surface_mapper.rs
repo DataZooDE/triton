@@ -20,10 +20,30 @@
 
 use serde_json::Value;
 use triton_core::a2ui::{Component, Surface, extract_surface};
+use triton_core::surface::{Charts, Markdown, SurfaceProfile, Tables};
 
 /// Per-answer byte cap. Gemini tolerates long answers; 8 KB is generous but
 /// bounded so a runaway surface can't produce an unbounded preview body.
-pub const GEMINI_TEXT_MAX_BYTES: usize = 8000;
+/// Gemini Enterprise (preview mapper): full markdown passthrough.
+///
+/// The single source of truth for this channel's caps (#352): the mapper below
+/// reads them from here, and Triton advertises the same profile to upstream
+/// agents as a rendering hint.
+pub const SURFACE: SurfaceProfile = SurfaceProfile {
+    channel: "gemini",
+    markdown: Markdown::Full,
+    tables: Tables::Native,
+    buttons: false,
+    max_buttons: None,
+    charts: Charts::Caption,
+    images: false,
+    max_text_bytes: 8000,
+    streaming: false,
+    subject_line: false,
+    guidance: "Gemini Enterprise: a markdown answer card. Tables render; buttons are dropped and charts become a one-line caption.",
+};
+
+pub const GEMINI_TEXT_MAX_BYTES: usize = SURFACE.max_text_bytes;
 
 const TRUNCATION_SENTINEL: &str = "\n\n[truncated — content exceeded Gemini's 8000-byte cap]";
 

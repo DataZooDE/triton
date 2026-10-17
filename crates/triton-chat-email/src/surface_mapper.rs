@@ -21,11 +21,31 @@
 use regex::Regex;
 use serde_json::Value;
 use triton_core::a2ui::{Component, Surface, extract_surface};
+use triton_core::surface::{Charts, Markdown, SurfaceProfile, Tables};
 
 /// A conservative ceiling on the rendered HTML body. Real mail transfer
 /// limits are megabytes; this only guards a pathological surface. Cuts land
 /// between complete component blocks so tags stay balanced.
-pub const EMAIL_HTML_MAX_BYTES: usize = 512_000;
+/// Email: markdown rendered to HTML, buttons as links, a derived subject line.
+///
+/// The single source of truth for this channel's caps (#352): the mapper below
+/// reads them from here, and Triton advertises the same profile to upstream
+/// agents as a rendering hint.
+pub const SURFACE: SurfaceProfile = SurfaceProfile {
+    channel: "email",
+    markdown: Markdown::Full,
+    tables: Tables::Native,
+    buttons: true,
+    max_buttons: None,
+    charts: Charts::Image,
+    images: true,
+    max_text_bytes: 512_000,
+    streaming: false,
+    subject_line: true,
+    guidance: "Email: the richest surface. Full markdown, tables, links and an inline chart; the first line becomes the subject, so make it a good one.",
+};
+
+pub const EMAIL_HTML_MAX_BYTES: usize = SURFACE.max_text_bytes;
 
 const TRUNCATION_SENTINEL_HTML: &str =
     "<p style=\"color:#999\"><em>[truncated — message exceeded the email size limit]</em></p>";

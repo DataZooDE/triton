@@ -29,6 +29,7 @@
 
 use serde_json::{Value, json};
 use triton_core::a2ui::{Component, DashboardTile, FormField, Surface, extract_surface};
+use triton_core::surface::{Charts, Markdown, SurfaceProfile, Tables};
 
 /// Telegram `sendMessage.text` hard limit. Architecture.md §8.7
 /// names `SurfaceLimits` as the cap-enforcement seam at L6′.
@@ -36,7 +37,26 @@ use triton_core::a2ui::{Component, DashboardTile, FormField, Surface, extract_su
 /// byte-length as a conservative proxy (any UTF-8 string ≤ 4096
 /// bytes is ≤ 4096 UTF-16 code units, so byte-counting only ever
 /// rejects messages Telegram itself would also reject).
-pub const TELEGRAM_TEXT_MAX_BYTES: usize = 4096;
+/// Telegram: HTML-escaped text with an inline keyboard.
+///
+/// The single source of truth for this channel's caps (#352): the mapper below
+/// reads them from here, and Triton advertises the same profile to upstream
+/// agents as a rendering hint.
+pub const SURFACE: SurfaceProfile = SurfaceProfile {
+    channel: "telegram",
+    markdown: Markdown::None,
+    tables: Tables::Text,
+    buttons: true,
+    max_buttons: None,
+    charts: Charts::None,
+    images: true,
+    max_text_bytes: 4096,
+    streaming: false,
+    subject_line: false,
+    guidance: "Telegram: plain text (markdown shows literally). No tables; follow-up buttons work; dashboards arrive as an image.",
+};
+
+pub const TELEGRAM_TEXT_MAX_BYTES: usize = SURFACE.max_text_bytes;
 
 /// Telegram `sendPhoto.caption` cap. Documented at 1024 bytes
 /// (UTF-16 code units, conservatively bounded as 1024 bytes for

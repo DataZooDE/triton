@@ -29,10 +29,30 @@
 
 use serde_json::{Value, json};
 use triton_core::a2ui::{Component, DashboardTile, Surface, extract_surface};
+use triton_core::surface::{Charts, Markdown, SurfaceProfile, Tables};
 
 /// Discord `data.content` hard limit. Documented as 2000 chars
 /// (UTF-16 code units); we treat as bytes (conservative).
-pub const DISCORD_CONTENT_MAX_BYTES: usize = 2000;
+/// Discord: escaped text with component buttons (five rows of five).
+///
+/// The single source of truth for this channel's caps (#352): the mapper below
+/// reads them from here, and Triton advertises the same profile to upstream
+/// agents as a rendering hint.
+pub const SURFACE: SurfaceProfile = SurfaceProfile {
+    channel: "discord",
+    markdown: Markdown::None,
+    tables: Tables::Text,
+    buttons: true,
+    max_buttons: Some(DISCORD_BUTTONS_PER_ROW * DISCORD_MAX_ROWS),
+    charts: Charts::None,
+    images: true,
+    max_text_bytes: 2000,
+    streaming: false,
+    subject_line: false,
+    guidance: "Discord: short plain text under 2000 characters (markdown is escaped). No tables; up to 25 buttons; dashboards arrive as an image.",
+};
+
+pub const DISCORD_CONTENT_MAX_BYTES: usize = SURFACE.max_text_bytes;
 
 const TRUNCATION_SENTINEL: &str = "\n\n*(truncated — exceeded Discord's 2000-byte content cap)*";
 
@@ -47,7 +67,7 @@ const BUTTON_ONLY_PLACEHOLDER: &str = "Choose an option:";
 /// concern).
 pub const DISCORD_BUTTONS_PER_ROW: usize = 5;
 pub const DISCORD_MAX_ROWS: usize = 5;
-pub const DISCORD_MAX_BUTTONS: usize = DISCORD_BUTTONS_PER_ROW * DISCORD_MAX_ROWS;
+pub const DISCORD_MAX_BUTTONS: usize = SURFACE.button_cap();
 
 /// Discord's string-select cap: max 25 options per menu, and
 /// each select menu occupies a whole Action Row (one menu per

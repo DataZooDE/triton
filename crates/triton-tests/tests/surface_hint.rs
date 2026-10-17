@@ -39,13 +39,25 @@ async fn triton_with(agent: &FakeAgent, extra: &[(&str, String)]) -> TritonProce
     TritonProcess::spawn_with_env(Duration::from_secs(5), env).await
 }
 
-/// The channel header of the agent's first recorded request.
+/// The channel header of the agent's first recorded **dispatch**.
+///
+/// Only requests that carry `X-Triton-Tool` or `X-Triton-MCP` count: every
+/// Triton dispatch sends one of them. Under the parallel suite an ephemeral
+/// port can be recycled, so a stray request meant for another test's dropped
+/// fake (e.g. a courier POST from a process still shutting down) may land
+/// here. Ignoring those keeps the test about Triton's dispatches, and a real
+/// dispatch without the channel header still fails it.
 fn first_channel(agent: &FakeAgent) -> Option<String> {
-    wait_for(Duration::from_secs(5), || {
-        let v = agent.channels_seen();
-        (!v.is_empty()).then_some(v)
-    })
-    .remove(0)
+    let headers = wait_for(Duration::from_secs(5), || {
+        agent
+            .headers_seen()
+            .into_iter()
+            .find(|h| h.contains_key("X-Triton-Tool") || h.contains_key("X-Triton-MCP"))
+    });
+    headers
+        .get("X-Triton-Channel")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

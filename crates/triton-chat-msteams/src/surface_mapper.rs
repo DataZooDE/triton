@@ -22,6 +22,7 @@
 
 use serde_json::{Value, json};
 use triton_core::a2ui::{Component, FormFieldKind, SourceItem, Surface, extract_surface};
+use triton_core::surface::{Charts, Markdown, SurfaceProfile, Tables};
 
 /// The Adaptive Card chrome (branded header) — fetched per reply from the
 /// report upstream's `get_theme` tool. Peacock owns ALL theming (one CSS of
@@ -147,7 +148,26 @@ fn header_container(theme: &CardChrome) -> Option<Value> {
 /// documented limit is ~28 KB; we use 24 KB (24,576 bytes) so rich executive
 /// markdown reports, KPI tables, and charts render fully without truncation
 /// while remaining safely under the ~28 KB platform ceiling.
-pub const MSTEAMS_TEXT_MAX_BYTES: usize = 24576;
+/// Microsoft Teams (and Copilot): Adaptive Cards with tables, actions and charts.
+///
+/// The single source of truth for this channel's caps (#352): the mapper below
+/// reads them from here, and Triton advertises the same profile to upstream
+/// agents as a rendering hint.
+pub const SURFACE: SurfaceProfile = SurfaceProfile {
+    channel: "msteams",
+    markdown: Markdown::Basic,
+    tables: Tables::Native,
+    buttons: true,
+    max_buttons: None,
+    charts: Charts::Native,
+    images: true,
+    max_text_bytes: 24576,
+    streaming: true,
+    subject_line: false,
+    guidance: "Microsoft Teams: Adaptive Card. Markdown emphasis, narrow tables (wide ones wrap badly), buttons and native charts work.",
+};
+
+pub const MSTEAMS_TEXT_MAX_BYTES: usize = SURFACE.max_text_bytes;
 
 /// Sentinel appended when we truncate to fit [`MSTEAMS_TEXT_MAX_BYTES`].
 const TRUNCATION_SENTINEL: &str =

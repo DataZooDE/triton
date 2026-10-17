@@ -23,11 +23,31 @@
 
 use serde_json::Value;
 use triton_core::a2ui::{Component, Surface, extract_surface};
+use triton_core::surface::{Charts, Markdown, SurfaceProfile, Tables};
 
 /// Conservative per-message byte cap. Signal has no documented
 /// hard limit, but ~2 KB is the practical threshold across
 /// signald's queueing layer and the major clients' UIs.
-pub const SIGNAL_TEXT_MAX_BYTES: usize = 2000;
+/// Signal: plain text only.
+///
+/// The single source of truth for this channel's caps (#352): the mapper below
+/// reads them from here, and Triton advertises the same profile to upstream
+/// agents as a rendering hint.
+pub const SURFACE: SurfaceProfile = SurfaceProfile {
+    channel: "signal",
+    markdown: Markdown::None,
+    tables: Tables::Text,
+    buttons: false,
+    max_buttons: None,
+    charts: Charts::None,
+    images: false,
+    max_text_bytes: 2000,
+    streaming: false,
+    subject_line: false,
+    guidance: "Signal: plain unformatted text only. No markdown, tables, buttons or charts; keep it short.",
+};
+
+pub const SIGNAL_TEXT_MAX_BYTES: usize = SURFACE.max_text_bytes;
 
 const TRUNCATION_SENTINEL: &str = "\n\n[truncated — content exceeded Signal's 2000-byte cap]";
 
