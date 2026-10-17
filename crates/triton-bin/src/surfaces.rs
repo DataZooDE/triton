@@ -28,9 +28,11 @@ fn profile_for(kind: AdapterKind) -> Option<&'static SurfaceProfile> {
 /// Every channel this binary can dispatch from: the HTTP trio plus one
 /// profile per chat adapter, with guidance overridden by
 /// `adapters.<name>.surface_guidance` (the manifest already validated its
-/// length) and by `TRITON_SURFACE_GUIDANCE_REST|MCP|A2A` for the trio.
+/// length) and by `TRITON_SURFACE_GUIDANCE_REST|MCP|A2A|A2A_A2UI` for the
+/// trio (`A2A_A2UI` tunes the A2UI variant of `a2a` separately).
 ///
-/// `Err` names an env override over the cap; the caller refuses boot.
+/// `Err` names an env override over the cap, or two adapters sharing a
+/// channel with different guidance; the caller refuses boot.
 pub fn registry(manifest: Option<&Manifest>) -> Result<SurfaceRegistry, String> {
     let mut r = SurfaceRegistry::with_trio_defaults();
     for profile in [
@@ -48,19 +50,54 @@ pub fn registry(manifest: Option<&Manifest>) -> Result<SurfaceRegistry, String> 
     }
 
     if let Some(m) = manifest {
-        for adapter in m.adapters.values() {
-            if let (Some(guidance), Some(profile)) =
+        // Adapters that share a channel (WhatsApp Cloud and the Web bridge)
+        // share one descriptor, so they can carry one guidance line at most.
+        // Two different ones are refused rather than letting the adapter that
+        // happens to iterate last win.
+        let mut chosen: std::collections::BTreeMap<&str, (&str, &str)> =
+            std::collections::BTreeMap::new();
+        for (name, adapter) in &m.adapters {
+            let (Some(guidance), Some(profile)) =
                 (&adapter.surface_guidance, profile_for(adapter.kind))
+            else {
+                continue;
+            };
+            if let Some((other, earlier)) = chosen.get(profile.channel)
+                && *earlier != guidance.as_str()
             {
-                r.insert(profile, Some(guidance));
+                return Err(format!(
+                    "adapters `{other}` and `{name}` both render on the `{}` channel \
+                     but set different surface_guidance; give them the same line or \
+                     set it on one",
+                    profile.channel
+                ));
             }
+            chosen.insert(profile.channel, (name.as_str(), guidance.as_str()));
+            r.insert(profile, Some(guidance));
         }
     }
 
-    for (var, profile) in [
-        ("TRITON_SURFACE_GUIDANCE_REST", &triton_core::surface::REST),
-        ("TRITON_SURFACE_GUIDANCE_MCP", &triton_core::surface::MCP),
-        ("TRITON_SURFACE_GUIDANCE_A2A", &triton_core::surface::A2A),
+    for (var, key, profile) in [
+        (
+            "TRITON_SURFACE_GUIDANCE_REST",
+            "rest",
+            &triton_core::surface::REST,
+        ),
+        (
+            "TRITON_SURFACE_GUIDANCE_MCP",
+            "mcp",
+            &triton_core::surface::MCP,
+        ),
+        (
+            "TRITON_SURFACE_GUIDANCE_A2A",
+            "a2a",
+            &triton_core::surface::A2A,
+        ),
+        (
+            "TRITON_SURFACE_GUIDANCE_A2A_A2UI",
+            triton_core::surface::A2A_A2UI_KEY,
+            &triton_core::surface::A2A_A2UI,
+        ),
     ] {
         let Some(guidance) = std::env::var(var).ok().filter(|g| !g.trim().is_empty()) else {
             continue;
@@ -72,7 +109,7 @@ pub fn registry(manifest: Option<&Manifest>) -> Result<SurfaceRegistry, String> 
                  (it rides every upstream call and lands in agents' prompts)"
             ));
         }
-        r.insert(profile, Some(&guidance));
+        r.insert_as(key, profile, Some(&guidance));
     }
     Ok(r)
 }

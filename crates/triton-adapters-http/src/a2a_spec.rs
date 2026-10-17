@@ -468,6 +468,7 @@ fn activates_a2ui(header: Option<&str>) -> bool {
 /// A2UI. Without A2UI the channel's registered `a2a` surface applies.
 fn turn_context(
     config: &SpecA2aConfig,
+    surfaces: &triton_core::SurfaceRegistry,
     context_id: &str,
     a2ui: bool,
 ) -> triton_core::ContextOverrides {
@@ -479,11 +480,17 @@ fn turn_context(
     }
     triton_core::ContextOverrides {
         triton_meta: meta,
+        // The registry's A2UI variant carries the operator's guidance; a host
+        // that replaced the registry without one still gets the profile.
         surface: a2ui.then(|| {
-            std::sync::Arc::new(triton_core::SurfaceDescriptor::from_profile(
-                &triton_core::surface::A2A_A2UI,
-                None,
-            ))
+            surfaces
+                .get(triton_core::surface::A2A_A2UI_KEY)
+                .unwrap_or_else(|| {
+                    std::sync::Arc::new(triton_core::SurfaceDescriptor::from_profile(
+                        &triton_core::surface::A2A_A2UI,
+                        None,
+                    ))
+                })
         }),
     }
 }
@@ -599,13 +606,20 @@ async fn message_send(
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let trace_id = principal.trace_id.clone();
     let tool = state.config.default_tool.clone();
+    // #352: one context for the whole turn, re-dispatches included.
+    let overrides = turn_context(
+        &state.config,
+        state.a2a.dispatcher.surfaces(),
+        &context_id,
+        a2ui,
+    );
 
     // A GE source button click resolves to an open-doc sentinel (not a real
     // agent turn): reply directly with the document surface — native Material
     // by default (a render_report(document) dispatch), or the /docs iframe
     // when TRITON_GE_DOC_IFRAME.
     if let Some(doc) = triton_core::a2ui::ge::open_doc(&text) {
-        let parts = doc_open_parts(&state.a2a.dispatcher, &principal, &doc).await;
+        let parts = doc_open_parts(&state.a2a.dispatcher, &principal, &doc, &overrides).await;
         let msg = json!({
             "kind": "message",
             "role": "agent",
@@ -632,8 +646,7 @@ async fn message_send(
     let vega_principal = principal.clone();
     let tasks = state.a2a.tasks.clone();
     let task_trace = trace_id.clone();
-    let context_for_dispatch = context_id.clone();
-    let overrides = turn_context(&state.config, &context_for_dispatch, a2ui);
+    let vega_overrides = overrides.clone();
     let handle = tokio::spawn(async move {
         let out = dispatcher
             .invoke_with(
@@ -674,7 +687,13 @@ async fn message_send(
         Ok(Ok(d)) => {
             let mut result = d.result;
             // Expand a report into a native interactive VegaChart for GE.
-            inject_report_vega(&vega_dispatcher, &mut result, &vega_principal).await;
+            inject_report_vega(
+                &vega_dispatcher,
+                &mut result,
+                &vega_principal,
+                &vega_overrides,
+            )
+            .await;
             let reply = reply_text(&result);
             let mut parts = vec![json!({ "kind": "text", "text": reply })];
             if let Some(msgs) = triton_core::a2ui::ge::build_messages(&result) {
@@ -740,13 +759,20 @@ async fn message_stream(
         .filter(|id| !id.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // #352: one context for the whole turn, re-dispatches included.
+    let overrides = turn_context(
+        &state.config,
+        state.a2a.dispatcher.surfaces(),
+        &context_id,
+        a2ui,
+    );
 
     // A GE source button click (open-doc sentinel): emit a one-shot SSE — a
     // working task, the document surface as a final artifact, and a completed
     // status. Native Material by default (a render_report(document) dispatch),
     // or the /docs iframe when TRITON_GE_DOC_IFRAME.
     if let Some(doc) = triton_core::a2ui::ge::open_doc(&text) {
-        let parts = doc_open_parts(&state.a2a.dispatcher, &principal, &doc).await;
+        let parts = doc_open_parts(&state.a2a.dispatcher, &principal, &doc, &overrides).await;
         state.a2a.tasks.record_entry(
             &trace_id,
             TaskState::Completed,
@@ -788,7 +814,7 @@ async fn message_stream(
     // consumes `principal`).
     let vega_dispatcher = state.a2a.dispatcher.clone();
     let vega_principal = principal.clone();
-    let context_for_dispatch = context_id.clone();
+    let vega_overrides = overrides.clone();
     let events = match state
         .a2a
         .dispatcher
@@ -798,7 +824,7 @@ async fn message_stream(
             principal,
             "a2a",
             None,
-            turn_context(&state.config, &context_for_dispatch, a2ui),
+            overrides,
         )
         .await
     {
@@ -848,6 +874,7 @@ async fn message_stream(
             let streamed = streamed.clone();
             let vega_dispatcher = vega_dispatcher.clone();
             let vega_principal = vega_principal.clone();
+            let vega_overrides = vega_overrides.clone();
             async move {
                 let out: Vec<Value> = match ev {
                     triton_core::stream::StreamEvent::Token(t) => {
@@ -868,7 +895,13 @@ async fn message_stream(
                         let mut v = v;
                         // Expand a report into a native interactive VegaChart
                         // (GE); best-effort, falls back to the static image.
-                        inject_report_vega(&vega_dispatcher, &mut v, &vega_principal).await;
+                        inject_report_vega(
+                            &vega_dispatcher,
+                            &mut v,
+                            &vega_principal,
+                            &vega_overrides,
+                        )
+                        .await;
                         let did_stream = streamed.load(Ordering::Relaxed);
                         let reply = reply_text(&v);
                         tasks.record_entry(
@@ -1026,6 +1059,7 @@ async fn inject_report_vega(
     dispatcher: &Dispatcher,
     result: &mut Value,
     principal: &triton_core::Principal,
+    overrides: &triton_core::ContextOverrides,
 ) {
     let target = result
         .get("surface")
@@ -1052,7 +1086,13 @@ async fn inject_report_vega(
     };
     let args = json!({ "report_id": &report_id, "params": params });
     let Ok(rep) = dispatcher
-        .invoke("render_report", args, principal.clone(), "a2a")
+        .invoke_with(
+            "render_report",
+            args,
+            principal.clone(),
+            "a2a",
+            overrides.clone(),
+        )
         .await
     else {
         return;
@@ -1106,6 +1146,7 @@ async fn doc_open_parts(
     dispatcher: &Dispatcher,
     principal: &triton_core::Principal,
     doc: &triton_core::a2ui::ge::OpenDocRef<'_>,
+    overrides: &triton_core::ContextOverrides,
 ) -> Vec<Value> {
     use triton_core::a2ui::ge;
     let msgs = if ge::doc_iframe_enabled() && !doc.url.is_empty() {
@@ -1116,7 +1157,13 @@ async fn doc_open_parts(
         let args =
             json!({ "report_id": "document", "params": { "skill": doc.skill, "id": doc.id } });
         let structured = match dispatcher
-            .invoke("render_report", args, principal.clone(), "a2a")
+            .invoke_with(
+                "render_report",
+                args,
+                principal.clone(),
+                "a2a",
+                overrides.clone(),
+            )
             .await
         {
             Ok(rep) => find_document_structured(&rep.result)

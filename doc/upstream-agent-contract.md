@@ -114,7 +114,10 @@ Object args carry Triton's reserved `_triton` key:
   operator sets `TRITON_STATIC_UPSTREAM_SURFACE_HINT=off`. The body field
   is then omitted and the header remains.
 - **Proactive pushes.** Before composing a `/v1/outbound` message, read
-  the delivery channel's descriptor from `GET /v1/manifest` → `surfaces`.
+  the delivery channel's descriptor from `GET /v1/manifest` → `surfaces`
+  (keyed by channel; the A2UI variant of `a2a` is under `a2a+a2ui`).
+- **Schema discovery** (`X-Triton-MCP: tools/list`) is not a turn and
+  carries no channel header.
 - **Embedded (in-process) tools** see the A2A metadata in args. They
   read the channel and surface by overriding
   `Tool::invoke_with_context`.

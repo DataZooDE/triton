@@ -1,0 +1,61 @@
+# #352: WhatsApp Cloud and the WhatsApp Web bridge render on the same
+# `whatsapp` channel with one profile. Two DIFFERENT guidance overrides for
+# that one channel can't both apply; boot must refuse rather than let the
+# last adapter silently win.
+version: "0.2"
+
+adapters:
+  whatsapp:
+    kind: whatsapp_cloud
+    tool: assistant
+    surface_guidance: "Operator says: two sentences, no lists."
+    inbound:
+      kind: webhook
+      signature: hmac256
+      secret: whatsapp-app-secret-for-test
+      verify_token: meta-verify-token-for-test
+    outbound:
+      kind: rest_api
+      token: whatsapp-access-token-for-test
+      phone_number_id: "100200300"
+    identity:
+      kind: sender_table
+      table: '{"491701234567":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: whatsapp-correlation-key-for-test
+  whatsapp_web:
+    kind: whatsapp_web
+    surface_guidance: "Bridge says: one sentence."
+    inbound:
+      kind: socket
+      signature: trusted_socket
+    outbound:
+      kind: socket
+    identity:
+      kind: sender_table
+      # WhatsApp id (wa-id) → Principal claims.
+      table: '{"4915112345678":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: numbered_prompts
+      selections: numbered_prompts
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 6
+      burst: 12
+    correlation_key: correlation-key-for-test
+
+tools:
+  echo:
+    surface_components: []

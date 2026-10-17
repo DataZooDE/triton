@@ -885,10 +885,13 @@ async fn the_manifest_endpoint_lists_every_channel_surface() {
     assert_eq!(surfaces["whatsapp"]["buttons"]["max"], 3);
     assert_eq!(surfaces["signal"]["buttons"]["supported"], false);
     assert_eq!(surfaces["rest"]["channel"], "rest");
-    for (channel, s) in surfaces.as_object().expect("surfaces map") {
-        assert_eq!(s["v"], 1, "{channel}");
-        assert_eq!(&s["channel"], channel, "keyed by its own channel");
+    for (key, s) in surfaces.as_object().expect("surfaces map") {
+        assert_eq!(s["v"], 1, "{key}");
+        // Keyed by channel; the A2UI variant of `a2a` has its own key.
+        let channel = key.strip_suffix("+a2ui").unwrap_or(key);
+        assert_eq!(s["channel"], channel, "{key}");
     }
+    assert_eq!(surfaces["a2a+a2ui"]["buttons"]["supported"], true);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -915,5 +918,57 @@ async fn the_manifest_endpoint_shows_guidance_overrides() {
     assert_eq!(
         body["surfaces"]["whatsapp"]["guidance"],
         "Operator says: two sentences, no lists."
+    );
+}
+
+/// The A2UI variant of the `a2a` surface is tunable on its own: plain-A2A
+/// guidance ("buttons are not shown") would be false for an A2UI client.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a2ui_guidance_has_its_own_override() {
+    let agent = FakeAgent::start_echoing().await;
+    let triton = triton_with(
+        &agent,
+        &[(
+            "TRITON_SURFACE_GUIDANCE_A2A_A2UI",
+            "GE: one card, two buttons at most.".to_string(),
+        )],
+    )
+    .await;
+    let body: serde_json::Value = reqwest::Client::new()
+        .get(triton.rest_url("/v1/manifest"))
+        .bearer_auth("dev-token")
+        .send()
+        .await
+        .expect("GET /v1/manifest")
+        .json()
+        .await
+        .expect("json");
+    assert_eq!(
+        body["surfaces"]["a2a+a2ui"]["guidance"],
+        "GE: one card, two buttons at most."
+    );
+    assert_ne!(
+        body["surfaces"]["a2a"]["guidance"], body["surfaces"]["a2a+a2ui"]["guidance"],
+        "the plain-A2A line is untouched"
+    );
+}
+
+/// WhatsApp Cloud and the bridge share the `whatsapp` channel. Two different
+/// overrides for it can't both apply, and the last adapter must not silently
+/// win.
+#[test]
+fn conflicting_guidance_for_one_channel_refuses_boot() {
+    let out = boot_and_wait_for_exit(&[
+        ("TRITON_ENV", "local".to_string()),
+        (
+            "TRITON_MANIFEST_PATH",
+            fixture("manifest-surface-guidance-conflict.yaml"),
+        ),
+    ]);
+    assert_eq!(out.code, Some(2), "boot must be refused: {}", out.logs);
+    assert!(
+        out.logs.contains("surface_guidance") && out.logs.contains("whatsapp"),
+        "say which channel: {}",
+        out.logs
     );
 }

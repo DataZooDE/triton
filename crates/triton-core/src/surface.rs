@@ -159,6 +159,11 @@ pub const A2A_A2UI: SurfaceProfile = SurfaceProfile {
     ..A2A
 };
 
+/// Registry key of the [`A2A_A2UI`] variant. It reports the `a2a` channel
+/// but is tuned and listed separately, since plain-A2A guidance ("buttons are
+/// not shown") is false for an A2UI client.
+pub const A2A_A2UI_KEY: &str = "a2a+a2ui";
+
 /// Version of the descriptor wire shape. Bump it, and document the change in
 /// `doc/architecture.md`, whenever a field changes meaning or is removed.
 pub const DESCRIPTOR_VERSION: u32 = 1;
@@ -228,6 +233,7 @@ impl SurfaceRegistry {
         for p in [&REST, &MCP, &A2A] {
             r.insert(p, None);
         }
+        r.insert_as(A2A_A2UI_KEY, &A2A_A2UI, None);
         r
     }
 
@@ -239,11 +245,21 @@ impl SurfaceRegistry {
         );
     }
 
+    /// Register (or replace) a descriptor under a key other than its channel
+    /// (a request-scoped variant such as [`A2A_A2UI_KEY`]).
+    pub fn insert_as(&mut self, key: &str, profile: &SurfaceProfile, guidance: Option<&str>) {
+        self.by_channel.insert(
+            key.to_string(),
+            Arc::new(SurfaceDescriptor::from_profile(profile, guidance)),
+        );
+    }
+
     pub fn get(&self, channel: &str) -> Option<Arc<SurfaceDescriptor>> {
         self.by_channel.get(channel).cloned()
     }
 
-    /// Every registered descriptor, keyed by channel (for discovery).
+    /// Every registered descriptor, keyed by channel or variant key (for
+    /// discovery).
     pub fn all(&self) -> impl Iterator<Item = (&str, &SurfaceDescriptor)> {
         self.by_channel
             .iter()

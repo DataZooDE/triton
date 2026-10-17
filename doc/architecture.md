@@ -577,9 +577,12 @@ lands can write a better one: no table for WhatsApp, a subject-worthy
 first line for email. Triton tells it, as **non-authoritative rendering
 advice**:
 
-- **`X-Triton-Channel: <channel>`** on every upstream call: tool calls,
-  SSE streams, MCP `resources/read` / `updateModelContext`, identity
-  resolver and rasterizer dispatches. The channel is derived from the
+- **`X-Triton-Channel: <channel>`** on every upstream dispatch and
+  relay: tool calls, SSE streams, MCP `resources/read` /
+  `updateModelContext`, identity resolver and rasterizer dispatches, and
+  the re-dispatches Triton makes within a turn (`get_theme`,
+  `render_report`). Schema discovery (`X-Triton-MCP: tools/list`) is not
+  a turn (no user, no channel) and carries none. The channel is derived from the
   adapter's audit `protocol` (`messenger:x[:role]` → `x`, `google_chat`
   → `googlechat`; `rest`, `mcp`, `a2a` as is).
 - **`_triton.surface`** in object tool args (sync and SSE): the
@@ -640,9 +643,11 @@ Semantics:
   authoritative.
 - **Spec A2A** reports `a2a` always. The surface follows the request: a
   client that activates the A2UI extension (`X-A2A-Extensions`, exact URI
-  match in the comma-separated list) gets the A2UI variant. Per-turn
+  match in the comma-separated list) gets the A2UI variant, registered
+  under its own key `a2a+a2ui` (still `channel: "a2a"`). Per-turn
   metadata rides beside it: `_triton.protocol`, `_triton.a2a_context_id`,
-  and `_triton.agent` (the `/a2a/<slug>` face).
+  and `_triton.agent` (the `/a2a/<slug>` face). The turn's report and
+  open-document `render_report` re-dispatches carry the same context.
 - **Embedded hosts.** In-process tools see the `_triton` metadata in
   args but not the surface. They opt in with
   `Tool::invoke_with_context(args, principal, &DispatchContext)`, whose
@@ -656,8 +661,11 @@ Semantics:
   courier's channel. `/v1/outbound` names one adapter per request, so
   there is no multi-channel "least capable" case to resolve.
 - **Operator tuning.** `adapters.<name>.surface_guidance` (chat) and
-  `TRITON_SURFACE_GUIDANCE_REST|MCP|A2A` (trio) replace the default
-  guidance line; over 1000 characters refuses boot.
+  `TRITON_SURFACE_GUIDANCE_REST|MCP|A2A|A2A_A2UI` (trio; `A2A_A2UI` tunes
+  the A2UI variant, whose plain-A2A line "buttons are not shown" would be
+  false) replace the default guidance line. Boot is refused when a value
+  is over 1000 characters, or when two adapters on one channel (WhatsApp
+  Cloud and the Web bridge) set different lines.
   `TRITON_STATIC_UPSTREAM_SURFACE_HINT=off` drops the body field (the
   header stays) for an agent whose strict argument schema rejects
   unknown keys. Triton cannot know an agent's validation rules, so this

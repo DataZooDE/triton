@@ -1037,3 +1037,106 @@ async fn a_remote_agent_behind_spec_a2a_gets_the_metadata_and_surface() {
         "header too"
     );
 }
+
+/// A spec-A2A host fronting one recording upstream as both the turn's tool
+/// (`remote`) and `render_report`, with `surfaces` as its registry.
+async fn remote_spec_host(
+    agent: &triton_tests::upstream_fixture::FakeAgent,
+    surfaces: triton_core::SurfaceRegistry,
+) -> (TestIssuer, String) {
+    use std::time::Duration;
+    let upstream = triton_upstream::StaticUpstream::from_spec(
+        &format!("remote={ep},render_report={ep}", ep = agent.host_port()),
+        "dev-token".to_string(),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+        5,
+        Duration::from_secs(30),
+    );
+    let iss = TestIssuer::start().await;
+    let dispatcher = Arc::new(
+        Dispatcher::new(
+            Arc::new(ToolRegistry::new()),
+            "test".to_string(),
+            DispatchControls::unenforced(),
+        )
+        .with_upstream(Arc::new(upstream))
+        .with_surfaces(surfaces),
+    );
+    let opts = EmbedOpts::dev().oidc(iss.issuer_url(), AUD, None).spec_a2a(
+        "DataZoo Agent",
+        "Answers questions.",
+        PUBLIC_URL,
+        "remote",
+    );
+    let app = router(dispatcher, &opts);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (iss, format!("http://{addr}"))
+}
+
+async fn send_a2ui(base: &str, iss: &TestIssuer, text: &str) {
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let mut request = send(text);
+    request["params"]["message"]["contextId"] = json!("session-9");
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .header("X-A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI)
+        .json(&request)
+        .send()
+        .await
+        .expect("POST");
+    assert!(resp.status().is_success(), "{}", resp.status());
+}
+
+/// An operator's A2UI guidance reaches an A2UI-activated turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_a2ui_turn_carries_the_operators_a2ui_guidance() {
+    let agent = triton_tests::upstream_fixture::FakeAgent::start_returning(
+        json!({ "surface": { "text": "ok" } }),
+    )
+    .await;
+    let mut surfaces = triton_core::SurfaceRegistry::with_trio_defaults();
+    surfaces.insert_as(
+        triton_core::surface::A2A_A2UI_KEY,
+        &triton_core::surface::A2A_A2UI,
+        Some("GE: one card."),
+    );
+    let (iss, base) = remote_spec_host(&agent, surfaces).await;
+    send_a2ui(&base, &iss, "hello").await;
+    let body = agent.bodies_seen().remove(0);
+    assert_eq!(body["_triton"]["surface"]["guidance"], "GE: one card.");
+    assert_eq!(body["_triton"]["surface"]["buttons"]["supported"], true);
+}
+
+/// The `render_report` re-dispatch Triton makes to expand a report for GE is
+/// part of the same turn: it carries the turn's metadata and surface.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_report_redispatch_keeps_the_turns_context() {
+    let agent = triton_tests::upstream_fixture::FakeAgent::start_returning(json!({
+        "surface": { "components": [
+            { "kind": "text", "value": "Sales are up." },
+            { "kind": "report", "report_id": "sales", "args": { "params": {} } }
+        ] }
+    }))
+    .await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    send_a2ui(&base, &iss, "sales please").await;
+
+    let tools = agent.tools_seen();
+    let i = tools
+        .iter()
+        .position(|t| t.as_deref() == Some("render_report"))
+        .unwrap_or_else(|| panic!("no render_report re-dispatch: {tools:?}"));
+    let body = &agent.bodies_seen()[i];
+    assert_eq!(body["report_id"], "sales");
+    assert_eq!(body["_triton"]["protocol"], "a2a", "{body}");
+    assert_eq!(body["_triton"]["a2a_context_id"], "session-9");
+    assert_eq!(body["_triton"]["surface"]["buttons"]["supported"], true);
+}

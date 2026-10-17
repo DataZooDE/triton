@@ -96,8 +96,56 @@ fn redact_in(v: &mut Value, parent: &str) {
     }
 }
 
+/// Every correlation token in `v` (the values [`redact`] masks), in order.
+fn tokens(v: &Value) -> Vec<String> {
+    fn walk(v: &Value, parent: &str, out: &mut Vec<String>) {
+        match v {
+            Value::Object(map) => {
+                let is_ct_param = map.get("key").and_then(Value::as_str) == Some("ct");
+                for (k, val) in map {
+                    let volatile = VOLATILE_KEYS.contains(&k.as_str())
+                        || (is_ct_param && k == "value")
+                        || (parent == "reply" && k == "id");
+                    match val.as_str() {
+                        Some(t) if volatile => out.push(t.to_string()),
+                        _ => walk(val, k, out),
+                    }
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|i| walk(i, parent, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(v, "", &mut out);
+    out
+}
+
+/// The redaction keeps the fixtures stable but hides the tokens, so check
+/// them here: the expected number, all distinct, and each one decoding to the
+/// button it belongs to (`go` with that button's `r`). A token is
+/// `b64url(JSON{t, a, …}).tag`; the body needs no key to read.
+fn check_tokens(name: &str, produced: &Value, expected: &[&str]) {
+    use base64::Engine as _;
+    let found = tokens(produced);
+    assert_eq!(found.len(), expected.len(), "{name}: tokens {found:?}");
+    let unique: std::collections::HashSet<_> = found.iter().collect();
+    assert_eq!(unique.len(), found.len(), "{name}: a token repeats");
+    for (token, region) in found.iter().zip(expected) {
+        let body = token.split('.').next().unwrap_or_default();
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body)
+            .unwrap_or_else(|e| panic!("{name}: token body {body:?}: {e}"));
+        let json: Value = serde_json::from_slice(&bytes).expect("token body json");
+        assert_eq!(json["t"], "go", "{name}: {json}");
+        assert_eq!(json["a"]["r"], *region, "{name}: {json}");
+    }
+}
+
 /// Compare against the checked-in baseline, or write it when explicitly asked.
-fn pin(name: &str, mut produced: Value) {
+/// `buttons` are the `r` args of the buttons the channel shows, in order.
+fn pin(name: &str, mut produced: Value, buttons: &[&str]) {
+    check_tokens(name, &produced, buttons);
     redact(&mut produced);
     let path = baseline_dir().join(name);
     let text = format!("{}\n", serde_json::to_string_pretty(&produced).unwrap());
@@ -498,6 +546,7 @@ async fn whatsapp_cloud_payload_is_pinned() {
     pin(
         "whatsapp_cloud.json",
         drive_whatsapp_cloud(rich_surface()).await.payload,
+        &["EU", "AP", "AM"],
     );
 }
 
@@ -506,17 +555,26 @@ async fn telegram_payload_is_pinned() {
     pin(
         "telegram.json",
         drive_telegram(rich_surface()).await.payload,
+        &["EU", "AP", "AM", "Q2"],
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn signal_payload_is_pinned() {
-    pin("signal.json", drive_signal(rich_surface()).await.payload);
+    pin(
+        "signal.json",
+        drive_signal(rich_surface()).await.payload,
+        &[],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn discord_slash_command_payload_is_pinned() {
-    pin("discord.json", drive_discord(rich_surface()).await.payload);
+    pin(
+        "discord.json",
+        drive_discord(rich_surface()).await.payload,
+        &["EU", "AP", "AM", "Q2"],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -524,10 +582,15 @@ async fn google_chat_sync_reply_is_pinned() {
     pin(
         "google_chat.json",
         drive_google_chat(rich_surface()).await.payload,
+        &["EU", "AP", "AM", "Q2"],
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn msteams_group_chat_payload_is_pinned() {
-    pin("msteams.json", drive_msteams(rich_surface()).await.payload);
+    pin(
+        "msteams.json",
+        drive_msteams(rich_surface()).await.payload,
+        &["EU", "AP", "AM", "Q2"],
+    );
 }

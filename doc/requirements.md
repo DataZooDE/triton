@@ -450,8 +450,9 @@ on implementation details not pinned below.
   otherwise make a distinction — admitting an un-enrolled sender under a
   pairing scope — and then discard it. It does not relieve an upstream
   of FR-U-6.
-- **FR-U-8 (#352)** Every upstream dispatch MUST carry the channel the
-  turn will be rendered on as `X-Triton-Channel`, and every tool
+- **FR-U-8 (#352)** Every upstream dispatch and relay (schema discovery
+  excepted: it is not a turn) MUST carry the channel the turn will be
+  rendered on as `X-Triton-Channel`, and every tool
   dispatch with object args MUST carry the channel's versioned surface
   descriptor as `_triton.surface` (architecture §8.7.1), unless an
   operator turned the body field off
