@@ -15,6 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::Value;
 
+use crate::dispatch_context::DispatchContext;
 use crate::error::TritonError;
 use crate::principal::ToolPrincipal;
 
@@ -53,6 +54,21 @@ pub trait Tool: Send + Sync {
     /// the dispatcher's full `Principal`, not via this trait.
     async fn invoke(&self, args: Value, principal: &ToolPrincipal) -> Result<Value, TritonError>;
 
+    /// [`Tool::invoke`] plus the dispatch context (#352): the channel the
+    /// turn will be rendered on and what it can show. Opt-in: the default
+    /// ignores the context and calls `invoke`, so existing tools (and their
+    /// outputs) are untouched. An embedded agent overrides this to tailor
+    /// its answer to the channel. Rendering advice only, never identity.
+    async fn invoke_with_context(
+        &self,
+        args: Value,
+        principal: &ToolPrincipal,
+        ctx: &DispatchContext,
+    ) -> Result<Value, TritonError> {
+        let _ = ctx;
+        self.invoke(args, principal).await
+    }
+
     /// Whether [`Tool::invoke_streaming`] emits real incremental
     /// frames. Default `false`: the dispatcher keeps the historical
     /// buffered path (immediate audit, single terminal `Done`).
@@ -81,6 +97,17 @@ pub trait Tool: Send + Sync {
         use futures::StreamExt as _;
         let value = self.invoke(args, principal).await?;
         Ok(futures::stream::once(async move { crate::stream::StreamEvent::Done(value) }).boxed())
+    }
+    /// [`Tool::invoke_streaming`] plus the dispatch context; see
+    /// [`Tool::invoke_with_context`]. The default ignores the context.
+    async fn invoke_streaming_with_context(
+        &self,
+        args: Value,
+        principal: &ToolPrincipal,
+        ctx: &DispatchContext,
+    ) -> Result<futures::stream::BoxStream<'static, crate::stream::StreamEvent>, TritonError> {
+        let _ = ctx;
+        self.invoke_streaming(args, principal).await
     }
 }
 

@@ -1814,7 +1814,7 @@ async fn rasterize_dashboard(
         tiles: dash.tiles.clone(),
     };
     let start = std::time::Instant::now();
-    let result = rasterizer.render(&req, principal).await;
+    let result = rasterizer.render(&req, principal, PROTOCOL).await;
     let latency_ms = start.elapsed().as_millis() as u64;
     match &result {
         Ok(_) => {

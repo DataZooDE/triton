@@ -1,0 +1,33 @@
+# #352 step 0 — surface baseline: plain Telegram text routes to the `assistant`
+# upstream so its rich surface is mapped and couriered. Secrets are env:// refs.
+version: "0.2"
+
+adapters:
+  telegram:
+    kind: telegram
+    tool: assistant
+    inbound:
+      kind: webhook
+      signature: secret_token
+      secret: env://TRITON_TG_WEBHOOK_SECRET
+    outbound:
+      kind: rest_api
+      token: env://TRITON_TG_BOT_TOKEN
+    identity:
+      kind: sender_table
+      table: env://TRITON_TG_SENDERS
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: inline_keyboard
+      selections: inline_keyboard
+      forms: numbered_prompts
+      dashboard: rasterised_png
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: env://TRITON_TG_CORRELATION_KEY
+
+tools:
+  echo:
+    surface_components: []

@@ -1,0 +1,35 @@
+[
+  {
+    "chat_id": 42,
+    "parse_mode": "HTML",
+    "reply_markup": {
+      "inline_keyboard": [
+        [
+          {
+            "callback_data": "<redacted>",
+            "text": "Drill into EMEA"
+          }
+        ],
+        [
+          {
+            "callback_data": "<redacted>",
+            "text": "Drill into APAC"
+          }
+        ],
+        [
+          {
+            "callback_data": "<redacted>",
+            "text": "Drill into AMER"
+          }
+        ],
+        [
+          {
+            "callback_data": "<redacted>",
+            "text": "Compare to Q2"
+          }
+        ]
+      ]
+    },
+    "text": "**Q3 revenue** by region:\n\n| Region | Revenue | Growth |\n|---|---|---|\n| EMEA | 1.2M | +4% |\n| APAC | 0.8M | +9% |\n| AMER | 2.1M | -1% |\n\n<i>APAC is growing fastest.</i>\n\nSources: Revenue report"
+  }
+]

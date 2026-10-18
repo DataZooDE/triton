@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use sha2::Sha256;
 use triton_tests::TritonProcess;
 use triton_tests::chat_courier_fixture::FakeWhatsAppApi;
-use triton_tests::upstream_fixture::FakeAgent;
+use triton_tests::upstream_fixture::{FakeAgent, without_hint};
 
 const APP_SECRET: &str = "whatsapp-app-secret-for-test";
 /// Not present in any sender table — only the resolver knows it.
@@ -110,7 +110,7 @@ async fn upstream_identity_resolves_principal_and_dispatches_with_it() {
         (!v.is_empty()).then_some(v)
     });
     assert_eq!(
-        resolver_bodies[0],
+        without_hint(&resolver_bodies[0]),
         json!({ "platform": "whatsapp", "sender": UNKNOWN_WA_ID }),
         "resolver must receive {{platform, sender}}"
     );
@@ -143,7 +143,12 @@ async fn upstream_identity_resolves_principal_and_dispatches_with_it() {
         let v = agent.bodies_seen();
         (!v.is_empty()).then_some(v)
     });
-    assert_eq!(agent_bodies[0], json!({ "message": "hello via resolver" }));
+    assert_eq!(
+        without_hint(&agent_bodies[0]),
+        json!({ "message": "hello via resolver" })
+    );
+    // #352: plus the rendering hint for the channel the turn is for.
+    assert_eq!(agent_bodies[0]["_triton"]["surface"]["channel"], "whatsapp");
 
     // ... and the reply was couriered back to the platform.
     let sent = wait_for(Duration::from_secs(3), || {

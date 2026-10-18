@@ -20,6 +20,7 @@
 use regex::Regex;
 use serde_json::Value;
 use triton_core::a2ui::{Component, FormFieldKind, SourceItem, Surface, extract_surface};
+use triton_core::surface::{Charts, Markdown, SurfaceProfile, Tables};
 
 /// The chat-card chrome (header title/logo, brand button colour) — fetched
 /// per reply from the report upstream's `get_theme` tool. Peacock owns ALL
@@ -75,7 +76,26 @@ impl CardChrome {
 
 /// Google Chat caps message text at ~32,000 chars; we use byte
 /// count as a conservative proxy.
-pub const GOOGLE_CHAT_TEXT_MAX_BYTES: usize = 32_000;
+/// Google Chat: Chat-syntax text plus Cards v2 (tables, buttons, chart images).
+///
+/// The single source of truth for this channel's caps (#352): the mapper below
+/// reads them from here, and Triton advertises the same profile to upstream
+/// agents as a rendering hint.
+pub const SURFACE: SurfaceProfile = SurfaceProfile {
+    channel: "googlechat",
+    markdown: Markdown::Basic,
+    tables: Tables::Native,
+    buttons: true,
+    max_buttons: None,
+    charts: Charts::Image,
+    images: true,
+    max_text_bytes: Some(32_000),
+    streaming: true,
+    subject_line: false,
+    guidance: "Google Chat: concise text with basic emphasis. Tables become cards (keep them to about 4 columns); buttons and chart images work.",
+};
+
+pub const GOOGLE_CHAT_TEXT_MAX_BYTES: usize = SURFACE.text_cap();
 
 const TRUNCATION_SENTINEL: &str =
     "\n\n[truncated — content exceeded Google Chat's 32,000-byte limit]";

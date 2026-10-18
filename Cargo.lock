@@ -2853,6 +2853,7 @@ dependencies = [
  "triton-embed",
  "triton-manifest",
  "triton-rasterizer",
+ "triton-upstream",
 ]
 
 [[package]]

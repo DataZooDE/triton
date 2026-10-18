@@ -25,9 +25,10 @@ POST / HTTP/1.1
 Host: <your-agent-host:port>
 Authorization: Bearer <triton-minted-rs256-jwt | dev-token>
 X-Triton-Tool: <tool name>
+X-Triton-Channel: <channel the turn renders on>
 Content-Type: application/json
 
-<the tool's args JSON, verbatim>
+<the tool's args JSON, plus Triton's reserved `_triton` key>
 ```
 
 Key facts, all load-bearing:
@@ -39,9 +40,25 @@ Key facts, all load-bearing:
   you can dispatch without sniffing the body.
   (`crates/triton-upstream/src/static_upstream.rs` `invoke`: `let resp
   = self.http.post(format!("http://{ep}/"))`.)
-- **The body is the raw args object**, exactly what the dispatcher
-  validated against your tool's schema. No envelope, no metadata
-  wrapper.
+- **The body is the args object**, exactly what the dispatcher
+  validated against your tool's schema, plus one reserved key,
+  `_triton`, that Triton owns. No envelope.
+- **Write for the channel (#352).** `X-Triton-Channel` names where your
+  answer lands (`whatsapp`, `msteams`, `googlechat`, `email`, `rest`,
+  `mcp`, `a2a`, …). `_triton.surface` describes what it can show
+  (`markdown`, `tables`, `buttons.{supported,max}`, `charts`,
+  `max_text_bytes`, `subject_line`, …, versioned by `v`), plus a
+  one-line `guidance` you can paste into your prompt. Skip
+  `suggest_followups` where `buttons.supported` is false, skip charts
+  where `charts` is `none`, make the first line a subject where
+  `subject_line` is true. It is advice: return one canonical surface
+  anyway, and the mapper still degrades it. Full table:
+  `doc/architecture.md` §8.7.1; contract: `doc/upstream-agent-contract.md`
+  §2b.
+- **Spec A2A metadata moved (#352, breaking).** Read
+  `_triton.protocol`, `_triton.a2a_context_id` and `_triton.agent` (the
+  `/a2a/<slug>` face), not the old flat `_triton_protocol` /
+  `_triton_a2a_context_id`.
 - **The bearer is NOT the inbound caller's token.** Triton mints a
   fresh RS256 JWT scoped to your agent. Verify it (→ `references/04`);
   never try to recover the original caller's token — there is no path

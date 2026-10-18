@@ -29,6 +29,11 @@ impl Tool for NamedTool {
     }
     async fn invoke(&self, args: Value, _p: &ToolPrincipal) -> Result<Value, TritonError> {
         let msg = args.get("message").and_then(Value::as_str).unwrap_or("");
+        if msg == "which agent?" {
+            // #352: the per-agent face names itself in `_triton.agent`.
+            let agent = args["_triton"]["agent"].as_str().unwrap_or("<root>");
+            return Ok(json!({ "surface": { "text": format!("{} via {agent}", self.0) } }));
+        }
         Ok(json!({ "surface": { "text": format!("{} heard: {msg}", self.0) } }))
     }
 }
@@ -299,4 +304,19 @@ async fn agents_without_the_primary_config_are_ignored() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+/// #352: a turn on `/a2a/<slug>` tells the tool which agent face it came
+/// through; the root face names none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_agent_face_is_named_in_the_triton_metadata() {
+    let (iss, base) = agents_host().await;
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let (_, sales) = rpc_at(&base, "/a2a/sales", &token, send("which agent?")).await;
+    assert_eq!(
+        sales["result"]["parts"][0]["text"],
+        "sales_analyst via sales"
+    );
+    let (_, root) = rpc_at(&base, "/a2a", &token, send("which agent?")).await;
+    assert_eq!(root["result"]["parts"][0]["text"], "assistant via <root>");
 }

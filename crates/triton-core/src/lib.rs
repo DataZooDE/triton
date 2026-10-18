@@ -15,6 +15,7 @@ use serde::Serialize;
 
 pub mod a2ui;
 pub mod audit;
+pub mod dispatch_context;
 pub mod dispatcher;
 pub mod error;
 pub mod metrics;
@@ -22,16 +23,19 @@ pub mod outbound;
 pub mod principal;
 pub mod ratelimit;
 pub mod stream;
+pub mod surface;
 pub mod tool;
 pub mod trace;
 
 pub use audit::PostOutcome;
+pub use dispatch_context::{ContextOverrides, DispatchContext};
 pub use dispatcher::{Dispatch, Dispatcher, UpstreamDispatch, envelope};
 pub use error::TritonError;
 pub use metrics::Metrics;
 pub use outbound::{OutboundCourier, OutboundRequest};
 pub use principal::{Principal, ToolPrincipal};
 pub use stream::{Finalized, StreamEvent, Termination, Timing};
+pub use surface::{SurfaceDescriptor, SurfaceProfile, SurfaceRegistry};
 pub use tool::{Tool, ToolDescriptor, ToolRegistry};
 
 /// A2UI envelope version requested by the caller (FR-A-3). Per ADR-4

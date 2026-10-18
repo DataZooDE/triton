@@ -1,0 +1,37 @@
+{
+  "data": {
+    "components": [
+      {
+        "components": [
+          {
+            "custom_id": "<redacted>",
+            "label": "Drill into EMEA",
+            "style": 1,
+            "type": 2
+          },
+          {
+            "custom_id": "<redacted>",
+            "label": "Drill into APAC",
+            "style": 1,
+            "type": 2
+          },
+          {
+            "custom_id": "<redacted>",
+            "label": "Drill into AMER",
+            "style": 1,
+            "type": 2
+          },
+          {
+            "custom_id": "<redacted>",
+            "label": "Compare to Q2",
+            "style": 1,
+            "type": 2
+          }
+        ],
+        "type": 1
+      }
+    ],
+    "content": "\\*\\*Q3 revenue\\*\\* by region:\n\n\\| Region \\| Revenue \\| Growth \\|\n\\|\\-\\-\\-\\|\\-\\-\\-\\|\\-\\-\\-\\|\n\\| EMEA \\| 1\\.2M \\| \\+4% \\|\n\\| APAC \\| 0\\.8M \\| \\+9% \\|\n\\| AMER \\| 2\\.1M \\| \\-1% \\|\n\n*APAC is growing fastest\\.*\n\nSources: Revenue report"
+  },
+  "type": 4
+}

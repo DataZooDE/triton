@@ -10,12 +10,39 @@
 //! would couple unrelated platforms' wire shapes together.
 
 use triton_core::a2ui::{Component, Surface, extract_surface};
+use triton_core::surface::{Charts, Markdown, SurfaceProfile, Tables};
 
 /// Twilio's documented single-message body limit (WhatsApp via the
 /// Messaging API). Treated as bytes — an oversized message is one Twilio
 /// itself would reject or silently segment; we truncate rather than let
 /// that happen unpredictably.
-pub const TWILIO_TEXT_MAX_BYTES: usize = 1600;
+/// Twilio WhatsApp: plain text, one message.
+///
+/// The single source of truth for this channel's caps (#352): the mapper below
+/// reads them from here, and Triton advertises the same profile to upstream
+/// agents as a rendering hint.
+pub const SURFACE_WHATSAPP: SurfaceProfile = SurfaceProfile {
+    channel: "twilio_whatsapp",
+    markdown: Markdown::Basic,
+    tables: Tables::Text,
+    buttons: false,
+    max_buttons: None,
+    charts: Charts::None,
+    images: false,
+    max_text_bytes: Some(1600),
+    streaming: false,
+    subject_line: false,
+    guidance: "WhatsApp via Twilio: one short plain-text message under 1600 characters. No tables, buttons or charts.",
+};
+
+/// Twilio RCS shares the Twilio mapper and its caps; only the label differs.
+pub const SURFACE_RCS: SurfaceProfile = SurfaceProfile {
+    channel: "twilio_rcs",
+    guidance: "RCS via Twilio: one short plain-text message under 1600 characters. No tables, buttons or charts.",
+    ..SURFACE_WHATSAPP
+};
+
+pub const TWILIO_TEXT_MAX_BYTES: usize = SURFACE_WHATSAPP.text_cap();
 
 const TRUNCATION_SENTINEL: &str = "\n\n[truncated — content exceeded Twilio's 1600-byte limit]";
 

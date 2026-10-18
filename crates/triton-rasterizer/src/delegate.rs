@@ -25,12 +25,16 @@ use crate::{Client, DashboardRequest, RasterizerError};
 /// delegated upstream tool. The `principal` is the resolved chat sender —
 /// unused by the sidecar, forwarded into the minted token by the upstream
 /// path so the renderer sees the same identity as a normal dispatch.
+/// `protocol` is the calling adapter's audit label (`messenger:telegram`):
+/// the delegated dispatch is audited under it and tells the renderer which
+/// channel the image is for (#352), exactly like the turn that produced it.
 #[async_trait]
 pub trait DashboardRasterizer: Send + Sync {
     async fn render(
         &self,
         req: &DashboardRequest,
         principal: &Principal,
+        protocol: &str,
     ) -> Result<Vec<u8>, RasterizerError>;
 }
 
@@ -40,6 +44,7 @@ impl DashboardRasterizer for Client {
         &self,
         req: &DashboardRequest,
         _principal: &Principal,
+        _protocol: &str,
     ) -> Result<Vec<u8>, RasterizerError> {
         // The sidecar is identity-agnostic (the substrate ACL fronts it);
         // the inherent `Client::render` carries the whole contract.
@@ -93,6 +98,7 @@ impl DashboardRasterizer for UpstreamRasterizer {
         &self,
         req: &DashboardRequest,
         principal: &Principal,
+        protocol: &str,
     ) -> Result<Vec<u8>, RasterizerError> {
         // The dashboard spec (`{title, tiles}`) is the tool's input — the
         // same JSON the sidecar accepts.
@@ -100,7 +106,7 @@ impl DashboardRasterizer for UpstreamRasterizer {
             .map_err(|e| RasterizerError::BadRequest(format!("encode dashboard spec: {e}")))?;
         let dispatch = self
             .dispatcher
-            .invoke(&self.tool, args, principal.clone(), "chat")
+            .invoke(&self.tool, args, principal.clone(), protocol)
             .await
             .map_err(dispatch_err)?;
         let b64 = dispatch

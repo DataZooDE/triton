@@ -30,6 +30,7 @@ use triton_secrets::{LiteralResolver, SecretResolver};
 
 mod optional_adapters;
 mod settings;
+mod surfaces;
 mod tools;
 use settings::Settings;
 
@@ -231,8 +232,18 @@ async fn main() -> std::io::Result<()> {
     let controls = controls
         .extend_denied_principals(&settings.denied_principals)
         .replace_scope_restriction("pairing", pairing_tools);
-    let mut dispatcher =
-        Dispatcher::new(registry, settings.env.clone(), controls).with_metrics(metrics.clone());
+    // #352: an over-long guidance override fails boot closed, like a bad
+    // manifest, rather than shipping an unbounded prompt fragment upstream.
+    let surface_registry = match surfaces::registry(manifest.as_ref()) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "surface guidance override rejected");
+            std::process::exit(2);
+        }
+    };
+    let mut dispatcher = Dispatcher::new(registry, settings.env.clone(), controls)
+        .with_metrics(metrics.clone())
+        .with_surfaces(surface_registry);
 
     // One announcement, one place, for whichever host is running
     // (#306 crew F6) — announcing from a host's `main` is how the
@@ -318,7 +329,8 @@ async fn main() -> std::io::Result<()> {
                 settings.stream_max_duration,
                 settings.circuit_open_after,
                 settings.circuit_cooldown,
-            );
+            )
+            .with_surface_hint(surfaces::hint_enabled());
             // NFR-S-4 SSRF guard: outside `local` env, every mapped endpoint
             // must be a loopback/private/tailnet target. A mis-templated or
             // compromised `TRITON_STATIC_UPSTREAMS` pointing at a public or

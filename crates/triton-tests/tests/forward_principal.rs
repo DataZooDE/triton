@@ -725,3 +725,41 @@ fn wait_for<T>(deadline: Duration, mut probe: impl FnMut() -> Option<T>) -> T {
         std::thread::sleep(Duration::from_millis(30));
     }
 }
+
+/// #352: the rendering hint rides beside the identity, never inside it. The
+/// minted bearer is built from the principal alone, so no channel or surface
+/// data may appear among its claims, forwarding on or off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_surface_hint_never_reaches_the_minted_bearer() {
+    let resolver = FakeAgent::start_returning(json!({
+        "sub": "resolved-bob", "scopes": ["chat"], "tenant": "globex"
+    }))
+    .await;
+    let agent = FakeAgent::start_echoing().await;
+    let whatsapp = FakeWhatsAppApi::start().await;
+    let proc = TritonProcess::spawn_with_env(
+        Duration::from_secs(5),
+        env_for(&whatsapp, &agent, &resolver, true),
+    )
+    .await;
+
+    let resp = post_inbound(&proc, UNKNOWN_WA_ID, "hi").await;
+    assert!(resp.status().is_success(), "{}", resp.status());
+
+    let bearer = wait_for(Duration::from_secs(5), || {
+        agent.bearers_seen().into_iter().next()
+    });
+    // Positive control: the hint did reach the agent, in the body.
+    assert_eq!(
+        agent.bodies_seen()[0]["_triton"]["surface"]["channel"],
+        "whatsapp"
+    );
+    let claims = jwt_claims(&bearer);
+    let text = claims.to_string();
+    for needle in ["channel", "surface", "_triton", "guidance"] {
+        assert!(
+            !text.contains(needle),
+            "minted bearer must not carry `{needle}`: {claims}"
+        );
+    }
+}

@@ -44,6 +44,9 @@ struct FakeAgentState {
     /// `X-Triton-MCP` header per request (`None` when absent) — pins the
     /// MCP-Apps verb-routing contract (#143 B/C).
     mcp_verbs_seen: Mutex<Vec<Option<String>>>,
+    /// Every request's full header map, in order — for header contracts
+    /// beyond the ones with a dedicated recorder (#352 `X-Triton-Channel`).
+    headers_seen: Mutex<Vec<HeaderMap>>,
     bodies_seen: Mutex<Vec<Value>>,
     hits: Mutex<u32>,
     failures_remaining: Mutex<u32>,
@@ -173,6 +176,7 @@ impl FakeAgent {
             bearers_seen: Mutex::new(Vec::new()),
             tools_seen: Mutex::new(Vec::new()),
             mcp_verbs_seen: Mutex::new(Vec::new()),
+            headers_seen: Mutex::new(Vec::new()),
             bodies_seen: Mutex::new(Vec::new()),
             hits: Mutex::new(0),
             failures_remaining: Mutex::new(fail_first),
@@ -211,6 +215,24 @@ impl FakeAgent {
     /// (e.g. a plain tool call). Pins the MCP-Apps routing contract.
     pub fn mcp_verbs_seen(&self) -> Vec<Option<String>> {
         self.state.mcp_verbs_seen.lock().unwrap().clone()
+    }
+
+    /// The full header map of every request this agent received, in order.
+    pub fn headers_seen(&self) -> Vec<HeaderMap> {
+        self.state.headers_seen.lock().unwrap().clone()
+    }
+
+    /// The `X-Triton-Channel` header of each request, `None` where absent
+    /// (#352: the channel the turn will be rendered on).
+    pub fn channels_seen(&self) -> Vec<Option<String>> {
+        self.headers_seen()
+            .iter()
+            .map(|h| {
+                h.get("X-Triton-Channel")
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string)
+            })
+            .collect()
     }
 
     /// JSON bodies of every request this agent received, in order.
@@ -273,6 +295,7 @@ async fn handler(
         .map(str::to_string);
     state.tools_seen.lock().unwrap().push(tool);
     state.mcp_verbs_seen.lock().unwrap().push(mcp_verb.clone());
+    state.headers_seen.lock().unwrap().push(headers.clone());
     let value: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
     state.bodies_seen.lock().unwrap().push(value.clone());
 
@@ -455,4 +478,15 @@ fn sse_response_slow_drip(frames: Vec<String>) -> axum::response::Response {
         .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
         .body(body)
         .unwrap()
+}
+
+/// A recorded request body without Triton's reserved `_triton` key (#352):
+/// the args the *caller* sent, for contract assertions that predate the
+/// surface hint. Assert on `_triton` separately where it matters.
+pub fn without_hint(body: &Value) -> Value {
+    let mut body = body.clone();
+    if let Some(map) = body.as_object_mut() {
+        map.remove("_triton");
+    }
+    body
 }

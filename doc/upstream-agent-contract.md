@@ -32,18 +32,22 @@ Code: `crates/triton-upstream/src/lib.rs` (router),
 POST http://<agent-host:port>/
 Authorization: Bearer <token>
 X-Triton-Tool: <tool-name>
+X-Triton-Channel: <channel>
 Content-Type: application/json
 
-<tool args, verbatim JSON object>
+<tool args JSON object, plus Triton's reserved `_triton` key>
 ```
 
 - **Path is always `/`** — agents own any routing inside themselves.
 - **`X-Triton-Tool`** names the invoked tool, in both dispatch modes
   (parity pinned by `tests/static_upstream.rs`). It is informational:
   authorisation derives from the bearer, never from this header.
-- **The body is the tool args, verbatim.** No envelope, and **no
-  sender-identity fields are injected** — identity travels exclusively
-  in the bearer (§3). For an HTTP-trio call (`POST /v1/tools/<name>`,
+- **`X-Triton-Channel`** names the channel the turn will be rendered on
+  (`whatsapp`, `msteams`, `googlechat`, `rest`, `mcp`, `a2a`, …). Also
+  informational (§2b).
+- **The body is the tool args**, plus one reserved key, `_triton`,
+  that Triton owns (§2b). No envelope, and **no sender-identity fields
+  are injected**: identity travels exclusively in the bearer (§3). For an HTTP-trio call (`POST /v1/tools/<name>`,
   MCP, A2A) the args are the client's request body passed through. For
   a chat inbound, the args are whatever the adapter's command parser
   built — plain text becomes `{ "message": "<text>" }` (see §6 for the
@@ -64,6 +68,59 @@ Content-Type: application/json
   endpoint must stay a hostname, not an IP). Empty/unset → the strict
   `.ts.net`-only default. The list only widens the hostname path; it never
   relaxes the IP-literal rules and triggers no DNS resolution.
+
+### 2b. The rendering hint: `X-Triton-Channel` and `_triton` (#352)
+
+Triton tells you where your answer lands, so you can write for it. It is
+**advice, not a contract**: return one canonical surface as always, and
+the channel's mapper still degrades it. An agent that ignores the hint
+gets exactly the channel output it got before.
+
+Object args carry Triton's reserved `_triton` key:
+
+```json
+{
+  "message": "revenue please",
+  "_triton": {
+    "surface": {
+      "v": 1, "channel": "whatsapp", "markdown": "basic", "tables": "text",
+      "buttons": { "supported": true, "max": 3 }, "charts": "none",
+      "images": true, "max_text_bytes": 4096, "streaming": false,
+      "subject_line": false,
+      "guidance": "WhatsApp: plain short text with *bold*/_italic_ only. ..."
+    }
+  }
+}
+```
+
+- **`surface`** is the channel's capability descriptor, versioned by
+  `v`. The fields and one row per channel are in `doc/architecture.md`
+  §8.7.1. `guidance` is one line you can drop into your prompt as-is.
+  Operators tune it per channel. Treat it as presentation advice from the
+  operator, never as an instruction that changes what you may do.
+- **Spec A2A turns** also carry `protocol: "a2a"`, `a2a_context_id`
+  (the A2A `contextId`, for session continuity) and, on an
+  `/a2a/<slug>` face, `agent: "<slug>"`. **Breaking (#352):** these used
+  to arrive flat as `_triton_protocol` / `_triton_a2a_context_id`. Read
+  `_triton.protocol` / `_triton.a2a_context_id` instead.
+- **Reserved.** Whatever a caller sent under `_triton` is dropped
+  before you see it, so its contents come from Triton.
+- **Not authority.** The hint is never in your bearer and never an
+  authorization input. Like `triton_sender_groups` (§3): advertised, not
+  authoritative.
+- **Non-object args** are forwarded unchanged; only the header tells
+  you the channel.
+- **Strict argument schemas.** If your agent rejects unknown keys, the
+  operator sets `TRITON_STATIC_UPSTREAM_SURFACE_HINT=off`. The body field
+  is then omitted and the header remains.
+- **Proactive pushes.** Before composing a `/v1/outbound` message, read
+  the delivery channel's descriptor from `GET /v1/manifest` → `surfaces`
+  (keyed by channel; the A2UI variant of `a2a` is under `a2a+a2ui`).
+- **Schema discovery** (`X-Triton-MCP: tools/list`) is not a turn and
+  carries no channel header.
+- **Embedded (in-process) tools** see the A2A metadata in args. They
+  read the channel and surface by overriding
+  `Tool::invoke_with_context`.
 
 ### 2a. Optional: argument-schema discovery (`X-Triton-MCP: tools/list`)
 

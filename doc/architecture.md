@@ -159,7 +159,7 @@ flowchart TB
     Disp[Dispatcher<br/>ToolRegistry.invoke]
     Router[Upstream router<br/>Consul + breaker + Vault swap]
     A2UI[A2UI builders<br/>v0.8, v0.9]
-    Mapper[Surface mapper L6'<br/>SurfaceLimits + Rasterizer]
+    Mapper[Surface mapper L6'<br/>SurfaceProfile + Rasterizer]
     ChatOut[Chat-channel outbound couriers<br/>one per chat adapter]
     Audit[Audit emitter<br/>JSON to stdout]
     Obs[Observability<br/>/healthz, /version, /metrics]
@@ -193,7 +193,7 @@ flowchart TB
 | **Dispatcher** | `ToolRegistry::invoke(tool, args, principal) -> Result`. Argument validation, timing, audit emission, four typed error variants (`Auth`, `Validation`, `Tool`, `Provider`). The single bottleneck every protocol funnels through. In v0.2 the dispatcher does not change shape; chat-channel invocations enter it through the inbound listener, exactly like HTTP invocations. | `2026-05-15-triton/triton/dispatcher.py`, `2026-05-16-triton-rust/src/dispatcher.rs` |
 | **Upstream router** | Resolves `agent:<tool>` via Consul; mints a per-call OIDC token via Vault role `agent-oidc-swap`; applies per-tool timeout + circuit-breaker (closed/open/half-open); dispatches HTTP/1.1 to the chosen agent on the tailnet. Wraps raw upstream JSON into A2UI; passes pre-shaped A2UI through. | **New in production** — neither experiment has upstreams; tools were in-process. Design follows G-9/G-10b/G-11/G-12. |
 | **A2UI builders** | One builder per version, no shared base. v0.8: PascalCase `ComponentWrapper` oneof. v0.9: flat-component shape. Content-negotiation helper parses `Accept` / message metadata. | `2026-05-15-triton/triton/ui/{builder,builder_v09,a2ui}.py`, `2026-05-16-triton-rust/src/ui/{builder,builder_v09,a2ui}.rs` |
-| **Surface mapper (L6′)** (v0.2) | Stateless function from A2UI envelope + per-adapter `degrade` rule table to platform-neutral `PlatformMessage`. Enforces per-adapter surface caps (`SurfaceLimits::DISCORD` 25-item select cap, `TELEGRAM` 8-buttons-per-row, `WHATSAPP_WEB` 4000-char chunks); chunks oversize text, paginates oversize button rows, rejects oversize selects with `UnsupportedSurface`. Dashboard components are delegated to an injected `Rasterizer`. HMAC-signed correlation tokens (per-adapter `CorrelationKey`) are emitted on every button / selection option for follow-up event matching. | `2026-05-23-triton-messengers-impl/crates/triton-chat-surface/src/mapper.rs` (`EnvelopeMapper`, `SurfaceLimits`, `Rasterizer`, `correlation::{sign,verify}`). |
+| **Surface mapper (L6′)** (v0.2) | One stateless mapper per chat crate (`crates/triton-chat-*/src/surface_mapper.rs`) from the A2UI envelope to that platform's message. Its numeric caps (text bytes, button count) come from the crate's `pub const SURFACE: SurfaceProfile` (#352), the same profile Triton hints to upstream agents (§8.7.1); truncates oversize text, caps buttons (WhatsApp 3, Discord 25), defers what the platform cannot show. Dashboard components are delegated to an injected `Rasterizer`. HMAC-signed correlation tokens (per-adapter `CorrelationKey`) are emitted on every button / selection option for follow-up event matching. | `2026-05-23-triton-messengers-impl/crates/triton-chat-surface/src/mapper.rs` (`EnvelopeMapper`, `SurfaceLimits`, `Rasterizer`, `correlation::{sign,verify}`). |
 | **Chat-channel outbound couriers** (v0.2) | One courier per chat adapter. Consumes `PlatformMessage` fragments from the surface mapper, encodes them into platform-native bytes per the adapter's `degrade` rules, and posts to the platform's outbound substrate (Telegram `sendMessage`, Discord `/channels/.../messages`, the WhatsApp Web socket session, signal-cli RPC, Bot Connector REST, Google Chat REST). Holds the platform credential (Vault-referenced per C-10) and is the only component in the binary that does. Emits the second audit record per invocation, sharing `trace_id` with the dispatcher record. | `2026-05-23-triton-messengers-impl/crates/chat-adapter-{telegram,discord,signal,...}/src/lib.rs` (`*Courier`). |
 | **Audit emitter** | Structured JSON lines to stdout. v0.1 callsites: dispatcher (one inbound line per invocation) and upstream router (one line per upstream dispatch). v0.2 adds the chat-channel courier as a third callsite — every chat-channel invocation emits a `AuditPhase::Dispatch` record from the dispatcher and a `AuditPhase::Post` record from the courier, sharing one `trace_id`. Inbound signature rejections produce an `AuditPhase::Rejected` record before the dispatcher is reached. | `2026-05-15-triton/triton/dispatcher.py` (reference fields), extended to the substrate audit schema; v0.2 phase discriminator in `crates/triton-chat-surface/src/audit.rs`. |
 | **Dashboard rasteriser** (external dependency, v0.2) | Out-of-process renderer that consumes a dashboard subdocument and returns `{png_bytes, caption}`. Realised as either an upstream tool named `render_a2ui_to_png` (preferred: inherits identity + audit symmetry through the upstream router) or a peer Nomad job reached as a sidecar. The text-first adapters (Signal, WhatsApp Web, Telegram, Discord, Google Chat) emit `Fragment::Media` with the rendered PNG; MS Teams projects the same envelope onto an Adaptive Card `ColumnSet` natively and skips the rasteriser. | `2026-05-23-triton-messengers-impl/crates/triton-chat-surface/src/mapper.rs` (`Rasterizer` trait). |
@@ -472,24 +472,32 @@ requires `Clone`).
 
 ### 8.7 Surface mapping (v0.2)
 
-The chat-channel adapters share one surface mapper at L6′ whose
-input is the canonical A2UI envelope and whose output is a
-platform-neutral `PlatformMessage`. The mapper is pure: its output
-depends only on the envelope and the per-adapter `degrade` rule
-table loaded from the manifest. It is the cheapest place to
-enforce per-platform surface caps (`SurfaceLimits`); a cap
-violation here cannot propagate past the dispatcher's boundary.
+Each chat crate owns its surface mapper at L6′
+(`crates/triton-chat-*/src/surface_mapper.rs`): input the canonical
+A2UI envelope, output that platform's message. The mappers are pure and
+deliberately not shared: one crate's wire shape must not couple to
+another's. What a channel can show is declared once per crate as
+`pub const SURFACE: SurfaceProfile` (`triton_core::surface`, #352), and
+the mapper reads its numeric caps from it. That const is also what Triton
+tells upstream agents (§8.7.1), so the hint cannot drift from the mapper.
+The manifest's `degrade` table is validation-only (FR-L-5 coverage); no
+mapper reads it.
 
-The richness spectrum spans six regimes:
+What each mapper does today (pinned by `tests/surface_profile.rs` in
+every chat crate and by the payload baselines in
+`crates/triton-tests/tests/surface_baseline.rs`):
 
-| Adapter        | Native surface vocabulary                          | Mapper behaviour |
-|----------------|----------------------------------------------------|------------------|
-| Signal         | text + media (no native buttons)                   | Degrade buttons / selections / forms to numbered prompts with HMAC-suffixed tokens. |
-| WhatsApp Web   | text + media + reply-quoting + reactions           | Same numbered-prompt degradation; chunked text at 4000 chars. |
-| Google Chat    | text + media + threads + reactions                 | Same numbered-prompt degradation; Card v2 surface deferred to a future manifest extension. |
-| Telegram       | text + media + inline keyboards (8 buttons/row)    | Native inline keyboard for button rows; degrade larger envelopes via pagination. |
-| Discord        | text + media + components v2 (buttons, selects, modals) | Native components v2; enforce Discord's 25-item select cap. |
-| MS Teams       | text + Adaptive Cards (forms, action buttons, layout) | Near-lossless projection onto Adaptive Card schema. |
+| Channel | Text cap (bytes) | Markdown | Tables | Buttons | Charts (`report`) |
+|---|---|---|---|---|---|
+| WhatsApp (Cloud + Web bridge) | 4096 | basic | as text | 3 reply buttons, rest deferred | dropped; dashboards rasterised |
+| Twilio WhatsApp / RCS | 1600 | basic | as text | deferred | dropped |
+| Signal | 2000 | none | as text | deferred | dropped |
+| Telegram | 4096 | none (HTML-escaped) | as text | inline keyboard | dropped; dashboards rasterised |
+| Discord | 2000 | none (escaped) | as text | components, ≤ 25 | dropped; dashboards rasterised |
+| Google Chat | 32 000 | basic (Chat syntax) | Cards v2 tables | card buttons | image |
+| MS Teams (+ Copilot) | 24 576 | basic | Adaptive Card tables | card actions | native AC chart |
+| Email | 512 000 (body) | full → HTML | HTML | styled links | inline image |
+| Gemini (preview mapper) | 8000 | full | markdown | deferred | caption |
 
 `PlatformMessage` is an ordered list of `Fragment`s (`Text`,
 `Media`, `ButtonSet`, `SelectionSet`, `Form`). The outbound
@@ -560,6 +568,108 @@ doing all the v0.2 work (PR 23):
 Nonce-based first-use-wins dedup is deferred — it needs a
 "seen" cache (per-tenant in-memory or substrate-side KV) and is
 a separate PR.
+
+#### 8.7.1 Surface hint to upstream agents (v1, #352)
+
+An agent returns one canonical surface and the mapper degrades it, so
+agents stay channel-agnostic. But an agent that knows where its answer
+lands can write a better one: no table for WhatsApp, a subject-worthy
+first line for email. Triton tells it, as **non-authoritative rendering
+advice**:
+
+- **`X-Triton-Channel: <channel>`** on every upstream dispatch and
+  relay: tool calls, SSE streams, MCP `resources/read` /
+  `updateModelContext`, identity resolver and rasterizer dispatches, and
+  the re-dispatches Triton makes within a turn (`get_theme`,
+  `render_report`). Schema discovery (`X-Triton-MCP: tools/list`) is not
+  a turn (no user, no channel) and carries none. The channel is derived from the
+  adapter's audit `protocol` (`messenger:x[:role]` → `x`, `google_chat`
+  → `googlechat`; `rest`, `mcp`, `a2a` as is).
+- **`_triton.surface`** in object tool args (sync and SSE): the
+  channel's `SurfaceDescriptor`, built from its `SurfaceProfile`.
+  Non-object args are forwarded unchanged, header only.
+
+The context travels in a `DispatchContext` beside the `Principal`,
+never inside it: the principal is audited and minted into the upstream
+bearer, and the hint must reach neither. `_triton` is Triton's reserved
+args key. The dispatcher drops a caller-supplied one, so the descriptor
+cannot be forged.
+
+Descriptor, `v: 1` (`DESCRIPTOR_VERSION`; bump it when a field changes
+meaning or disappears, and document the change here):
+
+```jsoncc
+{
+  "v": 1,
+  "channel": "whatsapp",
+  "markdown": "basic",          // none | basic | full
+  "tables": "text",             // text (raw pipes) | native
+  "buttons": { "supported": true, "max": 3 },   // max null = no Triton cap
+  "charts": "none",             // none | caption | image | native
+  "images": true,
+  "max_text_bytes": 4096,       // null = no Triton cap (HTTP trio)
+  "streaming": false,
+  "subject_line": false,
+  "guidance": "WhatsApp: plain short text with *bold*/_italic_ only. No tables or charts; at most 3 short follow-up buttons; keep it to a few short paragraphs."
+}
+```
+
+One line per channel (guidance omitted):
+
+| channel | markdown | tables | buttons | charts | images | max_text_bytes | streaming | subject_line |
+|---|---|---|---|---|---|---|---|---|
+| `whatsapp` | basic | text | yes, 3 | none | yes | 4096 | no | no |
+| `twilio_whatsapp`, `twilio_rcs` | basic | text | no | none | no | 1600 | no | no |
+| `signal` | none | text | no | none | no | 2000 | no | no |
+| `telegram` | none | text | yes | none | yes | 4096 | no | no |
+| `discord` | none | text | yes, 25 | none | yes | 2000 | no | no |
+| `googlechat` | basic | native | yes | image | yes | 32000 | yes | no |
+| `msteams` | basic | native | yes | native | yes | 24576 | yes | no |
+| `email` | full | native | yes | image | yes | 512000 | no | **yes** |
+| `rest` | full | native | yes | native | yes | null | yes | no |
+| `mcp` | full | native | no | image | yes | null | no | no |
+| `a2a` | full | native | no | image | yes | null | yes | no |
+| `a2a` + A2UI extension | full | native | yes | native | yes | null | yes | no |
+
+Semantics:
+
+- **Hint, not contract.** The descriptor is the *nominal* capability;
+  the mapper keeps the final say on combinations (on WhatsApp, buttons
+  lose to a selection list or a dashboard image). An agent that ignores
+  the hint gets exactly today's channel output. That is pinned byte for
+  byte against pre-#352 baselines (`surface_baseline.rs`).
+- **Not security-relevant.** Never an authorization input, never in the
+  minted bearer (tested). Like `triton_sender_groups`: advertised, not
+  authoritative.
+- **Spec A2A** reports `a2a` always. The surface follows the request: a
+  client that activates the A2UI extension (`X-A2A-Extensions`, exact URI
+  match in the comma-separated list) gets the A2UI variant, registered
+  under its own key `a2a+a2ui` (still `channel: "a2a"`). Per-turn
+  metadata rides beside it: `_triton.protocol`, `_triton.a2a_context_id`,
+  and `_triton.agent` (the `/a2a/<slug>` face). The turn's report and
+  open-document `render_report` re-dispatches carry the same context.
+- **Embedded hosts.** In-process tools see the `_triton` metadata in
+  args but not the surface. They opt in with
+  `Tool::invoke_with_context(args, principal, &DispatchContext)`, whose
+  default ignores the context, so existing tools are unchanged. The
+  dispatcher's registry defaults to the trio. A host adds its chat
+  channels with `Dispatcher::with_surfaces`.
+- **Proactive sends.** A worker composing a `/v1/outbound` push reads the
+  delivery channel's descriptor from `GET /v1/manifest` (`surfaces`, keyed
+  by channel, listed with or without a manifest). Triton's own
+  delivery-time re-dispatches (`get_theme`, `render_report`) carry the
+  courier's channel. `/v1/outbound` names one adapter per request, so
+  there is no multi-channel "least capable" case to resolve.
+- **Operator tuning.** `adapters.<name>.surface_guidance` (chat) and
+  `TRITON_SURFACE_GUIDANCE_REST|MCP|A2A|A2A_A2UI` (trio; `A2A_A2UI` tunes
+  the A2UI variant, whose plain-A2A line "buttons are not shown" would be
+  false) replace the default guidance line. Boot is refused when a value
+  is over 1000 characters, or when two adapters on one channel (WhatsApp
+  Cloud and the Web bridge) set different lines.
+  `TRITON_STATIC_UPSTREAM_SURFACE_HINT=off` drops the body field (the
+  header stays) for an agent whose strict argument schema rejects
+  unknown keys. Triton cannot know an agent's validation rules, so this
+  switch is the answer for that case.
 
 ### 8.8 Consumer test harness
 
@@ -673,9 +783,12 @@ See `requirements.md` §2. Additional terms used here:
 - **PlatformMessage** (v0.2) — ordered list of `Fragment`s (text,
   media, button-set, selection-set, form) produced by the surface
   mapper and consumed by an outbound courier.
-- **SurfaceLimits** (v0.2) — per-platform caps the mapper enforces
-  at its edge (Discord 25-item select cap, Telegram 8-buttons-per-row,
-  WhatsApp Web 4000-char text chunk).
+- **SurfaceProfile** (#352) — one `const` per chat crate declaring what
+  the channel can show (markdown, tables, buttons and their cap, charts,
+  text cap, …). The mapper reads its caps from it, and Triton hints it to
+  upstream agents as `_triton.surface` (§8.7.1). Replaces the
+  `SurfaceLimits` table the v0.2 design described, which this repo never
+  had.
 - **Rasterizer** (v0.2) — out-of-process dashboard renderer
   (`render_a2ui_to_png` tool or sidecar service) that returns
   `{png_bytes, caption}` for `dashboard` components on text-first

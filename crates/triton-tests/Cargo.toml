@@ -61,6 +61,10 @@ serde = { workspace = true }
 # The embedded trio host, exercised by tests/multi_issuer.rs. No cycle:
 # triton-embed does not depend on this crate.
 triton-embed = { path = "../triton-embed" }
+# The real static-upstream router, wired into an embedded host so spec A2A
+# (not mounted in the `triton` binary) can be tested against a real
+# recording upstream over TCP (#352).
+triton-upstream = { path = "../triton-upstream" }
 # Implementing triton-core's `Tool` trait (it is #[async_trait]) for the
 # in-process router in tests/multi_issuer.rs.
 async-trait = "0.1"

@@ -29,7 +29,11 @@ use futures::stream::{BoxStream, StreamExt};
 use serde_json::Value;
 use tokio::sync::RwLock;
 use triton_core::stream::{Finalized, Termination};
-use triton_core::{Principal, StreamEvent, TritonError, UpstreamDispatch};
+use triton_core::{DispatchContext, Principal, StreamEvent, TritonError, UpstreamDispatch};
+
+/// The channel the turn will be rendered on (#352). Informational, like
+/// `X-Triton-Tool`: never used for routing or authorization.
+const CHANNEL_HEADER: &str = "X-Triton-Channel";
 use triton_identity::JwtSigner;
 
 use crate::sse::decode_sse;
@@ -187,6 +191,11 @@ pub struct StaticUpstream {
     /// otherwise pin the connection forever. The stream is failed closed
     /// once it runs past this regardless of how steadily bytes arrive.
     stream_max_duration: Duration,
+    /// #352: write the channel's surface descriptor into `_triton.surface`
+    /// of object args. On by default; `TRITON_STATIC_UPSTREAM_SURFACE_HINT=off`
+    /// turns it off for an agent that rejects unknown args. The
+    /// `X-Triton-Channel` header is sent either way.
+    surface_hint: bool,
 }
 
 impl StaticUpstream {
@@ -236,7 +245,37 @@ impl StaticUpstream {
             circuit_cooldown,
             stream_idle_timeout,
             stream_max_duration,
+            surface_hint: true,
         }
+    }
+
+    /// Turn the `_triton.surface` body field on or off (#352).
+    pub fn with_surface_hint(mut self, on: bool) -> Self {
+        self.surface_hint = on;
+        self
+    }
+
+    /// Args as sent upstream: object args get the channel's descriptor under
+    /// `_triton.surface` (the dispatcher already removed any caller-supplied
+    /// `_triton`). Non-object args can't carry a field and go out unchanged;
+    /// the header alone tells the agent the channel.
+    fn with_hint(&self, mut args: Value, ctx: &DispatchContext) -> Value {
+        if !self.surface_hint {
+            return args;
+        }
+        let (Some(surface), Some(map)) = (&ctx.surface, args.as_object_mut()) else {
+            return args;
+        };
+        let reserved = map
+            .entry(triton_core::dispatcher::RESERVED_ARGS_KEY)
+            .or_insert_with(|| Value::Object(Default::default()));
+        if let Some(reserved) = reserved.as_object_mut() {
+            reserved.insert(
+                "surface".to_string(),
+                serde_json::to_value(surface.as_ref()).unwrap_or(Value::Null),
+            );
+        }
+        args
     }
 
     /// Attach a JWT signer: every dispatch now carries a freshly-minted RS256
@@ -398,12 +437,14 @@ impl StaticUpstream {
         tool: &str,
         args: Value,
         principal: &Principal,
+        ctx: &DispatchContext,
     ) -> Result<Value, TritonError> {
         let ep = self
             .map
             .get(tool)
             .ok_or_else(|| TritonError::Validation(format!("unknown tool: {tool}")))?;
         let bearer = self.bearer(principal)?;
+        let args = self.with_hint(args, ctx);
         let resp = self
             .http
             .post(format!("http://{ep}/"))
@@ -412,6 +453,7 @@ impl StaticUpstream {
             // informational tool-name header rides every dispatch so
             // multi-tool agents can route without sniffing the body.
             .header("X-Triton-Tool", tool)
+            .header(CHANNEL_HEADER, &ctx.channel)
             .json(&args)
             .send()
             .await
@@ -445,6 +487,7 @@ impl StaticUpstream {
         authority: &str,
         uri: &str,
         principal: &Principal,
+        ctx: &DispatchContext,
     ) -> Result<Value, TritonError> {
         let ep = self.map.get(authority).ok_or_else(|| {
             TritonError::Validation(format!("unknown resource owner: {authority}"))
@@ -455,6 +498,7 @@ impl StaticUpstream {
             .post(format!("http://{ep}/"))
             .bearer_auth(&bearer)
             .header("X-Triton-MCP", "resources/read")
+            .header(CHANNEL_HEADER, &ctx.channel)
             .json(&serde_json::json!({ "uri": uri }))
             .send()
             .await
@@ -523,6 +567,7 @@ impl StaticUpstream {
         authority: &str,
         record: Value,
         principal: &Principal,
+        ctx: &DispatchContext,
     ) -> Result<Value, TritonError> {
         let ep = self.map.get(authority).ok_or_else(|| {
             TritonError::Validation(format!("unknown resource owner: {authority}"))
@@ -533,6 +578,7 @@ impl StaticUpstream {
             .post(format!("http://{ep}/"))
             .bearer_auth(&bearer)
             .header("X-Triton-MCP", "updateModelContext")
+            .header(CHANNEL_HEADER, &ctx.channel)
             .json(&record)
             .send()
             .await
@@ -595,6 +641,7 @@ impl UpstreamDispatch for StaticUpstream {
         tool: &str,
         args: Value,
         principal: &Principal,
+        ctx: &DispatchContext,
     ) -> Result<Value, TritonError> {
         // FR-U-4: short-circuit if the per-tool breaker is open. Half-open
         // lets exactly one probe through. The `circuit_open` prefix routes
@@ -607,7 +654,7 @@ impl UpstreamDispatch for StaticUpstream {
             )));
         }
 
-        let outcome = self.do_dispatch(tool, args, principal).await;
+        let outcome = self.do_dispatch(tool, args, principal, ctx).await;
 
         // FR-U-3: only agent-side faults (Tool) count toward the breaker;
         // an unknown tool (Validation) is a caller fault and must not trip
@@ -626,7 +673,12 @@ impl UpstreamDispatch for StaticUpstream {
     /// circuit breaker as a tool call (keyed on the authority) so a sick
     /// renderer fails fast. Bearer minting + SSRF guard (enforced at boot
     /// on every mapped endpoint) + audit all apply identically.
-    async fn read_resource(&self, uri: &str, principal: &Principal) -> Result<Value, TritonError> {
+    async fn read_resource(
+        &self,
+        uri: &str,
+        principal: &Principal,
+        ctx: &DispatchContext,
+    ) -> Result<Value, TritonError> {
         // Caller-fault validation up front, before arming the breaker.
         let authority = parse_ui_authority(uri)?;
         if !self.map.contains_key(authority) {
@@ -643,7 +695,7 @@ impl UpstreamDispatch for StaticUpstream {
             )));
         }
 
-        let outcome = self.do_read_resource(authority, uri, principal).await;
+        let outcome = self.do_read_resource(authority, uri, principal, ctx).await;
 
         let count_failure = matches!(outcome, Err(TritonError::Tool(_)));
         let success = outcome.is_ok();
@@ -663,6 +715,7 @@ impl UpstreamDispatch for StaticUpstream {
         uri: &str,
         record: Value,
         principal: &Principal,
+        ctx: &DispatchContext,
     ) -> Result<Value, TritonError> {
         let authority = parse_ui_authority(uri)?;
         if !self.map.contains_key(authority) {
@@ -680,7 +733,7 @@ impl UpstreamDispatch for StaticUpstream {
         }
 
         let outcome = self
-            .do_update_model_context(authority, record, principal)
+            .do_update_model_context(authority, record, principal, ctx)
             .await;
 
         let count_failure = matches!(outcome, Err(TritonError::Tool(_)));
@@ -709,6 +762,7 @@ impl UpstreamDispatch for StaticUpstream {
         tool: &str,
         args: Value,
         principal: &Principal,
+        ctx: &DispatchContext,
     ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
         let permission = self.breaker_check(tool).await;
         if !permission.allowed {
@@ -727,12 +781,14 @@ impl UpstreamDispatch for StaticUpstream {
             }
         };
         let bearer = self.bearer(principal)?;
+        let args = self.with_hint(args, ctx);
 
         let send = self
             .http_stream
             .post(format!("http://{ep}/"))
             .bearer_auth(&bearer)
             .header("X-Triton-Tool", tool)
+            .header(CHANNEL_HEADER, &ctx.channel)
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .json(&args)
             .send()
