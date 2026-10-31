@@ -568,3 +568,112 @@ async fn an_inconsistent_customer_route_refuses_to_boot() {
         }
     }
 }
+
+/// The tool names `tools/list` returns at `url` for `token`.
+async fn tool_names(url: &str, token: &str) -> Vec<String> {
+    let resp = reqwest::Client::new()
+        .post(url)
+        .header("accept", "application/json, text/event-stream")
+        .bearer_auth(token)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {} }))
+        .send()
+        .await
+        .expect("POST tools/list");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let text = resp.text().await.expect("body");
+    // A JSON body, or one SSE `data:` event carrying it.
+    let json = text
+        .lines()
+        .find_map(|l| l.strip_prefix("data:"))
+        .unwrap_or(&text);
+    let body: Value = serde_json::from_str(json.trim()).expect("JSON-RPC response");
+    let mut names: Vec<String> = body["result"]["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("tools array: {body}"))
+        .iter()
+        .map(|t| t["name"].as_str().expect("name").to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// By default the in-process demo tools (`echo`, ...) are listed next to
+/// the upstream's on a customer path.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_customer_path_lists_the_built_in_tools_by_default() {
+    let r = rig().await;
+    let token = entra_token(&r.entra, TID_ACME);
+    let names = tool_names(&r.triton.rest_url("/mcp/acme"), &token).await;
+    assert!(names.contains(&"assistant".to_string()), "{names:?}");
+    assert!(names.contains(&"echo".to_string()), "{names:?}");
+}
+
+/// `TRITON_BUILTIN_TOOLS=off` registers no in-process tool: a public
+/// gateway in front of one agent lists exactly that agent's tools, so an
+/// MCP client (Claude, ChatGPT) does not offer `echo` or `demo_panel` to
+/// the user. Calling a built-in name is then an unknown tool.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn builtin_tools_off_lists_only_the_upstream_tools() {
+    let r = rig_with(true, &[("TRITON_BUILTIN_TOOLS", "off")]).await;
+    let token = entra_token(&r.entra, TID_ACME);
+    for path in ["/mcp/acme", "/mcp/globex"] {
+        let token = if path.ends_with("globex") {
+            entra_token(&r.entra, TID_GLOBEX)
+        } else {
+            token.clone()
+        };
+        let names = tool_names(&r.triton.rest_url(path), &token).await;
+        assert_eq!(names, vec!["assistant".to_string()], "{path}");
+    }
+
+    let resp = reqwest::Client::new()
+        .post(r.triton.rest_url("/mcp/acme"))
+        .header("accept", "application/json, text/event-stream")
+        .bearer_auth(&token)
+        .json(&json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                       "params": { "name": "echo", "arguments": { "message": "hi" } } }))
+        .send()
+        .await
+        .expect("POST tools/call");
+    let text = resp.text().await.expect("body");
+    assert!(
+        !text.contains("\"echo\":\"hi\""),
+        "a disabled built-in must not run: {text}"
+    );
+}
+
+/// An unknown value refuses to boot rather than silently exposing the
+/// built-ins on a gateway the operator meant to lock down.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unknown_builtin_tools_value_refuses_to_boot() {
+    let mut cmd = tokio::process::Command::new(triton_tests::locate_triton_binary());
+    for (k, _) in std::env::vars() {
+        if k.starts_with("TRITON_") {
+            cmd.env_remove(k);
+        }
+    }
+    let port = || triton_tests::free_tcp_port().to_string();
+    let child = cmd
+        .env("TRITON_BUILTIN_TOOLS", "maybe")
+        .env("TRITON_HOST", "127.0.0.1")
+        .env("TRITON_MCP_PORT", port())
+        .env("TRITON_A2A_PORT", port())
+        .env("TRITON_REST_PORT", port())
+        .env("TRITON_METRICS_PORT", port())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("run triton");
+    let out = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("booted instead of refusing")
+        .expect("output");
+    assert!(!out.status.success(), "boot must fail");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(text.contains("TRITON_BUILTIN_TOOLS"), "{text}");
+}

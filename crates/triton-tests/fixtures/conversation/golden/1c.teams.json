@@ -2,6 +2,12 @@
   "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
   "actions": [
     {
+      "style": "positive",
+      "title": "Open in the portfolio",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/analyse?lifecycle=planned"
+    },
+    {
       "associatedInputs": "none",
       "data": {
         "ct": "__send_message|{\"m\":\"List all planned Agents\"}"
@@ -9,11 +15,6 @@
       "title": "Show 3 more",
       "type": "Action.Execute",
       "verb": "agentAction"
-    },
-    {
-      "title": "Open in the portfolio",
-      "type": "Action.OpenUrl",
-      "url": "https://app.example.com/acme/analyse?lifecycle=planned"
     }
   ],
   "body": [

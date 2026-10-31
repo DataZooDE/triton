@@ -1,0 +1,136 @@
+{
+  "_actions": {
+    "a3": "Which agents are planned with AI Act class high?",
+    "a4": "Which agents are planned without an owner?"
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "as of 18:17",
+            "usageHint": "caption"
+          },
+          {
+            "columns": [
+              {
+                "field": "agent",
+                "header": "Agent"
+              },
+              {
+                "field": "capability",
+                "header": "Capability"
+              },
+              {
+                "field": "owner",
+                "header": "Owner"
+              }
+            ],
+            "component": "MaterialTable",
+            "id": "tbl-2",
+            "rows": [
+              {
+                "agent": "Agent 3",
+                "capability": "Requirements: Monitor",
+                "owner": "Head of IT Operations"
+              },
+              {
+                "agent": "Agent 8",
+                "capability": "Design: Schedule",
+                "owner": "Data Protection Officer"
+              },
+              {
+                "agent": "Agent 12",
+                "capability": "Design: Forecast",
+                "owner": "No owner"
+              },
+              {
+                "agent": "Agent 17",
+                "capability": "Validation: Forecast",
+                "owner": "Head of Quality Assurance"
+              },
+              {
+                "agent": "Agent 21",
+                "capability": "Planning: Schedule",
+                "owner": "Head of Production Planning"
+              },
+              {
+                "agent": "Agent 28",
+                "capability": "Sales: Forecast",
+                "owner": "Data Protection Officer"
+              }
+            ]
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a3",
+            "label": "High AI Act only",
+            "variant": "flat"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a4",
+            "label": "Without owner",
+            "variant": "flat"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a3",
+              "a4"
+            ],
+            "component": "MaterialRow",
+            "id": "row-5",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "t-1",
+              "tbl-2",
+              "row-5"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

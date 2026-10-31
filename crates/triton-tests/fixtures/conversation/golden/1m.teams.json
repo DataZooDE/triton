@@ -97,6 +97,7 @@
           "data": {
             "ct": "__send_message|{\"tpl\":\"Find {t1.lifecycle} Agents with AI Act class {t1.ai_act}[[ owned by {t1.owner}]]\"}"
           },
+          "style": "positive",
           "title": "Show Agents",
           "type": "Action.Execute",
           "verb": "agentAction"

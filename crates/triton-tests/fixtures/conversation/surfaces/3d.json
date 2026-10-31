@@ -1,0 +1,57 @@
+{
+  "_mock_item": "3d Unclear target (turn 3): three choices plus more, optional reason, nothing was changed",
+  "surface": {
+    "components": [
+      {
+        "kind": "header",
+        "title": "Which Agent should be retired?",
+        "context": "10 match \"Agent 2\". Nothing was changed."
+      },
+      {
+        "kind": "form",
+        "title": "",
+        "submit_label": "Retire as draft",
+        "fields": [
+          {
+            "name": "request",
+            "label": "Agent",
+            "kind": "select",
+            "required": true,
+            "style": "radio",
+            "options": [
+              {
+                "label": "Agent 2 · Requirements: Forecast",
+                "value": "Retire the agent \"Agent 2\"."
+              },
+              {
+                "label": "Agent 20 · Design: Monitor",
+                "value": "Retire the agent \"Agent 20\"."
+              },
+              {
+                "label": "Agent 21 · Planning: Schedule",
+                "value": "Retire the agent \"Agent 21\"."
+              }
+            ]
+          },
+          {
+            "name": "reason",
+            "label": "Reason (optional)",
+            "kind": "string",
+            "placeholder": "e.g. replaced by Agent 31",
+            "required": false
+          }
+        ],
+        "send_template": "{request}[[ Reason: {reason}]]"
+      },
+      {
+        "kind": "button",
+        "label": "7 more…",
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/open?view=match"
+        }
+      }
+    ]
+  },
+  "summary": "10 Agents match \"Agent 2\", so nothing was changed. Pick one:"
+}

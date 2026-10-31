@@ -1,0 +1,276 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "size": "Medium",
+              "text": "Change Agent 28",
+              "type": "TextBlock",
+              "weight": "Bolder",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        }
+      ],
+      "type": "ColumnSet"
+    },
+    {
+      "isSubtle": true,
+      "spacing": "None",
+      "text": "Sales: Forecast · Planned · Owner: Data Protection Officer",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "card": {
+            "body": [
+              {
+                "choices": [
+                  {
+                    "title": "IT Operations",
+                    "value": "IT Operations"
+                  },
+                  {
+                    "title": "Finance operations",
+                    "value": "Finance operations"
+                  },
+                  {
+                    "title": "Head of Quality Assurance",
+                    "value": "Head of Quality Assurance"
+                  }
+                ],
+                "id": "t1.value",
+                "isRequired": true,
+                "label": "New owner",
+                "style": "compact",
+                "type": "Input.ChoiceSet"
+              },
+              {
+                "id": "t1.reason",
+                "isMultiline": true,
+                "isRequired": false,
+                "label": "Why (optional)",
+                "placeholder": "e.g. Finance took over the process in October",
+                "type": "Input.Text"
+              },
+              {
+                "actions": [
+                  {
+                    "data": {
+                      "ct": "__send_message|{\"tpl\":\"Set the owner of Agent 28 to \\\"{t1.value}\\\".[[ Reason: {t1.reason}]] (version 08cbcd825d41)\"}"
+                    },
+                    "style": "positive",
+                    "title": "File for review",
+                    "type": "Action.Execute",
+                    "verb": "agentAction"
+                  }
+                ],
+                "type": "ActionSet"
+              },
+              {
+                "isSubtle": true,
+                "size": "Small",
+                "spacing": "Small",
+                "text": "A colleague reviews it before it goes live.",
+                "type": "TextBlock",
+                "wrap": true
+              }
+            ],
+            "type": "AdaptiveCard"
+          },
+          "title": "Owner",
+          "type": "Action.ShowCard"
+        },
+        {
+          "card": {
+            "body": [
+              {
+                "choices": [
+                  {
+                    "title": "Assessed",
+                    "value": "Assessed"
+                  },
+                  {
+                    "title": "Deployed",
+                    "value": "Deployed"
+                  },
+                  {
+                    "title": "Retired",
+                    "value": "Retired"
+                  }
+                ],
+                "id": "t2.value",
+                "isRequired": true,
+                "label": "New lifecycle",
+                "style": "compact",
+                "type": "Input.ChoiceSet"
+              },
+              {
+                "id": "t2.reason",
+                "isMultiline": true,
+                "isRequired": false,
+                "label": "Why (optional)",
+                "placeholder": "e.g. Finance took over the process in October",
+                "type": "Input.Text"
+              },
+              {
+                "actions": [
+                  {
+                    "data": {
+                      "ct": "__send_message|{\"tpl\":\"Set the lifecycle of Agent 28 to \\\"{t2.value}\\\".[[ Reason: {t2.reason}]] (version 08cbcd825d41)\"}"
+                    },
+                    "style": "positive",
+                    "title": "File for review",
+                    "type": "Action.Execute",
+                    "verb": "agentAction"
+                  }
+                ],
+                "type": "ActionSet"
+              },
+              {
+                "isSubtle": true,
+                "size": "Small",
+                "spacing": "Small",
+                "text": "A colleague reviews it before it goes live.",
+                "type": "TextBlock",
+                "wrap": true
+              }
+            ],
+            "type": "AdaptiveCard"
+          },
+          "title": "Lifecycle",
+          "type": "Action.ShowCard"
+        },
+        {
+          "card": {
+            "body": [
+              {
+                "choices": [
+                  {
+                    "title": "Minimal",
+                    "value": "Minimal"
+                  },
+                  {
+                    "title": "Limited",
+                    "value": "Limited"
+                  },
+                  {
+                    "title": "High",
+                    "value": "High"
+                  }
+                ],
+                "id": "t3.value",
+                "isRequired": true,
+                "label": "New AI Act class",
+                "style": "compact",
+                "type": "Input.ChoiceSet"
+              },
+              {
+                "id": "t3.reason",
+                "isMultiline": true,
+                "isRequired": false,
+                "label": "Why (optional)",
+                "placeholder": "e.g. Finance took over the process in October",
+                "type": "Input.Text"
+              },
+              {
+                "actions": [
+                  {
+                    "data": {
+                      "ct": "__send_message|{\"tpl\":\"Set the AI Act class of Agent 28 to \\\"{t3.value}\\\".[[ Reason: {t3.reason}]] (version 08cbcd825d41)\"}"
+                    },
+                    "style": "positive",
+                    "title": "File for review",
+                    "type": "Action.Execute",
+                    "verb": "agentAction"
+                  }
+                ],
+                "type": "ActionSet"
+              },
+              {
+                "isSubtle": true,
+                "size": "Small",
+                "spacing": "Small",
+                "text": "A colleague reviews it before it goes live.",
+                "type": "TextBlock",
+                "wrap": true
+              }
+            ],
+            "type": "AdaptiveCard"
+          },
+          "title": "AI Act class",
+          "type": "Action.ShowCard"
+        },
+        {
+          "card": {
+            "body": [
+              {
+                "choices": [
+                  {
+                    "title": "Capability: Sales: Schedule",
+                    "value": "Capability: Sales: Schedule"
+                  },
+                  {
+                    "title": "Purpose: Forecast quarterly demand",
+                    "value": "Purpose: Forecast quarterly demand"
+                  }
+                ],
+                "id": "t4.value",
+                "isRequired": true,
+                "label": "What to change",
+                "style": "compact",
+                "type": "Input.ChoiceSet"
+              },
+              {
+                "id": "t4.reason",
+                "isMultiline": true,
+                "isRequired": false,
+                "label": "Why (optional)",
+                "placeholder": "e.g. Finance took over the process in October",
+                "type": "Input.Text"
+              },
+              {
+                "actions": [
+                  {
+                    "data": {
+                      "ct": "__send_message|{\"tpl\":\"Change Agent 28: {t4.value}.[[ Reason: {t4.reason}]] (version 08cbcd825d41)\"}"
+                    },
+                    "style": "positive",
+                    "title": "File for review",
+                    "type": "Action.Execute",
+                    "verb": "agentAction"
+                  }
+                ],
+                "type": "ActionSet"
+              },
+              {
+                "isSubtle": true,
+                "size": "Small",
+                "spacing": "Small",
+                "text": "A colleague reviews it before it goes live.",
+                "type": "TextBlock",
+                "wrap": true
+              }
+            ],
+            "type": "AdaptiveCard"
+          },
+          "title": "More…",
+          "type": "Action.ShowCard"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

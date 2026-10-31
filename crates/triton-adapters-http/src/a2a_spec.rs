@@ -544,11 +544,34 @@ fn text_from_params(params: &Value, client: &A2uiClient) -> Option<Inbound> {
     // complete message to send (or a document to open) — this is what makes
     // a follow-up button re-ask instead of the agent seeing GE's "User
     // action triggered." placeholder text. Fall back to the text parts.
-    if let Some(action) = a2ui_action(parts) {
+    let action = a2ui_action(parts);
+    if debug_a2ui_actions() {
+        let outcome = match &action {
+            Some(triton_core::a2ui::ge::GeAction::Message(m)) => json!({ "message": m }),
+            Some(triton_core::a2ui::ge::GeAction::Incomplete(n)) => json!({ "incomplete": n }),
+            Some(triton_core::a2ui::ge::GeAction::OpenDoc { label, .. }) => {
+                json!({ "open_doc": label })
+            }
+            None => json!("none"),
+        };
+        tracing::info!(
+            inbound = %describe_a2ui_actions(parts),
+            outcome = %outcome,
+            "a2ui action (TRITON_DEBUG_A2UI_ACTIONS)"
+        );
+    }
+    if let Some(action) = action {
         return Some(match action {
             triton_core::a2ui::ge::GeAction::Message(text) => Inbound {
                 text,
                 open_doc: None,
+                missing: None,
+            },
+            // A form submit without its required inputs sends nothing.
+            triton_core::a2ui::ge::GeAction::Incomplete(names) => Inbound {
+                text: String::new(),
+                open_doc: None,
+                missing: Some(format!("Choose {} first.", names.join(", "))),
             },
             triton_core::a2ui::ge::GeAction::OpenDoc {
                 label,
@@ -563,6 +586,7 @@ fn text_from_params(params: &Value, client: &A2uiClient) -> Option<Inbound> {
                     id,
                     url,
                 }),
+                missing: None,
             },
         });
     }
@@ -579,11 +603,13 @@ fn text_from_params(params: &Value, client: &A2uiClient) -> Option<Inbound> {
         return client.fallback.clone().map(|text| Inbound {
             text,
             open_doc: None,
+            missing: None,
         });
     }
     Some(Inbound {
         text: trimmed.to_string(),
         open_doc: None,
+        missing: None,
     })
 }
 
@@ -703,6 +729,8 @@ fn message_parts(params: &Value) -> &[Value] {
 struct Inbound {
     text: String,
     open_doc: Option<OpenDoc>,
+    /// A form submit that lacked required inputs: refused with this text.
+    missing: Option<String>,
 }
 
 struct OpenDoc {
@@ -721,6 +749,63 @@ impl OpenDoc {
             url: &self.url,
         }
     }
+}
+
+/// A redacted summary of the inbound parts and A2UI actions, for the
+/// `TRITON_DEBUG_A2UI_ACTIONS=1` log: part kinds, each action's name,
+/// surface, keys and resolved context — the signed token in a component id
+/// is replaced by its length.
+fn describe_a2ui_actions(parts: &[Value]) -> Value {
+    let mut kinds = Vec::new();
+    let mut actions = Vec::new();
+    for p in parts {
+        let data = match p.get("kind").and_then(Value::as_str) {
+            Some("data") => p.get("data"),
+            None if p.get("data").is_some() => p.get("data"),
+            _ => None,
+        };
+        let Some(data) = data else {
+            let k = p.get("kind").and_then(Value::as_str).unwrap_or("text");
+            let n = p.get("text").and_then(Value::as_str).map_or(0, str::len);
+            kinds.push(json!(format!("{k}({n})")));
+            continue;
+        };
+        kinds.push(json!("data"));
+        let msgs: Vec<&Value> = match data {
+            Value::Array(a) => a.iter().collect(),
+            obj => vec![obj],
+        };
+        for a in msgs.iter().filter_map(|m| m.get("action")) {
+            let cid = a.get("sourceComponentId").and_then(Value::as_str).map(|c| {
+                match c.split_once('-') {
+                    Some((head, tok)) => format!("{head}-<token {} chars>", tok.len()),
+                    None => format!("<{} chars>", c.len()),
+                }
+            });
+            let keys: Vec<&String> = a
+                .as_object()
+                .map(|o| o.keys().collect())
+                .unwrap_or_default();
+            actions.push(json!({
+                "name": a.get("name"),
+                "surfaceId": a.get("surfaceId"),
+                "sourceComponentId": cid,
+                "keys": keys,
+                "context": a.get("context"),
+            }));
+        }
+    }
+    json!({ "parts": kinds, "actions": actions })
+}
+
+/// `TRITON_DEBUG_A2UI_ACTIONS=1`: log every inbound action, redacted
+/// ([`describe_a2ui_actions`]). Off by default; read once.
+fn debug_a2ui_actions() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("TRITON_DEBUG_A2UI_ACTIONS")
+            .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "on"))
+    })
 }
 
 /// The action of an inbound A2UI `action` DataPart. The client-to-server
@@ -755,19 +840,22 @@ pub(crate) fn a2ui_action(parts: &[Value]) -> Option<triton_core::a2ui::ge::GeAc
             let Some(action) = m.get("action") else {
                 continue;
             };
-            if let Some(q) = action
-                .get("context")
-                .and_then(|c| c.get("question"))
+            // A signed component id names the action; its form inputs come
+            // from the context. Only an action Triton did not sign may
+            // carry its message as `context.question` (crew F6).
+            let context = action.get("context").cloned().unwrap_or(Value::Null);
+            if let Some(cid) = action.get("sourceComponentId").and_then(Value::as_str)
+                && let Some(a) = triton_core::a2ui::ge::action_for_with(cid, &context)
+            {
+                return Some(a);
+            }
+            if let Some(q) = context
+                .get("question")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
                 return Some(triton_core::a2ui::ge::GeAction::Message(q.to_string()));
-            }
-            if let Some(cid) = action.get("sourceComponentId").and_then(Value::as_str)
-                && let Some(a) = triton_core::a2ui::ge::action_for(cid)
-            {
-                return Some(a);
             }
         }
     }
@@ -788,6 +876,18 @@ async fn message_send(
             "params.message.parts must contain at least one non-empty text part",
         );
     };
+    // A form submit without a required choice: nothing is sent; the reply
+    // says which choice is missing, as an ordinary agent message.
+    if let Some(missing) = &inbound.missing {
+        return rpc_ok(
+            &req.id,
+            json!({
+                "kind": "message", "role": "agent",
+                "messageId": uuid::Uuid::new_v4().to_string(),
+                "parts": [ { "kind": "text", "text": missing } ],
+            }),
+        );
+    }
     let text = inbound.text.clone();
     // A2A 0.3.0 requires `contextId` on Task; honor a client-supplied
     // `message.contextId`, else generate one (strict clients reject its
@@ -866,9 +966,10 @@ async fn message_send(
                 &vega_overrides,
             )
             .await;
-            let reply = reply_text(&result);
+            let msgs = triton_core::a2ui::ge::build_messages_negotiated(&result, a2ui);
+            let reply = text_part(&result, msgs.is_some());
             let mut parts = vec![json!({ "kind": "text", "text": reply })];
-            if let Some(msgs) = triton_core::a2ui::ge::build_messages_negotiated(&result, a2ui) {
+            if let Some(msgs) = msgs {
                 parts.extend(triton_core::a2ui::ge::data_parts(msgs));
             }
             let msg = json!({
@@ -924,6 +1025,18 @@ async fn message_stream(
             "params.message.parts must contain at least one non-empty text part",
         );
     };
+    if let Some(missing) = &inbound.missing {
+        // As in message/send: one agent message, the stream ends.
+        let frame = json!({ "jsonrpc": "2.0", "id": req.id, "result": {
+            "kind": "message", "role": "agent",
+            "messageId": uuid::Uuid::new_v4().to_string(),
+            "parts": [ { "kind": "text", "text": missing } ],
+        } });
+        let sse = futures::stream::iter([Ok::<_, std::convert::Infallible>(
+            axum::response::sse::Event::default().data(frame.to_string()),
+        )]);
+        return axum::response::Sse::new(sse).into_response();
+    }
     let text = inbound.text.clone();
     let trace_id = principal.trace_id.clone();
     let rpc_id = req.id.clone();
@@ -1134,7 +1247,9 @@ async fn message_stream(
                         // remain. A lagged reader missed deltas: resend whole.
                         let did_stream =
                             streamed.load(Ordering::Relaxed) && !lagged.load(Ordering::Relaxed);
-                        let reply = reply_text(&v);
+                        let a2ui_msgs =
+                            triton_core::a2ui::ge::build_messages_negotiated(&v, a2ui);
+                        let reply = text_part(&v, a2ui_msgs.is_some());
                         // Keep the prose and A2UI as separate artifacts. Token
                         // deltas append to the prose artifact; putting A2UI in
                         // its last chunk makes clients merge structured parts
@@ -1181,7 +1296,7 @@ async fn message_stream(
                                 },
                             })));
                         }
-                        if let Some(msgs) = triton_core::a2ui::ge::build_messages_negotiated(&v, a2ui) {
+                        if let Some(msgs) = a2ui_msgs {
                             frames.push(rpc_frames(json!({
                                 "kind": "artifact-update",
                                 "taskId": task_for_frames,
@@ -1437,6 +1552,23 @@ pub(crate) fn sources_markdown(result: &Value) -> Option<String> {
     (!links.is_empty()).then(|| format!("Sources: {}", links.join(" · ")))
 }
 
+/// The text part of a reply (say it once): beside a rendered A2UI surface,
+/// the result's one-sentence `summary` when it has one, because the rows,
+/// choices and facts are in the components; with no surface shown, the full
+/// [`reply_text`].
+pub fn text_part(result: &Value, surface_shown: bool) -> String {
+    if surface_shown
+        && let Some(summary) = result
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    {
+        return summary.to_string();
+    }
+    reply_text(result)
+}
+
 pub fn reply_text(result: &Value) -> String {
     for key in ["text", "message", "answer"] {
         if let Some(s) = result.get(key).and_then(Value::as_str) {
@@ -1673,5 +1805,48 @@ mod agent_slug_tests {
         ] {
             assert!(validate_agent_slug(bad).is_err(), "`{bad}`");
         }
+    }
+}
+
+#[cfg(test)]
+mod action_debug_tests {
+    use super::*;
+
+    /// The env-gated action log shows what the host actually posted — the
+    /// action name, surface, the click's context keys and values, and which
+    /// control was clicked — but never the signed token in the component id.
+    #[test]
+    fn the_action_summary_shows_the_context_and_never_the_token() {
+        let token = "x".repeat(120);
+        let parts = vec![
+            json!({ "kind": "text", "text": "User action triggered." }),
+            json!({ "kind": "data", "data": { "version": "v0.9", "action": {
+                "name": "submit",
+                "surfaceId": "srf-1",
+                "sourceComponentId": format!("a4-{token}"),
+                "timestamp": "2026-10-31T19:34:00Z",
+                "context": { "value": "IT Operations", "reason": "handover" }
+            } } }),
+        ];
+        let s = describe_a2ui_actions(&parts);
+        let text = s.to_string();
+        assert!(!text.contains(&token), "the signed token leaks: {text}");
+        let a = &s["actions"][0];
+        assert_eq!(a["name"], "submit");
+        assert_eq!(a["surfaceId"], "srf-1");
+        assert_eq!(a["sourceComponentId"], "a4-<token 120 chars>");
+        assert_eq!(a["context"]["value"], "IT Operations");
+        assert_eq!(a["context"]["reason"], "handover");
+        assert_eq!(
+            a["keys"],
+            json!([
+                "context",
+                "name",
+                "sourceComponentId",
+                "surfaceId",
+                "timestamp"
+            ])
+        );
+        assert_eq!(s["parts"], json!(["text(22)", "data"]));
     }
 }

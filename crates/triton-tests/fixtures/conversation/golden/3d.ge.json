@@ -1,0 +1,101 @@
+{
+  "_actions": {
+    "a4": "form submit, fills: Agent"
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "10 match \"Agent 2\". Nothing was changed.",
+            "usageHint": "caption"
+          },
+          {
+            "component": "MaterialSelect",
+            "id": "in-2",
+            "label": "Agent",
+            "options": [
+              {
+                "label": "Agent 2 · Requirements: Forecast",
+                "value": "Retire the agent \"Agent 2\"."
+              },
+              {
+                "label": "Agent 20 · Design: Monitor",
+                "value": "Retire the agent \"Agent 20\"."
+              },
+              {
+                "label": "Agent 21 · Planning: Schedule",
+                "value": "Retire the agent \"Agent 21\"."
+              }
+            ],
+            "value": {
+              "path": "/f1/request"
+            }
+          },
+          {
+            "component": "MaterialInput",
+            "id": "in-3",
+            "label": "Reason (optional)",
+            "placeholder": "e.g. replaced by Agent 31",
+            "value": {
+              "path": "/f1/reason"
+            }
+          },
+          {
+            "action": {
+              "event": {
+                "context": {
+                  "reason": {
+                    "path": "/f1/reason"
+                  },
+                  "request": {
+                    "path": "/f1/request"
+                  }
+                },
+                "name": "submit"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a4",
+            "label": "Retire as draft",
+            "variant": "flat"
+          },
+          {
+            "children": [
+              "t-1",
+              "in-2",
+              "in-3",
+              "a4"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

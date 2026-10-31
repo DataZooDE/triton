@@ -85,6 +85,7 @@
           "data": {
             "ct": "__send_message|{\"tpl\":\"Show the capability map for {t1.domain}[[, area {t1.area}]], {t1.scope}\"}"
           },
+          "style": "positive",
           "title": "Show map",
           "type": "Action.Execute",
           "verb": "agentAction"

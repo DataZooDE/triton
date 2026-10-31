@@ -1320,6 +1320,32 @@ async fn producer_surfaces_need_a2ui_negotiated() {
     assert_eq!(reply["result"]["parts"][0]["text"], "Here.");
 }
 
+/// The one-sentence `summary` is the text part only where a surface is shown:
+/// beside producer surfaces for an A2UI client, while a client that did not
+/// negotiate A2UI sees no surface and gets the whole `text`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_summary_follows_the_negotiated_producer_surface() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({
+        "summary": "Two picks.",
+        "text": "Two picks: A and B, both due Friday.",
+        "surface": {
+            "a2ui": [{ "components": [ { "id": "root", "component": "MaterialText", "text": "card" } ] }]
+        }
+    }))
+    .await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let with = post_rpc(&base, &iss, &send("hi"), true).await;
+    assert_eq!(with["result"]["parts"][0]["text"], "Two picks.", "{with}");
+    let without = post_rpc(&base, &iss, &send("hi"), false).await;
+    assert!(!without.to_string().contains("createSurface"), "{without}");
+    assert_eq!(
+        without["result"]["parts"][0]["text"], "Two picks: A and B, both due Friday.",
+        "{without}"
+    );
+}
+
 /// The click round trip also works on `message/stream`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_streamed_click_round_trips() {

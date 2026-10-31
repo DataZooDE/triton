@@ -162,9 +162,18 @@ fn normalise_ge(messages: &[Value], signer: &ActionSigner) -> Value {
             if let Some((short, _)) = id.split_once('-').filter(|(p, _)| {
                 p.starts_with('a') && p[1..].bytes().all(|b| b.is_ascii_digit()) && p.len() > 1
             }) {
-                let msg = signer
-                    .open(&id)
-                    .unwrap_or_else(|| panic!("action id {id} must decode"));
+                // A form submit (signed template) decodes to the inputs it
+                // still needs; anything else to its complete message.
+                let msg = match signer
+                    .open_action(&id)
+                    .unwrap_or_else(|| panic!("action id {id} must decode"))
+                {
+                    triton_core::a2ui::ge::GeAction::Message(m) => m,
+                    triton_core::a2ui::ge::GeAction::Incomplete(names) => {
+                        format!("form submit, fills: {}", names.join(", "))
+                    }
+                    other => panic!("unexpected action {other:?}"),
+                };
                 actions.insert(short.to_string(), json!(msg));
                 text = text.replace(&format!("\"{id}\""), &format!("\"{short}\""));
             }
@@ -225,6 +234,15 @@ fn every_mock_item_renders_as_valid_a2ui_v09_adaptive_card_and_text() {
         "2a-map",
         "2b",
         "2d",
+        // Turn 3: the redesigned renderings (one anatomy).
+        "3a",
+        "3b",
+        "3c",
+        "3d",
+        "3d-list",
+        "3e",
+        "3f",
+        "3g",
         // Extra cases beyond the mock items (prefixed `x-`).
         "x-embed-text",
     ];
@@ -248,10 +266,21 @@ fn every_mock_item_renders_as_valid_a2ui_v09_adaptive_card_and_text() {
     let on = GeOptions {
         open_url: true,
         embed: true,
+        ..GeOptions::default()
     };
     for (n, v) in &fixtures {
         if ["1a", "2b", "2d", "x-embed-text"].contains(&n.as_str()) {
             variants.push((format!("{n}.ge-optin.json"), v.clone(), on));
+        }
+    }
+    // The fallback switch for forms (one-click buttons instead of fields).
+    let chips = GeOptions {
+        form_fields: false,
+        ..GeOptions::default()
+    };
+    for (n, v) in &fixtures {
+        if ["1e", "1m", "1o", "3c", "3d"].contains(&n.as_str()) {
+            variants.push((format!("{n}.ge-chips.json"), v.clone(), chips));
         }
     }
 
@@ -502,6 +531,7 @@ fn non_https_links_are_dropped_on_every_channel() {
             GeOptions {
                 open_url: true,
                 embed: false,
+                ..GeOptions::default()
             },
         )
         .expect("ge"),
@@ -582,4 +612,258 @@ fn teams_template_inputs_are_namespaced_per_component() {
             "{tpl}"
         );
     }
+}
+
+/// Every visible string of a card or an A2UI message array (not action
+/// data, not URLs): what a reader sees.
+fn visible(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::Object(m) => {
+            for (k, x) in m {
+                match (k.as_str(), x) {
+                    (
+                        "text" | "title" | "label" | "placeholder" | "value" | "caption"
+                        | "description" | "header",
+                        Value::String(s),
+                    ) => out.push(s.clone()),
+                    ("data" | "url" | "action" | "id" | "targetElements", _) => {}
+                    _ => visible(x, out),
+                }
+            }
+        }
+        Value::Array(a) => a.iter().for_each(|x| visible(x, out)),
+        _ => {}
+    }
+}
+
+fn turn3(name: &str) -> Value {
+    read_json(&dir(&format!("fixtures/conversation/surfaces/{name}.json")))
+}
+
+/// Rule 4 (no internals): no version pin, no "Will be sent as", no raw URL
+/// is visible on a turn-3 card, on Teams or Gemini.
+#[test]
+fn turn3_cards_show_no_internals() {
+    let signer = signer();
+    for name in ["3a", "3b", "3c", "3d", "3d-list", "3e", "3f", "3g"] {
+        let s = turn3(name);
+        let mut seen = Vec::new();
+        visible(&teams_card(&s).expect("card"), &mut seen);
+        for opts in [
+            GeOptions::default(),
+            GeOptions {
+                form_fields: false,
+                ..GeOptions::default()
+            },
+        ] {
+            visible(
+                &json!(build_messages_with(&s, &signer, opts).expect("ge")),
+                &mut seen,
+            );
+        }
+        for t in &seen {
+            for bad in [
+                "version",
+                "Will be sent as",
+                "http://",
+                "https://",
+                "{value}",
+            ] {
+                assert!(
+                    !t.contains(bad),
+                    "{name}: visible internal {bad:?} in {t:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Rule 5 (one anatomy) on Teams: the header carries the title and the
+/// stamp, the primary action leads the bar in the primary style, and a
+/// table keeps one value per cell.
+#[test]
+fn turn3_teams_cards_follow_one_anatomy() {
+    let card = teams_card(&turn3("3a")).expect("card");
+    let body = card["body"].as_array().unwrap();
+    let head = &body[0];
+    assert_eq!(head["type"], "ColumnSet");
+    assert_eq!(head["columns"][0]["items"][0]["text"], "6 planned Agents");
+    assert_eq!(head["columns"][1]["items"][0]["text"], "as of 18:17");
+    let actions = card["actions"].as_array().expect("actions");
+    assert_eq!(actions.len(), 3);
+    assert_eq!(actions[0]["title"], "Open in the portfolio");
+    assert_eq!(actions[0]["style"], "positive");
+    assert!(actions[1].get("style").is_none());
+    // Header row + 6 rows, three columns each.
+    let rows: Vec<&Value> = body
+        .iter()
+        .filter(|e| {
+            e["type"] == "ColumnSet" && e["columns"].as_array().is_some_and(|c| c.len() == 3)
+        })
+        .collect();
+    assert_eq!(rows.len(), 7, "{card}");
+    assert_eq!(rows[1]["columns"][0]["items"][0]["text"], "Agent 3");
+    assert_eq!(
+        rows[1]["selectAction"]["type"], "Action.Execute",
+        "a row opens the Agent card"
+    );
+
+    // 3c: one ShowCard per field group; each holds its inputs and its own submit.
+    let card = teams_card(&turn3("3c")).expect("card");
+    let set = card["body"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "ActionSet")
+        .expect("openers");
+    let openers = set["actions"].as_array().unwrap();
+    let titles: Vec<&str> = openers
+        .iter()
+        .map(|a| a["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["Owner", "Lifecycle", "AI Act class", "More…"]);
+    for o in openers {
+        assert_eq!(o["type"], "Action.ShowCard");
+        let b = o["card"]["body"].as_array().unwrap();
+        assert_eq!(b[0]["type"], "Input.ChoiceSet");
+        assert_eq!(b[1]["type"], "Input.Text");
+        assert_eq!(b[2]["actions"][0]["type"], "Action.Execute");
+        assert_eq!(b[2]["actions"][0]["title"], "File for review");
+        assert_eq!(b[3]["text"], "A colleague reviews it before it goes live.");
+    }
+
+    // 3g: the failure sits in an attention container.
+    let card = teams_card(&turn3("3g")).expect("card");
+    assert!(
+        card["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["type"] == "Container" && e["style"] == "attention"),
+        "{card}"
+    );
+}
+
+/// Rule 1 on Gemini: the rows appear once (no row buttons beside the
+/// table), the header's title is left to the text part, and a list row can
+/// end in its own button ("Retire").
+#[test]
+fn turn3_gemini_shows_every_row_once() {
+    let signer = signer();
+    let comps = |name: &str, opts: GeOptions| -> Vec<Value> {
+        build_messages_with(&turn3(name), &signer, opts)
+            .unwrap()
+            .iter()
+            .filter_map(|m| {
+                m.pointer("/updateComponents/components")
+                    .and_then(Value::as_array)
+                    .cloned()
+            })
+            .flatten()
+            .collect()
+    };
+    let c = comps("3a", GeOptions::default());
+    let labels: Vec<&str> = c
+        .iter()
+        .filter(|x| x["component"] == "MaterialButton")
+        .filter_map(|x| x["label"].as_str())
+        .collect();
+    assert_eq!(
+        labels,
+        ["High AI Act only", "Without owner"],
+        "no row buttons"
+    );
+    assert!(
+        !c.iter().any(|x| x["text"] == "6 planned Agents"),
+        "the text part says the title"
+    );
+    // Rule 3 on Gemini too: a read shows its time (crew F3).
+    assert!(
+        c.iter().any(|x| x["text"] == "as of 18:17"),
+        "the stamp is shown"
+    );
+    let c = comps("3b", GeOptions::default());
+    assert!(
+        c.iter()
+            .any(|x| x["text"] == "31 Agents in 27 capabilities, 4 domains \u{b7} as of 18:18"),
+        "context and stamp on one caption"
+    );
+
+    let c = comps("3d-list", GeOptions::default());
+    let retire: Vec<&Value> = c.iter().filter(|x| x["label"] == "Retire").collect();
+    assert_eq!(retire.len(), 3);
+    assert_eq!(
+        signer.open(retire[0]["id"].as_str().unwrap()).as_deref(),
+        Some("Retire the agent \"Agent 2\".")
+    );
+
+    // 3c, fields: four panels (first open), a select and an input each.
+    let c = comps("3c", GeOptions::default());
+    let panels: Vec<&Value> = c
+        .iter()
+        .filter(|x| x["component"] == "MaterialExpansionPanel")
+        .collect();
+    assert_eq!(panels.len(), 4);
+    assert_eq!(panels[0]["expanded"], true);
+    assert_eq!(panels[1]["expanded"], false);
+    assert_eq!(
+        c.iter()
+            .filter(|x| x["component"] == "MaterialInput")
+            .count(),
+        4
+    );
+    let submit = c.iter().find(|x| x["label"] == "File for review").unwrap();
+    let id = submit["id"].as_str().unwrap();
+    assert_eq!(
+        signer.open_action_with(id, &json!({ "value": "IT Operations" })),
+        Some(triton_core::a2ui::ge::GeAction::Message(
+            "Set the owner of Agent 28 to \"IT Operations\". (version 08cbcd825d41)".into()
+        ))
+    );
+    assert_eq!(
+        signer.open_action_with(id, &json!({})),
+        // Named by its label, never its key (crew F4).
+        Some(triton_core::a2ui::ge::GeAction::Incomplete(vec![
+            "New owner".into()
+        ]))
+    );
+    // 3c, chips fallback: one button per value, no input fields.
+    let c = comps(
+        "3c",
+        GeOptions {
+            form_fields: false,
+            ..GeOptions::default()
+        },
+    );
+    assert_eq!(
+        c.iter()
+            .filter(|x| x["component"] == "MaterialInput")
+            .count(),
+        0
+    );
+    assert!(
+        c.iter()
+            .any(|x| x["component"] == "MaterialButton" && x["label"] == "IT Operations")
+    );
+}
+
+/// Values are data, not Markdown: a name like `[x](https://…)` in a header,
+/// a table cell or a fact never becomes a link on a Teams card.
+#[test]
+fn teams_card_values_are_never_markdown() {
+    let evil = "[pay](https://evil.example) *now*";
+    let surface = json!({ "surface": { "components": [
+        { "kind": "header", "title": evil, "context": evil },
+        { "kind": "table", "columns": [ { "key": "a", "label": "Agent" } ],
+          "rows": [ { "cells": { "a": evil } } ] },
+        { "kind": "key_value", "pairs": [ { "label": "Owner", "value": evil } ] }
+    ] } });
+    let card = teams_card(&surface).expect("card").to_string();
+    assert!(!card.contains("\"[pay]("), "{card}");
+    assert_eq!(
+        card.matches("\\\\[pay\\\\](https://evil.example) \\\\*now\\\\*")
+            .count(),
+        4,
+        "{card}"
+    );
 }

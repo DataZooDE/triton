@@ -6,6 +6,7 @@
       "data": {
         "ct": "__send_message|{\"m\":\"Set the owner of Agent 28 to \\\"Finance operations\\\". Reason: Finance took over the process in October.\"}"
       },
+      "style": "positive",
       "title": "Check again with current version",
       "type": "Action.Execute",
       "verb": "agentAction"

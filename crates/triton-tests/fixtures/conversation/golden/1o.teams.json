@@ -78,6 +78,7 @@
           "data": {
             "ct": "__send_message|{\"tpl\":\"Set the {t1.field} of Agent 28 to \\\"{t1.value}\\\".[[ Reason: {t1.reason}]]\"}"
           },
+          "style": "positive",
           "title": "File as draft for review",
           "type": "Action.Execute",
           "verb": "agentAction"

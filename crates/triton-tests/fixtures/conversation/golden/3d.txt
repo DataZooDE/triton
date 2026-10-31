@@ -1,0 +1,7 @@
+Which Agent should be retired?
+10 match "Agent 2". Nothing was changed.
+
+› ‹Agent› Reason: ‹Reason (optional)›
+  Agent: Agent 2 · Requirements: Forecast | Agent 20 · Design: Monitor | Agent 21 · Planning: Schedule
+
+7 more…: https://app.example.com/acme/open?view=match

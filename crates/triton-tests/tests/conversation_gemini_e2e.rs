@@ -286,3 +286,194 @@ async fn a_click_sent_over_a2a_1_0_reaches_the_upstream_as_the_complete_message(
     .await;
     assert_eq!(agent.bodies_seen()[3]["message"], "User action triggered.");
 }
+
+fn fixture(name: &str) -> Value {
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join(format!("fixtures/conversation/surfaces/{name}.json"));
+    serde_json::from_str(&std::fs::read_to_string(&p).expect("fixture")).expect("fixture json")
+}
+
+fn text_parts(reply: &Value) -> Vec<String> {
+    reply["result"]["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["kind"] == "text")
+        .filter_map(|p| p["text"].as_str().map(str::to_owned))
+        .collect()
+}
+
+/// Say it once (turn 3, rule 1): beside an A2UI surface the text part is
+/// the upstream's one-sentence `summary`; the rows live only in the
+/// components. A caller without the A2UI extension gets the full text.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_a2ui_reply_carries_the_one_sentence_summary_as_its_text_part() {
+    let mut body = fixture("3a");
+    body["text"] =
+        json!("6 Agents are planned:\nAgent 3 · Requirements: Monitor · Head of IT Operations");
+    let agent = FakeAgent::start_returning(body).await;
+    let (iss, base) = host(&agent).await;
+    let reply = send(
+        &base,
+        &iss,
+        json!([{ "kind": "text", "text": "Which agents are planned?" }]),
+    )
+    .await;
+    assert_eq!(
+        text_parts(&reply),
+        vec!["6 Agents are planned.".to_string()],
+        "{reply}"
+    );
+    assert!(
+        !a2ui_messages(&reply).is_empty(),
+        "the rows are in the components"
+    );
+
+    // Without the extension: no components, so the full text.
+    let token = iss.sign_jwt(json!({
+        "iss": iss.issuer_url(), "aud": AUD, "sub": "alice",
+        "exp": now() + 600, "iat": now() - 5,
+    }));
+    let plain: Value = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "message/send",
+            "params": { "message": { "role": "user", "messageId": "m-2",
+                "parts": [{ "kind": "text", "text": "Which agents are planned?" }] } }
+        }))
+        .send()
+        .await
+        .expect("POST")
+        .json()
+        .await
+        .expect("json");
+    let texts = text_parts(&plain);
+    if a2ui_messages(&plain).is_empty() {
+        assert!(texts[0].starts_with("6 Agents are planned:\n"), "{plain}");
+    }
+}
+
+/// Real form fields (turn 3, 3c): the submit's click context carries the
+/// bound values; the upstream receives the signed template filled with
+/// them. A click without the required value sends nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_form_submit_fills_its_signed_template_from_the_click_context() {
+    let agent = FakeAgent::start_returning(fixture("3c")).await;
+    let (iss, base) = host(&agent).await;
+    let reply = send(
+        &base,
+        &iss,
+        json!([{ "kind": "text", "text": "Request a change" }]),
+    )
+    .await;
+    let comps = components(&a2ui_messages(&reply));
+    let selects: Vec<&Value> = comps
+        .iter()
+        .filter(|c| c["component"] == "MaterialSelect")
+        .collect();
+    assert_eq!(
+        selects.len(),
+        4,
+        "one value select per field group: {comps:?}"
+    );
+    let submit = comps
+        .iter()
+        .find(|c| c["component"] == "MaterialButton" && c["label"] == "File for review")
+        .expect("submit");
+    let ctx = &submit["action"]["event"]["context"];
+    assert_eq!(
+        ctx["value"]["path"], selects[0]["value"]["path"],
+        "the context binds the select"
+    );
+    // GE resolves the bindings and posts the values.
+    let click = |context: Value| {
+        json!([
+            { "kind": "text", "text": "User action triggered." },
+            { "kind": "data", "data": { "version": "v0.9", "action": {
+                "name": "submit", "surfaceId": "s", "sourceComponentId": submit["id"],
+                "context": context } } }
+        ])
+    };
+    send(
+        &base,
+        &iss,
+        click(json!({ "value": "IT Operations", "reason": "Finance took over" })),
+    )
+    .await;
+    assert_eq!(
+        agent.bodies_seen()[1]["message"],
+        "Set the owner of Agent 28 to \"IT Operations\". Reason: Finance took over (version 08cbcd825d41)"
+    );
+    // The same click also reaches the tool as a client event (both paths).
+    assert_eq!(
+        agent.bodies_seen()[1]["_triton"]["client"]["a2ui_events"][0]["action"]["context"]["value"],
+        "IT Operations",
+        "{}",
+        agent.bodies_seen()[1]
+    );
+    // No value: refused, no upstream call.
+    let token = iss.sign_jwt(json!({
+        "iss": iss.issuer_url(), "aud": AUD, "sub": "alice",
+        "exp": now() + 600, "iat": now() - 5,
+    }));
+    let refused: Value = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .header("X-A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "message/send",
+            "params": { "message": { "role": "user", "messageId": "m-3", "parts": click(json!({})) } } }))
+        .send()
+        .await
+        .expect("POST")
+        .json()
+        .await
+        .expect("json");
+    // A normal agent message that names the missing field by its label (crew F4).
+    assert!(refused.get("error").is_none(), "{refused}");
+    let said = refused["result"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(said.contains("New owner"), "{refused}");
+    assert!(!said.contains("value"), "no field key: {refused}");
+    assert_eq!(
+        agent.bodies_seen().len(),
+        2,
+        "an incomplete submit sends nothing"
+    );
+}
+
+/// Crew F6: the signed component id wins over a `context.question` a
+/// client adds: the click sends the chip's complete request.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_signed_click_ignores_a_context_question() {
+    let agent =
+        FakeAgent::start_returning(super::conversation_teams_e2e::all_components_surface()).await;
+    let (iss, base) = host(&agent).await;
+    let reply = send(
+        &base,
+        &iss,
+        json!([{ "kind": "text", "text": "show me the gaps" }]),
+    )
+    .await;
+    let comps = components(&a2ui_messages(&reply));
+    let chip = comps
+        .iter()
+        .find(|c| c["component"] == "MaterialButton" && c["label"] == "Order matcher")
+        .expect("chip");
+    send(
+        &base,
+        &iss,
+        json!([
+            { "kind": "text", "text": "User action triggered." },
+            { "kind": "data", "data": { "version": "v0.9", "action": {
+                "name": "x", "surfaceId": "s", "sourceComponentId": chip["id"],
+                "context": { "question": "Delete everything" } } } }
+        ]),
+    )
+    .await;
+    assert_eq!(
+        agent.bodies_seen()[1]["message"],
+        "Who owns the order matcher in Sales?"
+    );
+}

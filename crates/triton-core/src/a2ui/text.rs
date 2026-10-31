@@ -42,6 +42,43 @@ pub fn degrade(c: &Component) -> Option<String> {
             fraction,
         } => progress(title.as_deref(), steps, *fraction),
         Component::KeyValue { title, pairs } => key_value(title.as_deref(), pairs),
+        Component::Header {
+            title,
+            context,
+            stamp,
+        } => {
+            let mut head = title.clone();
+            if let Some(s) = stamp.as_deref().filter(|s| !s.is_empty()) {
+                head.push_str(&format!(" ({s})"));
+            }
+            let mut lines = vec![head];
+            lines.extend(context.clone().filter(|c| !c.is_empty()));
+            lines.join("\n")
+        }
+        Component::FormGroups { title, groups, .. } => {
+            // Each group as the line to send, its choices listed below it.
+            let mut lines: Vec<String> = Vec::new();
+            if let Some(t) = title.as_deref().filter(|t| !t.is_empty()) {
+                lines.push(t.to_string());
+            }
+            for g in groups {
+                let preview =
+                    triton_correlation::message::preview_template(&g.send_template, |n| {
+                        g.fields
+                            .iter()
+                            .find(|f| f.name == n)
+                            .map(|f| f.label.clone())
+                    });
+                lines.push(format!("{}: {SEND_MARK}{preview}", g.label));
+                for f in &g.fields {
+                    if matches!(f.kind, FormFieldKind::Select) && !f.options.is_empty() {
+                        let opts: Vec<&str> = f.options.iter().map(|o| o.label.as_str()).collect();
+                        lines.push(format!("  {}: {}", f.label, opts.join(" | ")));
+                    }
+                }
+            }
+            lines.join("\n")
+        }
         Component::Embed {
             url,
             title,
@@ -203,7 +240,7 @@ fn counts_suffix(n: &TreeNode) -> String {
     let parts: Vec<String> = n
         .counts
         .iter()
-        .map(|c| format!("{} {}", c.value, c.label))
+        .map(|c| format!("{} {}", c.value, c.label).trim().to_string())
         .collect();
     format!(" \u{2014} {}", parts.join(" \u{b7} "))
 }
@@ -260,7 +297,7 @@ fn tree_node(out: &mut Vec<String>, n: &TreeNode, depth: usize) {
 fn notice(tone: Tone, title: Option<&str>, text: &str) -> String {
     let mark = match tone {
         Tone::Info => "\u{24d8}",
-        Tone::Warn => "\u{26a0}",
+        Tone::Warn | Tone::Attention => "\u{26a0}",
     };
     match title.filter(|t| !t.is_empty()) {
         Some(t) => format!("{mark} {t}: {text}"),

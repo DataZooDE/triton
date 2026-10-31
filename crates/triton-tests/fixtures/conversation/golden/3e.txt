@@ -1,0 +1,8 @@
+Retire Agent 20: filed for review
+Goes live once a colleague accepts it.
+
+Lifecycle: Deployed → Retired
+Reason: Replaced (from your message)
+Assumed: Owner, links and AI Act class unchanged
+
+Open draft: https://app.example.com/acme/open?draft=d1

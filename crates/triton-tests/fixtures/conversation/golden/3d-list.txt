@@ -1,0 +1,8 @@
+1. Agent 2 — Requirements: Forecast
+   › Retire the agent "Agent 2".
+2. Agent 20 — Design: Monitor
+   › Retire the agent "Agent 20".
+3. Agent 21 — Planning: Schedule
+   › Retire the agent "Agent 21".
+4. 7 more
+   › Which agents match "Agent 2"?

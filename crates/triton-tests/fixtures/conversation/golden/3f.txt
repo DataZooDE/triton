@@ -1,0 +1,9 @@
+4 owner proposals filed for review
+They go live once a colleague accepts them.
+
+1. Agent 12 · Proposed owner: Head of Production Planning
+2. Agent 19 · Proposed owner: Head of IT Operations
+3. Agent 24 · Proposed owner: Head of Quality Assurance
+4. Agent 27 · Proposed owner: Data Protection Officer
+
+Review all 4: https://app.example.com/acme/open?view=drafts

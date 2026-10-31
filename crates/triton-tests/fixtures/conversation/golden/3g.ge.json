@@ -1,0 +1,86 @@
+{
+  "_actions": {
+    "a4": "Propose an owner for every Agent without one."
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "color": "warn",
+            "component": "MaterialIcon",
+            "icon": "error",
+            "id": "ic-1"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-2",
+            "text": "Couldn't answer this: We tried three times and stopped. Nothing was changed.",
+            "usageHint": "body2"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "ic-1",
+              "t-2"
+            ],
+            "component": "MaterialRow",
+            "id": "row-3",
+            "justify": "start"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a4",
+            "label": "Try again",
+            "variant": "flat"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a4"
+            ],
+            "component": "MaterialRow",
+            "id": "row-5",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "row-3",
+              "row-5"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

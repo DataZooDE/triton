@@ -1,0 +1,48 @@
+{
+  "_mock_item": "3d Unclear target as a list of buttons (turn 3, Gemini): each Retire sends the complete request",
+  "surface": {
+    "components": [
+      {
+        "kind": "list",
+        "items": [
+          {
+            "label": "Agent 2",
+            "detail": "Requirements: Forecast",
+            "action_label": "Retire",
+            "action": {
+              "type": "send_message",
+              "text": "Retire the agent \"Agent 2\"."
+            }
+          },
+          {
+            "label": "Agent 20",
+            "detail": "Design: Monitor",
+            "action_label": "Retire",
+            "action": {
+              "type": "send_message",
+              "text": "Retire the agent \"Agent 20\"."
+            }
+          },
+          {
+            "label": "Agent 21",
+            "detail": "Planning: Schedule",
+            "action_label": "Retire",
+            "action": {
+              "type": "send_message",
+              "text": "Retire the agent \"Agent 21\"."
+            }
+          },
+          {
+            "label": "7 more",
+            "action_label": "Show",
+            "action": {
+              "type": "send_message",
+              "text": "Which agents match \"Agent 2\"?"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "summary": "10 Agents match \"Agent 2\", so nothing was changed. Pick one:"
+}

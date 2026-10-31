@@ -1,0 +1,60 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "style": "positive",
+      "title": "Open draft",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/open?draft=d1"
+    }
+  ],
+  "body": [
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "size": "Medium",
+              "text": "Retire Agent 20: filed for review",
+              "type": "TextBlock",
+              "weight": "Bolder",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        }
+      ],
+      "type": "ColumnSet"
+    },
+    {
+      "isSubtle": true,
+      "spacing": "None",
+      "text": "Goes live once a colleague accepts it.",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "facts": [
+        {
+          "title": "Lifecycle",
+          "value": "Deployed → Retired"
+        },
+        {
+          "title": "Reason",
+          "value": "Replaced (from your message)"
+        },
+        {
+          "title": "Assumed",
+          "value": "Owner, links and AI Act class unchanged"
+        }
+      ],
+      "type": "FactSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

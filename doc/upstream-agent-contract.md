@@ -26,6 +26,15 @@ Code: `crates/triton-upstream/src/lib.rs` (router),
 `crates/triton-upstream/src/static_upstream.rs` (static). Tests:
 `tests/upstream.rs`, `tests/static_upstream.rs`.
 
+Triton also registers its own in-process tools (`echo`, `narrate`,
+`help`, and in a `dev-token` build the demo surfaces such as
+`demo_panel`), and `tools/list` shows them next to the upstream's. A
+public gateway in front of one agent sets `TRITON_BUILTIN_TOOLS=off`:
+no in-process tool is registered, so MCP clients see only the agent's
+tools (a chat `help` command then needs an upstream named `help`). Any
+value other than `on`/`off` (or `true`/`false`, `1`/`0`) fails boot.
+Test: `tests/mcp_protected_resource.rs`.
+
 ## 2. The dispatch request (Triton → agent)
 
 ```
@@ -137,8 +146,11 @@ Object args carry Triton's reserved `_triton` key:
   button's `action.event.context` and check it when the click comes back;
   expect a click to arrive twice now and then (a client retry). A turn with
   only an event part reaches you with `message` = `A2UI action: <name>` (or
-  `A2UI error`). Clicks on Triton's own cards are signed actions and are
-  resolved by Triton as before; only producer surfaces (§4) rely on events.
+  `A2UI error`). Clicks on Triton's own cards are signed actions that
+  Triton resolves: the signed message (a form's template filled from the
+  click's context) becomes `message`, and a submit missing a required choice
+  is answered without a turn. Such a click is still listed in
+  `a2ui_events`; only producer surfaces (§4) rely on events.
 
 ### 2a. Optional: argument-schema discovery (`X-Triton-MCP: tools/list`)
 
@@ -239,6 +251,15 @@ Notes for agent authors:
 - Emit the **canonical** surface, not a versioned wire shape — Triton
   builds the negotiated A2UI version and the per-platform chat
   rendering from it (`degrade` rules in `adapter.yaml`).
+- Optional top-level `text` and `summary` (strings). `text` is the whole
+  answer for a host that shows text only. `summary` is one sentence that
+  says what the answer is; where Triton renders the surface as A2UI (Gemini
+  Enterprise), the text part beside it is `summary`, so rows, choices and
+  facts appear once, in the components. Without `summary` the text part is
+  `text` (or the surface's prose).
+- A card reads best in one anatomy: a `header` (title, one `context` line,
+  a short `stamp`), one body component (table, key/value, form or
+  `form_groups`), then one `primary` button and at most two others.
 - **Producer-built A2UI v0.9** (Gemini Enterprise only): put native
   surfaces in `surface.a2ui`, a sibling of `components` that every other
   channel ignores, so keep the prose in a `text` component:
@@ -370,7 +391,7 @@ these events (`event:` name + one-line JSON `data:`, blank-line separated):
 
 | Event | `data` | Meaning |
 |---|---|---|
-| `task` | `{"task_id": "<id>", "check_after_seconds"?: n, "receipt"?: "<text>"}` | The call is now the agent's task `task_id` (≤ 200 chars, opaque to Triton). Sent first. `receipt` is the hand-over text for a caller that stops waiting ("filed, still running, the result will be in …"; mock 1k). |
+| `task` | `{"task_id": "<id>", "check_after_seconds"?: n, "receipt"?: "<text>", "note"?: "<text>"}` | The call is now the agent's task `task_id` (≤ 200 chars, opaque to Triton). Sent first. `receipt` is the hand-over text for a caller that stops waiting ("filed, still running, the result will be in …"; mock 1k); on Teams it is the working card's title. `note` is one line under the working card's steps. |
 | `progress` | `{"text": "<step line>", "step"?: "<id or n/m>", "percent"?: 0–100}` | A real step, shown as it arrives (mock 1j). Any number, any time. |
 | `done` | the result — the canonical surface envelope (§4), as a buffered reply would be | Terminal success. |
 | `error` | `{"message": "<text>"}` | Terminal failure; `message` is shown to the caller. Not retried. |
@@ -415,7 +436,7 @@ What each caller sees:
 | A2A blocking send (both versions) | after `TRITON_A2A_BLOCK_SECS` (60): the working task, its status message = the `receipt`, `metadata.checkAfterSeconds` | the answer, if it ends within the cap |
 | A2A `tasks/get`, `GetTask`, `ListTasks`, `tasks/resubscribe`, `SubscribeToTask` | the stored task with the latest progress; a resubscribe streams on | completed task with the answer artifact |
 | MCP `tools/call` | after `TRITON_MCP_ASYNC_WAIT_SECS` (20) past `task`: `content: [{text: <receipt>}]`, `structuredContent: {status: "filed", task_id: <the agent's task_id>, check_after_seconds, receipt?}`, `_meta.trace_id` = Triton's trace, `isError: false` — the client checks back with the agent's own status tool, by the agent's id | the normal tool result, if it ends within the wait |
-| Teams (`TRITON_MSTEAMS_ASYNC`) | typing, then ONE Adaptive Card "REQUEST · WORKING · m:ss" (receipt, step line, step/percent), updated in place at most once a second | the same activity replaced by the answer (`updateActivity`) |
+| Teams (`TRITON_MSTEAMS_ASYNC`) | typing, then ONE Adaptive Card: the receipt as title with the elapsed time beside it, the real steps (done, current), the note; updated in place at most once a second and at least every 10 s, with a Universal Actions `refresh` that returns its current state. A card click turns the clicked card into this working card (no second card, no banner) | the same activity replaced by the answer (`updateActivity`) |
 
 Tasks are stored by Triton (`TRITON_TASK_DB`, SQLite; memory when unset)
 for `TRITON_TASK_TTL_SECS` (default 1 day). A task still running after

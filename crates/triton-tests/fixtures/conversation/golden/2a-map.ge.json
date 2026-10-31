@@ -1,15 +1,10 @@
 {
   "_actions": {
-    "a12": "Propose an Agent for Sales: Monitor",
-    "a14": "Show Agent 29",
-    "a18": "Show Agent 30",
-    "a2": "Propose an Agent for Finance: Forecast",
-    "a21": "Show Agent 31",
-    "a24": "Propose an Agent for Service: Schedule",
-    "a27": "Find Agents by capability",
-    "a4": "Propose an Agent for Finance: Monitor",
-    "a6": "Propose an Agent for Finance: Schedule",
-    "a9": "Show Agent 28"
+    "a10": "Show Agent 29",
+    "a14": "Show Agent 30",
+    "a17": "Show Agent 31",
+    "a22": "Find Agents by capability",
+    "a6": "Show Agent 28"
   },
   "messages": [
     {
@@ -33,84 +28,33 @@
             "usageHint": "subtitle1"
           },
           {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a2",
-            "label": "Propose an Agent here",
-            "variant": "basic"
+            "component": "MaterialText",
+            "id": "t-2",
+            "text": "Forecast",
+            "usageHint": "body2"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-3",
+            "text": "Monitor",
+            "usageHint": "body2"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-4",
+            "text": "Schedule",
+            "usageHint": "body2"
           },
           {
             "children": [
-              "a2"
-            ],
-            "component": "MaterialExpansionPanel",
-            "description": "⚠",
-            "expanded": true,
-            "id": "node-3",
-            "title": "Forecast"
-          },
-          {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a4",
-            "label": "Propose an Agent here",
-            "variant": "basic"
-          },
-          {
-            "children": [
-              "a4"
-            ],
-            "component": "MaterialExpansionPanel",
-            "description": "⚠",
-            "expanded": true,
-            "id": "node-5",
-            "title": "Monitor"
-          },
-          {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a6",
-            "label": "Propose an Agent here",
-            "variant": "basic"
-          },
-          {
-            "children": [
-              "a6"
-            ],
-            "component": "MaterialExpansionPanel",
-            "description": "⚠",
-            "expanded": true,
-            "id": "node-7",
-            "title": "Schedule"
-          },
-          {
-            "children": [
-              "node-3",
-              "node-5",
-              "node-7"
+              "t-2",
+              "t-3",
+              "t-4"
             ],
             "component": "MaterialExpansionPanel",
             "description": "0 Agents",
             "expanded": false,
-            "id": "node-8",
+            "id": "node-5",
             "title": "Finance"
           },
           {
@@ -122,27 +66,33 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a9",
+            "id": "a6",
             "label": "Agent 28 · Planned",
             "variant": "stroked"
           },
           {
             "align": "stretch",
             "children": [
-              "a9"
+              "a6"
             ],
             "component": "MaterialRow",
-            "id": "row-10",
+            "id": "row-7",
             "justify": "start"
           },
           {
             "children": [
-              "row-10"
+              "row-7"
             ],
             "component": "MaterialExpansionPanel",
             "expanded": false,
-            "id": "node-11",
+            "id": "node-8",
             "title": "Forecast"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-9",
+            "text": "Monitor",
+            "usageHint": "body2"
           },
           {
             "action": {
@@ -153,19 +103,39 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a12",
-            "label": "Propose an Agent here",
-            "variant": "basic"
+            "id": "a10",
+            "label": "Agent 29 · Candidate",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a10"
+            ],
+            "component": "MaterialRow",
+            "id": "row-11",
+            "justify": "start"
           },
           {
             "children": [
-              "a12"
+              "row-11"
             ],
             "component": "MaterialExpansionPanel",
-            "description": "⚠",
+            "expanded": false,
+            "id": "node-12",
+            "title": "Schedule (proposed)"
+          },
+          {
+            "children": [
+              "node-8",
+              "t-9",
+              "node-12"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "2 Agents",
             "expanded": true,
             "id": "node-13",
-            "title": "Monitor"
+            "title": "Sales"
           },
           {
             "action": {
@@ -177,7 +147,7 @@
             "color": "primary",
             "component": "MaterialButton",
             "id": "a14",
-            "label": "Agent 29 · Candidate",
+            "label": "Agent 30 · Deployed",
             "variant": "stroked"
           },
           {
@@ -196,49 +166,6 @@
             "component": "MaterialExpansionPanel",
             "expanded": false,
             "id": "node-16",
-            "title": "Schedule (proposed)"
-          },
-          {
-            "children": [
-              "node-11",
-              "node-13",
-              "node-16"
-            ],
-            "component": "MaterialExpansionPanel",
-            "description": "2 Agents",
-            "expanded": true,
-            "id": "node-17",
-            "title": "Sales"
-          },
-          {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a18",
-            "label": "Agent 30 · Deployed",
-            "variant": "stroked"
-          },
-          {
-            "align": "stretch",
-            "children": [
-              "a18"
-            ],
-            "component": "MaterialRow",
-            "id": "row-19",
-            "justify": "start"
-          },
-          {
-            "children": [
-              "row-19"
-            ],
-            "component": "MaterialExpansionPanel",
-            "expanded": false,
-            "id": "node-20",
             "title": "Forecast"
           },
           {
@@ -250,61 +177,44 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a21",
+            "id": "a17",
             "label": "Agent 31 · Assessed",
             "variant": "stroked"
           },
           {
             "align": "stretch",
             "children": [
-              "a21"
+              "a17"
             ],
             "component": "MaterialRow",
-            "id": "row-22",
+            "id": "row-18",
             "justify": "start"
           },
           {
             "children": [
-              "row-22"
+              "row-18"
             ],
             "component": "MaterialExpansionPanel",
             "expanded": false,
-            "id": "node-23",
+            "id": "node-19",
             "title": "Monitor"
           },
           {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a24",
-            "label": "Propose an Agent here",
-            "variant": "basic"
+            "component": "MaterialText",
+            "id": "t-20",
+            "text": "Schedule",
+            "usageHint": "body2"
           },
           {
             "children": [
-              "a24"
-            ],
-            "component": "MaterialExpansionPanel",
-            "description": "⚠",
-            "expanded": true,
-            "id": "node-25",
-            "title": "Schedule"
-          },
-          {
-            "children": [
-              "node-20",
-              "node-23",
-              "node-25"
+              "node-16",
+              "node-19",
+              "t-20"
             ],
             "component": "MaterialExpansionPanel",
             "description": "2 Agents",
             "expanded": true,
-            "id": "node-26",
+            "id": "node-21",
             "title": "Service"
           },
           {
@@ -316,26 +226,26 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a27",
+            "id": "a22",
             "label": "Change domain",
             "variant": "flat"
           },
           {
             "align": "stretch",
             "children": [
-              "a27"
+              "a22"
             ],
             "component": "MaterialRow",
-            "id": "row-28",
+            "id": "row-23",
             "justify": "start"
           },
           {
             "children": [
               "t-1",
-              "node-8",
-              "node-17",
-              "node-26",
-              "row-28"
+              "node-5",
+              "node-13",
+              "node-21",
+              "row-23"
             ],
             "component": "MaterialColumn",
             "id": "root-col"

@@ -1,0 +1,24 @@
+Capability map (as of 18:18)
+31 Agents in 27 capabilities, 4 domains
+
+Commercial & service — 4 Agents
+  Sales: Forecast — Agent 28
+    › Show the agent "Agent 28"
+  Sales: Schedule · proposed — Agent 29
+    › Show the agent "Agent 29"
+  Service: Forecast — Agent 30
+    › Show the agent "Agent 30"
+  Service: Monitor — Agent 31
+    › Show the agent "Agent 31"
+  Finance: Forecast · Monitor · Schedule ⚠
+Operations — 8 Agents
+  Production: Schedule — Agent 21
+    › Show the agent "Agent 21"
+Product & engineering — 22 Agents
+  Design: Forecast — Agent 12
+    › Show the agent "Agent 12"
+SaaS quality assurance — 1 Agent
+  Validation: Forecast — Agent 17
+    › Show the agent "Agent 17"
+
+Open in the portfolio: https://app.example.com/acme/open?view=map

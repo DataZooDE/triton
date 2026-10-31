@@ -1,0 +1,175 @@
+{
+  "_mock_item": "3b Capability map (turn 3): summary once, domains toggle client-side, empty capabilities of one area share a row",
+  "surface": {
+    "components": [
+      {
+        "kind": "header",
+        "title": "Capability map",
+        "context": "31 Agents in 27 capabilities, 4 domains",
+        "stamp": "as of 18:18"
+      },
+      {
+        "kind": "tree",
+        "gaps_toggle": "Only gaps",
+        "nodes": [
+          {
+            "label": "Commercial & service",
+            "counts": [
+              {
+                "label": "Agents",
+                "value": "4"
+              }
+            ],
+            "expanded": true,
+            "children": [
+              {
+                "label": "Finance: Forecast · Monitor · Schedule",
+                "gap": true,
+                "counts": [
+                  {
+                    "label": "",
+                    "value": "0"
+                  }
+                ]
+              },
+              {
+                "label": "Sales: Forecast",
+                "counts": [
+                  {
+                    "label": "",
+                    "value": "Agent 28"
+                  }
+                ],
+                "action": {
+                  "type": "send_message",
+                  "text": "Show the agent \"Agent 28\""
+                }
+              },
+              {
+                "label": "Sales: Schedule · proposed",
+                "counts": [
+                  {
+                    "label": "",
+                    "value": "Agent 29"
+                  }
+                ],
+                "action": {
+                  "type": "send_message",
+                  "text": "Show the agent \"Agent 29\""
+                }
+              },
+              {
+                "label": "Service: Forecast",
+                "counts": [
+                  {
+                    "label": "",
+                    "value": "Agent 30"
+                  }
+                ],
+                "action": {
+                  "type": "send_message",
+                  "text": "Show the agent \"Agent 30\""
+                }
+              },
+              {
+                "label": "Service: Monitor",
+                "counts": [
+                  {
+                    "label": "",
+                    "value": "Agent 31"
+                  }
+                ],
+                "action": {
+                  "type": "send_message",
+                  "text": "Show the agent \"Agent 31\""
+                }
+              }
+            ]
+          },
+          {
+            "label": "Operations",
+            "counts": [
+              {
+                "label": "Agents",
+                "value": "8"
+              }
+            ],
+            "children": [
+              {
+                "label": "Production: Schedule",
+                "counts": [
+                  {
+                    "label": "",
+                    "value": "Agent 21"
+                  }
+                ],
+                "action": {
+                  "type": "send_message",
+                  "text": "Show the agent \"Agent 21\""
+                }
+              }
+            ]
+          },
+          {
+            "label": "Product & engineering",
+            "counts": [
+              {
+                "label": "Agents",
+                "value": "22"
+              }
+            ],
+            "children": [
+              {
+                "label": "Design: Forecast",
+                "counts": [
+                  {
+                    "label": "",
+                    "value": "Agent 12"
+                  }
+                ],
+                "action": {
+                  "type": "send_message",
+                  "text": "Show the agent \"Agent 12\""
+                }
+              }
+            ]
+          },
+          {
+            "label": "SaaS quality assurance",
+            "counts": [
+              {
+                "label": "Agent",
+                "value": "1"
+              }
+            ],
+            "children": [
+              {
+                "label": "Validation: Forecast",
+                "counts": [
+                  {
+                    "label": "",
+                    "value": "Agent 17"
+                  }
+                ],
+                "action": {
+                  "type": "send_message",
+                  "text": "Show the agent \"Agent 17\""
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "kind": "button",
+        "label": "Open in the portfolio",
+        "primary": true,
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/open?view=map"
+        }
+      }
+    ]
+  },
+  "summary": "31 Agents in 27 capabilities across 4 domains."
+}

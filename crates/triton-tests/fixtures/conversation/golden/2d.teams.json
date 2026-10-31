@@ -13,21 +13,6 @@
       "wrap": true
     },
     {
-      "actions": [
-        {
-          "targetElements": [
-            "node-21",
-            "node-29",
-            "node-37",
-            "node-41"
-          ],
-          "title": "Only gaps",
-          "type": "Action.ToggleVisibility"
-        }
-      ],
-      "type": "ActionSet"
-    },
-    {
       "id": "node-1",
       "items": [
         {
@@ -53,10 +38,8 @@
             {
               "items": [
                 {
-                  "color": "Default",
                   "text": "Finance",
                   "type": "TextBlock",
-                  "weight": "Default",
                   "wrap": true
                 }
               ],
@@ -117,10 +100,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Warning",
                                   "text": "Forecast",
                                   "type": "TextBlock",
-                                  "weight": "Bolder",
                                   "wrap": true
                                 }
                               ],
@@ -161,10 +142,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Warning",
                                   "text": "Monitor",
                                   "type": "TextBlock",
-                                  "weight": "Bolder",
                                   "wrap": true
                                 }
                               ],
@@ -205,10 +184,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Warning",
                                   "text": "Schedule",
                                   "type": "TextBlock",
-                                  "weight": "Bolder",
                                   "wrap": true
                                 }
                               ],
@@ -272,10 +249,8 @@
             {
               "items": [
                 {
-                  "color": "Default",
                   "text": "Sales",
                   "type": "TextBlock",
-                  "weight": "Default",
                   "wrap": true
                 }
               ],
@@ -344,10 +319,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Default",
                                   "text": "Forecast",
                                   "type": "TextBlock",
-                                  "weight": "Default",
                                   "wrap": true
                                 }
                               ],
@@ -425,10 +398,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Warning",
                                   "text": "Monitor",
                                   "type": "TextBlock",
-                                  "weight": "Bolder",
                                   "wrap": true
                                 }
                               ],
@@ -477,10 +448,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Default",
                                   "text": "Schedule (proposed)",
                                   "type": "TextBlock",
-                                  "weight": "Default",
                                   "wrap": true
                                 }
                               ],
@@ -581,10 +550,8 @@
             {
               "items": [
                 {
-                  "color": "Default",
                   "text": "Service",
                   "type": "TextBlock",
-                  "weight": "Default",
                   "wrap": true
                 }
               ],
@@ -653,10 +620,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Default",
                                   "text": "Forecast",
                                   "type": "TextBlock",
-                                  "weight": "Default",
                                   "wrap": true
                                 }
                               ],
@@ -742,10 +707,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Default",
                                   "text": "Monitor",
                                   "type": "TextBlock",
-                                  "weight": "Default",
                                   "wrap": true
                                 }
                               ],
@@ -823,10 +786,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Warning",
                                   "text": "Schedule",
                                   "type": "TextBlock",
-                                  "weight": "Bolder",
                                   "wrap": true
                                 }
                               ],
@@ -863,6 +824,21 @@
       ],
       "spacing": "Small",
       "type": "Container"
+    },
+    {
+      "actions": [
+        {
+          "targetElements": [
+            "node-21",
+            "node-29",
+            "node-37",
+            "node-41"
+          ],
+          "title": "Only gaps",
+          "type": "Action.ToggleVisibility"
+        }
+      ],
+      "type": "ActionSet"
     },
     {
       "actions": [

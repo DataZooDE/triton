@@ -1,5 +1,7 @@
 {
-  "_actions": {},
+  "_actions": {
+    "a5": "form submit, fills: Domain, Show"
+  },
   "messages": [
     {
       "createSurface": {
@@ -22,15 +24,101 @@
             "usageHint": "subtitle2"
           },
           {
-            "component": "MaterialText",
-            "id": "t-2",
-            "text": "Will be sent as: Show the capability map for ‹Domain›, area ‹Area (optional)›, ‹Show›",
-            "usageHint": "body2"
+            "component": "MaterialSelect",
+            "id": "in-2",
+            "label": "Domain",
+            "options": [
+              {
+                "label": "Commercial & service",
+                "value": "Commercial & service"
+              },
+              {
+                "label": "Operations",
+                "value": "Operations"
+              },
+              {
+                "label": "Product & engineering",
+                "value": "Product & engineering"
+              }
+            ],
+            "value": {
+              "path": "/f1/domain"
+            }
+          },
+          {
+            "component": "MaterialSelect",
+            "id": "in-3",
+            "label": "Area (optional)",
+            "options": [
+              {
+                "label": "All areas",
+                "value": ""
+              },
+              {
+                "label": "Finance",
+                "value": "Finance"
+              },
+              {
+                "label": "Sales",
+                "value": "Sales"
+              },
+              {
+                "label": "Service",
+                "value": "Service"
+              }
+            ],
+            "value": {
+              "path": "/f1/area"
+            }
+          },
+          {
+            "component": "MaterialSelect",
+            "id": "in-4",
+            "label": "Show",
+            "options": [
+              {
+                "label": "Include proposed",
+                "value": "including proposed capabilities"
+              },
+              {
+                "label": "Only capabilities without Agents",
+                "value": "only capabilities without Agents"
+              }
+            ],
+            "value": {
+              "path": "/f1/scope"
+            }
+          },
+          {
+            "action": {
+              "event": {
+                "context": {
+                  "area": {
+                    "path": "/f1/area"
+                  },
+                  "domain": {
+                    "path": "/f1/domain"
+                  },
+                  "scope": {
+                    "path": "/f1/scope"
+                  }
+                },
+                "name": "submit"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a5",
+            "label": "Show map",
+            "variant": "flat"
           },
           {
             "children": [
               "t-1",
-              "t-2"
+              "in-2",
+              "in-3",
+              "in-4",
+              "a5"
             ],
             "component": "MaterialColumn",
             "id": "root-col"

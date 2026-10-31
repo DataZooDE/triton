@@ -192,6 +192,31 @@ pub enum Component {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         gaps_toggle: Option<String>,
     },
+    /// The head of a card (one anatomy for every answer): a title, at most
+    /// one context line, and a short stamp shown beside the title (a time,
+    /// a running timer). Hosts whose text part already says the title show
+    /// only the context line.
+    Header {
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stamp: Option<String>,
+    },
+    /// A change form split by what is changed: each group is a small form of
+    /// its own (its fields and the complete request its submit sends). Hosts
+    /// show the groups as a choice first (Teams: one `ShowCard` per group;
+    /// Gemini: one expandable panel per group), so a reader never scans a
+    /// long list of every possible change.
+    FormGroups {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        groups: Vec<FormGroup>,
+        submit_label: String,
+        /// One line under the submit (who reviews, what happens next).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
     /// An info or warning line (stale data, assumptions, limits).
     Notice {
         #[serde(default, skip_serializing_if = "Tone::is_default")]
@@ -281,6 +306,20 @@ pub struct ListItem {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<Action>,
+    /// Caption of a separate control for `action` at the end of the row
+    /// ("Retire"). Without it the row itself is the control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_label: Option<String>,
+}
+
+/// One group of a [`Component::FormGroups`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FormGroup {
+    /// What the group changes ("Owner"); the caption of its opener.
+    pub label: String,
+    pub fields: Vec<FormField>,
+    /// The complete request with `{<field name>}` placeholders.
+    pub send_template: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -350,6 +389,8 @@ pub enum Tone {
     #[default]
     Info,
     Warn,
+    /// Something failed: the host's attention/error style.
+    Attention,
 }
 
 impl Tone {
@@ -566,7 +607,9 @@ impl Component {
             Component::Button { action, .. } => action.is_some(),
             Component::Selection { submit, .. } => submit.is_some(),
             Component::Form { send_template, .. } => send_template.is_some(),
-            Component::List { .. }
+            Component::Header { .. }
+            | Component::FormGroups { .. }
+            | Component::List { .. }
             | Component::Table { .. }
             | Component::Chips { .. }
             | Component::Tree { .. }
@@ -612,6 +655,14 @@ impl Component {
             && args_key.trim().is_empty()
         {
             return Err("invalid A2UI surface: a selection with `submit` needs `args_key`".into());
+        }
+        if let Component::FormGroups { groups, .. } = self
+            && (groups.is_empty() || groups.iter().any(|g| g.send_template.trim().is_empty()))
+        {
+            return Err(
+                "invalid A2UI surface: form groups need at least one group, each with a template"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -783,7 +834,8 @@ fn v09_node_to_component(node: &Value) -> Option<Component> {
         }
         // Every other kind carries its canonical field names unchanged.
         "selection" | "form" | "dashboard" | "report" | "diff" | "sources" | "list" | "table"
-        | "chips" | "tree" | "notice" | "progress" | "key_value" | "embed" => {
+        | "chips" | "tree" | "notice" | "progress" | "key_value" | "embed" | "header"
+        | "form_groups" => {
             let map = node.as_object()?;
             for (k, v) in map {
                 if k != "type" {

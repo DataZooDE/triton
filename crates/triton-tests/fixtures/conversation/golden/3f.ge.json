@@ -1,0 +1,78 @@
+{
+  "_actions": {},
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "They go live once a colleague accepts them.",
+            "usageHint": "caption"
+          },
+          {
+            "columns": [
+              {
+                "field": "agent",
+                "header": "Agent"
+              },
+              {
+                "field": "owner",
+                "header": "Proposed owner"
+              }
+            ],
+            "component": "MaterialTable",
+            "id": "tbl-2",
+            "rows": [
+              {
+                "agent": "Agent 12",
+                "owner": "Head of Production Planning"
+              },
+              {
+                "agent": "Agent 19",
+                "owner": "Head of IT Operations"
+              },
+              {
+                "agent": "Agent 24",
+                "owner": "Head of Quality Assurance"
+              },
+              {
+                "agent": "Agent 27",
+                "owner": "Data Protection Officer"
+              }
+            ]
+          },
+          {
+            "children": [
+              "t-1",
+              "tbl-2"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

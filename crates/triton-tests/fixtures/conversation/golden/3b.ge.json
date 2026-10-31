@@ -1,0 +1,198 @@
+{
+  "_actions": {
+    "a10": "Show the agent \"Agent 12\"",
+    "a12": "Show the agent \"Agent 17\"",
+    "a3": "Show the agent \"Agent 28\"",
+    "a4": "Show the agent \"Agent 29\"",
+    "a5": "Show the agent \"Agent 30\"",
+    "a6": "Show the agent \"Agent 31\"",
+    "a8": "Show the agent \"Agent 21\""
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "31 Agents in 27 capabilities, 4 domains · as of 18:18",
+            "usageHint": "caption"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-2",
+            "text": "Finance: Forecast · Monitor · Schedule — 0",
+            "usageHint": "body2"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a3",
+            "label": "Sales: Forecast — Agent 28",
+            "variant": "basic"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a4",
+            "label": "Sales: Schedule · proposed — Agent 29",
+            "variant": "basic"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a5",
+            "label": "Service: Forecast — Agent 30",
+            "variant": "basic"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a6",
+            "label": "Service: Monitor — Agent 31",
+            "variant": "basic"
+          },
+          {
+            "children": [
+              "t-2",
+              "a3",
+              "a4",
+              "a5",
+              "a6"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "4 Agents",
+            "expanded": true,
+            "id": "node-7",
+            "title": "Commercial & service"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a8",
+            "label": "Production: Schedule — Agent 21",
+            "variant": "basic"
+          },
+          {
+            "children": [
+              "a8"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "8 Agents",
+            "expanded": false,
+            "id": "node-9",
+            "title": "Operations"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a10",
+            "label": "Design: Forecast — Agent 12",
+            "variant": "basic"
+          },
+          {
+            "children": [
+              "a10"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "22 Agents",
+            "expanded": false,
+            "id": "node-11",
+            "title": "Product & engineering"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a12",
+            "label": "Validation: Forecast — Agent 17",
+            "variant": "basic"
+          },
+          {
+            "children": [
+              "a12"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "1 Agent",
+            "expanded": false,
+            "id": "node-13",
+            "title": "SaaS quality assurance"
+          },
+          {
+            "children": [
+              "t-1",
+              "node-7",
+              "node-9",
+              "node-11",
+              "node-13"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

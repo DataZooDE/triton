@@ -1,5 +1,7 @@
 {
-  "_actions": {},
+  "_actions": {
+    "a8": "form submit, fills: What to change, New value"
+  },
   "messages": [
     {
       "createSurface": {
@@ -44,16 +46,85 @@
             "usageHint": "subtitle2"
           },
           {
-            "component": "MaterialText",
-            "id": "t-5",
-            "text": "Will be sent as: Set the ‹What to change› of Agent 28 to \"‹New value›\". Reason: ‹Why›",
-            "usageHint": "body2"
+            "component": "MaterialSelect",
+            "id": "in-5",
+            "label": "What to change",
+            "options": [
+              {
+                "label": "Owner",
+                "value": "owner"
+              },
+              {
+                "label": "Lifecycle",
+                "value": "lifecycle"
+              },
+              {
+                "label": "AI Act class",
+                "value": "AI Act class"
+              }
+            ],
+            "value": {
+              "path": "/f1/field"
+            }
+          },
+          {
+            "component": "MaterialSelect",
+            "id": "in-6",
+            "label": "New value",
+            "options": [
+              {
+                "label": "Finance operations (Org. unit)",
+                "value": "Finance operations"
+              },
+              {
+                "label": "Data Protection Officer",
+                "value": "Data Protection Officer"
+              }
+            ],
+            "value": {
+              "path": "/f1/value"
+            }
+          },
+          {
+            "component": "MaterialInput",
+            "id": "in-7",
+            "label": "Why",
+            "placeholder": "Finance took over the process in October.",
+            "value": {
+              "path": "/f1/reason"
+            }
+          },
+          {
+            "action": {
+              "event": {
+                "context": {
+                  "field": {
+                    "path": "/f1/field"
+                  },
+                  "reason": {
+                    "path": "/f1/reason"
+                  },
+                  "value": {
+                    "path": "/f1/value"
+                  }
+                },
+                "name": "submit"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a8",
+            "label": "File as draft for review",
+            "variant": "flat"
           },
           {
             "children": [
               "row-3",
               "t-4",
-              "t-5"
+              "in-5",
+              "in-6",
+              "in-7",
+              "a8"
             ],
             "component": "MaterialColumn",
             "id": "root-col"

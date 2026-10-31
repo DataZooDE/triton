@@ -1,0 +1,40 @@
+{
+  "_mock_item": "3e Draft filed (turn 3): facts and one primary action; who reviews is the context line",
+  "surface": {
+    "components": [
+      {
+        "kind": "header",
+        "title": "Retire Agent 20: filed for review",
+        "context": "Goes live once a colleague accepts it."
+      },
+      {
+        "kind": "key_value",
+        "pairs": [
+          {
+            "label": "Lifecycle",
+            "before": "Deployed",
+            "value": "Retired"
+          },
+          {
+            "label": "Reason",
+            "value": "Replaced (from your message)"
+          },
+          {
+            "label": "Assumed",
+            "value": "Owner, links and AI Act class unchanged"
+          }
+        ]
+      },
+      {
+        "kind": "button",
+        "label": "Open draft",
+        "primary": true,
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/open?draft=d1"
+        }
+      }
+    ]
+  },
+  "summary": "Filed for review: retire Agent 20. It goes live once a colleague accepts it."
+}

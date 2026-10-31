@@ -1,0 +1,402 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "style": "positive",
+      "title": "Open in the portfolio",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/open?view=planned"
+    },
+    {
+      "associatedInputs": "none",
+      "data": {
+        "ct": "__send_message|{\"m\":\"Which agents are planned with AI Act class high?\"}"
+      },
+      "title": "High AI Act only",
+      "type": "Action.Execute",
+      "verb": "agentAction"
+    },
+    {
+      "associatedInputs": "none",
+      "data": {
+        "ct": "__send_message|{\"m\":\"Which agents are planned without an owner?\"}"
+      },
+      "title": "Without owner",
+      "type": "Action.Execute",
+      "verb": "agentAction"
+    }
+  ],
+  "body": [
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "size": "Medium",
+              "text": "6 planned Agents",
+              "type": "TextBlock",
+              "weight": "Bolder",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "isSubtle": true,
+              "size": "Small",
+              "text": "as of 18:17",
+              "type": "TextBlock"
+            }
+          ],
+          "type": "Column",
+          "verticalContentAlignment": "Center",
+          "width": "auto"
+        }
+      ],
+      "type": "ColumnSet"
+    },
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "isSubtle": true,
+              "size": "Small",
+              "text": "Agent",
+              "type": "TextBlock",
+              "weight": "Bolder",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "isSubtle": true,
+              "size": "Small",
+              "text": "Capability",
+              "type": "TextBlock",
+              "weight": "Bolder",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "isSubtle": true,
+              "size": "Small",
+              "text": "Owner",
+              "type": "TextBlock",
+              "weight": "Bolder",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        }
+      ],
+      "type": "ColumnSet"
+    },
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "text": "Agent 3",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "Requirements: Monitor",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "Head of IT Operations",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        }
+      ],
+      "selectAction": {
+        "associatedInputs": "none",
+        "data": {
+          "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 3\\\"\"}"
+        },
+        "title": "Agent 3",
+        "type": "Action.Execute",
+        "verb": "agentAction"
+      },
+      "separator": true,
+      "type": "ColumnSet"
+    },
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "text": "Agent 8",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "Design: Schedule",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "Data Protection Officer",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        }
+      ],
+      "selectAction": {
+        "associatedInputs": "none",
+        "data": {
+          "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 8\\\"\"}"
+        },
+        "title": "Agent 8",
+        "type": "Action.Execute",
+        "verb": "agentAction"
+      },
+      "separator": true,
+      "type": "ColumnSet"
+    },
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "text": "Agent 12",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "Design: Forecast",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "No owner",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        }
+      ],
+      "selectAction": {
+        "associatedInputs": "none",
+        "data": {
+          "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 12\\\"\"}"
+        },
+        "title": "Agent 12",
+        "type": "Action.Execute",
+        "verb": "agentAction"
+      },
+      "separator": true,
+      "type": "ColumnSet"
+    },
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "text": "Agent 17",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "Validation: Forecast",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "Head of Quality Assurance",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        }
+      ],
+      "selectAction": {
+        "associatedInputs": "none",
+        "data": {
+          "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 17\\\"\"}"
+        },
+        "title": "Agent 17",
+        "type": "Action.Execute",
+        "verb": "agentAction"
+      },
+      "separator": true,
+      "type": "ColumnSet"
+    },
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "text": "Agent 21",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "Planning: Schedule",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "Head of Production Planning",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        }
+      ],
+      "selectAction": {
+        "associatedInputs": "none",
+        "data": {
+          "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 21\\\"\"}"
+        },
+        "title": "Agent 21",
+        "type": "Action.Execute",
+        "verb": "agentAction"
+      },
+      "separator": true,
+      "type": "ColumnSet"
+    },
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "text": "Agent 28",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "Sales: Forecast",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "text": "Data Protection Officer",
+              "type": "TextBlock",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        }
+      ],
+      "selectAction": {
+        "associatedInputs": "none",
+        "data": {
+          "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 28\\\"\"}"
+        },
+        "title": "Agent 28",
+        "type": "Action.Execute",
+        "verb": "agentAction"
+      },
+      "separator": true,
+      "type": "ColumnSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

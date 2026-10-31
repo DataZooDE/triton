@@ -1,0 +1,123 @@
+{
+  "_mock_item": "3a List (turn 3): header with stamp, one value per cell, row opens the Agent card, one primary and two secondary buttons",
+  "surface": {
+    "components": [
+      {
+        "kind": "header",
+        "title": "6 planned Agents",
+        "stamp": "as of 18:17"
+      },
+      {
+        "kind": "table",
+        "columns": [
+          {
+            "key": "agent",
+            "label": "Agent"
+          },
+          {
+            "key": "capability",
+            "label": "Capability"
+          },
+          {
+            "key": "owner",
+            "label": "Owner"
+          }
+        ],
+        "rows": [
+          {
+            "cells": {
+              "agent": "Agent 3",
+              "capability": "Requirements: Monitor",
+              "owner": "Head of IT Operations"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show the agent \"Agent 3\""
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 8",
+              "capability": "Design: Schedule",
+              "owner": "Data Protection Officer"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show the agent \"Agent 8\""
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 12",
+              "capability": "Design: Forecast",
+              "owner": "No owner"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show the agent \"Agent 12\""
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 17",
+              "capability": "Validation: Forecast",
+              "owner": "Head of Quality Assurance"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show the agent \"Agent 17\""
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 21",
+              "capability": "Planning: Schedule",
+              "owner": "Head of Production Planning"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show the agent \"Agent 21\""
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 28",
+              "capability": "Sales: Forecast",
+              "owner": "Data Protection Officer"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show the agent \"Agent 28\""
+            }
+          }
+        ]
+      },
+      {
+        "kind": "button",
+        "label": "Open in the portfolio",
+        "primary": true,
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/open?view=planned"
+        }
+      },
+      {
+        "kind": "button",
+        "label": "High AI Act only",
+        "action": {
+          "type": "send_message",
+          "text": "Which agents are planned with AI Act class high?"
+        }
+      },
+      {
+        "kind": "button",
+        "label": "Without owner",
+        "action": {
+          "type": "send_message",
+          "text": "Which agents are planned without an owner?"
+        }
+      }
+    ]
+  },
+  "summary": "6 Agents are planned."
+}
