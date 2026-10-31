@@ -777,6 +777,17 @@ fn turn3_gemini_shows_every_row_once() {
         !c.iter().any(|x| x["text"] == "6 planned Agents"),
         "the text part says the title"
     );
+    // Rule 3 on Gemini too: a read shows its time (crew F3).
+    assert!(
+        c.iter().any(|x| x["text"] == "as of 18:17"),
+        "the stamp is shown"
+    );
+    let c = comps("3b", GeOptions::default());
+    assert!(
+        c.iter()
+            .any(|x| x["text"] == "31 Agents in 27 capabilities, 4 domains \u{b7} as of 18:18"),
+        "context and stamp on one caption"
+    );
 
     let c = comps("3d-list", GeOptions::default());
     let retire: Vec<&Value> = c.iter().filter(|x| x["label"] == "Retire").collect();
@@ -811,8 +822,9 @@ fn turn3_gemini_shows_every_row_once() {
     );
     assert_eq!(
         signer.open_action_with(id, &json!({})),
+        // Named by its label, never its key (crew F4).
         Some(triton_core::a2ui::ge::GeAction::Incomplete(vec![
-            "value".into()
+            "New owner".into()
         ]))
     );
     // 3c, chips fallback: one button per value, no input fields.
@@ -832,5 +844,26 @@ fn turn3_gemini_shows_every_row_once() {
     assert!(
         c.iter()
             .any(|x| x["component"] == "MaterialButton" && x["label"] == "IT Operations")
+    );
+}
+
+/// Values are data, not Markdown: a name like `[x](https://…)` in a header,
+/// a table cell or a fact never becomes a link on a Teams card.
+#[test]
+fn teams_card_values_are_never_markdown() {
+    let evil = "[pay](https://evil.example) *now*";
+    let surface = json!({ "surface": { "components": [
+        { "kind": "header", "title": evil, "context": evil },
+        { "kind": "table", "columns": [ { "key": "a", "label": "Agent" } ],
+          "rows": [ { "cells": { "a": evil } } ] },
+        { "kind": "key_value", "pairs": [ { "label": "Owner", "value": evil } ] }
+    ] } });
+    let card = teams_card(&surface).expect("card").to_string();
+    assert!(!card.contains("\"[pay]("), "{card}");
+    assert_eq!(
+        card.matches("\\\\[pay\\\\](https://evil.example) \\\\*now\\\\*")
+            .count(),
+        4,
+        "{card}"
     );
 }

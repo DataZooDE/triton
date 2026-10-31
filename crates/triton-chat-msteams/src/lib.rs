@@ -2038,6 +2038,16 @@ async fn handle_callback(
                 let card = activity.reply_to_id.clone().map(|id| {
                     let mut card = TaskCard::new(None);
                     card.activity_id = Some(id);
+                    card.not_before = Some(std::time::Instant::now() + IN_PLACE_SETTLE);
+                    let task_id = uuid::Uuid::new_v4().to_string();
+                    card.refresh = adapter
+                        .tasks
+                        .as_ref()
+                        .and_then(|_| {
+                            refresh_token(adapter, &task_id, &sender.tenant, &sender.from_id)
+                        })
+                        .map(|t| (t, sender.from_id.clone()));
+                    card.task_id = Some(task_id);
                     card
                 });
                 let response = match &card {
@@ -2866,6 +2876,10 @@ async fn courier_deliver(
     // replaces the asserted identity and the raw id becomes the only
     // way to tell an impersonation from the victim's own session.
     let mut principal = sender_principal(&sender);
+    // A clicked card already names its task (its refresh token carries it).
+    if let Some(id) = in_place.as_ref().and_then(|c| c.task_id.clone()) {
+        principal.trace_id = id;
+    }
     // T3 (async-ops): carry the Teams conversationReference into the agent's
     // turn so a tool like `start_operation` can persist it and deliver the
     // (terminal + progress) result back to THIS conversation later. The inline
@@ -2962,7 +2976,9 @@ async fn courier_deliver(
         .as_ref()
         .and_then(|_| refresh_token(&adapter, &trace_id, &sender.tenant, &sender.from_id))
         .map(|t| (t, sender.from_id.clone()));
-    if let Some(card) = task_card.as_mut() {
+    if let Some(card) = task_card.as_mut()
+        && card.refresh.is_none()
+    {
         card.refresh = refresh.clone();
     }
     // F8b: with a task runner the turn is a task — stored once the
@@ -3000,7 +3016,13 @@ async fn courier_deliver(
                     principal,
                     PROTOCOL,
                     Default::default(),
-                    triton_tasks::Persist::OnAsync,
+                    // A clicked card is a task from the start, so its
+                    // refresh finds the answer even when it comes at once.
+                    if in_place_card {
+                        triton_tasks::Persist::Now
+                    } else {
+                        triton_tasks::Persist::OnAsync
+                    },
                 )
                 .map(|rx| {
                     triton_tasks::as_stream_events(rx, runner.store.clone(), trace_id.clone())
@@ -3192,6 +3214,10 @@ async fn courier_deliver(
         user_id: sender.from_id.clone(),
         tenant: sender.tenant.clone(),
     };
+    // The invoke's card response goes first (crew F1).
+    if let Some(t) = task_card.as_ref().and_then(|c| c.not_before) {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await;
+    }
     let delivered = deliver_terminal(
         &adapter,
         &target,
@@ -3528,12 +3554,25 @@ struct TaskCard {
     /// Signed refresh token: a viewer's Teams client asks for the current
     /// state of the card (`refresh`, Universal Actions) when it shows it.
     refresh: Option<(String, String)>,
+    /// A clicked card turned into this working card: its task id, chosen
+    /// before the dispatch, so the first card can already refresh itself.
+    task_id: Option<String>,
+    /// No update before this instant: the invoke's card response must reach
+    /// Teams first, or a fast answer would be overwritten by it.
+    not_before: Option<std::time::Instant>,
 }
+
+/// How long a clicked card waits before its first update (crew F1): the
+/// invoke's own card response has to be applied by Teams first.
+const IN_PLACE_SETTLE: std::time::Duration = std::time::Duration::from_millis(1500);
 
 const CARD_UPDATE_EVERY: std::time::Duration = std::time::Duration::from_millis(1000);
 /// The running timer in the card's header is pushed at this cadence even
 /// when no new step arrives, so a long run never looks stuck at `0:00`.
 const CARD_TICK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+/// After this long the tick slows to [`CARD_TICK_SLOW`].
+const CARD_TICK_FAST_FOR: std::time::Duration = std::time::Duration::from_secs(120);
+const CARD_TICK_SLOW: std::time::Duration = std::time::Duration::from_secs(60);
 /// Sentinel tool of a working card's `refresh` action: `{t: task id}`.
 const REFRESH_TOOL: &str = "__refresh_task";
 
@@ -3551,6 +3590,8 @@ impl TaskCard {
             steps: Vec::new(),
             note: None,
             refresh: None,
+            task_id: None,
+            not_before: None,
         }
     }
 
@@ -3606,6 +3647,12 @@ impl TaskCard {
     /// Throttle: Teams rate-limits edits; one per second is plenty. `true`
     /// when an update is to be sent now; the held step is then shown.
     fn due(&mut self) -> bool {
+        if self
+            .not_before
+            .is_some_and(|t| std::time::Instant::now() < t)
+        {
+            return false;
+        }
         if self.last_update.elapsed() >= CARD_UPDATE_EVERY {
             self.last_update = std::time::Instant::now();
             self.pending = false;
@@ -3615,16 +3662,26 @@ impl TaskCard {
         }
     }
 
-    /// When the held step is to be flushed: the end of the throttle window,
-    /// if a step is held and the card exists. `None` when nothing waits.
+    /// When the card is next pushed: the held step at the end of the
+    /// throttle window, else the timer tick (every 10 s for two minutes,
+    /// then every minute; the card's `refresh` covers the rest). `None`
+    /// before the card exists.
     fn flush_at(&self) -> Option<tokio::time::Instant> {
         self.activity_id.as_ref()?;
-        let tick = self.last_update + CARD_TICK_EVERY;
-        let at = if self.pending {
+        let tick_every = if self.started.elapsed() < CARD_TICK_FAST_FOR {
+            CARD_TICK_EVERY
+        } else {
+            CARD_TICK_SLOW
+        };
+        let tick = self.last_update + tick_every;
+        let mut at = if self.pending {
             (self.last_update + CARD_UPDATE_EVERY).min(tick)
         } else {
             tick
         };
+        if let Some(t) = self.not_before {
+            at = at.max(t);
+        }
         Some(tokio::time::Instant::from_std(at))
     }
 
@@ -3724,6 +3781,12 @@ async fn refresh_card(
         .filter(|r| r.owner.as_deref() == Some(triton_tasks::owner_key(&principal).as_str()));
     let working = |rec: Option<&triton_tasks::TaskRecord>| {
         let mut card = TaskCard::new(rec.and_then(|r| r.receipt.clone()));
+        // Still running: the card keeps refreshing itself.
+        card.refresh = args
+            .get("t")
+            .and_then(Value::as_str)
+            .and_then(|t| refresh_token(adapter, t, &sender.tenant, &sender.from_id))
+            .map(|t| (t, sender.from_id.clone()));
         card.note = rec.and_then(|r| r.note.clone());
         if let Some(r) = rec {
             card.started = std::time::Instant::now()
@@ -3902,6 +3965,8 @@ async fn resume_task(adapter: Arc<MsTeamsAdapter>, rec: triton_tasks::TaskRecord
     let mut card = d.card_activity_id.clone().map(|id| {
         let mut card = TaskCard::resumed(rec.receipt.clone(), age, id);
         card.note = rec.note.clone();
+        card.refresh =
+            refresh_token(&adapter, &rec.id, &d.tenant, &d.user_id).map(|t| (t, d.user_id.clone()));
         card
     });
     let mut terminal: Option<Result<Value, TritonError>> = None;

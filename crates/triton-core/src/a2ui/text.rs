@@ -240,7 +240,7 @@ fn counts_suffix(n: &TreeNode) -> String {
     let parts: Vec<String> = n
         .counts
         .iter()
-        .map(|c| format!("{} {}", c.value, c.label))
+        .map(|c| format!("{} {}", c.value, c.label).trim().to_string())
         .collect();
     format!(" \u{2014} {}", parts.join(" \u{b7} "))
 }

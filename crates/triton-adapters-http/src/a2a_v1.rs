@@ -668,7 +668,7 @@ fn parse_send(params: &Value) -> Result<Incoming, A2aError> {
         Some(triton_core::a2ui::ge::GeAction::OpenDoc { label, .. }) => Some(label),
         // A form submit without its required inputs sends nothing.
         Some(triton_core::a2ui::ge::GeAction::Incomplete(names)) => {
-            return Err(bad(&format!("missing input(s): {}", names.join(", "))));
+            return Err(bad(&format!("Choose {} first.", names.join(", "))));
         }
         None => None,
     };

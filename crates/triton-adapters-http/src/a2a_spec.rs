@@ -546,7 +546,7 @@ fn text_from_params(params: &Value) -> Option<Inbound> {
             triton_core::a2ui::ge::GeAction::Incomplete(names) => Inbound {
                 text: String::new(),
                 open_doc: None,
-                missing: Some(format!("missing input(s): {}", names.join(", "))),
+                missing: Some(format!("Choose {} first.", names.join(", "))),
             },
             triton_core::a2ui::ge::GeAction::OpenDoc {
                 label,
@@ -638,20 +638,22 @@ pub(crate) fn a2ui_action(parts: &[Value]) -> Option<triton_core::a2ui::ge::GeAc
             let Some(action) = m.get("action") else {
                 continue;
             };
-            if let Some(q) = action
-                .get("context")
-                .and_then(|c| c.get("question"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                return Some(triton_core::a2ui::ge::GeAction::Message(q.to_string()));
-            }
+            // A signed component id names the action; its form inputs come
+            // from the context. Only an action Triton did not sign may
+            // carry its message as `context.question` (crew F6).
             let context = action.get("context").cloned().unwrap_or(Value::Null);
             if let Some(cid) = action.get("sourceComponentId").and_then(Value::as_str)
                 && let Some(a) = triton_core::a2ui::ge::action_for_with(cid, &context)
             {
                 return Some(a);
+            }
+            if let Some(q) = context
+                .get("question")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                return Some(triton_core::a2ui::ge::GeAction::Message(q.to_string()));
             }
         }
     }
@@ -671,8 +673,17 @@ async fn message_send(
             "params.message.parts must contain at least one non-empty text part",
         );
     };
+    // A form submit without a required choice: nothing is sent; the reply
+    // says which choice is missing, as an ordinary agent message.
     if let Some(missing) = &inbound.missing {
-        return rpc_error(&req.id, INVALID_PARAMS, missing);
+        return rpc_ok(
+            &req.id,
+            json!({
+                "kind": "message", "role": "agent",
+                "messageId": uuid::Uuid::new_v4().to_string(),
+                "parts": [ { "kind": "text", "text": missing } ],
+            }),
+        );
     }
     let text = inbound.text.clone();
     // A2A 0.3.0 requires `contextId` on Task; honor a client-supplied
@@ -810,7 +821,16 @@ async fn message_stream(
         );
     };
     if let Some(missing) = &inbound.missing {
-        return rpc_error(&req.id, INVALID_PARAMS, missing);
+        // As in message/send: one agent message, the stream ends.
+        let frame = json!({ "jsonrpc": "2.0", "id": req.id, "result": {
+            "kind": "message", "role": "agent",
+            "messageId": uuid::Uuid::new_v4().to_string(),
+            "parts": [ { "kind": "text", "text": missing } ],
+        } });
+        let sse = futures::stream::iter([Ok::<_, std::convert::Infallible>(
+            axum::response::sse::Event::default().data(frame.to_string()),
+        )]);
+        return axum::response::Sse::new(sse).into_response();
     }
     let text = inbound.text.clone();
     let trace_id = principal.trace_id.clone();

@@ -259,10 +259,19 @@ impl ActionSigner {
 
     /// Mint the token for "fill this template from the form's inputs and
     /// send it as a new turn" (a form submit with real input fields).
-    pub fn sign_template(&self, template: &str) -> Option<String> {
+    pub fn sign_template(&self, template: &str, labels: &[(&str, &str)]) -> Option<String> {
+        // The field labels ride along so an incomplete submit can say which
+        // choice is missing in the reader's words, never by field key.
+        let mut args = triton_correlation::message::template_args(template);
+        args["labels"] = Value::Object(
+            labels
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), json!(v)))
+                .collect(),
+        );
         triton_correlation::encode_bound(
             triton_correlation::message::SEND_MESSAGE_TOOL,
-            &triton_correlation::message::template_args(template),
+            &args,
             self.ring.signing(),
             GE_ACTION_CAP,
             Self::binding(),
@@ -349,7 +358,13 @@ impl ActionSigner {
         match triton_correlation::message::resolve(&args, input) {
             Ok(m) => Some(GeAction::Message(m)),
             Err(triton_correlation::message::MessageError::Missing(names)) => {
-                Some(GeAction::Incomplete(names))
+                let label = |n: &String| {
+                    args.get("labels")
+                        .and_then(|l| l.get(n))
+                        .and_then(Value::as_str)
+                        .map_or_else(|| n.clone(), str::to_owned)
+                };
+                Some(GeAction::Incomplete(names.iter().map(label).collect()))
             }
             Err(_) => None,
         }
@@ -867,11 +882,20 @@ impl Card<'_> {
                 }
             }
             // The text part says the title; the card keeps the context line.
-            Component::Header { context, .. } => context
-                .as_deref()
-                .filter(|c| !c.is_empty())
-                .map(|c| vec![self.text(c, "caption")])
-                .unwrap_or_default(),
+            Component::Header { context, stamp, .. } => {
+                // The text part says the title; the card keeps the context
+                // line and the stamp (a read's time), on one caption.
+                let line: Vec<&str> = [context.as_deref(), stamp.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .filter(|t| !t.is_empty())
+                    .collect();
+                if line.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![self.text(&line.join(" \u{b7} "), "caption")]
+                }
+            }
             Component::FormGroups {
                 title,
                 groups,
@@ -931,9 +955,16 @@ impl Card<'_> {
             };
             ids.push(self.add("in", comp));
         }
-        let Some(token) = self.signer.sign_template(tpl) else {
-            tracing::warn!("a2ui/ge: dropping a form submit (template too long to sign)");
-            return ids;
+        let labels: Vec<(&str, &str)> = fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.label.as_str()))
+            .collect();
+        let Some(token) = self.signer.sign_template(tpl, &labels) else {
+            // No submit, no inputs: fields that cannot be sent would mislead.
+            tracing::warn!("a2ui/ge: form too long to sign; showing its one-click form instead");
+            let mark = self.flat.len();
+            self.flat.truncate(mark - ids.len());
+            return self.template_form("", fields, tpl, None);
         };
         self.n += 1;
         let id = format!("a{}-{token}", self.n);
@@ -990,7 +1021,8 @@ impl Card<'_> {
         ids
     }
 
-    /// A template form. GE cannot return input values (see Selection), so:
+    /// The one-click fallback of a template form (`TRITON_GE_FORM_FIELDS=off`,
+    /// or a form too long to sign) — for a host that drops a click's context:
     /// a form whose template depends on exactly ONE select field expands to
     /// one button per option; any other form shows its "will be sent as"
     /// preview for the reader to copy — Gemini cannot submit it.
@@ -1047,11 +1079,27 @@ impl Card<'_> {
         let counts: Vec<String> = n
             .counts
             .iter()
-            .map(|c| format!("{} {}", c.value, c.label))
+            .map(|c| format!("{} {}", c.value, c.label).trim().to_string())
             .collect();
-        let mut description = counts.join(" \u{b7} ");
-        if n.gap {
-            description = format!("\u{26a0} {description}").trim().to_string();
+        let description = counts.join(" \u{b7} ");
+        // A leaf is one line: a link-like button when it opens something (a
+        // panel holding a single button would be a click to reach a click),
+        // else text. A gap reads as its count.
+        if n.children.is_empty() && n.chips.is_empty() {
+            let line = if description.is_empty() {
+                n.label.clone()
+            } else {
+                format!("{} \u{2014} {description}", n.label)
+            };
+            if !n.gap
+                && let Some(id) = n
+                    .action
+                    .as_ref()
+                    .and_then(|a| self.action_button(&line, a, "basic"))
+            {
+                return id;
+            }
+            return self.text(&line, "body2");
         }
         let mut inner: Vec<String> = Vec::new();
         let chip_btns: Vec<String> = n

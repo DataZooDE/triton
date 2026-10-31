@@ -1,7 +1,7 @@
 {
   "_actions": {
-    "a2": "Which agents are planned with AI Act class high?",
-    "a3": "Which agents are planned without an owner?"
+    "a3": "Which agents are planned with AI Act class high?",
+    "a4": "Which agents are planned without an owner?"
   },
   "messages": [
     {
@@ -19,6 +19,12 @@
       "updateComponents": {
         "components": [
           {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "as of 18:17",
+            "usageHint": "caption"
+          },
+          {
             "columns": [
               {
                 "field": "agent",
@@ -34,7 +40,7 @@
               }
             ],
             "component": "MaterialTable",
-            "id": "tbl-1",
+            "id": "tbl-2",
             "rows": [
               {
                 "agent": "Agent 3",
@@ -77,7 +83,7 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a2",
+            "id": "a3",
             "label": "High AI Act only",
             "variant": "flat"
           },
@@ -90,24 +96,25 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a3",
+            "id": "a4",
             "label": "Without owner",
             "variant": "flat"
           },
           {
             "align": "stretch",
             "children": [
-              "a2",
-              "a3"
+              "a3",
+              "a4"
             ],
             "component": "MaterialRow",
-            "id": "row-4",
+            "id": "row-5",
             "justify": "start"
           },
           {
             "children": [
-              "tbl-1",
-              "row-4"
+              "t-1",
+              "tbl-2",
+              "row-5"
             ],
             "component": "MaterialColumn",
             "id": "root-col"

@@ -636,3 +636,60 @@ async fn the_working_card_timer_runs_without_new_steps() {
         "a tick at 0:1x with no new step: {ticks:#?}"
     );
 }
+
+/// Crew F1/F2: a click whose answer is there at once still shows in the
+/// clicked card AFTER Teams applied the invoke's working card (the first
+/// update waits a moment), and the first working card already refreshes
+/// itself; two refreshes while it runs both keep the refresh action.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_fast_answer_does_not_race_the_clicked_cards_working_card() {
+    let fake = FakeBotFramework::start().await;
+    let agent = FakeAsyncAgent::start(AsyncPlan {
+        total: Duration::from_secs(3),
+        tick: Duration::from_millis(300),
+        result: json!({ "surface": { "components": [
+            { "kind": "text", "value": ANSWER },
+            { "kind": "button", "label": "Again",
+              "action": { "type": "send_message", "text": "Propose an owner again." } }
+        ] } }),
+        ..AsyncPlan::default()
+    })
+    .await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(10), env(&fake, &agent)).await;
+    post(&proc, &fake, None).await;
+    wait_until(Duration::from_secs(10), || {
+        fake.updates()
+            .iter()
+            .any(|u| card_text(&u.body).contains("Again"))
+    })
+    .await;
+    let answer = fake.updates().last().unwrap().body.clone();
+    let again = find_execute(&answer, "Again").expect("chip").clone();
+    let before = fake.updates().len();
+    let clicked = Instant::now();
+    let resp = post_invoke(&proc, &fake, &invoke(again["data"].clone(), "card-9")).await;
+    // The first in-place working card carries its refresh action at once.
+    assert_eq!(
+        resp["value"]["refresh"]["action"]["type"], "Action.Execute",
+        "{resp}"
+    );
+    let token = resp["value"]["refresh"]["action"]["data"].clone();
+    // Two refreshes while it runs: still working, still refreshing.
+    for _ in 0..2 {
+        let r = post_invoke(&proc, &fake, &invoke(token.clone(), "card-9")).await;
+        assert_eq!(
+            r["value"]["refresh"]["action"]["type"], "Action.Execute",
+            "{r}"
+        );
+    }
+    wait_until(Duration::from_secs(10), || {
+        fake.updates()[before..]
+            .iter()
+            .any(|u| u.activity_id == "card-9")
+    })
+    .await;
+    assert!(
+        clicked.elapsed() >= Duration::from_millis(1000),
+        "the first update of the clicked card waits for the invoke response"
+    );
+}

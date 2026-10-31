@@ -1,9 +1,9 @@
 {
   "_actions": {
-    "a14": "form submit, fills: value",
-    "a19": "form submit, fills: value",
-    "a4": "form submit, fills: value",
-    "a9": "form submit, fills: value"
+    "a14": "form submit, fills: New AI Act class",
+    "a19": "form submit, fills: What to change",
+    "a4": "form submit, fills: New owner",
+    "a9": "form submit, fills: New lifecycle"
   },
   "messages": [
     {

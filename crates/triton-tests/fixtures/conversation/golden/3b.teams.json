@@ -147,7 +147,7 @@
                               "items": [
                                 {
                                   "isSubtle": true,
-                                  "text": "0 ",
+                                  "text": "0",
                                   "type": "TextBlock",
                                   "wrap": true
                                 }
@@ -192,7 +192,7 @@
                               "items": [
                                 {
                                   "isSubtle": true,
-                                  "text": "Agent 28 ",
+                                  "text": "Agent 28",
                                   "type": "TextBlock",
                                   "wrap": true
                                 }
@@ -246,7 +246,7 @@
                               "items": [
                                 {
                                   "isSubtle": true,
-                                  "text": "Agent 29 ",
+                                  "text": "Agent 29",
                                   "type": "TextBlock",
                                   "wrap": true
                                 }
@@ -300,7 +300,7 @@
                               "items": [
                                 {
                                   "isSubtle": true,
-                                  "text": "Agent 30 ",
+                                  "text": "Agent 30",
                                   "type": "TextBlock",
                                   "wrap": true
                                 }
@@ -354,7 +354,7 @@
                               "items": [
                                 {
                                   "isSubtle": true,
-                                  "text": "Agent 31 ",
+                                  "text": "Agent 31",
                                   "type": "TextBlock",
                                   "wrap": true
                                 }
@@ -493,7 +493,7 @@
                               "items": [
                                 {
                                   "isSubtle": true,
-                                  "text": "Agent 21 ",
+                                  "text": "Agent 21",
                                   "type": "TextBlock",
                                   "wrap": true
                                 }
@@ -632,7 +632,7 @@
                               "items": [
                                 {
                                   "isSubtle": true,
-                                  "text": "Agent 12 ",
+                                  "text": "Agent 12",
                                   "type": "TextBlock",
                                   "wrap": true
                                 }
@@ -771,7 +771,7 @@
                               "items": [
                                 {
                                   "isSubtle": true,
-                                  "text": "Agent 17 ",
+                                  "text": "Agent 17",
                                   "type": "TextBlock",
                                   "wrap": true
                                 }

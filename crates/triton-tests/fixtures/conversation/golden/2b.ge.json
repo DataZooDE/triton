@@ -1,10 +1,9 @@
 {
   "_actions": {
-    "a14": "Which Operations Agents have no owner?",
-    "a15": "Which data products does Operations need?",
+    "a13": "Which Operations Agents have no owner?",
+    "a14": "Which data products does Operations need?",
     "a2": "Show Agent 26",
-    "a5": "Propose an Agent for Logistics: Monitor",
-    "a7": "Show Agent 14"
+    "a6": "Show Agent 14"
   },
   "messages": [
     {
@@ -59,27 +58,10 @@
             "title": "Forecast"
           },
           {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a5",
-            "label": "none · propose",
-            "variant": "basic"
-          },
-          {
-            "children": [
-              "a5"
-            ],
-            "component": "MaterialExpansionPanel",
-            "description": "⚠",
-            "expanded": true,
-            "id": "node-6",
-            "title": "Monitor"
+            "component": "MaterialText",
+            "id": "t-5",
+            "text": "Monitor",
+            "usageHint": "body2"
           },
           {
             "action": {
@@ -90,55 +72,55 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a7",
+            "id": "a6",
             "label": "Agent 14 · Planned",
             "variant": "stroked"
           },
           {
             "align": "stretch",
             "children": [
-              "a7"
+              "a6"
             ],
             "component": "MaterialRow",
-            "id": "row-8",
+            "id": "row-7",
             "justify": "start"
           },
           {
             "children": [
-              "row-8"
+              "row-7"
             ],
             "component": "MaterialExpansionPanel",
             "expanded": false,
-            "id": "node-9",
+            "id": "node-8",
             "title": "Schedule"
           },
           {
             "children": [
               "node-4",
-              "node-6",
-              "node-9"
+              "t-5",
+              "node-8"
             ],
             "component": "MaterialExpansionPanel",
             "description": "2 Agents",
             "expanded": true,
-            "id": "node-10",
+            "id": "node-9",
             "title": "Logistics"
           },
           {
             "component": "MaterialText",
-            "id": "t-11",
+            "id": "t-10",
             "text": "Planning — 3 Agents",
             "usageHint": "body2"
           },
           {
             "component": "MaterialText",
-            "id": "t-12",
+            "id": "t-11",
             "text": "Production — 3 Agents · 1 proposed capability",
             "usageHint": "body2"
           },
           {
             "component": "MaterialText",
-            "id": "t-13",
+            "id": "t-12",
             "text": "Ask next",
             "usageHint": "body2"
           },
@@ -151,7 +133,7 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a14",
+            "id": "a13",
             "label": "Operations Agents without owner",
             "variant": "stroked"
           },
@@ -164,28 +146,28 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a15",
+            "id": "a14",
             "label": "Data products Operations needs",
             "variant": "stroked"
           },
           {
             "align": "stretch",
             "children": [
-              "a14",
-              "a15"
+              "a13",
+              "a14"
             ],
             "component": "MaterialRow",
-            "id": "row-16",
+            "id": "row-15",
             "justify": "start"
           },
           {
             "children": [
               "t-1",
-              "node-10",
+              "node-9",
+              "t-10",
               "t-11",
               "t-12",
-              "t-13",
-              "row-16"
+              "row-15"
             ],
             "component": "MaterialColumn",
             "id": "root-col"

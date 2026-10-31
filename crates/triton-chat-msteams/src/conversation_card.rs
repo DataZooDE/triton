@@ -328,12 +328,12 @@ impl Builder<'_, '_> {
         }
         for it in items {
             let mut inner = vec![json!({
-                "type": "TextBlock", "text": it.label, "wrap": true,
+                "type": "TextBlock", "text": plain(&it.label), "wrap": true,
                 "color": if it.action.is_some() { "Accent" } else { "Default" },
             })];
             if let Some(d) = it.detail.as_deref().filter(|d| !d.is_empty()) {
                 inner.push(json!({
-                    "type": "TextBlock", "text": d, "isSubtle": true,
+                    "type": "TextBlock", "text": plain(d), "isSubtle": true,
                     "spacing": "None", "size": "Small", "wrap": true,
                 }));
             }
@@ -362,7 +362,7 @@ impl Builder<'_, '_> {
             .iter()
             .map(|c| {
                 json!({ "type": "Column", "width": "stretch", "items": [
-                    { "type": "TextBlock", "text": c.label, "weight": "Bolder", "wrap": true,
+                    { "type": "TextBlock", "text": plain(&c.label), "weight": "Bolder", "wrap": true,
                       "isSubtle": true, "size": "Small" }
                 ] })
             })
@@ -375,7 +375,7 @@ impl Builder<'_, '_> {
                 .map(|c| {
                     let v = r.cells.get(&c.key).cloned().unwrap_or_default();
                     json!({ "type": "Column", "width": "stretch", "items": [
-                        { "type": "TextBlock", "text": v, "wrap": true }
+                        { "type": "TextBlock", "text": plain(&v), "wrap": true }
                     ] })
                 })
                 .collect();
@@ -446,7 +446,7 @@ impl Builder<'_, '_> {
         let counts: Vec<String> = n
             .counts
             .iter()
-            .map(|c| format!("{} {}", c.value, c.label))
+            .map(|c| format!("{} {}", c.value, c.label).trim().to_string())
             .collect();
         let has_inside = !n.children.is_empty() || !n.chips.is_empty();
         let children_id = self.next_id("kids");
@@ -469,13 +469,13 @@ impl Builder<'_, '_> {
                 { "type": "Column", "width": "auto", "items": marker_items },
                 { "type": "Column", "width": "stretch", "items": [
                     // A gap reads as its count ("0"): one calm style for every row.
-                    { "type": "TextBlock", "text": n.label, "wrap": true } ] },
+                    { "type": "TextBlock", "text": plain(&n.label), "wrap": true } ] },
             ],
         });
         if !counts.is_empty() {
             header["columns"].as_array_mut().unwrap().push(json!({
                 "type": "Column", "width": "auto", "items": [
-                    { "type": "TextBlock", "text": counts.join(" \u{b7} "),
+                    { "type": "TextBlock", "text": plain(&counts.join(" \u{b7} ")),
                       "isSubtle": true, "wrap": true } ] }));
         }
         if has_inside {
@@ -680,22 +680,40 @@ fn text_input(f: &FormField, id: &str, required: bool, multiline: bool) -> Value
     v
 }
 
+/// A data value (a name, a cell, a header) as a TextBlock shows it: Teams
+/// renders TextBlock text as Markdown, so a name such as `[x](https://…)`
+/// would become a link. Prose components keep their Markdown; values are
+/// escaped.
+fn plain(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        if matches!(
+            c,
+            '\\' | '*' | '_' | '[' | ']' | '`' | '~' | '#' | '<' | '>' | '|'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// The card head (one anatomy): the title in bold with the stamp (a time,
 /// a timer) right-aligned beside it, then the one context line, subtle.
 pub fn header(title: &str, context: Option<&str>, stamp: Option<&str>) -> Vec<Value> {
     let mut columns = vec![json!({ "type": "Column", "width": "stretch", "items": [
-        { "type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium", "wrap": true }
+        { "type": "TextBlock", "text": plain(title), "weight": "Bolder", "size": "Medium", "wrap": true }
     ] })];
     if let Some(s) = stamp.filter(|s| !s.is_empty()) {
         columns.push(json!({ "type": "Column", "width": "auto",
             "verticalContentAlignment": "Center", "items": [
-            { "type": "TextBlock", "text": s, "isSubtle": true, "size": "Small" }
+            { "type": "TextBlock", "text": plain(s), "isSubtle": true, "size": "Small" }
         ] }));
     }
     let mut out = vec![json!({ "type": "ColumnSet", "columns": columns })];
     if let Some(c) = context.filter(|c| !c.is_empty()) {
         out.push(json!({
-            "type": "TextBlock", "text": c, "isSubtle": true, "wrap": true, "spacing": "None",
+            "type": "TextBlock", "text": plain(c), "isSubtle": true, "wrap": true, "spacing": "None",
         }));
     }
     out
@@ -755,7 +773,7 @@ fn key_value(title: Option<&str>, pairs: &[KeyValuePair]) -> Vec<Value> {
                 Some(b) => format!("{b} \u{2192} {}", p.value),
                 None => p.value.clone(),
             };
-            json!({ "title": p.label, "value": v })
+            json!({ "title": plain(&p.label), "value": plain(&v) })
         })
         .collect();
     out.push(json!({ "type": "FactSet", "facts": facts }));
