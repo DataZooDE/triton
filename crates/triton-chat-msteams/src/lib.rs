@@ -3052,6 +3052,8 @@ async fn courier_deliver(
                         }
                         let mut card = TaskCard::new(None);
                         card.task(v);
+                        // The post below shows the receipt; nothing is held.
+                        card.pending = false;
                         card.refresh = refresh.clone();
                         let mut body =
                             card.activity(&recipient_id, &conversation_id, &sender.from_id);
@@ -3788,7 +3790,10 @@ where
 {
     use futures::StreamExt as _;
     match card.and_then(TaskCard::flush_at) {
+        // Biased: an event that is already there (the answer above all) goes
+        // before a due flush or timer tick.
         Some(at) => tokio::select! {
+            biased;
             ev = stream.next() => CardTurn::Event(ev),
             () = tokio::time::sleep_until(at) => CardTurn::Flush,
         },

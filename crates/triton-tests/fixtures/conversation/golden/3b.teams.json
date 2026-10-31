@@ -73,10 +73,8 @@
             {
               "items": [
                 {
-                  "color": "Default",
                   "text": "Commercial & service",
                   "type": "TextBlock",
-                  "weight": "Default",
                   "wrap": true
                 }
               ],
@@ -137,10 +135,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Warning",
                                   "text": "Finance: Forecast · Monitor · Schedule",
                                   "type": "TextBlock",
-                                  "weight": "Bolder",
                                   "wrap": true
                                 }
                               ],
@@ -184,10 +180,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Default",
                                   "text": "Sales: Forecast",
                                   "type": "TextBlock",
-                                  "weight": "Default",
                                   "wrap": true
                                 }
                               ],
@@ -240,10 +234,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Default",
                                   "text": "Sales: Schedule · proposed",
                                   "type": "TextBlock",
-                                  "weight": "Default",
                                   "wrap": true
                                 }
                               ],
@@ -296,10 +288,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Default",
                                   "text": "Service: Forecast",
                                   "type": "TextBlock",
-                                  "weight": "Default",
                                   "wrap": true
                                 }
                               ],
@@ -352,10 +342,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Default",
                                   "text": "Service: Monitor",
                                   "type": "TextBlock",
-                                  "weight": "Default",
                                   "wrap": true
                                 }
                               ],
@@ -431,10 +419,8 @@
             {
               "items": [
                 {
-                  "color": "Default",
                   "text": "Operations",
                   "type": "TextBlock",
-                  "weight": "Default",
                   "wrap": true
                 }
               ],
@@ -495,10 +481,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Default",
                                   "text": "Production: Schedule",
                                   "type": "TextBlock",
-                                  "weight": "Default",
                                   "wrap": true
                                 }
                               ],
@@ -574,10 +558,8 @@
             {
               "items": [
                 {
-                  "color": "Default",
                   "text": "Product & engineering",
                   "type": "TextBlock",
-                  "weight": "Default",
                   "wrap": true
                 }
               ],
@@ -638,10 +620,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Default",
                                   "text": "Design: Forecast",
                                   "type": "TextBlock",
-                                  "weight": "Default",
                                   "wrap": true
                                 }
                               ],
@@ -717,10 +697,8 @@
             {
               "items": [
                 {
-                  "color": "Default",
                   "text": "SaaS quality assurance",
                   "type": "TextBlock",
-                  "weight": "Default",
                   "wrap": true
                 }
               ],
@@ -781,10 +759,8 @@
                             {
                               "items": [
                                 {
-                                  "color": "Default",
                                   "text": "Validation: Forecast",
                                   "type": "TextBlock",
-                                  "weight": "Default",
                                   "wrap": true
                                 }
                               ],

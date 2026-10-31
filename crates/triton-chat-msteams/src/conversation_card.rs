@@ -468,9 +468,8 @@ impl Builder<'_, '_> {
             "columns": [
                 { "type": "Column", "width": "auto", "items": marker_items },
                 { "type": "Column", "width": "stretch", "items": [
-                    { "type": "TextBlock", "text": n.label, "wrap": true,
-                      "weight": if n.gap { "Bolder" } else { "Default" },
-                      "color": if n.gap { "Warning" } else { "Default" } } ] },
+                    // A gap reads as its count ("0"): one calm style for every row.
+                    { "type": "TextBlock", "text": n.label, "wrap": true } ] },
             ],
         });
         if !counts.is_empty() {
