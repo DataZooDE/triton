@@ -248,6 +248,19 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     let mut source_btn_ids: Vec<String> = Vec::new();
     // Predicted-GE-id → re-ask question, for this card's follow-up buttons.
     let mut qmap: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    // Producers that speak A2UI v0.9 themselves (`kind: "a2ui"`) hand their
+    // surfaces through verbatim, ahead of the card Triton builds below.
+    let passthrough: Vec<Value> = components
+        .iter()
+        .filter(|c| c.get("kind").and_then(Value::as_str) == Some("a2ui"))
+        .flat_map(|c| {
+            c.get("surfaces")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .flat_map(|surface| passthrough_messages(&surface))
+        .collect();
     let mut n = 0usize;
     let id = |prefix: &str, n: &mut usize| {
         *n += 1;
@@ -420,7 +433,7 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     }
 
     if root_children.is_empty() {
-        return None;
+        return (!passthrough.is_empty()).then_some(passthrough);
     }
 
     // Top: MaterialCard(outlined) → MaterialColumn(root_children).
@@ -439,7 +452,8 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     let surface_id = format!("{SURFACE_PREFIX}{}", uuid::Uuid::new_v4());
     remember_surface(&surface_id, qmap);
 
-    Some(vec![
+    let mut messages = passthrough;
+    messages.extend([
         json!({
             "version": "v0.9",
             "createSurface": {
@@ -462,7 +476,70 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
             "version": "v0.9",
             "updateComponents": { "surfaceId": surface_id, "components": flat },
         }),
-    ])
+    ]);
+    Some(messages)
+}
+
+/// The v0.9 messages for one passed-through surface:
+/// `{components, data_model?, send_data_model?, theme?, actions?}`.
+///
+/// `components` is the flat v0.9 component list and must contain the `root`
+/// component; a surface without one is dropped (the client would render an
+/// empty card). `actions` maps a button's `btn-N` id to the question its click
+/// re-asks, recorded under this surface for [`question_for`]: GE echoes only
+/// `surfaceId` and `sourceComponentId` on a click. `theme` is merged over
+/// Triton's defaults, so a producer can name itself (`agentDisplayName`).
+fn passthrough_messages(surface: &Value) -> Vec<Value> {
+    let Some(components) = surface.get("components").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    if !components
+        .iter()
+        .any(|c| c.get("id").and_then(Value::as_str) == Some("root"))
+    {
+        return Vec::new();
+    }
+    let surface_id = format!("{SURFACE_PREFIX}{}", uuid::Uuid::new_v4());
+    let qmap: std::collections::HashMap<usize, String> = surface
+        .get("actions")
+        .and_then(Value::as_object)
+        .map(|actions| {
+            actions
+                .iter()
+                .filter_map(|(cid, q)| {
+                    let n = cid.strip_prefix("btn-")?.parse().ok()?;
+                    Some((n, q.as_str()?.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    remember_surface(&surface_id, qmap);
+
+    let mut theme =
+        json!({ "primaryColor": THEME_PRIMARY_COLOR, "agentDisplayName": "DataZoo Agent" });
+    if let (Some(base), Some(over)) = (
+        theme.as_object_mut(),
+        surface.get("theme").and_then(Value::as_object),
+    ) {
+        for (k, v) in over {
+            base.insert(k.clone(), v.clone());
+        }
+    }
+    let mut create = json!({ "surfaceId": surface_id, "catalogId": BASIC_CATALOG, "theme": theme });
+    if surface.get("send_data_model").and_then(Value::as_bool) == Some(true) {
+        create["sendDataModel"] = json!(true);
+    }
+    let mut messages = vec![
+        json!({ "version": "v0.9", "createSurface": create }),
+        json!({ "version": "v0.9", "updateComponents": { "surfaceId": surface_id, "components": components } }),
+    ];
+    if let Some(model) = surface.get("data_model").filter(|m| !m.is_null()) {
+        messages.push(json!({
+            "version": "v0.9",
+            "updateDataModel": { "surfaceId": surface_id, "path": "/", "value": model },
+        }));
+    }
+    messages
 }
 
 /// Build a **Canvas-rooted** A2UI surface that shows `url` (the signed,
@@ -674,6 +751,107 @@ mod tests {
 
     fn find<'a>(comps: &'a [Value], id: &str) -> &'a Value {
         comps.iter().find(|c| c["id"] == id).expect("component id")
+    }
+
+    /// A producer that speaks v0.9 itself hands its surfaces through
+    /// verbatim: one createSurface + updateComponents (+ updateDataModel) per
+    /// surface, in order, with the producer's theme and sendDataModel.
+    #[test]
+    fn a2ui_surfaces_pass_through_verbatim() {
+        let result = json!({ "surface": { "components": [
+            { "kind": "text", "value": "Nine requirements, three close calls." },
+            { "kind": "a2ui", "surfaces": [
+                {
+                    "components": [
+                        { "id": "root", "component": "MaterialCard", "children": ["tbl"] },
+                        { "id": "tbl", "component": "MaterialTable",
+                          "columns": [{ "header": "Requirement", "field": "req" }],
+                          "rows": [{ "req": "Easy-Entry" }] }
+                    ],
+                    "data_model": { "picks": { "r04": "fold-flat mechanism" } },
+                    "send_data_model": true,
+                    "theme": { "agentDisplayName": "Coverage Matching" }
+                },
+                {
+                    "components": [
+                        { "id": "root", "component": "Canvas", "cardTitle": "Capability mapping",
+                          "children": ["frame"] },
+                        { "id": "frame", "component": "IFrameSrcdoc", "htmlContent": "<svg></svg>" }
+                    ]
+                }
+            ]}
+        ]}});
+        let msgs = build_messages(&result).expect("messages");
+        assert_eq!(msgs.len(), 5, "{msgs:?}");
+        let s1 = msgs[0]["createSurface"]["surfaceId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(msgs[0]["version"], "v0.9");
+        assert_eq!(msgs[0]["createSurface"]["catalogId"], BASIC_CATALOG);
+        assert_eq!(msgs[0]["createSurface"]["sendDataModel"], true);
+        assert_eq!(
+            msgs[0]["createSurface"]["theme"]["agentDisplayName"],
+            "Coverage Matching"
+        );
+        assert_eq!(
+            msgs[0]["createSurface"]["theme"]["primaryColor"],
+            THEME_PRIMARY_COLOR
+        );
+        assert_eq!(msgs[1]["updateComponents"]["surfaceId"], s1);
+        assert_eq!(
+            msgs[1]["updateComponents"]["components"][1]["component"],
+            "MaterialTable"
+        );
+        assert_eq!(msgs[2]["updateDataModel"]["surfaceId"], s1);
+        assert_eq!(msgs[2]["updateDataModel"]["path"], "/");
+        assert_eq!(
+            msgs[2]["updateDataModel"]["value"]["picks"]["r04"],
+            "fold-flat mechanism"
+        );
+        let s2 = msgs[3]["createSurface"]["surfaceId"].as_str().unwrap();
+        assert_ne!(s1, s2, "each surface has its own id");
+        assert!(msgs[3]["createSurface"].get("sendDataModel").is_none());
+        assert_eq!(
+            msgs[4]["updateComponents"]["components"][0]["component"],
+            "Canvas"
+        );
+    }
+
+    /// Buttons in a passed-through surface re-ask like Triton's own buttons:
+    /// `actions` maps a `btn-N` component id to the question GE's click
+    /// resolves to (GE echoes only surfaceId + sourceComponentId).
+    #[test]
+    fn a2ui_actions_feed_the_click_round_trip() {
+        let result = json!({ "surface": { "components": [
+            { "kind": "a2ui", "surfaces": [{
+                "components": [
+                    { "id": "root", "component": "MaterialCard", "children": ["btn-7"] },
+                    { "id": "btn-7", "component": "MaterialButton", "label": "Confirm",
+                      "action": { "event": { "name": "confirm", "context": {} } } }
+                ],
+                "actions": { "btn-7": "Confirm the three close calls" }
+            }]}
+        ]}});
+        let msgs = build_messages(&result).expect("messages");
+        let sid = msgs[0]["createSurface"]["surfaceId"].as_str().unwrap();
+        assert_eq!(
+            question_for(sid, "btn-7").as_deref(),
+            Some("Confirm the three close calls")
+        );
+        assert_eq!(question_for(sid, "btn-8"), None);
+    }
+
+    /// A surface without a `root` component cannot render; it is dropped
+    /// rather than sent to a client that would show an empty card.
+    #[test]
+    fn a2ui_surface_without_root_is_dropped() {
+        let result = json!({ "surface": { "components": [
+            { "kind": "a2ui", "surfaces": [{ "components": [
+                { "id": "card", "component": "MaterialCard", "children": [] }
+            ]}]}
+        ]}});
+        assert!(build_messages(&result).is_none());
     }
 
     #[test]

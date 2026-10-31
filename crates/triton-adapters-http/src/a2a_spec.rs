@@ -471,10 +471,38 @@ fn turn_context(
     surfaces: &triton_core::SurfaceRegistry,
     context_id: &str,
     a2ui: bool,
+    params: &Value,
 ) -> triton_core::ContextOverrides {
     let mut meta = serde_json::Map::new();
     meta.insert("protocol".into(), json!("a2a"));
     meta.insert("a2a_context_id".into(), json!(context_id));
+    // The client's A2UI events (a click on a passed-through surface) and the
+    // message metadata, where A2UI `sendDataModel` puts the surface's data
+    // model. Only the producing agent can interpret either, so both ride along
+    // verbatim; absent on a plain text turn.
+    let message = params.get("message");
+    let events: Vec<Value> = message
+        .and_then(|m| m.get("parts"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|p| p.get("kind").and_then(Value::as_str) == Some("data"))
+        .filter_map(|p| p.get("data"))
+        .flat_map(|d| match d {
+            Value::Array(a) => a.clone(),
+            other => vec![other.clone()],
+        })
+        .filter(|d| d.get("action").is_some() || d.get("error").is_some())
+        .collect();
+    if !events.is_empty() {
+        meta.insert("a2ui_events".into(), Value::Array(events));
+    }
+    if let Some(m) = message
+        .and_then(|m| m.get("metadata"))
+        .filter(|m| m.is_object())
+    {
+        meta.insert("a2a_message_metadata".into(), m.clone());
+    }
     if let Some(slug) = config.a2a_path.strip_prefix("/a2a/") {
         meta.insert("agent".into(), json!(slug));
     }
@@ -612,6 +640,7 @@ async fn message_send(
         state.a2a.dispatcher.surfaces(),
         &context_id,
         a2ui,
+        &req.params,
     );
 
     // A GE source button click resolves to an open-doc sentinel (not a real
@@ -765,6 +794,7 @@ async fn message_stream(
         state.a2a.dispatcher.surfaces(),
         &context_id,
         a2ui,
+        &req.params,
     );
 
     // A GE source button click (open-doc sentinel): emit a one-shot SSE — a
