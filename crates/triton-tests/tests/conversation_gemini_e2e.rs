@@ -405,6 +405,13 @@ async fn a_form_submit_fills_its_signed_template_from_the_click_context() {
         agent.bodies_seen()[1]["message"],
         "Set the owner of Agent 28 to \"IT Operations\". Reason: Finance took over (version 08cbcd825d41)"
     );
+    // The same click also reaches the tool as a client event (both paths).
+    assert_eq!(
+        agent.bodies_seen()[1]["_triton"]["client"]["a2ui_events"][0]["action"]["context"]["value"],
+        "IT Operations",
+        "{}",
+        agent.bodies_seen()[1]
+    );
     // No value: refused, no upstream call.
     let token = iss.sign_jwt(json!({
         "iss": iss.issuer_url(), "aud": AUD, "sub": "alice",

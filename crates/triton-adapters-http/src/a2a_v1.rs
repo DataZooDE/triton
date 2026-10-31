@@ -624,13 +624,15 @@ fn valid_context_id(id: &str) -> bool {
 
 struct Incoming {
     text: String,
+    /// The turn's A2UI client messages (`_triton.client.a2ui_events`).
+    events: Vec<Value>,
     context_id: Option<String>,
     task_id: Option<String>,
     return_immediately: bool,
 }
 
 /// A 1.0 `SendMessageRequest`, validated.
-fn parse_send(params: &Value) -> Result<Incoming, A2aError> {
+fn parse_send(params: &Value, a2ui: bool) -> Result<Incoming, A2aError> {
     let bad = |m: &str| A2aError::InvalidParams(m.to_string());
     let msg = params
         .get("message")
@@ -663,6 +665,7 @@ fn parse_send(params: &Value) -> Result<Incoming, A2aError> {
     // never sees the host's "User action triggered." placeholder. A source
     // button (open a document) has no 1.0 document reply; its label is
     // dispatched as the turn.
+    let client = crate::a2a_spec::a2ui_client(parts, a2ui);
     let action = match crate::a2a_spec::a2ui_action(parts) {
         Some(triton_core::a2ui::ge::GeAction::Message(text)) => Some(text),
         Some(triton_core::a2ui::ge::GeAction::OpenDoc { label, .. }) => Some(label),
@@ -682,6 +685,13 @@ fn parse_send(params: &Value) -> Result<Incoming, A2aError> {
         })
         .trim()
         .to_string();
+    // An event-only turn (a producer's button, a render error): the tool
+    // reads the event from `_triton.client`.
+    let text = if text.is_empty() {
+        client.fallback.clone().unwrap_or_default()
+    } else {
+        text
+    };
     if text.is_empty() {
         return Err(bad("the message needs a text part"));
     }
@@ -692,6 +702,7 @@ fn parse_send(params: &Value) -> Result<Incoming, A2aError> {
         .unwrap_or(false);
     Ok(Incoming {
         text,
+        events: client.events,
         context_id,
         task_id: opt_str(msg, "taskId", "task_id"),
         return_immediately,
@@ -753,7 +764,7 @@ async fn op_send(
     params: &Value,
     a2ui: bool,
 ) -> Result<Value, A2aError> {
-    let incoming = parse_send(params)?;
+    let incoming = parse_send(params, a2ui)?;
     if let Some(task_id) = &incoming.task_id {
         return Err(refuse_continuation(&state.a2a, &principal, task_id));
     }
@@ -761,7 +772,8 @@ async fn op_send(
         .context_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let overrides = crate::a2a_spec::turn_context_for(state, &context_id, a2ui);
+    let overrides =
+        crate::a2a_spec::turn_context_for(state, &context_id, a2ui, incoming.events.clone());
     let (rec, mut rx) = start_task(state, &principal, &incoming.text, &context_id, overrides)?;
     if !incoming.return_immediately {
         // Blocking is the default; capped so a platform's HTTP timeout is
@@ -1091,7 +1103,7 @@ async fn op_stream(
     framing: Framing,
     a2ui: bool,
 ) -> Result<Response, A2aError> {
-    let incoming = parse_send(params)?;
+    let incoming = parse_send(params, a2ui)?;
     if let Some(task_id) = &incoming.task_id {
         return Err(refuse_continuation(&state.a2a, &principal, task_id));
     }
@@ -1099,7 +1111,8 @@ async fn op_stream(
         .context_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let overrides = crate::a2a_spec::turn_context_for(state, &context_id, a2ui);
+    let overrides =
+        crate::a2a_spec::turn_context_for(state, &context_id, a2ui, incoming.events.clone());
     let (rec, rx) = start_task(state, &principal, &incoming.text, &context_id, overrides)?;
     Ok(task_stream(&state.a2a, framing, rec, Some(rx), a2ui))
 }

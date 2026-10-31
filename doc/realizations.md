@@ -2385,3 +2385,13 @@ Future note: when a channel courier and the runner both write a running task,
 make the store's read-modify-write atomic first (it is, since this review:
 one lock across get/change/put, terminal re-check inside it).
 
+- **What Gemini Enterprise does with producer-built A2UI v0.9 (measured
+  2026-10-31, lab app, the Coverage Matching agent).** A click keeps the
+  action `name`, `surfaceId` and `sourceComponentId` and arrives with the data
+  bindings of `action.event.context` resolved (literal values intact).
+  `createSurface.sendDataModel` is not honoured. Material cards, tables,
+  selects, chips, checkboxes, progress bars, VegaChart and Canvas side panels
+  render; inputs and buttons inside a Canvas work like inline ones;
+  `IFrameSrcdoc` creates no frame at all, inline or in a Canvas. One click was
+  once delivered twice during a slow turn: producers should treat a repeated
+  click as idempotent.

@@ -1,5 +1,9 @@
 # 05 — Surfaces on chat channels: degrade rules and caps
 
+> **Gemini Enterprise and native A2UI.** Producer-built v0.9 surfaces in
+> `surface.a2ui` bypass the degrade path entirely: they go verbatim to A2UI
+> clients only, and chat channels render `components`. See `references/01` §(c).
+
 If your tool's surface (→ `references/02`) is delivered to a chat
 channel — Telegram, WhatsApp Web, Signal, MS Teams, Discord, Google
 Chat — Triton's **surface mapper** projects the canonical envelope
