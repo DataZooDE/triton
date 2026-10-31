@@ -178,7 +178,7 @@ async fn three_way_parity_rest_a2a_mcp() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn missing_bearer_returns_jsonrpc_auth_error() {
+async fn missing_bearer_returns_401_with_the_jsonrpc_auth_error() {
     let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), HashMap::new()).await;
     let (status, body) = rpc_request(
         &proc,
@@ -191,10 +191,9 @@ async fn missing_bearer_returns_jsonrpc_auth_error() {
         None,
     )
     .await;
-    // architecture.md §8.3: MCP Auth → -32001. HTTP status itself
-    // is 200 because JSON-RPC carries errors in the body, not in
-    // the HTTP status.
-    assert!(status.is_success(), "JSON-RPC errors ride in body: {body}");
+    // architecture.md §8.3: MCP Auth → -32001 in the body, and HTTP 401
+    // (MCP HTTP authorization: the 401 is what starts a client's OAuth).
+    assert_eq!(status, 401, "an auth failure is a 401: {body}");
     assert_eq!(body["error"]["code"], -32001);
     assert_eq!(body["id"], 7);
 }

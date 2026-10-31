@@ -49,6 +49,39 @@ pub enum TritonError {
 }
 
 impl TritonError {
+    /// The one sentence a person sees for this failure, per class — never
+    /// the inner message, which may carry an upstream's status line or
+    /// text (`upstream x returned 404 Not Found`). The cause stays in the
+    /// log and the audit line. Chat couriers, MCP and A2A all use it.
+    pub fn user_notice(&self) -> &'static str {
+        match self {
+            Self::Tool(_) | Self::Provider(_) => {
+                "I encountered an issue processing that request with our data tools. Please check your query parameters or try again in a moment."
+            }
+            Self::RateLimited(_) => {
+                "The service is temporarily busy. Please wait a moment and try again."
+            }
+            Self::Auth(_) | Self::Forbidden(_) => {
+                "Authentication or authorization check failed for this request."
+            }
+            Self::Validation(_) => {
+                "An unexpected error occurred while processing your request. Please try again."
+            }
+        }
+    }
+
+    /// The inner message, without the class prefix `Display` adds.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Auth(m)
+            | Self::Forbidden(m)
+            | Self::Validation(m)
+            | Self::Tool(m)
+            | Self::Provider(m)
+            | Self::RateLimited(m) => m,
+        }
+    }
+
     /// Short class label used in audit lines (FR-AU-2 `result` field).
     pub fn class(&self) -> &'static str {
         match self {

@@ -114,6 +114,10 @@ pub struct Settings {
     /// `local` env (NFR-S-4 egress allowlist for the outbound reply
     /// Activity).
     pub msteams_extra_service_url_hosts: Vec<String>,
+    /// Hosts whose plain `http://` links are kept as links
+    /// (`TRITON_ALLOW_HTTP_LINK_HOSTS`). Empty by default; the binary
+    /// refuses non-empty values outside `local` env.
+    pub allow_http_link_hosts: Vec<String>,
     /// #635 P4: async reply courier for msteams.
     pub msteams_async: bool,
     pub courier_timeout: Duration,
@@ -218,6 +222,9 @@ pub struct Settings {
     /// #287: raw `tenant/sub` list from `--denied-principals`/env; parsed
     /// by `DispatchControls::deny`.
     pub denied_principals: String,
+    /// Inbound identity providers, spec A2A and long-running task settings;
+    /// see `ingress.rs`.
+    pub ingress: crate::ingress::IngressArgs,
 }
 
 impl Settings {
@@ -501,6 +508,13 @@ struct Cli {
     )]
     msteams_extra_service_url_hosts: String,
 
+    /// Comma-separated hosts whose plain `http://` links Triton keeps
+    /// as links (deep links, sources, embeds), e.g. `127.0.0.1,localhost`
+    /// for local end-to-end tests. Empty by default (only `https://`); the
+    /// binary refuses a non-empty value outside `local` env.
+    #[arg(long, env = "TRITON_ALLOW_HTTP_LINK_HOSTS", default_value = "")]
+    allow_http_link_hosts: String,
+
     /// #635 P4: async reply courier for msteams — ack the webhook 200
     /// immediately and deliver out-of-band (streaming in 1:1 chats).
     /// Bot Framework abandons the inbound connection at ~15s, which on
@@ -664,6 +678,9 @@ struct Cli {
     /// healthy pod and zero revocation.
     #[arg(long, env = "TRITON_DENIED_PRINCIPALS", default_value = "")]
     denied_principals: String,
+
+    #[command(flatten)]
+    ingress: crate::ingress::IngressArgs,
 }
 
 impl From<Cli> for Settings {
@@ -700,6 +717,7 @@ impl From<Cli> for Settings {
             egress_allowed_suffixes: parse_egress_suffixes(&c.egress_allowed_suffixes),
             optional_adapters: parse_optional_adapters(&c.optional_adapters),
             denied_principals: c.denied_principals,
+            ingress: c.ingress,
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
             stream_idle_timeout: Duration::from_millis(c.stream_idle_timeout_ms),
             stream_max_duration: Duration::from_millis(c.stream_max_duration_ms),
@@ -726,6 +744,12 @@ impl From<Cli> for Settings {
             msteams_token_url: c.msteams_token_url,
             msteams_extra_service_url_hosts: c
                 .msteams_extra_service_url_hosts
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            allow_http_link_hosts: c
+                .allow_http_link_hosts
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
