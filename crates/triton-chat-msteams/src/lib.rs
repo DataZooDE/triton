@@ -816,6 +816,10 @@ struct Activity {
     /// The invoke name (`adaptiveCard/action` for a universal action).
     #[serde(default)]
     name: Option<String>,
+    /// On a card action invoke: the activity id of the card that was
+    /// clicked, which the answer replaces in place.
+    #[serde(default, rename = "replyToId")]
+    reply_to_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1887,6 +1891,9 @@ async fn handle_callback(
     // or a key a client adds to `data` — replace the signed message (F1).
     // The click is a NEW user message with the complete text, routed exactly
     // like typed input, never a continuation of the card's turn.
+    if tool_name == REFRESH_TOOL {
+        return refresh_card(adapter, &sender, &args).await;
+    }
     if tool_name == triton_correlation::message::SEND_MESSAGE_TOOL {
         let inputs: std::collections::BTreeMap<String, String> = inputs.into_iter().collect();
         let text = match triton_correlation::message::resolve(&args, |k| inputs.get(k).cloned()) {
@@ -2022,6 +2029,23 @@ async fn handle_callback(
                 && let Ok((conversation_id, recipient_id)) =
                     convo_and_recipient(adapter, activity, &sender)
             {
+                // One card per request: the clicked card itself turns into
+                // the working card (the invoke's card response replaces it
+                // in place), and the answer later replaces that same card
+                // (`updateActivity` on the clicked activity). No banner, no
+                // second card. Without the clicked card's id (defensive) the
+                // answer is posted as before.
+                let card = activity.reply_to_id.clone().map(|id| {
+                    let mut card = TaskCard::new(None);
+                    card.activity_id = Some(id);
+                    card
+                });
+                let response = match &card {
+                    Some(card) => surface_mapper::invoke_card_response(card.content()),
+                    None => surface_mapper::invoke_message_response(
+                        "⏳ Working on it — the answer will follow here.",
+                    ),
+                };
                 spawn_courier(
                     adapter,
                     verified,
@@ -2031,14 +2055,9 @@ async fn handle_callback(
                     conversation_id,
                     recipient_id,
                     conversation_type,
+                    card,
                 );
-                return (
-                    StatusCode::OK,
-                    axum::Json(surface_mapper::invoke_message_response(
-                        "⏳ Working on it — the answer will follow here.",
-                    )),
-                )
-                    .into_response();
+                return (StatusCode::OK, axum::Json(response)).into_response();
             }
             dispatch_and_refresh_card(adapter, &tool_name, args, &sender).await
         }
@@ -2123,6 +2142,7 @@ async fn dispatch_and_post_reply(
             conversation_id.to_string(),
             recipient_id.to_string(),
             conversation_type,
+            None,
         );
         return StatusCode::OK.into_response();
     }
@@ -2776,6 +2796,7 @@ fn spawn_courier(
     conversation_id: String,
     recipient_id: String,
     conversation_type: Option<String>,
+    in_place: Option<TaskCard>,
 ) {
     let tracker = adapter.courier.tracker.clone();
     let adapter = adapter.clone();
@@ -2790,6 +2811,7 @@ fn spawn_courier(
             conversation_id,
             recipient_id,
             conversation_type,
+            in_place,
         )
         .await;
     };
@@ -2835,6 +2857,7 @@ async fn courier_deliver(
     conversation_id: String,
     recipient_id: String,
     conversation_type: Option<String>,
+    in_place: Option<TaskCard>,
 ) {
     // #250: msteams offers `sender_table` and `azure` only, and both
     // derive the subject FROM `from.id` — so recording it again would
@@ -2866,12 +2889,15 @@ async fn courier_deliver(
     let personal = conversation_type.as_deref() == Some("personal");
 
     // Progress. Personal: open a stream with an informative update.
-    // Group: keep a typing ticker alive while the dispatch runs.
+    // Group: keep a typing ticker alive while the dispatch runs. A card
+    // click already turned its card into the working card (in place):
+    // that card is the progress, so neither runs.
     let mut stream_id: Option<String> = None;
     let mut typing_ticker: Option<tokio::task::JoinHandle<()>> = None;
     // The working card of an asynchronous upstream task, if any.
-    let mut task_card: Option<TaskCard> = None;
-    if personal {
+    let in_place_card = in_place.is_some();
+    let mut task_card: Option<TaskCard> = in_place;
+    if personal && !in_place_card {
         let body = serde_json::json!({
             "type": "typing",
             "text": "Working on it…",
@@ -2896,7 +2922,7 @@ async fn courier_deliver(
                 tracing::debug!(error = %e, "msteams courier: stream open failed; plain delivery");
             }
         }
-    } else {
+    } else if !in_place_card {
         let adapter2 = adapter.clone();
         let verified2 = verified.clone();
         let conversation2 = conversation_id.clone();
@@ -2929,6 +2955,16 @@ async fn courier_deliver(
     // the old flow. `a2ui: None` — the courier renders the raw result.
     let started = std::time::Instant::now();
     let trace_id = principal.trace_id.clone();
+    // The working card refreshes itself when a viewer opens it (Universal
+    // Actions `refresh`), from the task store — so it needs one.
+    let refresh = adapter
+        .tasks
+        .as_ref()
+        .and_then(|_| refresh_token(&adapter, &trace_id, &sender.tenant, &sender.from_id))
+        .map(|t| (t, sender.from_id.clone()));
+    if let Some(card) = task_card.as_mut() {
+        card.refresh = refresh.clone();
+    }
     // F8b: with a task runner the turn is a task — stored once the
     // upstream goes asynchronous (with where its answer goes), resumed when
     // its stream breaks or is cut, bounded by TRITON_TASK_MAX_SECS.
@@ -2952,7 +2988,7 @@ async fn courier_deliver(
                     sub: sender.sub.clone(),
                     scopes: sender.scopes.clone(),
                     idp: sender.idp.clone(),
-                    card_activity_id: None,
+                    card_activity_id: task_card.as_ref().and_then(|c| c.activity_id.clone()),
                     delivered: false,
                 }
                 .to_json(),
@@ -3014,9 +3050,9 @@ async fn courier_deliver(
                         if let Some(t) = typing_ticker.take() {
                             t.abort();
                         }
-                        let mut card = TaskCard::new(
-                            v.get("receipt").and_then(Value::as_str).map(str::to_owned),
-                        );
+                        let mut card = TaskCard::new(None);
+                        card.task(v);
+                        card.refresh = refresh.clone();
                         let mut body =
                             card.activity(&recipient_id, &conversation_id, &sender.from_id);
                         // A personal chat's open stream is closed by the
@@ -3056,6 +3092,26 @@ async fn courier_deliver(
                             }
                         }
                         task_card = Some(card);
+                        continue;
+                    }
+                    // A clicked card is already the working card: the
+                    // upstream's receipt and note name it now.
+                    triton_core::stream::StreamEvent::Task(v) => {
+                        if let Some(card) = task_card.as_mut() {
+                            card.task(v);
+                            if let Some(id) = card.activity_id.clone()
+                                && card.due()
+                            {
+                                let body =
+                                    card.activity(&recipient_id, &conversation_id, &sender.from_id);
+                                if let Err(e) =
+                                    put_activity(&adapter, &verified, &conversation_id, &id, &body)
+                                        .await
+                                {
+                                    tracing::debug!(error = %e, "msteams courier: card update failed");
+                                }
+                            }
+                        }
                         continue;
                     }
                     triton_core::stream::StreamEvent::Progress(v) => {
@@ -3463,12 +3519,21 @@ struct TaskCard {
     /// A progress event arrived that no update has shown yet.
     pending: bool,
     receipt: Option<String>,
-    text: Option<String>,
-    step: Option<String>,
-    percent: Option<u64>,
+    /// The real steps so far, in order: all but the last are done.
+    steps: Vec<String>,
+    /// The upstream's line under the steps ("you can leave this chat…").
+    note: Option<String>,
+    /// Signed refresh token: a viewer's Teams client asks for the current
+    /// state of the card (`refresh`, Universal Actions) when it shows it.
+    refresh: Option<(String, String)>,
 }
 
 const CARD_UPDATE_EVERY: std::time::Duration = std::time::Duration::from_millis(1000);
+/// The running timer in the card's header is pushed at this cadence even
+/// when no new step arrives, so a long run never looks stuck at `0:00`.
+const CARD_TICK_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+/// Sentinel tool of a working card's `refresh` action: `{t: task id}`.
+const REFRESH_TOOL: &str = "__refresh_task";
 
 impl TaskCard {
     fn new(receipt: Option<String>) -> Self {
@@ -3481,10 +3546,30 @@ impl TaskCard {
             last_update: now.checked_sub(CARD_UPDATE_EVERY).unwrap_or(now),
             pending: false,
             receipt,
-            text: None,
-            step: None,
-            percent: None,
+            steps: Vec::new(),
+            note: None,
+            refresh: None,
         }
+    }
+
+    /// The upstream went asynchronous: its receipt names the card, its
+    /// note goes under the steps.
+    fn task(&mut self, v: &Value) {
+        if let Some(r) = v
+            .get("receipt")
+            .and_then(Value::as_str)
+            .filter(|r| !r.is_empty())
+        {
+            self.receipt = Some(surface_mapper::clamp_plain_text(r));
+        }
+        if let Some(n) = v
+            .get("note")
+            .and_then(Value::as_str)
+            .filter(|n| !n.is_empty())
+        {
+            self.note = Some(surface_mapper::clamp_plain_text(n));
+        }
+        self.pending = true;
     }
 
     /// The card of a task resumed after a restart: its age, and the
@@ -3499,11 +3584,20 @@ impl TaskCard {
     }
 
     fn progress(&mut self, v: &Value) {
-        if let Some(t) = v.get("text").and_then(Value::as_str) {
-            self.text = Some(surface_mapper::clamp_plain_text(t));
+        if let Some(t) = v
+            .get("text")
+            .and_then(Value::as_str)
+            .filter(|t| !t.trim().is_empty())
+        {
+            let t = surface_mapper::clamp_plain_text(t);
+            if self.steps.last() != Some(&t) {
+                self.steps.push(t);
+            }
+            // A bounded card: the latest steps tell the story.
+            if self.steps.len() > 6 {
+                self.steps.remove(0);
+            }
         }
-        self.step = v.get("step").and_then(Value::as_str).map(str::to_owned);
-        self.percent = v.get("percent").and_then(Value::as_u64).map(|p| p.min(100));
         self.pending = true;
     }
 
@@ -3522,34 +3616,58 @@ impl TaskCard {
     /// When the held step is to be flushed: the end of the throttle window,
     /// if a step is held and the card exists. `None` when nothing waits.
     fn flush_at(&self) -> Option<tokio::time::Instant> {
-        (self.pending && self.activity_id.is_some())
-            .then(|| tokio::time::Instant::from_std(self.last_update + CARD_UPDATE_EVERY))
+        self.activity_id.as_ref()?;
+        let tick = self.last_update + CARD_TICK_EVERY;
+        let at = if self.pending {
+            (self.last_update + CARD_UPDATE_EVERY).min(tick)
+        } else {
+            tick
+        };
+        Some(tokio::time::Instant::from_std(at))
+    }
+
+    /// The card content (one anatomy): the title with the running timer
+    /// beside it, the real steps (`✓` done, `…` the current one), the note.
+    fn content(&self) -> Value {
+        let secs = self.started.elapsed().as_secs();
+        let title = self.receipt.as_deref().unwrap_or("Working on it");
+        let mut body = conversation_card::header(
+            title,
+            None,
+            Some(&format!("{}:{:02}", secs / 60, secs % 60)),
+        );
+        let n = self.steps.len();
+        for (i, step) in self.steps.iter().enumerate() {
+            let last = i + 1 == n;
+            body.push(serde_json::json!({
+                "type": "TextBlock", "wrap": true, "spacing": "Small",
+                "text": format!("{} {step}", if last { "\u{2026}" } else { "\u{2713}" }),
+                "isSubtle": last,
+            }));
+        }
+        if let Some(note) = &self.note {
+            body.push(
+                serde_json::json!({ "type": "TextBlock", "wrap": true, "isSubtle": true,
+                "size": "Small", "text": note }),
+            );
+        }
+        let mut card = serde_json::json!({
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "type": "AdaptiveCard",
+            "version": "1.5",
+            "body": body,
+        });
+        if let Some((token, user)) = &self.refresh {
+            card["refresh"] = serde_json::json!({
+                "action": { "type": "Action.Execute", "verb": surface_mapper::ACTION_VERB,
+                    "data": { surface_mapper::TOKEN_DATA_KEY: token } },
+                "userIds": [user],
+            });
+        }
+        card
     }
 
     fn activity(&self, bot: &str, conversation: &str, user: &str) -> Value {
-        let secs = self.started.elapsed().as_secs();
-        let mut body = vec![
-            serde_json::json!({ "type": "TextBlock", "size": "Small", "weight": "Bolder",
-                "isSubtle": true,
-                "text": format!("REQUEST · WORKING · {}:{:02}", secs / 60, secs % 60) }),
-            serde_json::json!({ "type": "TextBlock", "size": "Medium", "weight": "Bolder",
-                "wrap": true,
-                "text": self.receipt.clone().unwrap_or_else(|| "Working on your request".into()) }),
-        ];
-        if let Some(t) = &self.text {
-            body.push(serde_json::json!({ "type": "TextBlock", "wrap": true, "text": t }));
-        }
-        let mut detail = Vec::new();
-        if let Some(s) = &self.step {
-            detail.push(format!("Step {s}"));
-        }
-        if let Some(p) = self.percent {
-            detail.push(format!("{p} %"));
-        }
-        if !detail.is_empty() {
-            body.push(serde_json::json!({ "type": "TextBlock", "isSubtle": true,
-                "size": "Small", "text": detail.join(" · ") }));
-        }
         serde_json::json!({
             "type": "message",
             "from": { "id": bot },
@@ -3557,15 +3675,101 @@ impl TaskCard {
             "recipient": { "id": user },
             "attachments": [{
                 "contentType": "application/vnd.microsoft.card.adaptive",
-                "content": {
-                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
-                    "type": "AdaptiveCard",
-                    "version": "1.5",
-                    "body": body,
-                },
+                "content": self.content(),
             }],
         })
     }
+}
+
+/// The signed `refresh` token of a working card: `(REFRESH_TOOL, {t})`,
+/// bound like every card token to the tenant and the card's recipient.
+fn refresh_token(
+    adapter: &MsTeamsAdapter,
+    task_id: &str,
+    tenant: &str,
+    sender: &str,
+) -> Option<String> {
+    triton_correlation::encode_bound(
+        REFRESH_TOOL,
+        &serde_json::json!({ "t": task_id }),
+        adapter.correlation_key.signing(),
+        surface_mapper::MSTEAMS_CORRELATION_CAP,
+        triton_correlation::Binding {
+            platform: "msteams",
+            tenant,
+            sender,
+        },
+        Some(CARD_TOKEN_TTL_SECS),
+    )
+    .ok()
+}
+
+/// Answer a working card's `refresh` invoke with the card as it is now:
+/// still working (timer and steps from the task store), the answer, or the
+/// failure notice. Only the task's owner gets its state; anyone else (and
+/// an unknown task) gets the card unchanged in meaning: still working.
+async fn refresh_card(
+    adapter: &Arc<MsTeamsAdapter>,
+    sender: &ResolvedSender,
+    args: &Value,
+) -> Response {
+    let principal = sender_principal(sender);
+    let rec = adapter
+        .tasks
+        .as_ref()
+        .zip(args.get("t").and_then(Value::as_str))
+        .and_then(|(runner, id)| runner.store.get(id))
+        .filter(|r| r.owner.as_deref() == Some(triton_tasks::owner_key(&principal).as_str()));
+    let working = |rec: Option<&triton_tasks::TaskRecord>| {
+        let mut card = TaskCard::new(rec.and_then(|r| r.receipt.clone()));
+        if let Some(r) = rec {
+            card.started = std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_millis(
+                    (triton_tasks::now_ms() - r.created_ms).max(0) as u64,
+                ))
+                .unwrap_or(card.started);
+            if let Some(p) = &r.progress {
+                card.progress(&serde_json::json!({ "text": p.text }));
+            }
+        }
+        card.content()
+    };
+    let card = match &rec {
+        Some(r) if r.state == triton_tasks::TaskState::Completed => {
+            let result = r.result.clone().unwrap_or_else(|| {
+                serde_json::json!({ "surface": { "text": r.result_text.clone().unwrap_or_default() } })
+            });
+            let chrome = fetch_chrome(adapter, &principal).await;
+            render_card_content(
+                adapter,
+                &result,
+                None,
+                None,
+                &chrome,
+                &sender.tenant,
+                &sender.from_id,
+            )
+            .unwrap_or_else(|| text_card(&text_reply_message(&result).text))
+        }
+        Some(r) if r.state == triton_tasks::TaskState::Failed => {
+            text_card(failure_notice(&triton_tasks::stored_error(r)))
+        }
+        other => working(other.as_ref()),
+    };
+    (
+        StatusCode::OK,
+        axum::Json(surface_mapper::invoke_card_response(card)),
+    )
+        .into_response()
+}
+
+/// A one-line card (a refreshed plain answer or a failure notice).
+fn text_card(text: &str) -> Value {
+    serde_json::json!({
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard", "version": "1.5",
+        "body": [ { "type": "TextBlock", "wrap": true, "text": text } ],
+    })
 }
 
 /// The next thing a task loop acts on: a stream event (or its end), or the

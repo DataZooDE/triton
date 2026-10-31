@@ -1,8 +1,8 @@
 //! Teams and a long-running upstream task (mock 1l).
 //!
 //! When the upstream goes asynchronous (contract §7), the Teams courier
-//! stops showing only "typing": it posts ONE card ("REQUEST · WORKING"
-//! with the step), updates that same activity in place as progress
+//! stops showing only "typing": it posts ONE card (the receipt as its
+//! title, a running timer, the real steps), updates that same activity in place as progress
 //! arrives, and finally replaces it with the answer — the Bot Connector's
 //! `updateActivity` (`PUT /v3/conversations/{id}/activities/{activityId}`).
 //! No second message carries the answer.
@@ -143,7 +143,18 @@ async fn a_group_chat_gets_typing_then_one_card_updated_in_place() {
     );
     assert!(is_card(messages[0]), "{:#}", messages[0]);
     let working = card_text(messages[0]);
-    assert!(working.contains("WORKING"), "{working}");
+    // One anatomy: the receipt is the title, the timer sits beside it; no
+    // "REQUEST · WORKING" process label.
+    assert!(
+        working.contains("Your request is filed and still running."),
+        "{working}"
+    );
+    assert!(working.contains("\"0:0"), "a running timer: {working}");
+    assert!(!working.contains("WORKING"), "{working}");
+    assert!(
+        messages[0]["attachments"][0]["content"]["refresh"]["action"]["type"] == "Action.Execute",
+        "the working card refreshes itself: {working}"
+    );
     assert!(
         !working.contains(ANSWER),
         "the first card is the working state"
@@ -462,4 +473,161 @@ async fn a_teams_card_gets_its_answer_after_a_triton_restart() {
     assert_eq!(last.activity_id, "stub-activity-id", "the same card");
     assert_eq!(agent.filed_count(), 1, "the restart did not file it again");
     assert!(agent.resumes().contains(&"up-1".to_string()));
+}
+
+fn invoke(data: Value, reply_to: &str) -> Value {
+    json!({
+        "type": "invoke", "name": "adaptiveCard/action", "id": "inv-1",
+        "replyToId": reply_to,
+        "serviceUrl": "https://placeholder.example/",
+        "channelId": "msteams",
+        "from": { "id": "29:1abc", "name": "Alice" },
+        "conversation": { "id": "a:conv-1" },
+        "recipient": { "id": "28:bot-1", "name": "MyBot" },
+        "value": { "action": { "type": "Action.Execute", "verb": "agentAction", "data": data } },
+    })
+}
+
+async fn post_invoke(proc: &TritonProcess, fake: &FakeBotFramework, body: &Value) -> Value {
+    let jwt = fake.sign_jwt(json!({
+        "iss": "https://api.botframework.com", "aud": AUDIENCE,
+        "exp": now() + 600, "iat": now() - 5, "serviceurl": fake.service_url(),
+    }));
+    let webhook = proc.chat_webhook_addr.expect("webhook");
+    let resp = reqwest::Client::new()
+        .post(format!("http://{webhook}/msteams/webhook"))
+        .header("Authorization", format!("Bearer {jwt}"))
+        .json(body)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    resp.json().await.unwrap()
+}
+
+fn find_execute<'a>(v: &'a Value, title: &str) -> Option<&'a Value> {
+    match v {
+        Value::Object(m) => {
+            if m.get("type").and_then(Value::as_str) == Some("Action.Execute")
+                && m.get("title").and_then(Value::as_str) == Some(title)
+            {
+                return Some(v);
+            }
+            m.values().find_map(|x| find_execute(x, title))
+        }
+        Value::Array(a) => a.iter().find_map(|x| find_execute(x, title)),
+        _ => None,
+    }
+}
+
+/// One card per request (turn 3, rule 2): a click on a card's button turns
+/// THAT card into the working card (the invoke's card response, no "Working
+/// on it" banner), and the answer replaces the same card in place — no
+/// second card, no typing. The working card's `refresh` returns the answer
+/// once the task is done.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_card_click_is_answered_in_the_clicked_card() {
+    let fake = FakeBotFramework::start().await;
+    let agent = FakeAsyncAgent::start(AsyncPlan {
+        total: Duration::from_secs(2),
+        tick: Duration::from_millis(300),
+        result: json!({ "surface": { "components": [
+            { "kind": "text", "value": ANSWER },
+            { "kind": "button", "label": "Again",
+              "action": { "type": "send_message", "text": "Propose an owner again." } }
+        ] } }),
+        ..AsyncPlan::default()
+    })
+    .await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(10), env(&fake, &agent)).await;
+    post(&proc, &fake, None).await;
+    wait_until(Duration::from_secs(10), || {
+        fake.updates()
+            .iter()
+            .any(|u| card_text(&u.body).contains("Again"))
+    })
+    .await;
+    let answer = fake.updates().last().unwrap().body.clone();
+    let again = find_execute(&answer, "Again").expect("chip").clone();
+    let messages_before = fake.captured().len();
+    let updates_before = fake.updates().len();
+
+    // The click: the invoke answers with a card (in place), not a message.
+    let resp = post_invoke(&proc, &fake, &invoke(again["data"].clone(), "card-7")).await;
+    assert_eq!(
+        resp["type"], "application/vnd.microsoft.card.adaptive",
+        "{resp}"
+    );
+    assert!(
+        !resp.to_string().contains("Working on it \u{2014}"),
+        "no banner: {resp}"
+    );
+    let working = resp["value"].clone();
+    assert!(working.to_string().contains("\"0:0"), "a timer: {working}");
+
+    // The answer replaces the clicked card; nothing new is posted.
+    wait_until(Duration::from_secs(10), || {
+        fake.updates()[updates_before..]
+            .iter()
+            .any(|u| u.activity_id == "card-7" && card_text(&u.body).contains(ANSWER))
+    })
+    .await;
+    assert_eq!(agent.filed_count(), 2);
+    assert!(
+        fake.updates()[updates_before..]
+            .iter()
+            .all(|u| u.activity_id == "card-7"),
+        "every update after the click addresses the clicked card"
+    );
+    assert_eq!(
+        fake.captured().len(),
+        messages_before,
+        "no second card, no typing: {:#?}",
+        &fake.captured()[messages_before..]
+    );
+
+    // The working card's refresh now returns the answer card.
+    let updated = fake.updates()[updates_before..]
+        .iter()
+        .find(|u| u.body["attachments"][0]["content"]["refresh"].is_object())
+        .map(|u| u.body["attachments"][0]["content"]["refresh"]["action"]["data"].clone())
+        .expect("a working-card update carries the refresh action");
+    let refreshed = post_invoke(&proc, &fake, &invoke(updated, "card-7")).await;
+    assert_eq!(
+        refreshed["type"], "application/vnd.microsoft.card.adaptive",
+        "{refreshed}"
+    );
+    assert!(refreshed.to_string().contains(ANSWER), "{refreshed}");
+}
+
+/// The timer never sticks at 0:00 (3f): with no new step, the working card
+/// is still pushed while the run lasts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_working_card_timer_runs_without_new_steps() {
+    let fake = FakeBotFramework::start().await;
+    let agent = FakeAsyncAgent::start(AsyncPlan {
+        total: Duration::from_secs(13),
+        tick: Duration::from_millis(200),
+        progress_limit: Some(1),
+        ..AsyncPlan::default()
+    })
+    .await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(10), env(&fake, &agent)).await;
+    post(&proc, &fake, None).await;
+    wait_until(Duration::from_secs(20), || {
+        fake.updates()
+            .iter()
+            .any(|u| card_text(&u.body).contains(ANSWER))
+    })
+    .await;
+    let ticks: Vec<String> = fake
+        .updates()
+        .iter()
+        .filter(|u| !card_text(&u.body).contains(ANSWER))
+        .map(|u| card_text(&u.body))
+        .collect();
+    assert!(
+        ticks.iter().any(|t| t.contains("\"0:1")),
+        "a tick at 0:1x with no new step: {ticks:#?}"
+    );
 }
