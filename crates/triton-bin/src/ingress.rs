@@ -13,6 +13,7 @@
 //! | `TRITON_GOOGLE_ACCESS_AUDIENCES` | OAuth client ids (comma-separated) an opaque Google access token may be issued to. Enables Google. |
 //! | `TRITON_GOOGLE_ACCESS_ALLOWED_HD` | `hd[=tenant],…` — required with the audiences. |
 //! | `TRITON_GOOGLE_TOKENINFO_URL` | test override; refused outside `env=local`. |
+//! | `TRITON_GOOGLE_USERINFO_URL` | test override of the OIDC userinfo endpoint (the `hd` of an access token); refused outside `env=local`. |
 //! | `TRITON_A2A_PUBLIC_URL` | the A2A endpoint as callers reach it (the card's URL). Enables spec A2A. |
 //! | `TRITON_A2A_DEFAULT_TOOL` | the tool a spec A2A message is dispatched to (required with the URL). |
 //! | `TRITON_A2A_AGENT_NAME` / `_DESCRIPTION` / `_VERSION` | card fields. |
@@ -60,6 +61,9 @@ pub struct IngressArgs {
     /// Google tokeninfo override (tests only; `env=local`).
     #[arg(long, env = "TRITON_GOOGLE_TOKENINFO_URL")]
     pub google_tokeninfo_url: Option<String>,
+    /// Google OIDC userinfo override (tests only; `env=local`).
+    #[arg(long, env = "TRITON_GOOGLE_USERINFO_URL")]
+    pub google_userinfo_url: Option<String>,
 
     /// Public URL of the spec A2A endpoint — what the Agent Card names.
     /// Gemini Enterprise drops non-443 ports, so this is configured, never
@@ -321,6 +325,12 @@ pub fn identity_providers(
         }
         google = google.with_tokeninfo_url(url.clone());
     }
+    if let Some(url) = &args.google_userinfo_url {
+        if !local {
+            return Err(refuse_override("TRITON_GOOGLE_USERINFO_URL"));
+        }
+        google = google.with_userinfo_url(url.clone());
+    }
     tracing::info!(
         audiences = audiences.len(),
         "Google access-token verifier enabled"
@@ -542,6 +552,36 @@ mod tests {
         assert_eq!(
             super::default_mcp_scope("api://triton-mcp/"),
             "api://triton-mcp/access_as_user"
+        );
+    }
+
+    /// The userinfo override, like the tokeninfo one, would let a config
+    /// mint any hosted domain: only `env=local` accepts it.
+    #[test]
+    fn the_userinfo_override_is_refused_outside_local() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            ingress: super::IngressArgs,
+        }
+        let cli = Cli::try_parse_from([
+            "triton",
+            "--google-access-audiences",
+            "client-1",
+            "--google-access-allowed-hd",
+            "acme.example",
+            "--google-userinfo-url",
+            "http://127.0.0.1:1/userinfo",
+        ])
+        .expect("args parse");
+        let err = super::identity_providers(&cli.ingress, "prod", &mut Vec::new(), &mut Vec::new())
+            .err()
+            .expect("refused outside local");
+        assert!(err.0.contains("TRITON_GOOGLE_USERINFO_URL"), "{}", err.0);
+        assert!(
+            super::identity_providers(&cli.ingress, "local", &mut Vec::new(), &mut Vec::new())
+                .is_ok()
         );
     }
 

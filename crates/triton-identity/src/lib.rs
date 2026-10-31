@@ -674,6 +674,21 @@ fn is_entra_guid(s: &str) -> bool {
 /// Default Google tokeninfo endpoint. Overridable in tests.
 const GOOGLE_TOKENINFO_URL: &str = "https://oauth2.googleapis.com/tokeninfo";
 
+/// Google's OIDC userinfo endpoint (`userinfo_endpoint` of
+/// `https://accounts.google.com/.well-known/openid-configuration`).
+/// Overridable in tests.
+///
+/// Why: tokeninfo answers an **access** token without `hd` — only ID
+/// tokens carry the hosted domain — so a Workspace member forwarded by
+/// Gemini Enterprise would be refused under `require_hd` (real-platform
+/// finding, 2026-10-31). Userinfo, called with the access token as Bearer
+/// (needs the `openid` scope), names `hd` for a Workspace member and omits
+/// it for a consumer account. See `doc/google-access-tokens.md`.
+const GOOGLE_USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/userinfo";
+
+/// Upper bound on cached userinfo answers (hosted domains per token).
+const GOOGLE_HD_CACHE_CAP: usize = 1024;
+
 /// The subset of Google's tokeninfo response we consume. `email_verified` and
 /// `exp` are typed as `Value` because tokeninfo returns them as JSON strings
 /// (e.g. `"true"`, `"1788600000"`) while other Google surfaces use native
@@ -687,6 +702,121 @@ struct GoogleTokenInfo {
     scope: Option<String>,
     /// Google Workspace hosted domain, when present.
     hd: Option<String>,
+    /// Google's stable account id; cross-checked against userinfo.
+    sub: Option<String>,
+}
+
+/// The subset of Google's OIDC userinfo response we consume.
+#[derive(Debug, Deserialize, Default)]
+struct GoogleUserInfo {
+    sub: Option<String>,
+    email: Option<String>,
+    /// Present only for a Google Workspace / Cloud organisation member.
+    hd: Option<String>,
+}
+
+/// What userinfo told us about one token's hosted domain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UserInfoHd {
+    /// A Workspace member of this (lower-cased) domain.
+    Domain(String),
+    /// Userinfo answered, without `hd`: a consumer account.
+    None,
+}
+
+/// Fail-closed check of a userinfo answer against the validated tokeninfo:
+/// the same user (email, and `sub` when both carry it), and then `hd`.
+fn check_google_userinfo(
+    info: &GoogleTokenInfo,
+    ui: &GoogleUserInfo,
+) -> Result<UserInfoHd, TritonError> {
+    let same_email = matches!(
+        (info.email.as_deref(), ui.email.as_deref()),
+        (Some(a), Some(b)) if !a.is_empty() && a.eq_ignore_ascii_case(b)
+    );
+    let sub_conflict = matches!(
+        (info.sub.as_deref(), ui.sub.as_deref()),
+        (Some(a), Some(b)) if a != b
+    );
+    if !same_email || sub_conflict {
+        return Err(TritonError::Auth(
+            "google access token identity mismatch".into(),
+        ));
+    }
+    Ok(
+        match ui.hd.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+            Some(h) => UserInfoHd::Domain(h.to_ascii_lowercase()),
+            None => UserInfoHd::None,
+        },
+    )
+}
+
+/// Cache key for a bearer: its SHA-256, so the raw token is not kept as a
+/// map key longer than needed.
+fn token_hash(token: &str) -> [u8; 32] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(token.as_bytes()).into()
+}
+
+struct HdCacheEntry {
+    hd: UserInfoHd,
+    expires: Instant,
+    last_used: u64,
+}
+
+/// Bounded LRU of userinfo answers, keyed by token hash, each entry valid
+/// until its token expires.
+#[derive(Default)]
+struct HdCache {
+    entries: HashMap<[u8; 32], HdCacheEntry>,
+    tick: u64,
+}
+
+impl HdCache {
+    fn get(&mut self, key: &[u8; 32]) -> Option<UserInfoHd> {
+        let now = Instant::now();
+        self.tick += 1;
+        let tick = self.tick;
+        match self.entries.get_mut(key) {
+            Some(e) if e.expires > now => {
+                e.last_used = tick;
+                Some(e.hd.clone())
+            }
+            Some(_) => {
+                self.entries.remove(key);
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn put(&mut self, key: [u8; 32], hd: UserInfoHd, ttl: Duration) {
+        if ttl.is_zero() {
+            return;
+        }
+        let now = Instant::now();
+        self.tick += 1;
+        if self.entries.len() >= GOOGLE_HD_CACHE_CAP && !self.entries.contains_key(&key) {
+            self.entries.retain(|_, e| e.expires > now);
+            if self.entries.len() >= GOOGLE_HD_CACHE_CAP
+                && let Some(oldest) = self
+                    .entries
+                    .iter()
+                    .min_by_key(|(_, e)| e.last_used)
+                    .map(|(k, _)| *k)
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(
+            key,
+            HdCacheEntry {
+                hd,
+                expires: now + ttl,
+                last_used: self.tick,
+            },
+        );
+    }
 }
 
 fn json_is_true(v: Option<&serde_json::Value>) -> bool {
@@ -852,8 +982,11 @@ pub struct GoogleAccessTokenVerifier {
     /// Admit only tokens with a real `hd` (no email-domain fallback).
     require_hd: bool,
     tokeninfo_url: String,
+    userinfo_url: String,
     http: reqwest::Client,
     cache: RwLock<HashMap<String, GoogleCacheEntry>>,
+    /// Userinfo hosted-domain answers, per token hash until token expiry.
+    hd_cache: Mutex<HdCache>,
 }
 
 impl GoogleAccessTokenVerifier {
@@ -889,6 +1022,7 @@ impl GoogleAccessTokenVerifier {
             }),
             require_hd: true,
             tokeninfo_url: GOOGLE_TOKENINFO_URL.to_string(),
+            userinfo_url: GOOGLE_USERINFO_URL.to_string(),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(3))
                 // The bearer rides in the query string, so a redirect would
@@ -897,6 +1031,7 @@ impl GoogleAccessTokenVerifier {
                 .build()
                 .expect("reqwest client"),
             cache: RwLock::new(HashMap::new()),
+            hd_cache: Mutex::new(HdCache::default()),
         }
     }
 
@@ -916,6 +1051,58 @@ impl GoogleAccessTokenVerifier {
     pub fn with_tokeninfo_url(mut self, url: impl Into<String>) -> Self {
         self.tokeninfo_url = url.into();
         self
+    }
+
+    /// Point the hosted-domain lookup at another OIDC userinfo endpoint.
+    /// Like the tokeninfo override, the binary allows it only in
+    /// `env=local`.
+    pub fn with_userinfo_url(mut self, url: impl Into<String>) -> Self {
+        self.userinfo_url = url.into();
+        self
+    }
+
+    /// The hosted domain for a token whose tokeninfo answer has none (every
+    /// access token): ask userinfo once per token, cache until expiry.
+    /// Every failure is a refusal with a neutral message; details go to the
+    /// log only.
+    async fn userinfo_hd(
+        &self,
+        raw_token: &str,
+        info: &GoogleTokenInfo,
+        exp: i64,
+        now: i64,
+    ) -> Result<UserInfoHd, TritonError> {
+        let key = token_hash(raw_token);
+        if let Some(hd) = self.hd_cache.lock().await.get(&key) {
+            return Ok(hd);
+        }
+        let neutral = || TritonError::Auth("google access token could not be verified".into());
+        let resp = self
+            .http
+            .get(&self.userinfo_url)
+            .bearer_auth(raw_token)
+            .send()
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e.without_url(), "google userinfo request failed");
+                neutral()
+            })?;
+        if !resp.status().is_success() {
+            // 401 here usually means the token lacks the `openid` scope.
+            tracing::warn!(status = %resp.status(), "google userinfo refused the access token");
+            return Err(neutral());
+        }
+        let ui: GoogleUserInfo = resp.json().await.map_err(|e| {
+            tracing::warn!(error = %e.without_url(), "google userinfo decode failed");
+            neutral()
+        })?;
+        let hd = check_google_userinfo(info, &ui)?;
+        let ttl = (exp - now).max(0) as u64;
+        self.hd_cache
+            .lock()
+            .await
+            .put(key, hd.clone(), Duration::from_secs(ttl));
+        Ok(hd)
     }
 
     pub async fn verify(&self, raw_token: &str) -> Result<Principal, TritonError> {
@@ -938,11 +1125,21 @@ impl GoogleAccessTokenVerifier {
                 "google access token rejected by tokeninfo".into(),
             ));
         }
-        let info: GoogleTokenInfo = resp.json().await.map_err(|e| {
+        let mut info: GoogleTokenInfo = resp.json().await.map_err(|e| {
             tracing::warn!(error = %e.without_url(), "google tokeninfo decode failed");
             TritonError::Auth("google tokeninfo decode failed".into())
         })?;
         let now = now_unix();
+        if self.require_hd && info.hd.as_deref().map(str::trim).is_none_or(str::is_empty) {
+            // Audience, verified email and expiry first: userinfo is asked
+            // only about a token that is otherwise acceptable.
+            let base = validate_google_tokeninfo_with(&info, &self.audiences, None, false, now)?;
+            if let UserInfoHd::Domain(hd) =
+                self.userinfo_hd(raw_token, &info, base.exp, now).await?
+            {
+                info.hd = Some(hd);
+            }
+        }
         let id = validate_google_tokeninfo_with(
             &info,
             &self.audiences,
@@ -1011,6 +1208,93 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod google_userinfo_tests {
+    use super::*;
+
+    fn info(email: &str, sub: Option<&str>) -> GoogleTokenInfo {
+        GoogleTokenInfo {
+            email: Some(email.into()),
+            sub: sub.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    fn ui(email: Option<&str>, sub: Option<&str>, hd: Option<&str>) -> GoogleUserInfo {
+        GoogleUserInfo {
+            email: email.map(str::to_string),
+            sub: sub.map(str::to_string),
+            hd: hd.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn userinfo_hd_is_taken_only_for_the_same_user() {
+        let ti = info("alice@acme.example", Some("1"));
+        assert_eq!(
+            check_google_userinfo(
+                &ti,
+                &ui(
+                    Some("Alice@Acme.Example"),
+                    Some("1"),
+                    Some(" Acme.Example ")
+                )
+            )
+            .unwrap(),
+            UserInfoHd::Domain("acme.example".into())
+        );
+        assert_eq!(
+            check_google_userinfo(&ti, &ui(Some("alice@acme.example"), None, None)).unwrap(),
+            UserInfoHd::None,
+            "a consumer account"
+        );
+        assert!(
+            check_google_userinfo(
+                &ti,
+                &ui(Some("bob@acme.example"), Some("1"), Some("acme.example"))
+            )
+            .is_err()
+        );
+        assert!(check_google_userinfo(&ti, &ui(None, Some("1"), Some("acme.example"))).is_err());
+        assert!(
+            check_google_userinfo(
+                &ti,
+                &ui(Some("alice@acme.example"), Some("2"), Some("acme.example"))
+            )
+            .is_err(),
+            "another account id"
+        );
+    }
+
+    #[test]
+    fn the_hd_cache_is_bounded_and_evicts_the_least_recently_used() {
+        let mut c = HdCache::default();
+        let ttl = Duration::from_secs(60);
+        for i in 0..GOOGLE_HD_CACHE_CAP {
+            c.put(token_hash(&format!("t{i}")), UserInfoHd::None, ttl);
+        }
+        // Touch t0 so t1 is now the least recently used.
+        assert!(c.get(&token_hash("t0")).is_some());
+        c.put(
+            token_hash("new"),
+            UserInfoHd::Domain("acme.example".into()),
+            ttl,
+        );
+        assert_eq!(c.entries.len(), GOOGLE_HD_CACHE_CAP);
+        assert!(c.get(&token_hash("t0")).is_some());
+        assert!(c.get(&token_hash("t1")).is_none(), "t1 evicted");
+        assert_eq!(
+            c.get(&token_hash("new")),
+            Some(UserInfoHd::Domain("acme.example".into()))
+        );
+        c.put(token_hash("expired"), UserInfoHd::None, Duration::ZERO);
+        assert!(
+            c.get(&token_hash("expired")).is_none(),
+            "zero ttl is not cached"
+        );
+    }
 }
 
 #[cfg(test)]

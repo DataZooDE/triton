@@ -50,31 +50,96 @@ const GOOGLE_TOKEN_OUTSIDE: &str = "ya29.opaque-token-from-another-domain";
 /// A consumer Google account whose email is on the customer's domain but
 /// that is no Workspace member: no `hd`.
 const GOOGLE_TOKEN_NO_HD: &str = "ya29.opaque-consumer-account";
+/// A Workspace member's real access token: Google's tokeninfo answers an
+/// ACCESS token without `hd` (only ID tokens carry it); the OIDC userinfo
+/// endpoint names the hosted domain.
+const GOOGLE_TOKEN_WORKSPACE_ACCESS: &str = "ya29.workspace-access-token";
+/// tokeninfo and userinfo disagree on the email.
+const GOOGLE_TOKEN_EMAIL_MISMATCH: &str = "ya29.userinfo-email-mismatch";
 
 /// Google's tokeninfo endpoint, as far as Triton consumes it: `GET
 /// ?access_token=<t>` answers the token's audience, verified email,
-/// hosted domain and expiry, or `400` for an unknown token.
+/// hosted domain and expiry, or `400` for an unknown token. Beside it the
+/// OIDC userinfo endpoint (`GET /userinfo`, `Authorization: Bearer <t>`),
+/// which answers `sub`, `email` and, for a Workspace member, `hd`.
 pub(crate) struct FakeTokeninfo {
     addr: SocketAddr,
     hits: Arc<Mutex<u32>>,
+    userinfo_hits: Arc<Mutex<u32>>,
 }
 
 impl FakeTokeninfo {
     pub(crate) async fn start() -> Self {
         let hits = Arc::new(Mutex::new(0u32));
+        let userinfo_hits = Arc::new(Mutex::new(0u32));
         let app = Router::new()
             .route("/tokeninfo", get(tokeninfo))
-            .with_state(hits.clone());
+            .with_state(hits.clone())
+            .merge(
+                Router::new()
+                    .route("/userinfo", get(userinfo))
+                    .with_state(userinfo_hits.clone()),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
-        Self { addr, hits }
+        Self {
+            addr,
+            hits,
+            userinfo_hits,
+        }
     }
 
     pub(crate) fn url(&self) -> String {
         format!("http://{}/tokeninfo", self.addr)
+    }
+
+    pub(crate) fn userinfo_url(&self) -> String {
+        format!("http://{}/userinfo", self.addr)
+    }
+
+    fn userinfo_hits(&self) -> u32 {
+        *self.userinfo_hits.lock().unwrap()
+    }
+}
+
+async fn userinfo(
+    State(hits): State<Arc<Mutex<u32>>>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    *hits.lock().unwrap() += 1;
+    let token = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    match token {
+        Some(GOOGLE_TOKEN_WORKSPACE_ACCESS) => Json(json!({
+            "sub": "110000000000000000001",
+            "email": "alice@acme.example",
+            "email_verified": true,
+            "hd": "acme.example",
+        }))
+        .into_response(),
+        Some(GOOGLE_TOKEN_NO_HD) => Json(json!({
+            "sub": "110000000000000000002",
+            "email": "eve@acme.example",
+            "email_verified": true,
+        }))
+        .into_response(),
+        Some(GOOGLE_TOKEN_EMAIL_MISMATCH) => Json(json!({
+            "sub": "110000000000000000003",
+            "email": "someone-else@acme.example",
+            "email_verified": true,
+            "hd": "acme.example",
+        }))
+        .into_response(),
+        _ => (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "invalid_token" })),
+        )
+            .into_response(),
     }
 }
 
@@ -98,6 +163,29 @@ async fn tokeninfo(
         Some(GOOGLE_TOKEN_NO_HD) => Json(json!({
             "aud": GOOGLE_CLIENT,
             "email": "eve@acme.example",
+            "email_verified": "true",
+            "exp": exp,
+        }))
+        .into_response(),
+        // Google's real access-token answer: `azp`, `aud`, `sub`, `scope`,
+        // `exp`, `expires_in`, `email`, `email_verified`, `access_type` —
+        // no `hd`.
+        Some(GOOGLE_TOKEN_WORKSPACE_ACCESS) => Json(json!({
+            "azp": GOOGLE_CLIENT,
+            "aud": GOOGLE_CLIENT,
+            "sub": "110000000000000000001",
+            "scope": "openid https://www.googleapis.com/auth/userinfo.email",
+            "exp": exp,
+            "expires_in": "3599",
+            "email": "alice@acme.example",
+            "email_verified": "true",
+            "access_type": "online",
+        }))
+        .into_response(),
+        Some(GOOGLE_TOKEN_EMAIL_MISMATCH) => Json(json!({
+            "aud": GOOGLE_CLIENT,
+            "sub": "110000000000000000003",
+            "email": "bob@acme.example",
             "email_verified": "true",
             "exp": exp,
         }))
@@ -164,6 +252,10 @@ async fn rig() -> Rig {
             "acme.example=acme".to_string(),
         ),
         ("TRITON_GOOGLE_TOKENINFO_URL".to_string(), google.url()),
+        (
+            "TRITON_GOOGLE_USERINFO_URL".to_string(),
+            google.userinfo_url(),
+        ),
         (
             "TRITON_STATIC_UPSTREAMS".to_string(),
             format!("assistant={}", agent.host_port()),
@@ -535,6 +627,10 @@ async fn google_requires_a_real_hd_and_a_bare_hd_is_its_own_tenant() {
         ),
         ("TRITON_GOOGLE_TOKENINFO_URL".to_string(), google.url()),
         (
+            "TRITON_GOOGLE_USERINFO_URL".to_string(),
+            google.userinfo_url(),
+        ),
+        (
             "TRITON_STATIC_UPSTREAMS".to_string(),
             format!("assistant={}", agent.host_port()),
         ),
@@ -559,4 +655,116 @@ async fn google_requires_a_real_hd_and_a_bare_hd_is_its_own_tenant() {
         claims["tenant"], "acme.example",
         "a bare hd is its own tenant"
     );
+}
+
+async fn call_with_body(triton: &TritonProcess, token: &str) -> (reqwest::StatusCode, String) {
+    let resp = reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/assistant"))
+        .bearer_auth(token)
+        .json(&json!({ "message": "hi" }))
+        .send()
+        .await
+        .expect("POST /v1/tools/assistant");
+    let status = resp.status();
+    (status, resp.text().await.unwrap_or_default())
+}
+
+/// Real-platform finding (Gemini Enterprise, 2026-10-31): Google's
+/// tokeninfo answers an ACCESS token without `hd`, so a Workspace member
+/// was refused. The hosted domain then comes from the OIDC userinfo
+/// endpoint, under the same allow-list, and is cached per token.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_workspace_access_token_without_hd_at_tokeninfo_gets_hd_from_userinfo() {
+    let r = rig().await;
+    assert_eq!(
+        call(&r.triton, GOOGLE_TOKEN_WORKSPACE_ACCESS).await,
+        reqwest::StatusCode::OK
+    );
+    let claims = last_upstream_claims(&r.agent);
+    assert_eq!(claims["idp"], "google");
+    assert_eq!(claims["idp_tenant"], "acme.example", "hd from userinfo");
+    assert_eq!(
+        claims["tenant"], "acme",
+        "the userinfo hd maps to the tenant"
+    );
+    assert_eq!(claims["email"], "alice@acme.example");
+
+    assert_eq!(
+        call(&r.triton, GOOGLE_TOKEN_WORKSPACE_ACCESS).await,
+        reqwest::StatusCode::OK
+    );
+    assert_eq!(r._google.userinfo_hits(), 1, "userinfo once per token");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn userinfo_without_hd_or_with_another_email_is_refused() {
+    let r = rig().await;
+    assert_eq!(
+        call(&r.triton, GOOGLE_TOKEN_NO_HD).await,
+        reqwest::StatusCode::UNAUTHORIZED,
+        "a consumer account has no hd at userinfo either"
+    );
+    assert_eq!(
+        call(&r.triton, GOOGLE_TOKEN_EMAIL_MISMATCH).await,
+        reqwest::StatusCode::UNAUTHORIZED,
+        "userinfo must name the same user as tokeninfo"
+    );
+    assert!(r.agent.bearers_seen().is_empty(), "no dispatch happened");
+}
+
+/// Userinfo unreachable: fail closed, and the caller learns nothing about
+/// the internals (no URL, no transport error).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn userinfo_down_fails_closed_with_a_neutral_message() {
+    let agent = FakeAgent::start_echoing().await;
+    let google = FakeTokeninfo::start().await;
+    let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let dead_url = format!("http://{}/userinfo", dead.local_addr().unwrap());
+    drop(dead);
+    let env = HashMap::from([
+        ("TRITON_ENV".to_string(), "local".to_string()),
+        (
+            "TRITON_GOOGLE_ACCESS_AUDIENCES".to_string(),
+            GOOGLE_CLIENT.to_string(),
+        ),
+        (
+            "TRITON_GOOGLE_ACCESS_ALLOWED_HD".to_string(),
+            "acme.example".to_string(),
+        ),
+        ("TRITON_GOOGLE_TOKENINFO_URL".to_string(), google.url()),
+        ("TRITON_GOOGLE_USERINFO_URL".to_string(), dead_url.clone()),
+        (
+            "TRITON_STATIC_UPSTREAMS".to_string(),
+            format!("assistant={}", agent.host_port()),
+        ),
+        (
+            "TRITON_JWT_SIGNING_KEY".to_string(),
+            SIGNING_KEY_PEM.to_string(),
+        ),
+        ("TRITON_JWT_JWKS".to_string(), SIGNER_JWKS.to_string()),
+        (
+            "TRITON_JWT_KID".to_string(),
+            "triton-test-signer".to_string(),
+        ),
+        (
+            "TRITON_SELF_ISSUER".to_string(),
+            "https://triton.test".to_string(),
+        ),
+    ]);
+    let triton = TritonProcess::spawn_with_env(Duration::from_secs(10), env).await;
+    let (status, body) = call_with_body(&triton, GOOGLE_TOKEN_WORKSPACE_ACCESS).await;
+    assert_eq!(status, reqwest::StatusCode::UNAUTHORIZED);
+    assert!(
+        !body.contains("127.0.0.1"),
+        "no endpoint in the body: {body}"
+    );
+    assert!(
+        !body.contains("userinfo"),
+        "no internals in the body: {body}"
+    );
+    assert!(
+        !body.to_lowercase().contains("connect"),
+        "no transport error: {body}"
+    );
+    assert!(agent.bearers_seen().is_empty(), "no dispatch happened");
 }
