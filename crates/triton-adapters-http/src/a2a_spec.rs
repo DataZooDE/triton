@@ -540,6 +540,13 @@ fn text_from_params(params: &Value) -> Option<Inbound> {
             triton_core::a2ui::ge::GeAction::Message(text) => Inbound {
                 text,
                 open_doc: None,
+                missing: None,
+            },
+            // A form submit without its required inputs sends nothing.
+            triton_core::a2ui::ge::GeAction::Incomplete(names) => Inbound {
+                text: String::new(),
+                open_doc: None,
+                missing: Some(format!("missing input(s): {}", names.join(", "))),
             },
             triton_core::a2ui::ge::GeAction::OpenDoc {
                 label,
@@ -554,6 +561,7 @@ fn text_from_params(params: &Value) -> Option<Inbound> {
                     id,
                     url,
                 }),
+                missing: None,
             },
         });
     }
@@ -567,6 +575,7 @@ fn text_from_params(params: &Value) -> Option<Inbound> {
     (!trimmed.is_empty()).then(|| Inbound {
         text: trimmed.to_string(),
         open_doc: None,
+        missing: None,
     })
 }
 
@@ -575,6 +584,8 @@ fn text_from_params(params: &Value) -> Option<Inbound> {
 struct Inbound {
     text: String,
     open_doc: Option<OpenDoc>,
+    /// A form submit that lacked required inputs: refused with this text.
+    missing: Option<String>,
 }
 
 struct OpenDoc {
@@ -636,8 +647,9 @@ pub(crate) fn a2ui_action(parts: &[Value]) -> Option<triton_core::a2ui::ge::GeAc
             {
                 return Some(triton_core::a2ui::ge::GeAction::Message(q.to_string()));
             }
+            let context = action.get("context").cloned().unwrap_or(Value::Null);
             if let Some(cid) = action.get("sourceComponentId").and_then(Value::as_str)
-                && let Some(a) = triton_core::a2ui::ge::action_for(cid)
+                && let Some(a) = triton_core::a2ui::ge::action_for_with(cid, &context)
             {
                 return Some(a);
             }
@@ -659,6 +671,9 @@ async fn message_send(
             "params.message.parts must contain at least one non-empty text part",
         );
     };
+    if let Some(missing) = &inbound.missing {
+        return rpc_error(&req.id, INVALID_PARAMS, missing);
+    }
     let text = inbound.text.clone();
     // A2A 0.3.0 requires `contextId` on Task; honor a client-supplied
     // `message.contextId`, else generate one (strict clients reject its
@@ -736,9 +751,10 @@ async fn message_send(
                 &vega_overrides,
             )
             .await;
-            let reply = reply_text(&result);
+            let msgs = triton_core::a2ui::ge::build_messages(&result);
+            let reply = text_part(&result, msgs.is_some());
             let mut parts = vec![json!({ "kind": "text", "text": reply })];
-            if let Some(msgs) = triton_core::a2ui::ge::build_messages(&result) {
+            if let Some(msgs) = msgs {
                 parts.extend(triton_core::a2ui::ge::data_parts(msgs));
             }
             let msg = json!({
@@ -793,6 +809,9 @@ async fn message_stream(
             "params.message.parts must contain at least one non-empty text part",
         );
     };
+    if let Some(missing) = &inbound.missing {
+        return rpc_error(&req.id, INVALID_PARAMS, missing);
+    }
     let text = inbound.text.clone();
     let trace_id = principal.trace_id.clone();
     let rpc_id = req.id.clone();
@@ -1002,7 +1021,8 @@ async fn message_stream(
                         // remain. A lagged reader missed deltas: resend whole.
                         let did_stream =
                             streamed.load(Ordering::Relaxed) && !lagged.load(Ordering::Relaxed);
-                        let reply = reply_text(&v);
+                        let a2ui_msgs = triton_core::a2ui::ge::build_messages(&v);
+                        let reply = text_part(&v, a2ui_msgs.is_some());
                         // Keep the prose and A2UI as separate artifacts. Token
                         // deltas append to the prose artifact; putting A2UI in
                         // its last chunk makes clients merge structured parts
@@ -1049,7 +1069,7 @@ async fn message_stream(
                                 },
                             })));
                         }
-                        if let Some(msgs) = triton_core::a2ui::ge::build_messages(&v) {
+                        if let Some(msgs) = a2ui_msgs {
                             frames.push(rpc_frames(json!({
                                 "kind": "artifact-update",
                                 "taskId": task_for_frames,
@@ -1303,6 +1323,23 @@ pub(crate) fn sources_markdown(result: &Value) -> Option<String> {
         })
         .collect();
     (!links.is_empty()).then(|| format!("Sources: {}", links.join(" · ")))
+}
+
+/// The text part of a reply (say it once): beside a rendered A2UI surface,
+/// the result's one-sentence `summary` when it has one, because the rows,
+/// choices and facts are in the components; with no surface shown, the full
+/// [`reply_text`].
+pub fn text_part(result: &Value, surface_shown: bool) -> String {
+    if surface_shown
+        && let Some(summary) = result
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    {
+        return summary.to_string();
+    }
+    reply_text(result)
 }
 
 pub fn reply_text(result: &Value) -> String {

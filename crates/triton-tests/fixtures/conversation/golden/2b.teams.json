@@ -8,21 +8,6 @@
       "wrap": true
     },
     {
-      "actions": [
-        {
-          "targetElements": [
-            "node-5",
-            "node-13",
-            "node-17",
-            "node-21"
-          ],
-          "title": "Only gaps",
-          "type": "Action.ToggleVisibility"
-        }
-      ],
-      "type": "ActionSet"
-    },
-    {
       "id": "node-1",
       "items": [
         {
@@ -424,6 +409,21 @@
       ],
       "spacing": "Small",
       "type": "Container"
+    },
+    {
+      "actions": [
+        {
+          "targetElements": [
+            "node-5",
+            "node-13",
+            "node-17",
+            "node-21"
+          ],
+          "title": "Only gaps",
+          "type": "Action.ToggleVisibility"
+        }
+      ],
+      "type": "ActionSet"
     },
     {
       "actions": [

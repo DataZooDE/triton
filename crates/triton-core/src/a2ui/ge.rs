@@ -33,7 +33,7 @@
 
 use serde_json::{Value, json};
 
-use super::{Action, Component, FormField, FormFieldKind, StepState, Tone, TreeNode};
+use super::{Action, Component, FormField, FormFieldKind, FormGroup, StepState, Tone, TreeNode};
 
 /// The A2UI v0.9 A2A-extension URI (agent-card advertisement + activation).
 pub const EXTENSION_URI: &str = "https://a2ui.org/a2a-extension/a2ui/v0.9";
@@ -82,6 +82,10 @@ fn doc_sentinel() -> &'static str {
 pub enum GeAction {
     /// Send this complete message as a new turn.
     Message(String),
+    /// A form submit whose click did not carry every required input (the
+    /// named fields). Nothing is sent; the caller says which choice is
+    /// missing.
+    Incomplete(Vec<String>),
     /// Open a cited document (no agent turn).
     OpenDoc {
         label: String,
@@ -253,6 +257,20 @@ impl ActionSigner {
         .ok()
     }
 
+    /// Mint the token for "fill this template from the form's inputs and
+    /// send it as a new turn" (a form submit with real input fields).
+    pub fn sign_template(&self, template: &str) -> Option<String> {
+        triton_correlation::encode_bound(
+            triton_correlation::message::SEND_MESSAGE_TOOL,
+            &triton_correlation::message::template_args(template),
+            self.ring.signing(),
+            GE_ACTION_CAP,
+            Self::binding(),
+            Some(GE_ACTION_TTL_SECS),
+        )
+        .ok()
+    }
+
     /// Mint the component id (`a<n>-<token>`) for "open this cited
     /// document" — signed like a send-message action, typed on decode.
     pub fn sign_open_doc(
@@ -281,12 +299,19 @@ impl ActionSigner {
     pub fn open(&self, component_id: &str) -> Option<String> {
         match self.open_action(component_id)? {
             GeAction::Message(m) => Some(m),
-            GeAction::OpenDoc { .. } => None,
+            GeAction::OpenDoc { .. } | GeAction::Incomplete(_) => None,
         }
     }
 
     /// Decode a clicked component id into its typed action.
     pub fn open_action(&self, component_id: &str) -> Option<GeAction> {
+        self.open_action_with(component_id, &Value::Null)
+    }
+
+    /// Decode a clicked component id; a form submit's template is filled
+    /// from `context` (the click's resolved `action.context`, one string per
+    /// field name). Unsigned inputs only ever complete a signed template.
+    pub fn open_action_with(&self, component_id: &str, context: &Value) -> Option<GeAction> {
         let rest = component_id.strip_prefix('a')?;
         let (n, token) = rest.split_once('-')?;
         if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
@@ -312,9 +337,22 @@ impl ActionSigner {
         if tool != triton_correlation::message::SEND_MESSAGE_TOOL {
             return None;
         }
-        triton_correlation::message::resolve(&args, |_| None)
-            .ok()
-            .map(GeAction::Message)
+        let input = |k: &str| {
+            context.get(k).and_then(|v| match v {
+                Value::String(s) => Some(s.clone()),
+                // A select bound to a list (ChoicePicker style) or a number.
+                Value::Array(a) => a.first().and_then(Value::as_str).map(str::to_owned),
+                Value::Number(n) => Some(n.to_string()),
+                _ => None,
+            })
+        };
+        match triton_correlation::message::resolve(&args, input) {
+            Ok(m) => Some(GeAction::Message(m)),
+            Err(triton_correlation::message::MessageError::Missing(names)) => {
+                Some(GeAction::Incomplete(names))
+            }
+            Err(_) => None,
+        }
     }
 }
 
@@ -353,6 +391,12 @@ pub fn action_for(source_component_id: &str) -> Option<GeAction> {
     ActionSigner::global().open_action(source_component_id)
 }
 
+/// [`action_for`] with the click's resolved `action.context`, which carries
+/// a form's input values.
+pub fn action_for_with(source_component_id: &str, context: &Value) -> Option<GeAction> {
+    ActionSigner::global().open_action_with(source_component_id, context)
+}
+
 /// String form of [`action_for`] for the existing A2A caller: a message
 /// verbatim, an open-doc as the nonce-protected in-band form [`open_doc`]
 /// parses. The surface id is not used (the clicked id is self-contained);
@@ -360,6 +404,7 @@ pub fn action_for(source_component_id: &str) -> Option<GeAction> {
 pub fn question_for(_surface_id: &str, source_component_id: &str) -> Option<String> {
     Some(match action_for(source_component_id)? {
         GeAction::Message(m) => m,
+        GeAction::Incomplete(_) => return None,
         GeAction::OpenDoc {
             label,
             skill,
@@ -369,10 +414,11 @@ pub fn question_for(_surface_id: &str, source_component_id: &str) -> Option<Stri
     })
 }
 
-/// Rendering switches for [`build_messages_with`]. Both default OFF because
-/// each depends on something only a live Gemini Enterprise tenant can
-/// confirm; see the field docs.
-#[derive(Debug, Clone, Copy, Default)]
+/// Rendering switches for [`build_messages_with`]. `open_url` and `embed`
+/// default OFF because each depends on something only a live Gemini
+/// Enterprise tenant can confirm; `form_fields` defaults ON with a switch
+/// back to one-click buttons; see the field docs.
+#[derive(Debug, Clone, Copy)]
 pub struct GeOptions {
     /// Emit `open_url` actions as in-card buttons (`functionCall: openUrl`,
     /// the composite catalog's own function). OFF: an earlier, malformed
@@ -387,6 +433,23 @@ pub struct GeOptions {
     /// request), else the panel shows a security error. When off, the
     /// embed's `fallback` renders inline. Env: `TRITON_GE_EMBED`.
     pub embed: bool,
+    /// Render a template form as real input fields (`MaterialSelect`,
+    /// `MaterialInput`) bound to the surface data model, whose submit sends
+    /// the bound values in the click's `action.context`. ON by default. OFF
+    /// (`TRITON_GE_FORM_FIELDS=off`) restores the one-click buttons: a form
+    /// whose template needs one select becomes one button per option, which
+    /// works even where a host drops the click context.
+    pub form_fields: bool,
+}
+
+impl Default for GeOptions {
+    fn default() -> Self {
+        GeOptions {
+            open_url: false,
+            embed: false,
+            form_fields: true,
+        }
+    }
 }
 
 impl GeOptions {
@@ -399,9 +462,15 @@ impl GeOptions {
                     .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
                     .unwrap_or(false)
             };
+            let off = |k: &str| {
+                std::env::var(k)
+                    .map(|v| matches!(v.trim(), "0" | "false" | "FALSE" | "no" | "off"))
+                    .unwrap_or(false)
+            };
             GeOptions {
                 open_url: on("TRITON_GE_OPEN_URL"),
                 embed: on("TRITON_GE_EMBED"),
+                form_fields: !off("TRITON_GE_FORM_FIELDS"),
             }
         })
     }
@@ -463,6 +532,8 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
 struct Card<'a> {
     flat: Vec<Value>,
     n: usize,
+    /// Field-form counter: each form's data-model namespace (`/f<k>`).
+    forms: usize,
     signer: &'a ActionSigner,
     opts: GeOptions,
 }
@@ -594,15 +665,25 @@ impl Card<'_> {
                 }
                 for it in items {
                     let mut cell = Vec::new();
-                    let head = it
-                        .action
-                        .as_ref()
-                        .and_then(|a| self.action_button(&it.label, a, "basic"));
+                    // With an `action_label` the control is a button at the
+                    // end of the row ("Agent 2 · Requirements: Forecast ·
+                    // [Retire]"); without one the label is the control.
+                    let (head, tail) = match (&it.action, &it.action_label) {
+                        (Some(a), Some(caption)) => {
+                            (None, self.action_button(caption, a, "stroked"))
+                        }
+                        (Some(a), None) => (self.action_button(&it.label, a, "basic"), None),
+                        (None, _) => (None, None),
+                    };
                     cell.push(head.unwrap_or_else(|| self.text(&it.label, "body1")));
                     if let Some(d) = it.detail.as_deref().filter(|d| !d.is_empty()) {
                         cell.push(self.text(d, "caption"));
                     }
-                    ids.push(self.column(cell));
+                    let col = self.column(cell);
+                    match tail {
+                        Some(btn) => ids.push(self.row(vec![col, btn])),
+                        None => ids.push(col),
+                    }
                 }
                 ids
             }
@@ -634,19 +715,11 @@ impl Card<'_> {
                 if let Some(t) = title {
                     table["caption"] = json!(t);
                 }
+                // A MaterialTable cannot carry a row action. A button per
+                // row would show every row twice (the rows once in the
+                // table, once as buttons), so row actions stay with the
+                // hosts that can make a row tappable.
                 ids.push(self.add("tbl", table));
-                // A MaterialTable cannot carry a row action: actionable rows
-                // get a button each, labelled by the row's first cell.
-                let first = columns.first().map(|c| c.key.clone()).unwrap_or_default();
-                let btns: Vec<String> = rows
-                    .iter()
-                    .filter_map(|r| {
-                        let a = r.action.as_ref()?;
-                        let label = r.cells.get(&first).cloned().unwrap_or_default();
-                        self.action_button(&label, a, "stroked")
-                    })
-                    .collect();
-                ids.extend(self.button_rows(btns));
                 ids
             }
             Component::Chips { prompt, chips } => {
@@ -678,6 +751,7 @@ impl Card<'_> {
                 let icon = match tone {
                     Tone::Info => ("info", "primary"),
                     Tone::Warn => ("warning", "warn"),
+                    Tone::Attention => ("error", "warn"),
                 };
                 let icon_id = self.add(
                     "ic",
@@ -776,10 +850,34 @@ impl Card<'_> {
             Component::Form {
                 title,
                 fields,
+                submit_label,
                 send_template: Some(tpl),
                 preview_label,
                 ..
-            } => self.template_form(title, fields, tpl, preview_label.as_deref()),
+            } => {
+                if self.opts.form_fields {
+                    let mut ids = Vec::new();
+                    if !title.is_empty() {
+                        ids.push(self.text(title, "subtitle2"));
+                    }
+                    ids.extend(self.field_form(fields, tpl, submit_label));
+                    ids
+                } else {
+                    self.template_form(title, fields, tpl, preview_label.as_deref())
+                }
+            }
+            // The text part says the title; the card keeps the context line.
+            Component::Header { context, .. } => context
+                .as_deref()
+                .filter(|c| !c.is_empty())
+                .map(|c| vec![self.text(c, "caption")])
+                .unwrap_or_default(),
+            Component::FormGroups {
+                title,
+                groups,
+                submit_label,
+                note,
+            } => self.form_groups(title.as_deref(), groups, submit_label, note.as_deref()),
             Component::Button {
                 label,
                 action: Some(a),
@@ -792,6 +890,104 @@ impl Card<'_> {
             Component::Narration { text } => vec![self.text(text, "caption")],
             _ => Vec::new(),
         }
+    }
+
+    /// A form with real inputs: each field is bound to `/f<k>/<name>` in the
+    /// surface data model, and the submit's `action.context` maps every
+    /// field name to its binding, so the click carries the chosen values.
+    /// The submit's id is the signed template ([`ActionSigner::sign_template`]);
+    /// the A2A layer fills it from the context ([`action_for_with`]).
+    fn field_form(&mut self, fields: &[FormField], tpl: &str, submit_label: &str) -> Vec<String> {
+        self.forms += 1;
+        let ns = format!("/f{}", self.forms);
+        let mut ids = Vec::new();
+        let mut context = serde_json::Map::new();
+        for f in fields {
+            let path = format!("{ns}/{}", f.name);
+            context.insert(f.name.clone(), json!({ "path": path }));
+            let comp = match f.kind {
+                FormFieldKind::Select => json!({
+                    "component": "MaterialSelect",
+                    "label": f.label,
+                    "options": f.options.iter()
+                        .map(|o| json!({ "label": o.label, "value": o.value }))
+                        .collect::<Vec<_>>(),
+                    "value": { "path": path },
+                }),
+                FormFieldKind::Integer => json!({
+                    "component": "MaterialInput", "label": f.label, "type": "number",
+                    "value": { "path": path },
+                }),
+                _ => {
+                    let mut c = json!({
+                        "component": "MaterialInput", "label": f.label,
+                        "value": { "path": path },
+                    });
+                    if let Some(p) = &f.placeholder {
+                        c["placeholder"] = json!(p);
+                    }
+                    c
+                }
+            };
+            ids.push(self.add("in", comp));
+        }
+        let Some(token) = self.signer.sign_template(tpl) else {
+            tracing::warn!("a2ui/ge: dropping a form submit (template too long to sign)");
+            return ids;
+        };
+        self.n += 1;
+        let id = format!("a{}-{token}", self.n);
+        let label = if submit_label.is_empty() {
+            "Send"
+        } else {
+            submit_label
+        };
+        self.flat.push(json!({
+            "id": id,
+            "component": "MaterialButton",
+            "label": label,
+            "variant": "flat",
+            "color": "primary",
+            "action": { "event": { "name": "submit", "context": Value::Object(context) } },
+        }));
+        ids.push(id);
+        ids
+    }
+
+    /// Form groups: one expandable panel per group (the first open), each a
+    /// [`Card::field_form`] — or, with form fields off, the one-click buttons
+    /// of [`Card::template_form`].
+    fn form_groups(
+        &mut self,
+        title: Option<&str>,
+        groups: &[FormGroup],
+        submit_label: &str,
+        note: Option<&str>,
+    ) -> Vec<String> {
+        let mut ids = Vec::new();
+        if let Some(t) = title.filter(|t| !t.is_empty()) {
+            ids.push(self.text(t, "subtitle2"));
+        }
+        for (k, g) in groups.iter().enumerate() {
+            let mut inner = if self.opts.form_fields {
+                self.field_form(&g.fields, &g.send_template, submit_label)
+            } else {
+                self.template_form("", &g.fields, &g.send_template, None)
+            };
+            if let Some(n) = note.filter(|n| !n.is_empty()) {
+                inner.push(self.text(n, "caption"));
+            }
+            ids.push(self.add(
+                "grp",
+                json!({
+                    "component": "MaterialExpansionPanel",
+                    "title": g.label,
+                    "expanded": k == 0,
+                    "children": inner,
+                }),
+            ));
+        }
+        ids
     }
 
     /// A template form. GE cannot return input values (see Selection), so:
@@ -837,8 +1033,11 @@ impl Card<'_> {
                 .find(|f| f.name == name)
                 .map(|f| f.label.clone())
         });
-        let label = preview_label.unwrap_or("Will be sent as");
-        ids.push(self.text(&format!("{label}: {preview}"), "body2"));
+        // The preview is shown only when the producer asks for it: the
+        // composed request is plumbing, not content.
+        if let Some(label) = preview_label {
+            ids.push(self.text(&format!("{label}: {preview}"), "body2"));
+        }
         ids
     }
 
@@ -929,6 +1128,7 @@ pub fn build_messages_with(
     let mut card = Card {
         flat: Vec::new(),
         n: 0,
+        forms: 0,
         signer,
         opts,
     };

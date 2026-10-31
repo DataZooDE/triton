@@ -2,6 +2,7 @@
   "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
   "actions": [
     {
+      "style": "positive",
       "title": "Open in the portfolio",
       "type": "Action.OpenUrl",
       "url": "https://app.example.com/acme/analyse?lifecycle=planned"

@@ -1,15 +1,9 @@
 {
   "_actions": {
-    "a11": "Which agents are planned? Show their AI Act class.",
-    "a12": "Which agents are planned? Show their owner.",
-    "a13": "Which agents are planned? Show their capability.",
-    "a16": "Find planned Agents",
-    "a2": "Show Agent 3",
-    "a3": "Show Agent 8",
-    "a4": "Show Agent 12",
-    "a5": "Show Agent 17",
-    "a6": "Show Agent 21",
-    "a7": "Show Agent 28"
+    "a2": "Which agents are planned? Show their AI Act class.",
+    "a3": "Which agents are planned? Show their owner.",
+    "a4": "Which agents are planned? Show their capability.",
+    "a7": "Find planned Agents"
   },
   "messages": [
     {
@@ -77,114 +71,6 @@
             "color": "primary",
             "component": "MaterialButton",
             "id": "a2",
-            "label": "Agent 3 · Requirements: Monitor · Head of IT Operations",
-            "variant": "stroked"
-          },
-          {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a3",
-            "label": "Agent 8 · Design: Schedule · Data Protection Officer",
-            "variant": "stroked"
-          },
-          {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a4",
-            "label": "Agent 12 · Design: Forecast · no owner",
-            "variant": "stroked"
-          },
-          {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a5",
-            "label": "Agent 17 · Validation: Forecast · Head of Quality Assurance",
-            "variant": "stroked"
-          },
-          {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a6",
-            "label": "Agent 21 · Planning: Schedule · Head of Production Planning",
-            "variant": "stroked"
-          },
-          {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a7",
-            "label": "Agent 28 · Sales: Forecast · Data Protection Officer",
-            "variant": "stroked"
-          },
-          {
-            "align": "stretch",
-            "children": [
-              "a2",
-              "a3"
-            ],
-            "component": "MaterialRow",
-            "id": "row-8",
-            "justify": "start"
-          },
-          {
-            "align": "stretch",
-            "children": [
-              "a4",
-              "a5"
-            ],
-            "component": "MaterialRow",
-            "id": "row-9",
-            "justify": "start"
-          },
-          {
-            "align": "stretch",
-            "children": [
-              "a6",
-              "a7"
-            ],
-            "component": "MaterialRow",
-            "id": "row-10",
-            "justify": "start"
-          },
-          {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a11",
             "label": "+ AI Act class",
             "variant": "stroked"
           },
@@ -197,7 +83,7 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a12",
+            "id": "a3",
             "label": "+ Owner",
             "variant": "stroked"
           },
@@ -210,27 +96,27 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a13",
+            "id": "a4",
             "label": "+ Capability",
             "variant": "stroked"
           },
           {
             "align": "stretch",
             "children": [
-              "a11",
-              "a12"
+              "a2",
+              "a3"
             ],
             "component": "MaterialRow",
-            "id": "row-14",
+            "id": "row-5",
             "justify": "start"
           },
           {
             "align": "stretch",
             "children": [
-              "a13"
+              "a4"
             ],
             "component": "MaterialRow",
-            "id": "row-15",
+            "id": "row-6",
             "justify": "start"
           },
           {
@@ -242,28 +128,25 @@
             },
             "color": "primary",
             "component": "MaterialButton",
-            "id": "a16",
+            "id": "a7",
             "label": "Refine filters",
             "variant": "flat"
           },
           {
             "align": "stretch",
             "children": [
-              "a16"
+              "a7"
             ],
             "component": "MaterialRow",
-            "id": "row-17",
+            "id": "row-8",
             "justify": "start"
           },
           {
             "children": [
               "tbl-1",
-              "row-8",
-              "row-9",
-              "row-10",
-              "row-14",
-              "row-15",
-              "row-17"
+              "row-5",
+              "row-6",
+              "row-8"
             ],
             "component": "MaterialColumn",
             "id": "root-col"

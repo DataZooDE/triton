@@ -263,17 +263,18 @@ async fn teams_renders_every_component_and_a_click_is_a_new_stateless_request() 
         panic!("card fails the Adaptive Card schema: {e:#}\n{card}");
     }
     let s = card.to_string();
+    // No internals (turn 3, rule 4): the composed request is not shown.
+    assert!(!s.contains("Will be sent as"), "{card}");
     for needle in [
         "Invoice matcher",         // list + table + chip
         "Action.OpenUrl",          // list row / button deep link
         "Action.ToggleVisibility", // tree expand + only-gaps
         "Only gaps",
-        "\"style\":\"warning\"",    // notice
-        "\u{25b6} Match",           // progress status line
-        "none \u{2192} Anna Weber", // key_value change
-        "Input.ChoiceSet",          // selection radio + form select
-        "\"style\":\"expanded\"",   // radio
-        "Will be sent as: Show agents in \u{2039}Capability\u{203a} that are \u{2039}Status\u{203a}",
+        "\"style\":\"warning\"",      // notice
+        "\u{25b6} Match",             // progress status line
+        "none \u{2192} Anna Weber",   // key_value change
+        "Input.ChoiceSet",            // selection radio + form select
+        "\"style\":\"expanded\"",     // radio
         "task/fetch",                 // embed → task module
         "The map opens in a dialog.", // embed fallback inline
     ] {

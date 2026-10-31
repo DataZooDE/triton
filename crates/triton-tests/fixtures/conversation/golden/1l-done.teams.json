@@ -2,6 +2,7 @@
   "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
   "actions": [
     {
+      "style": "positive",
       "title": "Review all 4",
       "type": "Action.OpenUrl",
       "url": "https://app.example.com/acme/review/c/9H4P"

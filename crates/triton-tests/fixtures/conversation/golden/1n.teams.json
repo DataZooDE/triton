@@ -6,6 +6,7 @@
       "data": {
         "ct": "__send_message|{\"m\":\"Change Agent 28\"}"
       },
+      "style": "positive",
       "title": "Request a change",
       "type": "Action.Execute",
       "verb": "agentAction"

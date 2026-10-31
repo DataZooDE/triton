@@ -1,0 +1,61 @@
+{
+  "_mock_item": "3f Long run, result (turn 3): the final answer is a result table, not a pointer",
+  "surface": {
+    "components": [
+      {
+        "kind": "header",
+        "title": "4 owner proposals filed for review",
+        "context": "They go live once a colleague accepts them."
+      },
+      {
+        "kind": "table",
+        "columns": [
+          {
+            "key": "agent",
+            "label": "Agent"
+          },
+          {
+            "key": "owner",
+            "label": "Proposed owner"
+          }
+        ],
+        "rows": [
+          {
+            "cells": {
+              "agent": "Agent 12",
+              "owner": "Head of Production Planning"
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 19",
+              "owner": "Head of IT Operations"
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 24",
+              "owner": "Head of Quality Assurance"
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 27",
+              "owner": "Data Protection Officer"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "button",
+        "label": "Review all 4",
+        "primary": true,
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/open?view=drafts"
+        }
+      }
+    ]
+  },
+  "summary": "4 owner proposals filed for review."
+}

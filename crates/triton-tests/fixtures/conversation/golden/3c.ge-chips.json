@@ -1,0 +1,338 @@
+{
+  "_actions": {
+    "a10": "Set the lifecycle of Agent 28 to \"Deployed\". (version 08cbcd825d41)",
+    "a11": "Set the lifecycle of Agent 28 to \"Retired\". (version 08cbcd825d41)",
+    "a16": "Set the AI Act class of Agent 28 to \"Minimal\". (version 08cbcd825d41)",
+    "a17": "Set the AI Act class of Agent 28 to \"Limited\". (version 08cbcd825d41)",
+    "a18": "Set the AI Act class of Agent 28 to \"High\". (version 08cbcd825d41)",
+    "a2": "Set the owner of Agent 28 to \"IT Operations\". (version 08cbcd825d41)",
+    "a23": "Change Agent 28: Capability: Sales: Schedule. (version 08cbcd825d41)",
+    "a24": "Change Agent 28: Purpose: Forecast quarterly demand. (version 08cbcd825d41)",
+    "a3": "Set the owner of Agent 28 to \"Finance operations\". (version 08cbcd825d41)",
+    "a4": "Set the owner of Agent 28 to \"Head of Quality Assurance\". (version 08cbcd825d41)",
+    "a9": "Set the lifecycle of Agent 28 to \"Assessed\". (version 08cbcd825d41)"
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "Sales: Forecast · Planned · Owner: Data Protection Officer",
+            "usageHint": "caption"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a2",
+            "label": "IT Operations",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a3",
+            "label": "Finance operations",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a4",
+            "label": "Head of Quality Assurance",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a2",
+              "a3"
+            ],
+            "component": "MaterialRow",
+            "id": "row-5",
+            "justify": "start"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a4"
+            ],
+            "component": "MaterialRow",
+            "id": "row-6",
+            "justify": "start"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-7",
+            "text": "A colleague reviews it before it goes live.",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "row-5",
+              "row-6",
+              "t-7"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": true,
+            "id": "grp-8",
+            "title": "Owner"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a9",
+            "label": "Assessed",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a10",
+            "label": "Deployed",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a11",
+            "label": "Retired",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a9",
+              "a10"
+            ],
+            "component": "MaterialRow",
+            "id": "row-12",
+            "justify": "start"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a11"
+            ],
+            "component": "MaterialRow",
+            "id": "row-13",
+            "justify": "start"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-14",
+            "text": "A colleague reviews it before it goes live.",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "row-12",
+              "row-13",
+              "t-14"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "grp-15",
+            "title": "Lifecycle"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a16",
+            "label": "Minimal",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a17",
+            "label": "Limited",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a18",
+            "label": "High",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a16",
+              "a17"
+            ],
+            "component": "MaterialRow",
+            "id": "row-19",
+            "justify": "start"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a18"
+            ],
+            "component": "MaterialRow",
+            "id": "row-20",
+            "justify": "start"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-21",
+            "text": "A colleague reviews it before it goes live.",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "row-19",
+              "row-20",
+              "t-21"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "grp-22",
+            "title": "AI Act class"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a23",
+            "label": "Capability: Sales: Schedule",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a24",
+            "label": "Purpose: Forecast quarterly demand",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a23",
+              "a24"
+            ],
+            "component": "MaterialRow",
+            "id": "row-25",
+            "justify": "start"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-26",
+            "text": "A colleague reviews it before it goes live.",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "row-25",
+              "t-26"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "grp-27",
+            "title": "More…"
+          },
+          {
+            "children": [
+              "t-1",
+              "grp-8",
+              "grp-15",
+              "grp-22",
+              "grp-27"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

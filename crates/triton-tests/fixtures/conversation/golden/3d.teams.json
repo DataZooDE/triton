@@ -1,0 +1,84 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "title": "7 more…",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/open?view=match"
+    }
+  ],
+  "body": [
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "size": "Medium",
+              "text": "Which Agent should be retired?",
+              "type": "TextBlock",
+              "weight": "Bolder",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        }
+      ],
+      "type": "ColumnSet"
+    },
+    {
+      "isSubtle": true,
+      "spacing": "None",
+      "text": "10 match \"Agent 2\". Nothing was changed.",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "choices": [
+        {
+          "title": "Agent 2 · Requirements: Forecast",
+          "value": "Retire the agent \"Agent 2\"."
+        },
+        {
+          "title": "Agent 20 · Design: Monitor",
+          "value": "Retire the agent \"Agent 20\"."
+        },
+        {
+          "title": "Agent 21 · Planning: Schedule",
+          "value": "Retire the agent \"Agent 21\"."
+        }
+      ],
+      "id": "t1.request",
+      "isRequired": true,
+      "label": "Agent",
+      "style": "expanded",
+      "type": "Input.ChoiceSet"
+    },
+    {
+      "id": "t1.reason",
+      "isMultiline": false,
+      "isRequired": false,
+      "label": "Reason (optional)",
+      "placeholder": "e.g. replaced by Agent 31",
+      "type": "Input.Text"
+    },
+    {
+      "actions": [
+        {
+          "data": {
+            "ct": "__send_message|{\"tpl\":\"{t1.request}[[ Reason: {t1.reason}]]\"}"
+          },
+          "title": "Retire as draft",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

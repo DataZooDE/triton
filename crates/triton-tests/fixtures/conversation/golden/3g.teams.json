@@ -1,0 +1,44 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "associatedInputs": "none",
+      "data": {
+        "ct": "__send_message|{\"m\":\"Propose an owner for every Agent without one.\"}"
+      },
+      "style": "positive",
+      "title": "Try again",
+      "type": "Action.Execute",
+      "verb": "agentAction"
+    },
+    {
+      "title": "Open in Inbox",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/open?request=r1"
+    }
+  ],
+  "body": [
+    {
+      "items": [
+        {
+          "text": "Couldn't answer this",
+          "type": "TextBlock",
+          "weight": "Bolder",
+          "wrap": true
+        },
+        {
+          "text": "We tried three times and stopped. Nothing was changed.",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "style": "attention",
+      "type": "Container"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

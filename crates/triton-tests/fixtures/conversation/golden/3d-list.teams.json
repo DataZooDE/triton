@@ -1,0 +1,118 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 2",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Requirements: Forecast",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "associatedInputs": "none",
+        "data": {
+          "ct": "__send_message|{\"m\":\"Retire the agent \\\"Agent 2\\\".\"}"
+        },
+        "title": "Agent 2",
+        "type": "Action.Execute",
+        "verb": "agentAction"
+      },
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 20",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Design: Monitor",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "associatedInputs": "none",
+        "data": {
+          "ct": "__send_message|{\"m\":\"Retire the agent \\\"Agent 20\\\".\"}"
+        },
+        "title": "Agent 20",
+        "type": "Action.Execute",
+        "verb": "agentAction"
+      },
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 21",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Planning: Schedule",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "associatedInputs": "none",
+        "data": {
+          "ct": "__send_message|{\"m\":\"Retire the agent \\\"Agent 21\\\".\"}"
+        },
+        "title": "Agent 21",
+        "type": "Action.Execute",
+        "verb": "agentAction"
+      },
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "7 more",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "associatedInputs": "none",
+        "data": {
+          "ct": "__send_message|{\"m\":\"Which agents match \\\"Agent 2\\\"?\"}"
+        },
+        "title": "7 more",
+        "type": "Action.Execute",
+        "verb": "agentAction"
+      },
+      "separator": true,
+      "type": "Container"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

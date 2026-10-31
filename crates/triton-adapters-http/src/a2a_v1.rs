@@ -466,8 +466,13 @@ fn artifact_v10(rec: &TaskRecord, a2ui: bool) -> Option<Value> {
     if rec.state != TaskState::Completed {
         return None;
     }
-    let mut parts = vec![json!({ "text": rec.result_text.clone().unwrap_or_default() })];
-    if let Some(msgs) = a2ui_messages(rec, a2ui) {
+    let msgs = a2ui_messages(rec, a2ui);
+    let text = match (&msgs, rec.result.as_ref()) {
+        (Some(_), Some(result)) => crate::a2a_spec::text_part(result, true),
+        _ => rec.result_text.clone().unwrap_or_default(),
+    };
+    let mut parts = vec![json!({ "text": text })];
+    if let Some(msgs) = msgs {
         parts.extend(
             msgs.into_iter()
                 .map(|m| json!({ "data": m, "mediaType": triton_core::a2ui::ge::MIME })),
@@ -658,10 +663,15 @@ fn parse_send(params: &Value) -> Result<Incoming, A2aError> {
     // never sees the host's "User action triggered." placeholder. A source
     // button (open a document) has no 1.0 document reply; its label is
     // dispatched as the turn.
-    let action = crate::a2a_spec::a2ui_action(parts).map(|a| match a {
-        triton_core::a2ui::ge::GeAction::Message(text) => text,
-        triton_core::a2ui::ge::GeAction::OpenDoc { label, .. } => label,
-    });
+    let action = match crate::a2a_spec::a2ui_action(parts) {
+        Some(triton_core::a2ui::ge::GeAction::Message(text)) => Some(text),
+        Some(triton_core::a2ui::ge::GeAction::OpenDoc { label, .. }) => Some(label),
+        // A form submit without its required inputs sends nothing.
+        Some(triton_core::a2ui::ge::GeAction::Incomplete(names)) => {
+            return Err(bad(&format!("missing input(s): {}", names.join(", "))));
+        }
+        None => None,
+    };
     let text = action
         .unwrap_or_else(|| {
             parts

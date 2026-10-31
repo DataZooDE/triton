@@ -2,6 +2,7 @@
   "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
   "actions": [
     {
+      "style": "positive",
       "title": "Open in the portfolio",
       "type": "Action.OpenUrl",
       "url": "https://app.example.com/acme/analyse?lifecycle=planned"
@@ -33,6 +34,8 @@
         {
           "items": [
             {
+              "isSubtle": true,
+              "size": "Small",
               "text": "Agent · capability",
               "type": "TextBlock",
               "weight": "Bolder",
@@ -45,6 +48,8 @@
         {
           "items": [
             {
+              "isSubtle": true,
+              "size": "Small",
               "text": "AI Act",
               "type": "TextBlock",
               "weight": "Bolder",

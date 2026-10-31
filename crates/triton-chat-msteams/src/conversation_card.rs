@@ -16,8 +16,8 @@
 
 use serde_json::{Value, json};
 use triton_core::a2ui::{
-    Action, Chip, Component, FormField, FormFieldKind, KeyValuePair, ListItem, ProgressStep,
-    StepState, Surface, TableColumn, TableRow, Tone, TreeNode,
+    Action, Chip, Component, FormField, FormFieldKind, FormGroup, KeyValuePair, ListItem,
+    ProgressStep, StepState, Surface, TableColumn, TableRow, Tone, TreeNode,
 };
 use triton_correlation::message::{
     SEND_MESSAGE_TOOL, preview_template, rename_placeholders, required_placeholders, template_args,
@@ -79,7 +79,7 @@ pub fn card_for_result(
     if signed.is_empty() && dashboard.is_none() && image_url.is_none() && !rich {
         return None;
     }
-    Some(surface_mapper::build_adaptive_card_with(
+    let mut card = surface_mapper::build_adaptive_card_with(
         &text,
         dashboard.as_ref(),
         &signed,
@@ -87,7 +87,44 @@ pub fn card_for_result(
         chart,
         chrome,
         &elements,
-    ))
+    );
+    mark_primary(&mut card, result);
+    Some(card)
+}
+
+/// One anatomy: the surface's primary button leads the card's action bar
+/// in the host's primary style (`positive`); the secondary ones follow in
+/// surface order.
+fn mark_primary(card: &mut Value, result: &Value) {
+    let Ok(surface) = triton_core::a2ui::extract_surface(result) else {
+        return;
+    };
+    let primary: Vec<&str> = surface
+        .components
+        .iter()
+        .filter_map(|c| match c {
+            Component::Button {
+                label,
+                primary: true,
+                ..
+            } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    let Some(actions) = card.get_mut("actions").and_then(Value::as_array_mut) else {
+        return;
+    };
+    if primary.is_empty() {
+        return;
+    }
+    let (mut first, rest): (Vec<Value>, Vec<Value>) = actions
+        .drain(..)
+        .partition(|a| primary.contains(&a["title"].as_str().unwrap_or_default()));
+    for a in &mut first {
+        a["style"] = json!("positive");
+    }
+    first.extend(rest);
+    *actions = first;
 }
 
 /// The components this module renders: the conversation set minus
@@ -188,6 +225,17 @@ impl Builder<'_, '_> {
                 fraction,
             } => progress(title.as_deref(), steps, *fraction),
             Component::KeyValue { title, pairs } => key_value(title.as_deref(), pairs),
+            Component::Header {
+                title,
+                context,
+                stamp,
+            } => header(title, context.as_deref(), stamp.as_deref()),
+            Component::FormGroups {
+                title,
+                groups,
+                submit_label,
+                note,
+            } => self.form_groups(title.as_deref(), groups, submit_label, note.as_deref()),
             Component::Selection {
                 prompt,
                 options,
@@ -215,10 +263,12 @@ impl Builder<'_, '_> {
                 })];
                 // The template names the input by `args_key`; the preview
                 // shows the prompt where the choice goes.
-                let preview = preview_template(&sub.template, |n| {
-                    (n == args_key.as_str()).then(|| prompt.clone())
-                });
-                out.push(preview_block(sub.preview_label.as_deref(), &preview));
+                if let Some(label) = sub.preview_label.as_deref() {
+                    let preview = preview_template(&sub.template, |n| {
+                        (n == args_key.as_str()).then(|| prompt.clone())
+                    });
+                    out.push(preview_block(label, &preview));
+                }
                 let signed = rename_placeholders(&sub.template, |n| format!("{ns}{n}"));
                 if let Some(a) = self.template_action(&sub.label, &signed) {
                     out.push(json!({ "type": "ActionSet", "actions": [a] }));
@@ -309,7 +359,8 @@ impl Builder<'_, '_> {
             .iter()
             .map(|c| {
                 json!({ "type": "Column", "width": "stretch", "items": [
-                    { "type": "TextBlock", "text": c.label, "weight": "Bolder", "wrap": true }
+                    { "type": "TextBlock", "text": c.label, "weight": "Bolder", "wrap": true,
+                      "isSubtle": true, "size": "Small" }
                 ] })
             })
             .collect();
@@ -365,6 +416,8 @@ impl Builder<'_, '_> {
             .iter()
             .map(|n| self.tree_node(n, &mut no_gap_ids))
             .collect();
+        // The toggle sits under the map, with the card's other actions.
+        out.extend(rendered);
         if let Some(label) = gaps_toggle
             && !no_gap_ids.is_empty()
         {
@@ -376,7 +429,6 @@ impl Builder<'_, '_> {
                 } ],
             }));
         }
-        out.extend(rendered);
         out
     }
 
@@ -487,13 +539,15 @@ impl Builder<'_, '_> {
         for f in fields {
             out.push(input(f, &ns, used.iter().any(|u| u == &f.name)));
         }
-        let preview = preview_template(tpl, |name| {
-            fields
-                .iter()
-                .find(|f| f.name == name)
-                .map(|f| f.label.clone())
-        });
-        out.push(preview_block(preview_label, &preview));
+        if let Some(plabel) = preview_label {
+            let preview = preview_template(tpl, |name| {
+                fields
+                    .iter()
+                    .find(|f| f.name == name)
+                    .map(|f| f.label.clone())
+            });
+            out.push(preview_block(plabel, &preview));
+        }
         let label = if submit_label.is_empty() {
             "Send"
         } else {
@@ -506,6 +560,60 @@ impl Builder<'_, '_> {
         out
     }
 
+    /// Form groups (3c): one `Action.ShowCard` per group, so the reader
+    /// picks WHAT to change before seeing any field; each shown card holds
+    /// the group's inputs and its own template submit (`Action.Execute`),
+    /// then the note. Inputs are namespaced per group like any template
+    /// component, and a submit gathers only its own card's inputs.
+    fn form_groups(
+        &mut self,
+        title: Option<&str>,
+        groups: &[FormGroup],
+        submit_label: &str,
+        note: Option<&str>,
+    ) -> Vec<Value> {
+        let mut out = Vec::new();
+        if let Some(t) = title.filter(|t| !t.is_empty()) {
+            out.push(heading(t));
+        }
+        let label = if submit_label.is_empty() {
+            "Send"
+        } else {
+            submit_label
+        };
+        let mut openers = Vec::new();
+        for g in groups {
+            let ns = self.namespace();
+            let used = required_placeholders(&g.send_template);
+            let mut body: Vec<Value> = g
+                .fields
+                .iter()
+                .map(|f| input(f, &ns, used.iter().any(|u| u == &f.name)))
+                .collect();
+            let signed = rename_placeholders(&g.send_template, |n| format!("{ns}{n}"));
+            let Some(submit) = self.template_action(label, &signed) else {
+                continue;
+            };
+            let mut submit = submit;
+            submit["style"] = json!("positive");
+            body.push(json!({ "type": "ActionSet", "actions": [submit] }));
+            if let Some(n) = note.filter(|n| !n.is_empty()) {
+                body.push(json!({
+                    "type": "TextBlock", "text": n, "isSubtle": true, "size": "Small",
+                    "wrap": true, "spacing": "Small",
+                }));
+            }
+            openers.push(json!({
+                "type": "Action.ShowCard", "title": g.label,
+                "card": { "type": "AdaptiveCard", "body": body },
+            }));
+        }
+        if !openers.is_empty() {
+            out.push(json!({ "type": "ActionSet", "actions": openers }));
+        }
+        out
+    }
+
     /// The input-id prefix of the next template component.
     fn namespace(&mut self) -> String {
         self.forms += 1;
@@ -514,9 +622,8 @@ impl Builder<'_, '_> {
 }
 
 /// "Will be sent as: …" — the complete request the submit will send, with
-/// the user's choices marked.
-fn preview_block(label: Option<&str>, preview: &str) -> Value {
-    let label = label.unwrap_or("Will be sent as");
+/// the user's choices marked. Shown only when the producer names it.
+fn preview_block(label: &str, preview: &str) -> Value {
     json!({
         "type": "TextBlock", "text": format!("{label}: {preview}"),
         "isSubtle": true, "size": "Small", "wrap": true,
@@ -573,10 +680,32 @@ fn text_input(f: &FormField, id: &str, required: bool, multiline: bool) -> Value
     v
 }
 
+/// The card head (one anatomy): the title in bold with the stamp (a time,
+/// a timer) right-aligned beside it, then the one context line, subtle.
+pub fn header(title: &str, context: Option<&str>, stamp: Option<&str>) -> Vec<Value> {
+    let mut columns = vec![json!({ "type": "Column", "width": "stretch", "items": [
+        { "type": "TextBlock", "text": title, "weight": "Bolder", "size": "Medium", "wrap": true }
+    ] })];
+    if let Some(s) = stamp.filter(|s| !s.is_empty()) {
+        columns.push(json!({ "type": "Column", "width": "auto",
+            "verticalContentAlignment": "Center", "items": [
+            { "type": "TextBlock", "text": s, "isSubtle": true, "size": "Small" }
+        ] }));
+    }
+    let mut out = vec![json!({ "type": "ColumnSet", "columns": columns })];
+    if let Some(c) = context.filter(|c| !c.is_empty()) {
+        out.push(json!({
+            "type": "TextBlock", "text": c, "isSubtle": true, "wrap": true, "spacing": "None",
+        }));
+    }
+    out
+}
+
 fn notice(tone: Tone, title: Option<&str>, text: &str) -> Value {
     let style = match tone {
         Tone::Info => "accent",
         Tone::Warn => "warning",
+        Tone::Attention => "attention",
     };
     let mut items = Vec::new();
     if let Some(t) = title.filter(|t| !t.is_empty()) {

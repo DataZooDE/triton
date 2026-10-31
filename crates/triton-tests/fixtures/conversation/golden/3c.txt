@@ -1,0 +1,11 @@
+Change Agent 28
+Sales: Forecast · Planned · Owner: Data Protection Officer
+
+Owner: › Set the owner of Agent 28 to "‹New owner›". Reason: ‹Why (optional)› (version 08cbcd825d41)
+  New owner: IT Operations | Finance operations | Head of Quality Assurance
+Lifecycle: › Set the lifecycle of Agent 28 to "‹New lifecycle›". Reason: ‹Why (optional)› (version 08cbcd825d41)
+  New lifecycle: Assessed | Deployed | Retired
+AI Act class: › Set the AI Act class of Agent 28 to "‹New AI Act class›". Reason: ‹Why (optional)› (version 08cbcd825d41)
+  New AI Act class: Minimal | Limited | High
+More…: › Change Agent 28: ‹What to change›. Reason: ‹Why (optional)› (version 08cbcd825d41)
+  What to change: Capability: Sales: Schedule | Purpose: Forecast quarterly demand

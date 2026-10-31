@@ -1,0 +1,20 @@
+6 planned Agents (as of 18:17)
+
+1. Agent 3 · Capability: Requirements: Monitor · Owner: Head of IT Operations
+   › Show the agent "Agent 3"
+2. Agent 8 · Capability: Design: Schedule · Owner: Data Protection Officer
+   › Show the agent "Agent 8"
+3. Agent 12 · Capability: Design: Forecast · Owner: No owner
+   › Show the agent "Agent 12"
+4. Agent 17 · Capability: Validation: Forecast · Owner: Head of Quality Assurance
+   › Show the agent "Agent 17"
+5. Agent 21 · Capability: Planning: Schedule · Owner: Head of Production Planning
+   › Show the agent "Agent 21"
+6. Agent 28 · Capability: Sales: Forecast · Owner: Data Protection Officer
+   › Show the agent "Agent 28"
+
+Open in the portfolio: https://app.example.com/acme/open?view=planned
+
+› Which agents are planned with AI Act class high?
+
+› Which agents are planned without an owner?

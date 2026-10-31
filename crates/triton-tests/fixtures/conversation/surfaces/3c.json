@@ -1,0 +1,148 @@
+{
+  "_mock_item": "3c Change form (turn 3): field groups first, then value and optional why; the version pin rides only in the signed template",
+  "surface": {
+    "components": [
+      {
+        "kind": "header",
+        "title": "Change Agent 28",
+        "context": "Sales: Forecast · Planned · Owner: Data Protection Officer"
+      },
+      {
+        "kind": "form_groups",
+        "submit_label": "File for review",
+        "note": "A colleague reviews it before it goes live.",
+        "groups": [
+          {
+            "label": "Owner",
+            "fields": [
+              {
+                "name": "value",
+                "label": "New owner",
+                "kind": "select",
+                "required": true,
+                "options": [
+                  {
+                    "label": "IT Operations",
+                    "value": "IT Operations"
+                  },
+                  {
+                    "label": "Finance operations",
+                    "value": "Finance operations"
+                  },
+                  {
+                    "label": "Head of Quality Assurance",
+                    "value": "Head of Quality Assurance"
+                  }
+                ]
+              },
+              {
+                "name": "reason",
+                "label": "Why (optional)",
+                "kind": "text",
+                "placeholder": "e.g. Finance took over the process in October",
+                "required": false
+              }
+            ],
+            "send_template": "Set the owner of Agent 28 to \"{value}\".[[ Reason: {reason}]] (version 08cbcd825d41)"
+          },
+          {
+            "label": "Lifecycle",
+            "fields": [
+              {
+                "name": "value",
+                "label": "New lifecycle",
+                "kind": "select",
+                "required": true,
+                "options": [
+                  {
+                    "label": "Assessed",
+                    "value": "Assessed"
+                  },
+                  {
+                    "label": "Deployed",
+                    "value": "Deployed"
+                  },
+                  {
+                    "label": "Retired",
+                    "value": "Retired"
+                  }
+                ]
+              },
+              {
+                "name": "reason",
+                "label": "Why (optional)",
+                "kind": "text",
+                "placeholder": "e.g. Finance took over the process in October",
+                "required": false
+              }
+            ],
+            "send_template": "Set the lifecycle of Agent 28 to \"{value}\".[[ Reason: {reason}]] (version 08cbcd825d41)"
+          },
+          {
+            "label": "AI Act class",
+            "fields": [
+              {
+                "name": "value",
+                "label": "New AI Act class",
+                "kind": "select",
+                "required": true,
+                "options": [
+                  {
+                    "label": "Minimal",
+                    "value": "Minimal"
+                  },
+                  {
+                    "label": "Limited",
+                    "value": "Limited"
+                  },
+                  {
+                    "label": "High",
+                    "value": "High"
+                  }
+                ]
+              },
+              {
+                "name": "reason",
+                "label": "Why (optional)",
+                "kind": "text",
+                "placeholder": "e.g. Finance took over the process in October",
+                "required": false
+              }
+            ],
+            "send_template": "Set the AI Act class of Agent 28 to \"{value}\".[[ Reason: {reason}]] (version 08cbcd825d41)"
+          },
+          {
+            "label": "More…",
+            "fields": [
+              {
+                "name": "value",
+                "label": "What to change",
+                "kind": "select",
+                "required": true,
+                "options": [
+                  {
+                    "label": "Capability: Sales: Schedule",
+                    "value": "Capability: Sales: Schedule"
+                  },
+                  {
+                    "label": "Purpose: Forecast quarterly demand",
+                    "value": "Purpose: Forecast quarterly demand"
+                  }
+                ]
+              },
+              {
+                "name": "reason",
+                "label": "Why (optional)",
+                "kind": "text",
+                "placeholder": "e.g. Finance took over the process in October",
+                "required": false
+              }
+            ],
+            "send_template": "Change Agent 28: {value}.[[ Reason: {reason}]] (version 08cbcd825d41)"
+          }
+        ]
+      }
+    ]
+  },
+  "summary": "Choose what to change on Agent 28."
+}

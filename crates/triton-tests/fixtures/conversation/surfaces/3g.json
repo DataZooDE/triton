@@ -1,0 +1,31 @@
+{
+  "_mock_item": "3g Failure after three tries (turn 3): attention container, try again resends the original request",
+  "surface": {
+    "components": [
+      {
+        "kind": "notice",
+        "tone": "attention",
+        "title": "Couldn't answer this",
+        "text": "We tried three times and stopped. Nothing was changed."
+      },
+      {
+        "kind": "button",
+        "label": "Try again",
+        "primary": true,
+        "action": {
+          "type": "send_message",
+          "text": "Propose an owner for every Agent without one."
+        }
+      },
+      {
+        "kind": "button",
+        "label": "Open in Inbox",
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/open?request=r1"
+        }
+      }
+    ]
+  },
+  "summary": "Couldn't answer this after three tries. Nothing was changed."
+}

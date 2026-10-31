@@ -1,0 +1,864 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "style": "positive",
+      "title": "Open in the portfolio",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/open?view=map"
+    }
+  ],
+  "body": [
+    {
+      "columns": [
+        {
+          "items": [
+            {
+              "size": "Medium",
+              "text": "Capability map",
+              "type": "TextBlock",
+              "weight": "Bolder",
+              "wrap": true
+            }
+          ],
+          "type": "Column",
+          "width": "stretch"
+        },
+        {
+          "items": [
+            {
+              "isSubtle": true,
+              "size": "Small",
+              "text": "as of 18:18",
+              "type": "TextBlock"
+            }
+          ],
+          "type": "Column",
+          "verticalContentAlignment": "Center",
+          "width": "auto"
+        }
+      ],
+      "type": "ColumnSet"
+    },
+    {
+      "isSubtle": true,
+      "spacing": "None",
+      "text": "31 Agents in 27 capabilities, 4 domains",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "id": "node-1",
+      "items": [
+        {
+          "columns": [
+            {
+              "items": [
+                {
+                  "id": "open-3",
+                  "isVisible": true,
+                  "text": "▾",
+                  "type": "TextBlock"
+                },
+                {
+                  "id": "closed-4",
+                  "isVisible": false,
+                  "text": "▸",
+                  "type": "TextBlock"
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            },
+            {
+              "items": [
+                {
+                  "color": "Default",
+                  "text": "Commercial & service",
+                  "type": "TextBlock",
+                  "weight": "Default",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "stretch"
+            },
+            {
+              "items": [
+                {
+                  "isSubtle": true,
+                  "text": "4 Agents",
+                  "type": "TextBlock",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            }
+          ],
+          "selectAction": {
+            "targetElements": [
+              "kids-2",
+              "open-3",
+              "closed-4"
+            ],
+            "type": "Action.ToggleVisibility"
+          },
+          "type": "ColumnSet"
+        },
+        {
+          "id": "kids-2",
+          "isVisible": true,
+          "items": [
+            {
+              "columns": [
+                {
+                  "items": [],
+                  "type": "Column",
+                  "width": "12px"
+                },
+                {
+                  "items": [
+                    {
+                      "id": "node-5",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Warning",
+                                  "text": "Finance: Forecast · Monitor · Schedule",
+                                  "type": "TextBlock",
+                                  "weight": "Bolder",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "isSubtle": true,
+                                  "text": "0 ",
+                                  "type": "TextBlock",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            }
+                          ],
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-9",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Sales: Forecast",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "isSubtle": true,
+                                  "text": "Agent 28 ",
+                                  "type": "TextBlock",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 28\\\"\"}"
+                            },
+                            "title": "Sales: Forecast",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-13",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Sales: Schedule · proposed",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "isSubtle": true,
+                                  "text": "Agent 29 ",
+                                  "type": "TextBlock",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 29\\\"\"}"
+                            },
+                            "title": "Sales: Schedule · proposed",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-17",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Service: Forecast",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "isSubtle": true,
+                                  "text": "Agent 30 ",
+                                  "type": "TextBlock",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 30\\\"\"}"
+                            },
+                            "title": "Service: Forecast",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-21",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Service: Monitor",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "isSubtle": true,
+                                  "text": "Agent 31 ",
+                                  "type": "TextBlock",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 31\\\"\"}"
+                            },
+                            "title": "Service: Monitor",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    }
+                  ],
+                  "type": "Column",
+                  "width": "stretch"
+                }
+              ],
+              "type": "ColumnSet"
+            }
+          ],
+          "spacing": "None",
+          "type": "Container"
+        }
+      ],
+      "spacing": "Small",
+      "type": "Container"
+    },
+    {
+      "id": "node-25",
+      "items": [
+        {
+          "columns": [
+            {
+              "items": [
+                {
+                  "id": "open-27",
+                  "isVisible": false,
+                  "text": "▾",
+                  "type": "TextBlock"
+                },
+                {
+                  "id": "closed-28",
+                  "isVisible": true,
+                  "text": "▸",
+                  "type": "TextBlock"
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            },
+            {
+              "items": [
+                {
+                  "color": "Default",
+                  "text": "Operations",
+                  "type": "TextBlock",
+                  "weight": "Default",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "stretch"
+            },
+            {
+              "items": [
+                {
+                  "isSubtle": true,
+                  "text": "8 Agents",
+                  "type": "TextBlock",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            }
+          ],
+          "selectAction": {
+            "targetElements": [
+              "kids-26",
+              "open-27",
+              "closed-28"
+            ],
+            "type": "Action.ToggleVisibility"
+          },
+          "type": "ColumnSet"
+        },
+        {
+          "id": "kids-26",
+          "isVisible": false,
+          "items": [
+            {
+              "columns": [
+                {
+                  "items": [],
+                  "type": "Column",
+                  "width": "12px"
+                },
+                {
+                  "items": [
+                    {
+                      "id": "node-29",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Production: Schedule",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "isSubtle": true,
+                                  "text": "Agent 21 ",
+                                  "type": "TextBlock",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 21\\\"\"}"
+                            },
+                            "title": "Production: Schedule",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    }
+                  ],
+                  "type": "Column",
+                  "width": "stretch"
+                }
+              ],
+              "type": "ColumnSet"
+            }
+          ],
+          "spacing": "None",
+          "type": "Container"
+        }
+      ],
+      "spacing": "Small",
+      "type": "Container"
+    },
+    {
+      "id": "node-33",
+      "items": [
+        {
+          "columns": [
+            {
+              "items": [
+                {
+                  "id": "open-35",
+                  "isVisible": false,
+                  "text": "▾",
+                  "type": "TextBlock"
+                },
+                {
+                  "id": "closed-36",
+                  "isVisible": true,
+                  "text": "▸",
+                  "type": "TextBlock"
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            },
+            {
+              "items": [
+                {
+                  "color": "Default",
+                  "text": "Product & engineering",
+                  "type": "TextBlock",
+                  "weight": "Default",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "stretch"
+            },
+            {
+              "items": [
+                {
+                  "isSubtle": true,
+                  "text": "22 Agents",
+                  "type": "TextBlock",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            }
+          ],
+          "selectAction": {
+            "targetElements": [
+              "kids-34",
+              "open-35",
+              "closed-36"
+            ],
+            "type": "Action.ToggleVisibility"
+          },
+          "type": "ColumnSet"
+        },
+        {
+          "id": "kids-34",
+          "isVisible": false,
+          "items": [
+            {
+              "columns": [
+                {
+                  "items": [],
+                  "type": "Column",
+                  "width": "12px"
+                },
+                {
+                  "items": [
+                    {
+                      "id": "node-37",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Design: Forecast",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "isSubtle": true,
+                                  "text": "Agent 12 ",
+                                  "type": "TextBlock",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 12\\\"\"}"
+                            },
+                            "title": "Design: Forecast",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    }
+                  ],
+                  "type": "Column",
+                  "width": "stretch"
+                }
+              ],
+              "type": "ColumnSet"
+            }
+          ],
+          "spacing": "None",
+          "type": "Container"
+        }
+      ],
+      "spacing": "Small",
+      "type": "Container"
+    },
+    {
+      "id": "node-41",
+      "items": [
+        {
+          "columns": [
+            {
+              "items": [
+                {
+                  "id": "open-43",
+                  "isVisible": false,
+                  "text": "▾",
+                  "type": "TextBlock"
+                },
+                {
+                  "id": "closed-44",
+                  "isVisible": true,
+                  "text": "▸",
+                  "type": "TextBlock"
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            },
+            {
+              "items": [
+                {
+                  "color": "Default",
+                  "text": "SaaS quality assurance",
+                  "type": "TextBlock",
+                  "weight": "Default",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "stretch"
+            },
+            {
+              "items": [
+                {
+                  "isSubtle": true,
+                  "text": "1 Agent",
+                  "type": "TextBlock",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            }
+          ],
+          "selectAction": {
+            "targetElements": [
+              "kids-42",
+              "open-43",
+              "closed-44"
+            ],
+            "type": "Action.ToggleVisibility"
+          },
+          "type": "ColumnSet"
+        },
+        {
+          "id": "kids-42",
+          "isVisible": false,
+          "items": [
+            {
+              "columns": [
+                {
+                  "items": [],
+                  "type": "Column",
+                  "width": "12px"
+                },
+                {
+                  "items": [
+                    {
+                      "id": "node-45",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Validation: Forecast",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "isSubtle": true,
+                                  "text": "Agent 17 ",
+                                  "type": "TextBlock",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Show the agent \\\"Agent 17\\\"\"}"
+                            },
+                            "title": "Validation: Forecast",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    }
+                  ],
+                  "type": "Column",
+                  "width": "stretch"
+                }
+              ],
+              "type": "ColumnSet"
+            }
+          ],
+          "spacing": "None",
+          "type": "Container"
+        }
+      ],
+      "spacing": "Small",
+      "type": "Container"
+    },
+    {
+      "actions": [
+        {
+          "targetElements": [
+            "node-9",
+            "node-13",
+            "node-17",
+            "node-21",
+            "node-25",
+            "node-29",
+            "node-33",
+            "node-37",
+            "node-41",
+            "node-45"
+          ],
+          "title": "Only gaps",
+          "type": "Action.ToggleVisibility"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

@@ -1,0 +1,326 @@
+{
+  "_actions": {
+    "a14": "form submit, fills: value",
+    "a19": "form submit, fills: value",
+    "a4": "form submit, fills: value",
+    "a9": "form submit, fills: value"
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "Sales: Forecast · Planned · Owner: Data Protection Officer",
+            "usageHint": "caption"
+          },
+          {
+            "component": "MaterialSelect",
+            "id": "in-2",
+            "label": "New owner",
+            "options": [
+              {
+                "label": "IT Operations",
+                "value": "IT Operations"
+              },
+              {
+                "label": "Finance operations",
+                "value": "Finance operations"
+              },
+              {
+                "label": "Head of Quality Assurance",
+                "value": "Head of Quality Assurance"
+              }
+            ],
+            "value": {
+              "path": "/f1/value"
+            }
+          },
+          {
+            "component": "MaterialInput",
+            "id": "in-3",
+            "label": "Why (optional)",
+            "placeholder": "e.g. Finance took over the process in October",
+            "value": {
+              "path": "/f1/reason"
+            }
+          },
+          {
+            "action": {
+              "event": {
+                "context": {
+                  "reason": {
+                    "path": "/f1/reason"
+                  },
+                  "value": {
+                    "path": "/f1/value"
+                  }
+                },
+                "name": "submit"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a4",
+            "label": "File for review",
+            "variant": "flat"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-5",
+            "text": "A colleague reviews it before it goes live.",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "in-2",
+              "in-3",
+              "a4",
+              "t-5"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": true,
+            "id": "grp-6",
+            "title": "Owner"
+          },
+          {
+            "component": "MaterialSelect",
+            "id": "in-7",
+            "label": "New lifecycle",
+            "options": [
+              {
+                "label": "Assessed",
+                "value": "Assessed"
+              },
+              {
+                "label": "Deployed",
+                "value": "Deployed"
+              },
+              {
+                "label": "Retired",
+                "value": "Retired"
+              }
+            ],
+            "value": {
+              "path": "/f2/value"
+            }
+          },
+          {
+            "component": "MaterialInput",
+            "id": "in-8",
+            "label": "Why (optional)",
+            "placeholder": "e.g. Finance took over the process in October",
+            "value": {
+              "path": "/f2/reason"
+            }
+          },
+          {
+            "action": {
+              "event": {
+                "context": {
+                  "reason": {
+                    "path": "/f2/reason"
+                  },
+                  "value": {
+                    "path": "/f2/value"
+                  }
+                },
+                "name": "submit"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a9",
+            "label": "File for review",
+            "variant": "flat"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-10",
+            "text": "A colleague reviews it before it goes live.",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "in-7",
+              "in-8",
+              "a9",
+              "t-10"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "grp-11",
+            "title": "Lifecycle"
+          },
+          {
+            "component": "MaterialSelect",
+            "id": "in-12",
+            "label": "New AI Act class",
+            "options": [
+              {
+                "label": "Minimal",
+                "value": "Minimal"
+              },
+              {
+                "label": "Limited",
+                "value": "Limited"
+              },
+              {
+                "label": "High",
+                "value": "High"
+              }
+            ],
+            "value": {
+              "path": "/f3/value"
+            }
+          },
+          {
+            "component": "MaterialInput",
+            "id": "in-13",
+            "label": "Why (optional)",
+            "placeholder": "e.g. Finance took over the process in October",
+            "value": {
+              "path": "/f3/reason"
+            }
+          },
+          {
+            "action": {
+              "event": {
+                "context": {
+                  "reason": {
+                    "path": "/f3/reason"
+                  },
+                  "value": {
+                    "path": "/f3/value"
+                  }
+                },
+                "name": "submit"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a14",
+            "label": "File for review",
+            "variant": "flat"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-15",
+            "text": "A colleague reviews it before it goes live.",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "in-12",
+              "in-13",
+              "a14",
+              "t-15"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "grp-16",
+            "title": "AI Act class"
+          },
+          {
+            "component": "MaterialSelect",
+            "id": "in-17",
+            "label": "What to change",
+            "options": [
+              {
+                "label": "Capability: Sales: Schedule",
+                "value": "Capability: Sales: Schedule"
+              },
+              {
+                "label": "Purpose: Forecast quarterly demand",
+                "value": "Purpose: Forecast quarterly demand"
+              }
+            ],
+            "value": {
+              "path": "/f4/value"
+            }
+          },
+          {
+            "component": "MaterialInput",
+            "id": "in-18",
+            "label": "Why (optional)",
+            "placeholder": "e.g. Finance took over the process in October",
+            "value": {
+              "path": "/f4/reason"
+            }
+          },
+          {
+            "action": {
+              "event": {
+                "context": {
+                  "reason": {
+                    "path": "/f4/reason"
+                  },
+                  "value": {
+                    "path": "/f4/value"
+                  }
+                },
+                "name": "submit"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a19",
+            "label": "File for review",
+            "variant": "flat"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-20",
+            "text": "A colleague reviews it before it goes live.",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "in-17",
+              "in-18",
+              "a19",
+              "t-20"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "grp-21",
+            "title": "More…"
+          },
+          {
+            "children": [
+              "t-1",
+              "grp-6",
+              "grp-11",
+              "grp-16",
+              "grp-21"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

@@ -24,21 +24,6 @@
       "wrap": true
     },
     {
-      "actions": [
-        {
-          "targetElements": [
-            "node-21",
-            "node-29",
-            "node-37",
-            "node-41"
-          ],
-          "title": "Only gaps",
-          "type": "Action.ToggleVisibility"
-        }
-      ],
-      "type": "ActionSet"
-    },
-    {
       "id": "node-1",
       "items": [
         {
@@ -874,6 +859,21 @@
       ],
       "spacing": "Small",
       "type": "Container"
+    },
+    {
+      "actions": [
+        {
+          "targetElements": [
+            "node-21",
+            "node-29",
+            "node-37",
+            "node-41"
+          ],
+          "title": "Only gaps",
+          "type": "Action.ToggleVisibility"
+        }
+      ],
+      "type": "ActionSet"
     },
     {
       "actions": [

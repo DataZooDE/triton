@@ -1,5 +1,7 @@
 {
-  "_actions": {},
+  "_actions": {
+    "a5": "form submit, fills: lifecycle, ai_act"
+  },
   "messages": [
     {
       "createSurface": {
@@ -22,15 +24,113 @@
             "usageHint": "subtitle2"
           },
           {
-            "component": "MaterialText",
-            "id": "t-2",
-            "text": "Will be sent as: Find ‹Lifecycle› Agents with AI Act class ‹AI Act class› owned by ‹Owner›",
-            "usageHint": "body2"
+            "component": "MaterialSelect",
+            "id": "in-2",
+            "label": "Lifecycle",
+            "options": [
+              {
+                "label": "Candidate",
+                "value": "candidate"
+              },
+              {
+                "label": "Assessed",
+                "value": "assessed"
+              },
+              {
+                "label": "Planned",
+                "value": "planned"
+              },
+              {
+                "label": "In delivery",
+                "value": "in delivery"
+              },
+              {
+                "label": "Deployed",
+                "value": "deployed"
+              }
+            ],
+            "value": {
+              "path": "/f1/lifecycle"
+            }
+          },
+          {
+            "component": "MaterialSelect",
+            "id": "in-3",
+            "label": "AI Act class",
+            "options": [
+              {
+                "label": "High",
+                "value": "high"
+              },
+              {
+                "label": "Limited",
+                "value": "limited"
+              },
+              {
+                "label": "Minimal",
+                "value": "minimal"
+              },
+              {
+                "label": "Unassessed",
+                "value": "unassessed"
+              }
+            ],
+            "value": {
+              "path": "/f1/ai_act"
+            }
+          },
+          {
+            "component": "MaterialSelect",
+            "id": "in-4",
+            "label": "Owner",
+            "options": [
+              {
+                "label": "Any owner",
+                "value": ""
+              },
+              {
+                "label": "Data Protection Officer",
+                "value": "Data Protection Officer"
+              },
+              {
+                "label": "Head of IT Operations",
+                "value": "Head of IT Operations"
+              }
+            ],
+            "value": {
+              "path": "/f1/owner"
+            }
+          },
+          {
+            "action": {
+              "event": {
+                "context": {
+                  "ai_act": {
+                    "path": "/f1/ai_act"
+                  },
+                  "lifecycle": {
+                    "path": "/f1/lifecycle"
+                  },
+                  "owner": {
+                    "path": "/f1/owner"
+                  }
+                },
+                "name": "submit"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a5",
+            "label": "Show Agents",
+            "variant": "flat"
           },
           {
             "children": [
               "t-1",
-              "t-2"
+              "in-2",
+              "in-3",
+              "in-4",
+              "a5"
             ],
             "component": "MaterialColumn",
             "id": "root-col"

@@ -1,8 +1,6 @@
 {
   "_actions": {
-    "a2": "Retire the agent \"Agent 2\".",
-    "a3": "Retire the agent \"Agent 20\".",
-    "a4": "Retire the agent \"Agent 28\"."
+    "a4": "form submit, fills: agent"
   },
   "messages": [
     {
@@ -26,68 +24,62 @@
             "usageHint": "subtitle2"
           },
           {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
+            "component": "MaterialSelect",
+            "id": "in-2",
+            "label": "Agent",
+            "options": [
+              {
+                "label": "Agent 2 · Requirements: Forecast · Assessed",
+                "value": "Agent 2"
+              },
+              {
+                "label": "Agent 20 · Design: Monitor · Deployed",
+                "value": "Agent 20"
+              },
+              {
+                "label": "Agent 28 · Sales: Forecast · Planned",
+                "value": "Agent 28"
               }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a2",
-            "label": "Agent 2 · Requirements: Forecast · Assessed",
-            "variant": "stroked"
+            ],
+            "value": {
+              "path": "/f1/agent"
+            }
+          },
+          {
+            "component": "MaterialInput",
+            "id": "in-3",
+            "label": "Reason (optional)",
+            "placeholder": "e.g. replaced by Agent 31",
+            "value": {
+              "path": "/f1/reason"
+            }
           },
           {
             "action": {
               "event": {
-                "context": {},
-                "name": "send_message"
-              }
-            },
-            "color": "primary",
-            "component": "MaterialButton",
-            "id": "a3",
-            "label": "Agent 20 · Design: Monitor · Deployed",
-            "variant": "stroked"
-          },
-          {
-            "action": {
-              "event": {
-                "context": {},
-                "name": "send_message"
+                "context": {
+                  "agent": {
+                    "path": "/f1/agent"
+                  },
+                  "reason": {
+                    "path": "/f1/reason"
+                  }
+                },
+                "name": "submit"
               }
             },
             "color": "primary",
             "component": "MaterialButton",
             "id": "a4",
-            "label": "Agent 28 · Sales: Forecast · Planned",
-            "variant": "stroked"
-          },
-          {
-            "align": "stretch",
-            "children": [
-              "a2",
-              "a3"
-            ],
-            "component": "MaterialRow",
-            "id": "row-5",
-            "justify": "start"
-          },
-          {
-            "align": "stretch",
-            "children": [
-              "a4"
-            ],
-            "component": "MaterialRow",
-            "id": "row-6",
-            "justify": "start"
+            "label": "Retire as draft",
+            "variant": "flat"
           },
           {
             "children": [
               "t-1",
-              "row-5",
-              "row-6"
+              "in-2",
+              "in-3",
+              "a4"
             ],
             "component": "MaterialColumn",
             "id": "root-col"

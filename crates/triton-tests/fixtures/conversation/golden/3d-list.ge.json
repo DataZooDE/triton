@@ -1,0 +1,212 @@
+{
+  "_actions": {
+    "a1": "Retire the agent \"Agent 2\".",
+    "a11": "Retire the agent \"Agent 21\".",
+    "a16": "Which agents match \"Agent 2\"?",
+    "a6": "Retire the agent \"Agent 20\"."
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a1",
+            "label": "Retire",
+            "variant": "stroked"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-2",
+            "text": "Agent 2",
+            "usageHint": "body1"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-3",
+            "text": "Requirements: Forecast",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "t-2",
+              "t-3"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-4"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "col-4",
+              "a1"
+            ],
+            "component": "MaterialRow",
+            "id": "row-5",
+            "justify": "start"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a6",
+            "label": "Retire",
+            "variant": "stroked"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-7",
+            "text": "Agent 20",
+            "usageHint": "body1"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-8",
+            "text": "Design: Monitor",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "t-7",
+              "t-8"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-9"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "col-9",
+              "a6"
+            ],
+            "component": "MaterialRow",
+            "id": "row-10",
+            "justify": "start"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a11",
+            "label": "Retire",
+            "variant": "stroked"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-12",
+            "text": "Agent 21",
+            "usageHint": "body1"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-13",
+            "text": "Planning: Schedule",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "t-12",
+              "t-13"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-14"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "col-14",
+              "a11"
+            ],
+            "component": "MaterialRow",
+            "id": "row-15",
+            "justify": "start"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a16",
+            "label": "Show",
+            "variant": "stroked"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-17",
+            "text": "7 more",
+            "usageHint": "body1"
+          },
+          {
+            "children": [
+              "t-17"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-18"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "col-18",
+              "a16"
+            ],
+            "component": "MaterialRow",
+            "id": "row-19",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "row-5",
+              "row-10",
+              "row-15",
+              "row-19"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}
