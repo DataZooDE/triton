@@ -1,0 +1,95 @@
+{
+  "_mock_item": "2b A2UI: expandable capability tree (Gemini · A2UI). Planning/Production children are not in the mock and are left out",
+  "surface": {
+    "components": [
+      {
+        "kind": "embed",
+        "url": "https://app.example.com/acme/open?view=capability-map&domain=operations&embed=1",
+        "title": "Expand map ⤢",
+        "height": 640,
+        "fallback": {
+          "kind": "tree",
+          "title": "Operations · 8 Agents · 9 capabilities",
+          "gaps_toggle": "Only gaps",
+          "nodes": [
+            {
+              "label": "Logistics",
+              "counts": [
+                {
+                  "label": "Agents",
+                  "value": "2"
+                }
+              ],
+              "expanded": true,
+              "children": [
+                {
+                  "label": "Forecast",
+                  "chips": [
+                    {
+                      "label": "Agent 26 · In delivery",
+                      "message": "Show Agent 26"
+                    }
+                  ]
+                },
+                {
+                  "label": "Monitor",
+                  "gap": true,
+                  "action_label": "none · propose",
+                  "action": {
+                    "type": "send_message",
+                    "text": "Propose an Agent for Logistics: Monitor"
+                  }
+                },
+                {
+                  "label": "Schedule",
+                  "chips": [
+                    {
+                      "label": "Agent 14 · Planned",
+                      "message": "Show Agent 14"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "label": "Planning",
+              "counts": [
+                {
+                  "label": "Agents",
+                  "value": "3"
+                }
+              ]
+            },
+            {
+              "label": "Production",
+              "counts": [
+                {
+                  "label": "Agents",
+                  "value": "3"
+                },
+                {
+                  "label": "proposed capability",
+                  "value": "1"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "kind": "chips",
+        "prompt": "Ask next",
+        "chips": [
+          {
+            "label": "Operations Agents without owner",
+            "message": "Which Operations Agents have no owner?"
+          },
+          {
+            "label": "Data products Operations needs",
+            "message": "Which data products does Operations need?"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,5 @@
+Find Agents
+› Find ‹Lifecycle› Agents with AI Act class ‹AI Act class› owned by ‹Owner›
+  Lifecycle: Candidate | Assessed | Planned | In delivery | Deployed
+  AI Act class: High | Limited | Minimal | Unassessed
+  Owner: Any owner | Data Protection Officer | Head of IT Operations

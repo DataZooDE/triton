@@ -1,0 +1,64 @@
+{
+  "_mock_item": "1o Guided change form (Teams / A2UI): the preview shows the exact request",
+  "surface": {
+    "components": [
+      {
+        "kind": "notice",
+        "text": "As of 18:03. If someone else changes it first, we tell you."
+      },
+      {
+        "kind": "form",
+        "title": "Change Agent 28",
+        "submit_label": "File as draft for review",
+        "fields": [
+          {
+            "name": "field",
+            "label": "What to change",
+            "kind": "select",
+            "required": true,
+            "default": "owner",
+            "options": [
+              {
+                "label": "Owner",
+                "value": "owner"
+              },
+              {
+                "label": "Lifecycle",
+                "value": "lifecycle"
+              },
+              {
+                "label": "AI Act class",
+                "value": "AI Act class"
+              }
+            ]
+          },
+          {
+            "name": "value",
+            "label": "New value",
+            "kind": "select",
+            "required": true,
+            "options": [
+              {
+                "label": "Finance operations (Org. unit)",
+                "value": "Finance operations"
+              },
+              {
+                "label": "Data Protection Officer",
+                "value": "Data Protection Officer"
+              }
+            ]
+          },
+          {
+            "name": "reason",
+            "label": "Why",
+            "kind": "text",
+            "required": false,
+            "placeholder": "Finance took over the process in October."
+          }
+        ],
+        "send_template": "Set the {field} of Agent 28 to \"{value}\".[[ Reason: {reason}]]",
+        "preview_label": "Will be sent as"
+      }
+    ]
+  }
+}

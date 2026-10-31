@@ -49,6 +49,8 @@ use serde_json::Value;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
+pub mod message;
+
 type HmacSha256 = Hmac<Sha256>;
 
 /// Telegram's published cap on `callback_data` bytes. Used as the

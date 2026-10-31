@@ -1,0 +1,133 @@
+{
+  "_actions": {},
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "3 drafts ready for review",
+            "usageHint": "subtitle1"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-2",
+            "text": "New: Agent \"Planning preparation\"",
+            "usageHint": "body1"
+          },
+          {
+            "children": [
+              "t-2"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-3"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-4",
+            "text": "New: Agent \"Planning approval\"",
+            "usageHint": "body1"
+          },
+          {
+            "children": [
+              "t-4"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-5"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-6",
+            "text": "Change: Agent 21 → Retired",
+            "usageHint": "body1"
+          },
+          {
+            "children": [
+              "t-6"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-7"
+          },
+          {
+            "color": "primary",
+            "component": "MaterialIcon",
+            "icon": "info",
+            "id": "ic-8"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-9",
+            "text": "From: \"Split the planning Agent into preparation and approval.\"",
+            "usageHint": "body2"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "ic-8",
+              "t-9"
+            ],
+            "component": "MaterialRow",
+            "id": "row-10",
+            "justify": "start"
+          },
+          {
+            "color": "primary",
+            "component": "MaterialIcon",
+            "icon": "info",
+            "id": "ic-11"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-12",
+            "text": "Assumed: both new Agents keep owner Head of Production Planning.",
+            "usageHint": "body2"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "ic-11",
+              "t-12"
+            ],
+            "component": "MaterialRow",
+            "id": "row-13",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "t-1",
+              "col-3",
+              "col-5",
+              "col-7",
+              "row-10",
+              "row-13"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

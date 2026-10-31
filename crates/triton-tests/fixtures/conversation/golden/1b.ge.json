@@ -1,0 +1,285 @@
+{
+  "_actions": {
+    "a11": "Which agents are planned? Show their AI Act class.",
+    "a12": "Which agents are planned? Show their owner.",
+    "a13": "Which agents are planned? Show their capability.",
+    "a16": "Find planned Agents",
+    "a2": "Show Agent 3",
+    "a3": "Show Agent 8",
+    "a4": "Show Agent 12",
+    "a5": "Show Agent 17",
+    "a6": "Show Agent 21",
+    "a7": "Show Agent 28"
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "caption": "Agents · lifecycle: planned · 6",
+            "columns": [
+              {
+                "field": "agent",
+                "header": "Agent · capability"
+              },
+              {
+                "field": "ai_act",
+                "header": "AI Act"
+              }
+            ],
+            "component": "MaterialTable",
+            "id": "tbl-1",
+            "rows": [
+              {
+                "agent": "Agent 3 · Requirements: Monitor · Head of IT Operations",
+                "ai_act": "Minimal"
+              },
+              {
+                "agent": "Agent 8 · Design: Schedule · Data Protection Officer",
+                "ai_act": "High"
+              },
+              {
+                "agent": "Agent 12 · Design: Forecast · no owner",
+                "ai_act": "High"
+              },
+              {
+                "agent": "Agent 17 · Validation: Forecast · Head of Quality Assurance",
+                "ai_act": "Limited"
+              },
+              {
+                "agent": "Agent 21 · Planning: Schedule · Head of Production Planning",
+                "ai_act": "Minimal"
+              },
+              {
+                "agent": "Agent 28 · Sales: Forecast · Data Protection Officer",
+                "ai_act": "Minimal"
+              }
+            ]
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a2",
+            "label": "Agent 3 · Requirements: Monitor · Head of IT Operations",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a3",
+            "label": "Agent 8 · Design: Schedule · Data Protection Officer",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a4",
+            "label": "Agent 12 · Design: Forecast · no owner",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a5",
+            "label": "Agent 17 · Validation: Forecast · Head of Quality Assurance",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a6",
+            "label": "Agent 21 · Planning: Schedule · Head of Production Planning",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a7",
+            "label": "Agent 28 · Sales: Forecast · Data Protection Officer",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a2",
+              "a3"
+            ],
+            "component": "MaterialRow",
+            "id": "row-8",
+            "justify": "start"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a4",
+              "a5"
+            ],
+            "component": "MaterialRow",
+            "id": "row-9",
+            "justify": "start"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a6",
+              "a7"
+            ],
+            "component": "MaterialRow",
+            "id": "row-10",
+            "justify": "start"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a11",
+            "label": "+ AI Act class",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a12",
+            "label": "+ Owner",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a13",
+            "label": "+ Capability",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a11",
+              "a12"
+            ],
+            "component": "MaterialRow",
+            "id": "row-14",
+            "justify": "start"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a13"
+            ],
+            "component": "MaterialRow",
+            "id": "row-15",
+            "justify": "start"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a16",
+            "label": "Refine filters",
+            "variant": "flat"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a16"
+            ],
+            "component": "MaterialRow",
+            "id": "row-17",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "tbl-1",
+              "row-8",
+              "row-9",
+              "row-10",
+              "row-14",
+              "row-15",
+              "row-17"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

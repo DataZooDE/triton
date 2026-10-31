@@ -1,0 +1,66 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "associatedInputs": "none",
+      "data": {
+        "ct": "__send_message|{\"m\":\"Change Agent 28\"}"
+      },
+      "title": "Request a change",
+      "type": "Action.Execute",
+      "verb": "agentAction"
+    },
+    {
+      "associatedInputs": "none",
+      "data": {
+        "ct": "__send_message|{\"m\":\"What does Agent 28 depend on?\"}"
+      },
+      "title": "Dependencies",
+      "type": "Action.Execute",
+      "verb": "agentAction"
+    },
+    {
+      "title": "Open in the portfolio",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/open?object=agent%3Aagent-28"
+    }
+  ],
+  "body": [
+    {
+      "text": "Agent 28 · Planned",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "facts": [
+        {
+          "title": "Capability",
+          "value": "Commercial & service › Sales: Forecast"
+        },
+        {
+          "title": "Owner",
+          "value": "Data Protection Officer"
+        },
+        {
+          "title": "AI Act class",
+          "value": "Minimal"
+        },
+        {
+          "title": "Depends on",
+          "value": "Customer master, Pricing API"
+        },
+        {
+          "title": "Open drafts",
+          "value": "none"
+        }
+      ],
+      "type": "FactSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

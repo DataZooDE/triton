@@ -1,0 +1,121 @@
+{
+  "_mock_item": "1b Adaptive Card: result list (Teams · Adaptive Card); a row opens 1n, Refine filters opens 1m",
+  "surface": {
+    "components": [
+      {
+        "kind": "table",
+        "title": "Agents · lifecycle: planned · 6",
+        "columns": [
+          {
+            "key": "agent",
+            "label": "Agent · capability"
+          },
+          {
+            "key": "ai_act",
+            "label": "AI Act"
+          }
+        ],
+        "rows": [
+          {
+            "cells": {
+              "agent": "Agent 3 · Requirements: Monitor · Head of IT Operations",
+              "ai_act": "Minimal"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show Agent 3"
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 8 · Design: Schedule · Data Protection Officer",
+              "ai_act": "High"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show Agent 8"
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 12 · Design: Forecast · no owner",
+              "ai_act": "High"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show Agent 12"
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 17 · Validation: Forecast · Head of Quality Assurance",
+              "ai_act": "Limited"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show Agent 17"
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 21 · Planning: Schedule · Head of Production Planning",
+              "ai_act": "Minimal"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show Agent 21"
+            }
+          },
+          {
+            "cells": {
+              "agent": "Agent 28 · Sales: Forecast · Data Protection Officer",
+              "ai_act": "Minimal"
+            },
+            "action": {
+              "type": "send_message",
+              "text": "Show Agent 28"
+            }
+          }
+        ]
+      },
+      {
+        "kind": "chips",
+        "chips": [
+          {
+            "label": "+ AI Act class",
+            "message": "Which agents are planned? Show their AI Act class."
+          },
+          {
+            "label": "+ Owner",
+            "message": "Which agents are planned? Show their owner."
+          },
+          {
+            "label": "+ Capability",
+            "message": "Which agents are planned? Show their capability."
+          }
+        ]
+      },
+      {
+        "kind": "button",
+        "label": "Open in the portfolio",
+        "primary": true,
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/analyse?lifecycle=planned"
+        }
+      },
+      {
+        "kind": "button",
+        "label": "Refine filters",
+        "action": {
+          "type": "send_message",
+          "text": "Find planned Agents"
+        }
+      },
+      {
+        "kind": "narration",
+        "text": "Portfolio as of 18:03. Nothing was changed."
+      }
+    ]
+  }
+}

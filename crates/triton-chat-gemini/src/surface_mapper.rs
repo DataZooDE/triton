@@ -83,6 +83,13 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     let mut deferred_forms = 0usize;
     for c in &surface.components {
         match c {
+            // Conversation components (and action/template controls):
+            // the shared, no-multi-turn plain-text degradation.
+            c if c.is_conversation() => {
+                if let Some(t) = triton_core::a2ui::text::degrade(c) {
+                    chunks.push(t);
+                }
+            }
             // Markdown passthrough — Gemini renders the emphasis/lists as-is.
             Component::Text { value, .. } => chunks.push(value.clone()),
             Component::Narration { text } => chunks.push(text.clone()),
@@ -104,6 +111,9 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             Component::Button { .. } => deferred_buttons += 1,
             Component::Selection { .. } => deferred_selections += 1,
             Component::Form { .. } => deferred_forms += 1,
+            // Every remaining kind is a conversation kind, taken above
+            // (`Component::is_conversation` is exhaustive).
+            other => debug_assert!(other.is_conversation()),
         }
     }
     if chunks.is_empty() {
@@ -273,6 +283,7 @@ mod tests {
                     tool: "narrate".into(),
                     args: json!({}),
                     resource: None,
+                    action: None,
                 },
             ],
         };

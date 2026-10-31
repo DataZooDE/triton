@@ -1,0 +1,7 @@
+3 Agents match "Agent 2", so nothing was changed. Copy the line you mean and send it as a new message:
+
+› Retire the agent "Agent 2" (Requirements: Forecast)
+› Retire the agent "Agent 20" (Design: Monitor)
+› Retire the agent "Agent 28" (Sales: Forecast)
+
+Replying "Agent 20" alone won't work: each message is read on its own.

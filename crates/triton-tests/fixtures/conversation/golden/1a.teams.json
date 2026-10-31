@@ -1,0 +1,178 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "title": "Open in the portfolio",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/analyse?lifecycle=planned"
+    }
+  ],
+  "body": [
+    {
+      "text": "**6 Agents are planned.**\n\n_Portfolio as of 18:03. Nothing was changed._",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "text": "Agent · capability · owner",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 3",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Requirements: Monitor · Head of IT Operations",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "title": "Agent 3",
+        "type": "Action.OpenUrl",
+        "url": "https://app.example.com/acme/open?object=agent%3Aagent-3"
+      },
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 8",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Design: Schedule · Data Protection Officer",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "title": "Agent 8",
+        "type": "Action.OpenUrl",
+        "url": "https://app.example.com/acme/open?object=agent%3Aagent-8"
+      },
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 12",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Design: Forecast · no owner",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "title": "Agent 12",
+        "type": "Action.OpenUrl",
+        "url": "https://app.example.com/acme/open?object=agent%3Aagent-12"
+      },
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 17",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Validation: Forecast · Head of Quality Assurance",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "title": "Agent 17",
+        "type": "Action.OpenUrl",
+        "url": "https://app.example.com/acme/open?object=agent%3Aagent-17"
+      },
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 21",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Planning: Schedule · Head of Production Planning",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "title": "Agent 21",
+        "type": "Action.OpenUrl",
+        "url": "https://app.example.com/acme/open?object=agent%3Aagent-21"
+      },
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 28",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Sales: Forecast · Data Protection Officer",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "title": "Agent 28",
+        "type": "Action.OpenUrl",
+        "url": "https://app.example.com/acme/open?object=agent%3Aagent-28"
+      },
+      "separator": true,
+      "type": "Container"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

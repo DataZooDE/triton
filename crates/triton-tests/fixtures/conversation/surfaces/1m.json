@@ -1,0 +1,92 @@
+{
+  "_mock_item": "1m Find Agents: filter card (Teams / A2UI). Deviation: no live count ('2 match', 'Show 2 Agents') — a card has no server round trip before submit",
+  "surface": {
+    "components": [
+      {
+        "kind": "form",
+        "title": "Find Agents",
+        "submit_label": "Show Agents",
+        "fields": [
+          {
+            "name": "lifecycle",
+            "label": "Lifecycle",
+            "kind": "select",
+            "required": true,
+            "style": "radio",
+            "default": "planned",
+            "options": [
+              {
+                "label": "Candidate",
+                "value": "candidate"
+              },
+              {
+                "label": "Assessed",
+                "value": "assessed"
+              },
+              {
+                "label": "Planned",
+                "value": "planned"
+              },
+              {
+                "label": "In delivery",
+                "value": "in delivery"
+              },
+              {
+                "label": "Deployed",
+                "value": "deployed"
+              }
+            ]
+          },
+          {
+            "name": "ai_act",
+            "label": "AI Act class",
+            "kind": "select",
+            "required": true,
+            "style": "radio",
+            "default": "high",
+            "options": [
+              {
+                "label": "High",
+                "value": "high"
+              },
+              {
+                "label": "Limited",
+                "value": "limited"
+              },
+              {
+                "label": "Minimal",
+                "value": "minimal"
+              },
+              {
+                "label": "Unassessed",
+                "value": "unassessed"
+              }
+            ]
+          },
+          {
+            "name": "owner",
+            "label": "Owner",
+            "kind": "select",
+            "required": false,
+            "options": [
+              {
+                "label": "Any owner",
+                "value": ""
+              },
+              {
+                "label": "Data Protection Officer",
+                "value": "Data Protection Officer"
+              },
+              {
+                "label": "Head of IT Operations",
+                "value": "Head of IT Operations"
+              }
+            ]
+          }
+        ],
+        "send_template": "Find {lifecycle} Agents with AI Act class {ai_act}[[ owned by {owner}]]",
+        "preview_label": "Will be sent as"
+      }
+    ]
+  }
+}

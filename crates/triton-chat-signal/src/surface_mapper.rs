@@ -94,6 +94,13 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     let mut deferred_dashboards = 0usize;
     for c in &surface.components {
         match c {
+            // Conversation components (and action/template controls):
+            // the shared, no-multi-turn plain-text degradation.
+            c if c.is_conversation() => {
+                if let Some(t) = triton_core::a2ui::text::degrade(c) {
+                    chunks.push(t);
+                }
+            }
             Component::Text { value, .. } => {
                 chunks.push(value.clone());
             }
@@ -142,6 +149,9 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
                 // discord).
                 deferred_dashboards += 1;
             }
+            // Every remaining kind is a conversation kind, taken above
+            // (`Component::is_conversation` is exhaustive).
+            other => debug_assert!(other.is_conversation()),
         }
     }
     if chunks.is_empty() {
@@ -278,6 +288,7 @@ mod tests {
                 tool: "narrate".into(),
                 args: json!({}),
                 resource: None,
+                action: None,
             }],
         };
         assert!(matches!(render(&s), Err(RenderError::EmptyAfterRender)));
@@ -297,6 +308,7 @@ mod tests {
                     tool: "narrate".into(),
                     args: json!({}),
                     resource: None,
+                    action: None,
                 },
             ],
         };
@@ -345,6 +357,8 @@ mod tests {
                     }],
                     tool: "narrate".into(),
                     args_key: "s".into(),
+                    style: Default::default(),
+                    submit: None,
                 },
             ],
         };

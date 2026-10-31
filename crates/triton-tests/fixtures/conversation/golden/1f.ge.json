@@ -1,0 +1,102 @@
+{
+  "_actions": {
+    "a1": "Retire the agent \"Agent 2\" (Requirements: Forecast)",
+    "a2": "Retire the agent \"Agent 20\" (Design: Monitor)",
+    "a3": "Retire the agent \"Agent 28\" (Sales: Forecast)"
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a1",
+            "label": "Agent 2 · Req. Forecast",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a2",
+            "label": "Agent 20 · Design Monitor",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a3",
+            "label": "Agent 28 · Sales Forecast",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a1",
+              "a2"
+            ],
+            "component": "MaterialRow",
+            "id": "row-4",
+            "justify": "start"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a3"
+            ],
+            "component": "MaterialRow",
+            "id": "row-5",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "row-4",
+              "row-5"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

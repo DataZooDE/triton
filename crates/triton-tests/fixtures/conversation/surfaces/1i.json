@@ -1,0 +1,40 @@
+{
+  "_mock_item": "1i Several drafts as one changeset (Teams · Adaptive Card): one card per request",
+  "surface": {
+    "components": [
+      {
+        "kind": "list",
+        "title": "3 drafts ready for review",
+        "items": [
+          {
+            "label": "New: Agent \"Planning preparation\""
+          },
+          {
+            "label": "New: Agent \"Planning approval\""
+          },
+          {
+            "label": "Change: Agent 21 → Retired"
+          }
+        ]
+      },
+      {
+        "kind": "notice",
+        "title": "From",
+        "text": "\"Split the planning Agent into preparation and approval.\""
+      },
+      {
+        "kind": "notice",
+        "text": "Assumed: both new Agents keep owner Head of Production Planning."
+      },
+      {
+        "kind": "button",
+        "label": "Review all 3",
+        "primary": true,
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/review/c/7Q2K"
+        }
+      }
+    ]
+  }
+}

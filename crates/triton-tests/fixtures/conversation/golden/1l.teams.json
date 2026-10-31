@@ -1,0 +1,51 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "text": "**Owners for Agents without one**",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "text": "Request · working · 1:10",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "isSubtle": false,
+      "spacing": "Small",
+      "text": "✓ Found 4 Agents without an owner",
+      "type": "TextBlock",
+      "weight": "Default",
+      "wrap": true
+    },
+    {
+      "isSubtle": false,
+      "spacing": "Small",
+      "text": "▶ Step 2 of 3 · drafting proposals",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "isSubtle": true,
+      "spacing": "Small",
+      "text": "○ Filing drafts for review",
+      "type": "TextBlock",
+      "weight": "Default",
+      "wrap": true
+    },
+    {
+      "isSubtle": true,
+      "size": "Small",
+      "text": "60 %",
+      "type": "TextBlock"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

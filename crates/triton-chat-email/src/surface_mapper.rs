@@ -120,6 +120,18 @@ pub fn render(surface: &Surface) -> Result<RenderedEmail, RenderError> {
 
     for c in &surface.components {
         match c {
+            // Conversation components (and action/template controls):
+            // the shared, no-multi-turn plain-text degradation.
+            c if c.is_conversation() => {
+                if let Some(t) = triton_core::a2ui::text::degrade(c) {
+                    flush(&mut pending, &mut html_blocks, &mut text_blocks);
+                    html_blocks.push(format!(
+                        "<p style=\"white-space:pre-wrap\">{}</p>",
+                        escape_html(&t)
+                    ));
+                    text_blocks.push(t);
+                }
+            }
             Component::Text { value, .. } => {
                 flush(&mut pending, &mut html_blocks, &mut text_blocks);
                 html_blocks.push(md_to_html(value));
@@ -238,6 +250,9 @@ pub fn render(surface: &Surface) -> Result<RenderedEmail, RenderError> {
                     text_blocks.push(format!("Sources: {}", labels.join(" \u{b7} ")));
                 }
             }
+            // Every remaining kind is a conversation kind, taken above
+            // (`Component::is_conversation` is exhaustive).
+            other => debug_assert!(other.is_conversation()),
         }
     }
     flush(&mut pending, &mut html_blocks, &mut text_blocks);
@@ -572,6 +587,7 @@ mod tests {
                 tool: "assistant".into(),
                 args: serde_json::json!({ "question": "what does initech buy?" }),
                 resource: None,
+                action: None,
             },
             Component::Button {
                 primary: false,
@@ -579,6 +595,7 @@ mod tests {
                 tool: "render_report".into(),
                 args: serde_json::json!({}),
                 resource: Some("ui://peacock/sales?x=1".into()),
+                action: None,
             },
         ]);
         let r = render(&s).expect("renders");
@@ -646,9 +663,13 @@ mod tests {
                 label: "Material".into(),
                 kind: FormFieldKind::String,
                 required: true,
+                options: Vec::new(),
+                style: Default::default(),
             }],
             submit_label: "Go".into(),
             tool: "assistant".into(),
+            preview_label: None,
+            send_template: None,
         }]);
         let r = render(&s).expect("renders");
         assert_eq!(
@@ -670,6 +691,8 @@ mod tests {
                 }],
                 tool: "assistant".into(),
                 args_key: "q".into(),
+                style: Default::default(),
+                submit: None,
             },
             Component::Sources {
                 items: vec![SourceItem {

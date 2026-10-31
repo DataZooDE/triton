@@ -1,0 +1,17 @@
+Commercial & service · 4 Agents
+Finance — 0 Agents
+  Forecast, Monitor, Schedule ⚠
+Sales — 2 Agents
+  Forecast: Agent 28 · Planned
+  Schedule (proposed): Agent 29 · Candidate
+  Monitor ⚠
+Service — 2 Agents
+  Forecast: Agent 30 · Deployed
+  Monitor: Agent 31 · Assessed
+  Schedule ⚠
+
+Expand map ⤢: https://app.example.com/acme/open?view=capability-map&domain=commercial-service&embed=1
+
+› Find Agents by capability
+
+Portfolio as of 18:03. Nothing was changed.

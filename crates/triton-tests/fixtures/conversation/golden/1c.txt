@@ -1,0 +1,16 @@
+6 planned Agents
+1. Agent 3 — Requirements: Monitor — Head of IT Operations
+   https://app.example.com/acme/open?object=agent%3Aagent-3
+2. Agent 8 — Design: Schedule — Data Protection Officer
+   https://app.example.com/acme/open?object=agent%3Aagent-8
+3. Agent 12 — Design: Forecast — no owner
+   https://app.example.com/acme/open?object=agent%3Aagent-12
+
+› List all planned Agents
+
+Open in the portfolio: https://app.example.com/acme/analyse?lifecycle=planned
+
+Ask next (sent as a new question)
+› Which planned Agents have a high AI Act class?
+› Which planned Agents have no owner?
+› What do the planned Agents depend on?

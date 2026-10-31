@@ -1,0 +1,87 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "title": "Review all 3",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/review/c/7Q2K"
+    }
+  ],
+  "body": [
+    {
+      "text": "3 drafts ready for review",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "items": [
+        {
+          "color": "Default",
+          "text": "New: Agent \"Planning preparation\"",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Default",
+          "text": "New: Agent \"Planning approval\"",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Default",
+          "text": "Change: Agent 21 → Retired",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "text": "From",
+          "type": "TextBlock",
+          "weight": "Bolder",
+          "wrap": true
+        },
+        {
+          "text": "\"Split the planning Agent into preparation and approval.\"",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "style": "accent",
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "text": "Assumed: both new Agents keep owner Head of Production Planning.",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "style": "accent",
+      "type": "Container"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

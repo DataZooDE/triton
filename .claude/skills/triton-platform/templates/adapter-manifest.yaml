@@ -28,8 +28,16 @@ tools:
     # a real surface get rejected at render time.
     # Full vocabulary: text, narration, buttons, selections, forms,
     # dashboard, sources (click-to-open document references), report
-    # (inline chart) — see references/02.
+    # (inline chart), and the conversation components lists, tables,
+    # chips, trees, notices, progress, key_values, embeds — see
+    # references/02 and references/05.
     surface_components: [text, narration, buttons]
+
+  # A conversational agent (for example a portfolio agent): answers as lists with deep
+  # links, refusals as one-click complete requests, a capability map.
+  my-conversational-tool:
+    surface_components: [text, buttons, selections, forms, lists, tables,
+                         chips, trees, notices, progress, key_values, embeds]
 
   # A raw-JSON tool with no UI declares an empty surface.
   my-raw-tool:
@@ -63,11 +71,43 @@ adapters:
       # selections: inline_keyboard
       # forms: numbered_prompts
       # dashboard: rasterised_png    # requires a configured rasteriser
+      # Conversation components on a text channel (no multi-turn: every
+      # action is shown as the complete line to copy and send):
+      # lists: numbered_list         # 1. label — detail, deep link as URL
+      # tables: numbered_list
+      # chips: copy_lines            # › Show agents in Procurement …
+      # trees: indented_text         # two spaces per level, counts inline
+      # notices: passthrough         # ⓘ / ⚠ line
+      # progress: status_lines       # ✓ done ▶ active ○ pending
+      # key_values: key_value_lines  # Label: before → after
+      # embeds: inline_fallback      # the embed's fallback component + URL
     rate_limit:
       messages_per_sec: 25
       burst: 50
     correlation_key: env://TRITON_TELEGRAM_CORRELATION_KEY
 
+# Microsoft Teams renders every conversation component natively in the
+# Adaptive Card (ColumnSet/FactSet, Input.ChoiceSet, Action.Execute with a
+# signed complete message, Action.ToggleVisibility for the tree):
+#
+#  msteams:
+#    kind: ms_teams
+#    tool: my-conversational-tool
+#    …
+#    degrade:
+#      text: passthrough
+#      buttons: adaptive_card
+#      selections: adaptive_card
+#      forms: adaptive_card
+#      lists: adaptive_card
+#      tables: adaptive_card_column_set
+#      chips: adaptive_card
+#      trees: adaptive_card
+#      notices: adaptive_card
+#      progress: status_lines
+#      key_values: adaptive_card
+#      embeds: task_module         # URL task module + inline fallback card
+#
 # ── OPTIONAL: agent-resolved sender identity (FR-I-7) ─────────────
 # Instead of an operator-curated `sender_table`, an adapter can delegate
 # sender resolution to one of YOUR tools via `identity.kind: upstream`.

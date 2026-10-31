@@ -1,0 +1,40 @@
+{
+  "_actions": {},
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "IFrameUrl",
+            "height": 640,
+            "id": "frame",
+            "url": "https://app.example.com/acme/open?view=capability-map&embed=1"
+          },
+          {
+            "autoOpen": false,
+            "cardIcon": "account_tree",
+            "cardTitle": "Open the capability map",
+            "children": [
+              "frame"
+            ],
+            "component": "Canvas",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

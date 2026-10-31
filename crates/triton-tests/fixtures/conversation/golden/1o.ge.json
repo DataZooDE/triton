@@ -1,0 +1,75 @@
+{
+  "_actions": {},
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "color": "primary",
+            "component": "MaterialIcon",
+            "icon": "info",
+            "id": "ic-1"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-2",
+            "text": "As of 18:03. If someone else changes it first, we tell you.",
+            "usageHint": "body2"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "ic-1",
+              "t-2"
+            ],
+            "component": "MaterialRow",
+            "id": "row-3",
+            "justify": "start"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-4",
+            "text": "Change Agent 28",
+            "usageHint": "subtitle2"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-5",
+            "text": "Will be sent as: Set the ‹What to change› of Agent 28 to \"‹New value›\". Reason: ‹Why›",
+            "usageHint": "body2"
+          },
+          {
+            "children": [
+              "row-3",
+              "t-4",
+              "t-5"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

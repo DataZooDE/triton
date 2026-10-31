@@ -1,0 +1,12 @@
+Agent 28 · Planned
+Capability: Commercial & service › Sales: Forecast
+Owner: Data Protection Officer
+AI Act class: Minimal
+Depends on: Customer master, Pricing API
+Open drafts: none
+
+› Change Agent 28
+
+› What does Agent 28 depend on?
+
+Open in the portfolio: https://app.example.com/acme/open?object=agent%3Aagent-28

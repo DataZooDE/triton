@@ -1,0 +1,58 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "title": "Review all 4",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/review/c/9H4P"
+    }
+  ],
+  "body": [
+    {
+      "text": "**4 drafts ready for review**",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "text": "Request · done · 3:52",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "isSubtle": false,
+      "spacing": "Small",
+      "text": "✓ Found 4 Agents without an owner",
+      "type": "TextBlock",
+      "weight": "Default",
+      "wrap": true
+    },
+    {
+      "isSubtle": false,
+      "spacing": "Small",
+      "text": "✓ Drafted proposals",
+      "type": "TextBlock",
+      "weight": "Default",
+      "wrap": true
+    },
+    {
+      "isSubtle": false,
+      "spacing": "Small",
+      "text": "✓ Filed drafts for review",
+      "type": "TextBlock",
+      "weight": "Default",
+      "wrap": true
+    },
+    {
+      "isSubtle": true,
+      "size": "Small",
+      "text": "100 %",
+      "type": "TextBlock"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

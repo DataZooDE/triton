@@ -1,0 +1,112 @@
+{
+  "_actions": {
+    "a5": "Set the owner of Agent 28 to \"Finance operations\". Reason: Finance took over the process in October."
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "color": "warn",
+            "component": "MaterialIcon",
+            "icon": "warning",
+            "id": "ic-1"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-2",
+            "text": "Agent 28 changed: Changed at 18:10 since this card was shown: lifecycle Planned → In delivery. Your change was not filed.",
+            "usageHint": "body2"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "ic-1",
+              "t-2"
+            ],
+            "component": "MaterialRow",
+            "id": "row-3",
+            "justify": "start"
+          },
+          {
+            "caption": "Your input is kept:",
+            "columns": [
+              {
+                "field": "label",
+                "header": ""
+              },
+              {
+                "field": "value",
+                "header": ""
+              }
+            ],
+            "component": "MaterialTable",
+            "id": "kv-4",
+            "rows": [
+              {
+                "label": "Owner",
+                "value": "Finance operations"
+              },
+              {
+                "label": "Reason",
+                "value": "Finance took over the process in October."
+              }
+            ]
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a5",
+            "label": "Check again with current version",
+            "variant": "flat"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a5"
+            ],
+            "component": "MaterialRow",
+            "id": "row-6",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "row-3",
+              "kv-4",
+              "row-6"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

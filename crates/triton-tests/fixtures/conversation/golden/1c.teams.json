@@ -1,0 +1,144 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "associatedInputs": "none",
+      "data": {
+        "ct": "__send_message|{\"m\":\"List all planned Agents\"}"
+      },
+      "title": "Show 3 more",
+      "type": "Action.Execute",
+      "verb": "agentAction"
+    },
+    {
+      "title": "Open in the portfolio",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/analyse?lifecycle=planned"
+    }
+  ],
+  "body": [
+    {
+      "text": "6 planned Agents",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 3",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Requirements: Monitor — Head of IT Operations",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "title": "Agent 3",
+        "type": "Action.OpenUrl",
+        "url": "https://app.example.com/acme/open?object=agent%3Aagent-3"
+      },
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 8",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Design: Schedule — Data Protection Officer",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "title": "Agent 8",
+        "type": "Action.OpenUrl",
+        "url": "https://app.example.com/acme/open?object=agent%3Aagent-8"
+      },
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "items": [
+        {
+          "color": "Accent",
+          "text": "Agent 12",
+          "type": "TextBlock",
+          "wrap": true
+        },
+        {
+          "isSubtle": true,
+          "size": "Small",
+          "spacing": "None",
+          "text": "Design: Forecast — no owner",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "selectAction": {
+        "title": "Agent 12",
+        "type": "Action.OpenUrl",
+        "url": "https://app.example.com/acme/open?object=agent%3Aagent-12"
+      },
+      "separator": true,
+      "type": "Container"
+    },
+    {
+      "text": "Ask next (sent as a new question)",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "associatedInputs": "none",
+          "data": {
+            "ct": "__send_message|{\"m\":\"Which planned Agents have a high AI Act class?\"}"
+          },
+          "title": "Planned with high AI Act class",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        },
+        {
+          "associatedInputs": "none",
+          "data": {
+            "ct": "__send_message|{\"m\":\"Which planned Agents have no owner?\"}"
+          },
+          "title": "Planned without owner",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        },
+        {
+          "associatedInputs": "none",
+          "data": {
+            "ct": "__send_message|{\"m\":\"What do the planned Agents depend on?\"}"
+          },
+          "title": "Dependencies of planned Agents",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

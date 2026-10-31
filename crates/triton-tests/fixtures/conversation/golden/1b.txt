@@ -1,0 +1,23 @@
+Agents · lifecycle: planned · 6
+1. Agent 3 · Requirements: Monitor · Head of IT Operations · AI Act: Minimal
+   › Show Agent 3
+2. Agent 8 · Design: Schedule · Data Protection Officer · AI Act: High
+   › Show Agent 8
+3. Agent 12 · Design: Forecast · no owner · AI Act: High
+   › Show Agent 12
+4. Agent 17 · Validation: Forecast · Head of Quality Assurance · AI Act: Limited
+   › Show Agent 17
+5. Agent 21 · Planning: Schedule · Head of Production Planning · AI Act: Minimal
+   › Show Agent 21
+6. Agent 28 · Sales: Forecast · Data Protection Officer · AI Act: Minimal
+   › Show Agent 28
+
+› Which agents are planned? Show their AI Act class.
+› Which agents are planned? Show their owner.
+› Which agents are planned? Show their capability.
+
+Open in the portfolio: https://app.example.com/acme/analyse?lifecycle=planned
+
+› Find planned Agents
+
+Portfolio as of 18:03. Nothing was changed.

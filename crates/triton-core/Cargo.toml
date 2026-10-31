@@ -12,6 +12,9 @@ publish = false
 # release. Enabled transitively by triton-adapters-http/capture.
 capture = []
 
+[dev-dependencies]
+base64 = "0.22"
+
 [dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
@@ -21,3 +24,6 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
+triton-correlation = { path = "../triton-correlation" }
+tracing = { workspace = true }

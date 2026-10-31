@@ -98,6 +98,47 @@ a fresh `trace_id`. You don't implement this — but know that:
   `tool` names and `args` for interactive components small, or the
   token won't fit and the mapper degrades/rejects.
 
+## Conversation components per channel
+
+`send_message` actions are signed per channel:
+
+- **Teams:** `Action.Execute` `data.ct`, bound to tenant + sender, 7-day
+  TTL; fixed messages carry `associatedInputs: none`; card inputs only fill
+  a template's placeholders, never the signed text.
+- **Gemini Enterprise:** in the clicked component's **id** (`a<N>-<token>`,
+  the only field GE echoes back), key `TRITON_A2UI_ACTION_KEY` (same on
+  every replica; boot fails on a malformed value). Bound to the platform
+  only — the GE principal is not known when the card is built — which is
+  safe for `send_message` (it runs under the clicker's own principal):
+  30-day TTL. Open-doc actions carry a signed `/docs` URL and live 24 h.
+  The token body is readable (integrity, not confidentiality).
+- Budget: a token is capped at 2048 bytes on GE and 1536 on Teams; a
+  control whose request does not fit is dropped and logged. Keep requests
+  to a sentence.
+- Only `https://` links are actionable; any other scheme is dropped in the
+  canonical model, on every channel. For local end-to-end tests,
+  `TRITON_ALLOW_HTTP_LINK_HOSTS=127.0.0.1,localhost` keeps `http://` links to
+  the listed hosts; the binary refuses it unless `TRITON_ENV=local`.
+
+| Component | Gemini Enterprise (A2UI v0.9, composite catalog) | Teams (Adaptive Card 1.4) | Text (`a2ui::text`) |
+|---|---|---|---|
+| `list` | `MaterialColumn` per row; actionable label is a `MaterialButton` | `Container` + `selectAction` | `1. label — detail`, URL or `› message` below |
+| `table` | `MaterialTable` + one button per actionable row | `ColumnSet` grid, row `selectAction` | numbered `cell · Col: cell` rows |
+| `chips` | `MaterialButton`s (stroked), 2 per `MaterialRow` | `ActionSet` of `Action.Execute` | `› <complete message>` per chip |
+| `tree` | nested `MaterialExpansionPanel` (client-side expand); **no "only gaps" toggle** (no visibility binding in the catalog) — gap nodes start expanded, marked ⚠ | nested `Container`s, header `Action.ToggleVisibility`; "only gaps" = one toggle over every gap-free node | indented map, two spaces per level |
+| `notice` | `MaterialIcon` (info/warning) + `MaterialText` | `Container` style `accent`/`warning` | `ⓘ …` / `⚠ …` |
+| `progress` | `MaterialProgressBar` + icon rows | status `TextBlock`s + `%` | `✓ / ▶ / ○` lines + `[#####-----] 50 %` |
+| `key_value` | `MaterialTable` (label, value) | `FactSet`, `before → value` | `Label: before → value` |
+| `selection` + `submit` | **one button per option** (GE posts `context:{}`, so a client-side radio value never arrives) | `Input.ChoiceSet` (`expanded` = radio) + preview + `Action.Execute` | `› <template filled per option>` |
+| `form` + `send_template` | one select field in the template → one button per option; otherwise **preview text only** (GE cannot submit inputs) | `Input.*` + "will be sent as" + `Action.Execute`; callback fills `{name}` from inputs, refuses a missing one | `› <template with ‹Label›>` + options |
+| `button` `open_url` | `MaterialButton` + `functionCall openUrl` only with `TRITON_GE_OPEN_URL=1` (unqualified live); else omitted — put the link in the prose | `Action.OpenUrl` | `label: url` |
+| `embed` | `Canvas` + `IFrameUrl` surface with `TRITON_GE_EMBED=1` (host must be on GE's allowlist); else the fallback inline | fallback inline + `Action.Submit` task/fetch → URL task module (host in the app's `validDomains`) | fallback text + `title: url` |
+
+Degrade rules for text adapters: `lists/tables: numbered_list`,
+`chips: copy_lines`, `trees: indented_text`, `progress: status_lines`,
+`key_values: key_value_lines`, `embeds: inline_fallback`; Teams:
+`adaptive_card` / `adaptive_card_column_set`, `embeds: task_module`.
+
 ## Theming — peacock owns ALL of it
 
 There is **no theme config in Triton** (the manifest `theme:` block was

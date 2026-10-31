@@ -1,0 +1,16 @@
+{
+  "_mock_item": "not a mock item: an embed whose fallback is plain prose (crew review F3)",
+  "surface": {
+    "components": [
+      {
+        "kind": "embed",
+        "url": "https://app.example.com/acme/open?view=capability-map&embed=1",
+        "title": "Open the capability map",
+        "fallback": {
+          "kind": "text",
+          "value": "The capability map has 9 agents and 2 gaps."
+        }
+      }
+    ]
+  }
+}

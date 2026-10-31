@@ -1,0 +1,333 @@
+{
+  "_actions": {
+    "a12": "Propose an Agent for Sales: Monitor",
+    "a14": "Show Agent 29",
+    "a18": "Show Agent 30",
+    "a2": "Propose an Agent for Finance: Forecast",
+    "a21": "Show Agent 31",
+    "a24": "Propose an Agent for Service: Schedule",
+    "a4": "Propose an Agent for Finance: Monitor",
+    "a6": "Propose an Agent for Finance: Schedule",
+    "a9": "Show Agent 28"
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "Commercial & service · 4 Agents",
+            "usageHint": "subtitle1"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a2",
+            "label": "Propose an Agent here",
+            "variant": "basic"
+          },
+          {
+            "children": [
+              "a2"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "⚠",
+            "expanded": true,
+            "id": "node-3",
+            "title": "Forecast"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a4",
+            "label": "Propose an Agent here",
+            "variant": "basic"
+          },
+          {
+            "children": [
+              "a4"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "⚠",
+            "expanded": true,
+            "id": "node-5",
+            "title": "Monitor"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a6",
+            "label": "Propose an Agent here",
+            "variant": "basic"
+          },
+          {
+            "children": [
+              "a6"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "⚠",
+            "expanded": true,
+            "id": "node-7",
+            "title": "Schedule"
+          },
+          {
+            "children": [
+              "node-3",
+              "node-5",
+              "node-7"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "0 Agents",
+            "expanded": false,
+            "id": "node-8",
+            "title": "Finance"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a9",
+            "label": "Agent 28 · Planned",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a9"
+            ],
+            "component": "MaterialRow",
+            "id": "row-10",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "row-10"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "node-11",
+            "title": "Forecast"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a12",
+            "label": "Propose an Agent here",
+            "variant": "basic"
+          },
+          {
+            "children": [
+              "a12"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "⚠",
+            "expanded": true,
+            "id": "node-13",
+            "title": "Monitor"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a14",
+            "label": "Agent 29 · Candidate",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a14"
+            ],
+            "component": "MaterialRow",
+            "id": "row-15",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "row-15"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "node-16",
+            "title": "Schedule (proposed)"
+          },
+          {
+            "children": [
+              "node-11",
+              "node-13",
+              "node-16"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "2 Agents",
+            "expanded": true,
+            "id": "node-17",
+            "title": "Sales"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a18",
+            "label": "Agent 30 · Deployed",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a18"
+            ],
+            "component": "MaterialRow",
+            "id": "row-19",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "row-19"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "node-20",
+            "title": "Forecast"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a21",
+            "label": "Agent 31 · Assessed",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a21"
+            ],
+            "component": "MaterialRow",
+            "id": "row-22",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "row-22"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "node-23",
+            "title": "Monitor"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a24",
+            "label": "Propose an Agent here",
+            "variant": "basic"
+          },
+          {
+            "children": [
+              "a24"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "⚠",
+            "expanded": true,
+            "id": "node-25",
+            "title": "Schedule"
+          },
+          {
+            "children": [
+              "node-20",
+              "node-23",
+              "node-25"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "2 Agents",
+            "expanded": true,
+            "id": "node-26",
+            "title": "Service"
+          },
+          {
+            "children": [
+              "t-1",
+              "node-8",
+              "node-17",
+              "node-26"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "_mock_item": "1h Card: before and after (Teams · Adaptive Card). No Accept button on purpose (drafts are accepted elsewhere, by someone other than the author). Deviation: no 'Copy link' (no clipboard action in A2UI/AC)",
+  "surface": {
+    "components": [
+      {
+        "kind": "key_value",
+        "title": "Proposal · open · needs review: Retire Agent 25",
+        "pairs": [
+          {
+            "label": "Lifecycle",
+            "before": "Deployed",
+            "value": "Retired"
+          },
+          {
+            "label": "Reason",
+            "value": "Replaced (from your message)"
+          },
+          {
+            "label": "Assumed",
+            "value": "Owner, links and AI Act class unchanged"
+          },
+          {
+            "label": "Reviewer",
+            "value": "Anyone with review rights except you"
+          }
+        ]
+      },
+      {
+        "kind": "button",
+        "label": "Open in the portfolio review",
+        "primary": true,
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/review/d/01M636Z8XN"
+        }
+      }
+    ]
+  }
+}

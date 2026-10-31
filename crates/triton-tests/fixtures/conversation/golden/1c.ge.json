@@ -1,0 +1,203 @@
+{
+  "_actions": {
+    "a11": "List all planned Agents",
+    "a13": "Which planned Agents have a high AI Act class?",
+    "a14": "Which planned Agents have no owner?",
+    "a15": "What do the planned Agents depend on?"
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "6 planned Agents",
+            "usageHint": "subtitle1"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-2",
+            "text": "Agent 3",
+            "usageHint": "body1"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-3",
+            "text": "Requirements: Monitor — Head of IT Operations",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "t-2",
+              "t-3"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-4"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-5",
+            "text": "Agent 8",
+            "usageHint": "body1"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-6",
+            "text": "Design: Schedule — Data Protection Officer",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "t-5",
+              "t-6"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-7"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-8",
+            "text": "Agent 12",
+            "usageHint": "body1"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-9",
+            "text": "Design: Forecast — no owner",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "t-8",
+              "t-9"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-10"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a11",
+            "label": "Show 3 more",
+            "variant": "flat"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-12",
+            "text": "Ask next (sent as a new question)",
+            "usageHint": "body2"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a13",
+            "label": "Planned with high AI Act class",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a14",
+            "label": "Planned without owner",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a15",
+            "label": "Dependencies of planned Agents",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a13",
+              "a14"
+            ],
+            "component": "MaterialRow",
+            "id": "row-16",
+            "justify": "start"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a15"
+            ],
+            "component": "MaterialRow",
+            "id": "row-17",
+            "justify": "start"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a11"
+            ],
+            "component": "MaterialRow",
+            "id": "row-18",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "t-1",
+              "col-4",
+              "col-7",
+              "col-10",
+              "t-12",
+              "row-16",
+              "row-17",
+              "row-18"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

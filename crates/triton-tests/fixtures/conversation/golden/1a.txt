@@ -1,0 +1,19 @@
+**6 Agents are planned.**
+
+Agent · capability · owner
+1. Agent 3 — Requirements: Monitor · Head of IT Operations
+   https://app.example.com/acme/open?object=agent%3Aagent-3
+2. Agent 8 — Design: Schedule · Data Protection Officer
+   https://app.example.com/acme/open?object=agent%3Aagent-8
+3. Agent 12 — Design: Forecast · no owner
+   https://app.example.com/acme/open?object=agent%3Aagent-12
+4. Agent 17 — Validation: Forecast · Head of Quality Assurance
+   https://app.example.com/acme/open?object=agent%3Aagent-17
+5. Agent 21 — Planning: Schedule · Head of Production Planning
+   https://app.example.com/acme/open?object=agent%3Aagent-21
+6. Agent 28 — Sales: Forecast · Data Protection Officer
+   https://app.example.com/acme/open?object=agent%3Aagent-28
+
+Open in the portfolio: https://app.example.com/acme/analyse?lifecycle=planned
+
+Portfolio as of 18:03. Nothing was changed.

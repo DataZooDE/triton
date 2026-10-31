@@ -1,0 +1,121 @@
+{
+  "_actions": {},
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "Request · done · 3:52",
+            "usageHint": "subtitle2"
+          },
+          {
+            "component": "MaterialProgressBar",
+            "id": "pb-2",
+            "mode": "determinate",
+            "value": 100.0
+          },
+          {
+            "color": "primary",
+            "component": "MaterialIcon",
+            "icon": "check_circle",
+            "id": "ic-3"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-4",
+            "text": "Found 4 Agents without an owner",
+            "usageHint": "body2"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "ic-3",
+              "t-4"
+            ],
+            "component": "MaterialRow",
+            "id": "row-5",
+            "justify": "start"
+          },
+          {
+            "color": "primary",
+            "component": "MaterialIcon",
+            "icon": "check_circle",
+            "id": "ic-6"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-7",
+            "text": "Drafted proposals",
+            "usageHint": "body2"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "ic-6",
+              "t-7"
+            ],
+            "component": "MaterialRow",
+            "id": "row-8",
+            "justify": "start"
+          },
+          {
+            "color": "primary",
+            "component": "MaterialIcon",
+            "icon": "check_circle",
+            "id": "ic-9"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-10",
+            "text": "Filed drafts for review",
+            "usageHint": "body2"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "ic-9",
+              "t-10"
+            ],
+            "component": "MaterialRow",
+            "id": "row-11",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "t-1",
+              "pb-2",
+              "row-5",
+              "row-8",
+              "row-11"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

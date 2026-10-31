@@ -1,0 +1,39 @@
+{
+  "_mock_item": "1l Card that updates in place — done state",
+  "surface": {
+    "components": [
+      {
+        "kind": "text",
+        "value": "**4 drafts ready for review**"
+      },
+      {
+        "kind": "progress",
+        "title": "Request · done · 3:52",
+        "fraction": 1.0,
+        "steps": [
+          {
+            "label": "Found 4 Agents without an owner",
+            "state": "done"
+          },
+          {
+            "label": "Drafted proposals",
+            "state": "done"
+          },
+          {
+            "label": "Filed drafts for review",
+            "state": "done"
+          }
+        ]
+      },
+      {
+        "kind": "button",
+        "label": "Review all 4",
+        "primary": true,
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/review/c/9H4P"
+        }
+      }
+    ]
+  }
+}

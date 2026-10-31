@@ -1,0 +1,36 @@
+{
+  "_mock_item": "1f A2UI chips (Gemini · A2UI). Deviation: A2UI v0.9 cannot fill the host composer, so each chip sends its complete request (as 1d) — no 'Edit message'",
+  "surface": {
+    "components": [
+      {
+        "kind": "text",
+        "value": "3 Agents match. Pick one; it is sent as a new, complete request."
+      },
+      {
+        "kind": "chips",
+        "chips": [
+          {
+            "label": "Agent 2 · Req. Forecast",
+            "message": "Retire the agent \"Agent 2\" (Requirements: Forecast)"
+          },
+          {
+            "label": "Agent 20 · Design Monitor",
+            "message": "Retire the agent \"Agent 20\" (Design: Monitor)"
+          },
+          {
+            "label": "Agent 28 · Sales Forecast",
+            "message": "Retire the agent \"Agent 28\" (Sales: Forecast)"
+          }
+        ]
+      },
+      {
+        "kind": "button",
+        "label": "Open in the portfolio",
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/analyse?q=Agent%202"
+        }
+      }
+    ]
+  }
+}

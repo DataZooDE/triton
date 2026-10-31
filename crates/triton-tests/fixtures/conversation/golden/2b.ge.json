@@ -1,0 +1,207 @@
+{
+  "_actions": {
+    "a14": "Which Operations Agents have no owner?",
+    "a15": "Which data products does Operations need?",
+    "a2": "Show Agent 26",
+    "a5": "Propose an Agent for Logistics: Monitor",
+    "a7": "Show Agent 14"
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "Operations · 8 Agents · 9 capabilities",
+            "usageHint": "subtitle1"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a2",
+            "label": "Agent 26 · In delivery",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a2"
+            ],
+            "component": "MaterialRow",
+            "id": "row-3",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "row-3"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "node-4",
+            "title": "Forecast"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a5",
+            "label": "none · propose",
+            "variant": "basic"
+          },
+          {
+            "children": [
+              "a5"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "⚠",
+            "expanded": true,
+            "id": "node-6",
+            "title": "Monitor"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a7",
+            "label": "Agent 14 · Planned",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a7"
+            ],
+            "component": "MaterialRow",
+            "id": "row-8",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "row-8"
+            ],
+            "component": "MaterialExpansionPanel",
+            "expanded": false,
+            "id": "node-9",
+            "title": "Schedule"
+          },
+          {
+            "children": [
+              "node-4",
+              "node-6",
+              "node-9"
+            ],
+            "component": "MaterialExpansionPanel",
+            "description": "2 Agents",
+            "expanded": true,
+            "id": "node-10",
+            "title": "Logistics"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-11",
+            "text": "Planning — 3 Agents",
+            "usageHint": "body2"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-12",
+            "text": "Production — 3 Agents · 1 proposed capability",
+            "usageHint": "body2"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-13",
+            "text": "Ask next",
+            "usageHint": "body2"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a14",
+            "label": "Operations Agents without owner",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a15",
+            "label": "Data products Operations needs",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a14",
+              "a15"
+            ],
+            "component": "MaterialRow",
+            "id": "row-16",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "t-1",
+              "node-10",
+              "t-11",
+              "t-12",
+              "t-13",
+              "row-16"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

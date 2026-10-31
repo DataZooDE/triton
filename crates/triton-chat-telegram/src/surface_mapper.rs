@@ -192,11 +192,16 @@ pub fn try_extract_form_only(result: &Value) -> Option<FormOnly> {
     if surface.components.len() != 1 {
         return None;
     }
+    // A TEMPLATE form (`send_template`) is not a tool call to collect
+    // field by field: it degrades to its copy line in `render` (no
+    // multi-turn), so it is never intercepted here (F2).
     let Component::Form {
         submit_label: _,
         title,
         fields,
         tool,
+        send_template: None,
+        ..
     } = surface.components.into_iter().next().unwrap()
     else {
         return None;
@@ -276,6 +281,13 @@ pub fn render(
     let mut first_dashboard: Option<RasterDashboard> = None;
     for c in &surface.components {
         match c {
+            // Conversation components (and action/template controls):
+            // the shared, no-multi-turn plain-text degradation.
+            c if c.is_conversation() => {
+                if let Some(t) = triton_core::a2ui::text::degrade(c) {
+                    chunks.push(PreRender::text(&t));
+                }
+            }
             Component::Text { value, .. } => {
                 chunks.push(PreRender::text(value));
             }
@@ -364,6 +376,7 @@ pub fn render(
                 options,
                 tool,
                 args_key,
+                ..
             } => {
                 if options.is_empty() {
                     deferred_selections += 1;
@@ -452,6 +465,9 @@ pub fn render(
                     deferred_dashboards += 1;
                 }
             }
+            // Every remaining kind is a conversation kind, taken above
+            // (`Component::is_conversation` is exhaustive).
+            other => debug_assert!(other.is_conversation()),
         }
     }
     // Codex PR 21 review concern: a button-only Surface (no Text
@@ -766,6 +782,8 @@ mod tests {
                     ],
                     tool: "narrate".into(),
                     args_key: "s".into(),
+                    style: Default::default(),
+                    submit: None,
                 },
             ],
         };
@@ -916,6 +934,8 @@ mod tests {
                     options: vec![],
                     tool: "narrate".into(),
                     args_key: "s".into(),
+                    style: Default::default(),
+                    submit: None,
                 },
             ],
         };
@@ -943,6 +963,7 @@ mod tests {
                     tool: "narrate".into(),
                     args: json!({}),
                     resource: None,
+                    action: None,
                 },
             ],
         };
@@ -990,6 +1011,7 @@ mod tests {
                     tool: "narrate".into(),
                     args: big_args,
                     resource: None,
+                    action: None,
                 },
             ],
         };
@@ -1042,6 +1064,7 @@ mod tests {
                 tool: "narrate".into(),
                 args: json!({}),
                 resource: None,
+                action: None,
             }],
         };
         let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
@@ -1171,9 +1194,13 @@ mod tests {
                     label: "Your name".into(),
                     kind: FormFieldKind::String,
                     required: true,
+                    options: Vec::new(),
+                    style: Default::default(),
                 }],
                 submit_label: "Send".into(),
                 tool: "echo".into(),
+                preview_label: None,
+                send_template: None,
             }],
         };
         let result = json!({ "surface": s });
@@ -1204,9 +1231,13 @@ mod tests {
                         label: "Your name".into(),
                         kind: FormFieldKind::String,
                         required: true,
+                        options: Vec::new(),
+                        style: Default::default(),
                     }],
                     submit_label: "Send".into(),
                     tool: "echo".into(),
+                    preview_label: None,
+                    send_template: None,
                 },
             ],
         };

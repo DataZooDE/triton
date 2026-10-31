@@ -175,6 +175,7 @@ impl Tool for Narrate {
                     tool: "narrate".into(),
                     args: serde_json::json!({ "subject": parsed.subject }),
                     resource: None,
+                    action: None,
                 },
             ],
         };
@@ -264,6 +265,8 @@ impl Tool for DemoPanel {
                     ],
                     tool: "narrate".into(),
                     args_key: "subject".into(),
+                    style: Default::default(),
+                    submit: None,
                 },
                 Component::Form {
                     title: "Customer feedback".into(),
@@ -275,6 +278,8 @@ impl Tool for DemoPanel {
                             label: "Your name".into(),
                             kind: FormFieldKind::String,
                             required: true,
+                            options: Vec::new(),
+                            style: Default::default(),
                         },
                         FormField {
                             placeholder: None,
@@ -283,6 +288,8 @@ impl Tool for DemoPanel {
                             label: "Rating (1-5)".into(),
                             kind: FormFieldKind::Integer,
                             required: true,
+                            options: Vec::new(),
+                            style: Default::default(),
                         },
                         FormField {
                             placeholder: None,
@@ -291,10 +298,14 @@ impl Tool for DemoPanel {
                             label: "OK to follow up?".into(),
                             kind: FormFieldKind::Boolean,
                             required: false,
+                            options: Vec::new(),
+                            style: Default::default(),
                         },
                     ],
                     submit_label: "Send feedback".into(),
                     tool: "echo".into(),
+                    preview_label: None,
+                    send_template: None,
                 },
                 Component::Button {
                     primary: false,
@@ -302,6 +313,7 @@ impl Tool for DemoPanel {
                     tool: "demo_panel".into(),
                     args: serde_json::json!({}),
                     resource: None,
+                    action: None,
                 },
             ],
         };
@@ -362,9 +374,13 @@ impl Tool for FormOnlyDemo {
                     label: "Your message".into(),
                     kind: FormFieldKind::String,
                     required: true,
+                    options: Vec::new(),
+                    style: Default::default(),
                 }],
                 submit_label: "Send".into(),
                 tool: "echo".into(),
+                preview_label: None,
+                send_template: None,
             }],
         };
         Ok(serde_json::json!({ "surface": surface }))
@@ -423,6 +439,8 @@ impl Tool for FormOnlyDemoMulti {
                         label: "name".into(),
                         kind: FormFieldKind::String,
                         required: true,
+                        options: Vec::new(),
+                        style: Default::default(),
                     },
                     FormField {
                         placeholder: None,
@@ -431,6 +449,8 @@ impl Tool for FormOnlyDemoMulti {
                         label: "age".into(),
                         kind: FormFieldKind::Integer,
                         required: true,
+                        options: Vec::new(),
+                        style: Default::default(),
                     },
                     FormField {
                         placeholder: None,
@@ -439,6 +459,8 @@ impl Tool for FormOnlyDemoMulti {
                         label: "subscribe".into(),
                         kind: FormFieldKind::Boolean,
                         required: false,
+                        options: Vec::new(),
+                        style: Default::default(),
                     },
                 ],
                 submit_label: "Send".into(),
@@ -450,6 +472,8 @@ impl Tool for FormOnlyDemoMulti {
                 // single `message` string field, additional-
                 // properties: false).
                 tool: "submitted_form".into(),
+                preview_label: None,
+                send_template: None,
             }],
         };
         Ok(serde_json::json!({ "surface": surface }))

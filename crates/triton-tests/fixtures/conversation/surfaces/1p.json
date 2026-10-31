@@ -1,0 +1,36 @@
+{
+  "_mock_item": "1p Stale object while filling the form (Teams / A2UI). Deviation: no Discard button (nothing was filed, so nothing to discard)",
+  "surface": {
+    "components": [
+      {
+        "kind": "notice",
+        "tone": "warn",
+        "title": "Agent 28 changed",
+        "text": "Changed at 18:10 since this card was shown: lifecycle Planned → In delivery. Your change was not filed."
+      },
+      {
+        "kind": "key_value",
+        "title": "Your input is kept:",
+        "pairs": [
+          {
+            "label": "Owner",
+            "value": "Finance operations"
+          },
+          {
+            "label": "Reason",
+            "value": "Finance took over the process in October."
+          }
+        ]
+      },
+      {
+        "kind": "button",
+        "label": "Check again with current version",
+        "primary": true,
+        "action": {
+          "type": "send_message",
+          "text": "Set the owner of Agent 28 to \"Finance operations\". Reason: Finance took over the process in October."
+        }
+      }
+    ]
+  }
+}

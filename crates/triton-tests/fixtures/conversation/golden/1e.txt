@@ -1,0 +1,5 @@
+3 match "Agent 2". Nothing was changed yet.
+
+Which Agent should be retired?
+› Retire the agent "‹Agent›". Reason: ‹Reason (optional)›
+  Agent: Agent 2 · Requirements: Forecast · Assessed | Agent 20 · Design: Monitor · Deployed | Agent 28 · Sales: Forecast · Planned

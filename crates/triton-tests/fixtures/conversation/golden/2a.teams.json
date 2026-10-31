@@ -1,0 +1,101 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "text": "Find Agents by capability",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "choices": [
+        {
+          "title": "Commercial & service",
+          "value": "Commercial & service"
+        },
+        {
+          "title": "Operations",
+          "value": "Operations"
+        },
+        {
+          "title": "Product & engineering",
+          "value": "Product & engineering"
+        }
+      ],
+      "id": "t1.domain",
+      "isRequired": true,
+      "label": "Domain",
+      "style": "compact",
+      "type": "Input.ChoiceSet",
+      "value": "Commercial & service"
+    },
+    {
+      "choices": [
+        {
+          "title": "All areas",
+          "value": ""
+        },
+        {
+          "title": "Finance",
+          "value": "Finance"
+        },
+        {
+          "title": "Sales",
+          "value": "Sales"
+        },
+        {
+          "title": "Service",
+          "value": "Service"
+        }
+      ],
+      "id": "t1.area",
+      "isRequired": false,
+      "label": "Area (optional)",
+      "style": "compact",
+      "type": "Input.ChoiceSet"
+    },
+    {
+      "choices": [
+        {
+          "title": "Include proposed",
+          "value": "including proposed capabilities"
+        },
+        {
+          "title": "Only capabilities without Agents",
+          "value": "only capabilities without Agents"
+        }
+      ],
+      "id": "t1.scope",
+      "isRequired": true,
+      "label": "Show",
+      "style": "expanded",
+      "type": "Input.ChoiceSet",
+      "value": "including proposed capabilities"
+    },
+    {
+      "isSubtle": true,
+      "size": "Small",
+      "text": "Will be sent as: Show the capability map for ‹Domain›, area ‹Area (optional)›, ‹Show›",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "data": {
+            "ct": "__send_message|{\"tpl\":\"Show the capability map for {t1.domain}[[, area {t1.area}]], {t1.scope}\"}"
+          },
+          "title": "Show map",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

@@ -1,0 +1,94 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "items": [
+        {
+          "text": "As of 18:03. If someone else changes it first, we tell you.",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "style": "accent",
+      "type": "Container"
+    },
+    {
+      "text": "Change Agent 28",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "choices": [
+        {
+          "title": "Owner",
+          "value": "owner"
+        },
+        {
+          "title": "Lifecycle",
+          "value": "lifecycle"
+        },
+        {
+          "title": "AI Act class",
+          "value": "AI Act class"
+        }
+      ],
+      "id": "t1.field",
+      "isRequired": true,
+      "label": "What to change",
+      "style": "compact",
+      "type": "Input.ChoiceSet",
+      "value": "owner"
+    },
+    {
+      "choices": [
+        {
+          "title": "Finance operations (Org. unit)",
+          "value": "Finance operations"
+        },
+        {
+          "title": "Data Protection Officer",
+          "value": "Data Protection Officer"
+        }
+      ],
+      "id": "t1.value",
+      "isRequired": true,
+      "label": "New value",
+      "style": "compact",
+      "type": "Input.ChoiceSet"
+    },
+    {
+      "id": "t1.reason",
+      "isMultiline": true,
+      "isRequired": false,
+      "label": "Why",
+      "placeholder": "Finance took over the process in October.",
+      "type": "Input.Text"
+    },
+    {
+      "isSubtle": true,
+      "size": "Small",
+      "text": "Will be sent as: Set the ‹What to change› of Agent 28 to \"‹New value›\". Reason: ‹Why›",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "data": {
+            "ct": "__send_message|{\"tpl\":\"Set the {t1.field} of Agent 28 to \\\"{t1.value}\\\".[[ Reason: {t1.reason}]]\"}"
+          },
+          "title": "File as draft for review",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

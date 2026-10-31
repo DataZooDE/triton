@@ -1,0 +1,120 @@
+{
+  "_actions": {
+    "a2": "Which Operations Agents have no owner?",
+    "a3": "Which data products does Operations need?"
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "Ask next",
+            "usageHint": "body2"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a2",
+            "label": "Operations Agents without owner",
+            "variant": "stroked"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a3",
+            "label": "Data products Operations needs",
+            "variant": "stroked"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a2",
+              "a3"
+            ],
+            "component": "MaterialRow",
+            "id": "row-4",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "t-1",
+              "row-4"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    },
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "IFrameUrl",
+            "height": 640,
+            "id": "frame",
+            "url": "https://app.example.com/acme/open?view=capability-map&domain=operations&embed=1"
+          },
+          {
+            "autoOpen": false,
+            "cardIcon": "account_tree",
+            "cardTitle": "Expand map ⤢",
+            "children": [
+              "frame"
+            ],
+            "component": "Canvas",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

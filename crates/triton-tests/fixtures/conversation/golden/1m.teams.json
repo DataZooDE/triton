@@ -1,0 +1,113 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "text": "Find Agents",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "choices": [
+        {
+          "title": "Candidate",
+          "value": "candidate"
+        },
+        {
+          "title": "Assessed",
+          "value": "assessed"
+        },
+        {
+          "title": "Planned",
+          "value": "planned"
+        },
+        {
+          "title": "In delivery",
+          "value": "in delivery"
+        },
+        {
+          "title": "Deployed",
+          "value": "deployed"
+        }
+      ],
+      "id": "t1.lifecycle",
+      "isRequired": true,
+      "label": "Lifecycle",
+      "style": "expanded",
+      "type": "Input.ChoiceSet",
+      "value": "planned"
+    },
+    {
+      "choices": [
+        {
+          "title": "High",
+          "value": "high"
+        },
+        {
+          "title": "Limited",
+          "value": "limited"
+        },
+        {
+          "title": "Minimal",
+          "value": "minimal"
+        },
+        {
+          "title": "Unassessed",
+          "value": "unassessed"
+        }
+      ],
+      "id": "t1.ai_act",
+      "isRequired": true,
+      "label": "AI Act class",
+      "style": "expanded",
+      "type": "Input.ChoiceSet",
+      "value": "high"
+    },
+    {
+      "choices": [
+        {
+          "title": "Any owner",
+          "value": ""
+        },
+        {
+          "title": "Data Protection Officer",
+          "value": "Data Protection Officer"
+        },
+        {
+          "title": "Head of IT Operations",
+          "value": "Head of IT Operations"
+        }
+      ],
+      "id": "t1.owner",
+      "isRequired": false,
+      "label": "Owner",
+      "style": "compact",
+      "type": "Input.ChoiceSet"
+    },
+    {
+      "isSubtle": true,
+      "size": "Small",
+      "text": "Will be sent as: Find ‹Lifecycle› Agents with AI Act class ‹AI Act class› owned by ‹Owner›",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "data": {
+            "ct": "__send_message|{\"tpl\":\"Find {t1.lifecycle} Agents with AI Act class {t1.ai_act}[[ owned by {t1.owner}]]\"}"
+          },
+          "title": "Show Agents",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

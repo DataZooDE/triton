@@ -1,0 +1,5 @@
+Find Agents by capability
+› Show the capability map for ‹Domain›, area ‹Area (optional)›, ‹Show›
+  Domain: Commercial & service | Operations | Product & engineering
+  Area (optional): All areas | Finance | Sales | Service
+  Show: Include proposed | Only capabilities without Agents

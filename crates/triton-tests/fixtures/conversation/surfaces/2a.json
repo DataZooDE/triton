@@ -1,0 +1,79 @@
+{
+  "_mock_item": "2a Adaptive Card: input card. Deviations: the two toggle chips are one radio choice; no live count",
+  "surface": {
+    "components": [
+      {
+        "kind": "form",
+        "title": "Find Agents by capability",
+        "submit_label": "Show map",
+        "fields": [
+          {
+            "name": "domain",
+            "label": "Domain",
+            "kind": "select",
+            "required": true,
+            "default": "Commercial & service",
+            "options": [
+              {
+                "label": "Commercial & service",
+                "value": "Commercial & service"
+              },
+              {
+                "label": "Operations",
+                "value": "Operations"
+              },
+              {
+                "label": "Product & engineering",
+                "value": "Product & engineering"
+              }
+            ]
+          },
+          {
+            "name": "area",
+            "label": "Area (optional)",
+            "kind": "select",
+            "required": false,
+            "options": [
+              {
+                "label": "All areas",
+                "value": ""
+              },
+              {
+                "label": "Finance",
+                "value": "Finance"
+              },
+              {
+                "label": "Sales",
+                "value": "Sales"
+              },
+              {
+                "label": "Service",
+                "value": "Service"
+              }
+            ]
+          },
+          {
+            "name": "scope",
+            "label": "Show",
+            "kind": "select",
+            "required": true,
+            "style": "radio",
+            "default": "including proposed capabilities",
+            "options": [
+              {
+                "label": "Include proposed",
+                "value": "including proposed capabilities"
+              },
+              {
+                "label": "Only capabilities without Agents",
+                "value": "only capabilities without Agents"
+              }
+            ]
+          }
+        ],
+        "send_template": "Show the capability map for {domain}[[, area {area}]], {scope}",
+        "preview_label": "Will be sent as"
+      }
+    ]
+  }
+}

@@ -169,6 +169,17 @@ pub fn render(
 
     for c in &surface.components {
         match c {
+            // Conversation components (and action/template controls):
+            // the shared, no-multi-turn plain-text degradation.
+            c if c.is_conversation() => {
+                if let Some(t) = triton_core::a2ui::text::degrade(c) {
+                    chunks.push(t.clone());
+                    raw_sources.push(Some(RawChunk {
+                        kind: RawKind::Text,
+                        raw: t,
+                    }));
+                }
+            }
             Component::Text { value, .. } => {
                 chunks.push(value.clone());
                 raw_sources.push(Some(RawChunk {
@@ -236,6 +247,7 @@ pub fn render(
                 options,
                 tool,
                 args_key,
+                ..
             } => {
                 // #94: the FIRST Selection becomes a Cloud API list;
                 // additional selections defer (one list per message).
@@ -301,6 +313,9 @@ pub fn render(
                     deferred_dashboards += 1;
                 }
             }
+            // Every remaining kind is a conversation kind, taken above
+            // (`Component::is_conversation` is exhaustive).
+            other => debug_assert!(other.is_conversation()),
         }
     }
 
@@ -662,6 +677,7 @@ mod tests {
                     tool: "narrate".into(),
                     args: json!({}),
                     resource: None,
+                    action: None,
                 },
                 Component::Selection {
                     prompt: "pick".into(),
@@ -671,6 +687,8 @@ mod tests {
                     }],
                     tool: "narrate".into(),
                     args_key: "s".into(),
+                    style: Default::default(),
+                    submit: None,
                 },
                 Component::Form {
                     title: "form".into(),
@@ -681,9 +699,13 @@ mod tests {
                         label: "Name".into(),
                         kind: FormFieldKind::String,
                         required: false,
+                        options: Vec::new(),
+                        style: Default::default(),
                     }],
                     submit_label: "Send".into(),
                     tool: "narrate".into(),
+                    preview_label: None,
+                    send_template: None,
                 },
                 Component::Dashboard {
                     title: "Secrets".into(),
@@ -779,6 +801,7 @@ mod tests {
                 tool: "narrate".into(),
                 args: json!({}),
                 resource: None,
+                action: None,
             }],
         };
         let r = render(&s, &KEY, "acme", "u1").expect("renders");
@@ -799,6 +822,7 @@ mod tests {
             tool: "narrate".into(),
             args: json!({ "subject": label }),
             resource: None,
+            action: None,
         };
         let s = Surface {
             components: vec![

@@ -41,12 +41,13 @@ fn component_to_json(c: &Component) -> Value {
             label,
             tool,
             args,
+            action,
             resource,
             primary,
         } => {
             let mut b = json!({
                 "label": label,
-                "action": { "tool": tool, "args": args }
+                "action": super::button_action(tool, args, action.as_ref())
             });
             if let Some(r) = resource {
                 b["resource"] = json!(r);
@@ -61,6 +62,7 @@ fn component_to_json(c: &Component) -> Value {
             options,
             tool,
             args_key,
+            ..
         } => json!({
             "Selection": {
                 "prompt": prompt,
@@ -76,6 +78,7 @@ fn component_to_json(c: &Component) -> Value {
             fields,
             submit_label,
             tool,
+            ..
         } => json!({
             "Form": {
                 "title": title,
@@ -124,6 +127,21 @@ fn component_to_json(c: &Component) -> Value {
                 })).collect::<Vec<_>>(),
             }
         }),
+        // Conversation components: v0.8 is frozen for the Explorer; they
+        // ride as the canonical object under their PascalCase name so a
+        // v0.8 host can at least see (and skip) them.
+        // Every remaining kind is a conversation block
+        // (`Component::is_conversation_block`): no renamed fields.
+        _ => {
+            debug_assert!(c.is_conversation_block());
+            let mut v = serde_json::to_value(c).unwrap_or_default();
+            let kind = v
+                .as_object_mut()
+                .and_then(|o| o.remove("kind"))
+                .and_then(|k| k.as_str().map(pascal))
+                .unwrap_or_default();
+            json!({ kind: v })
+        }
     };
     json!({ "Component": inner })
 }
@@ -144,7 +162,23 @@ fn form_field_to_json(f: &FormField) -> Value {
     if let Some(d) = &f.default_value {
         o["default"] = d.clone();
     }
+    if !f.options.is_empty() {
+        o["options"] = json!(f.options);
+    }
     o
+}
+
+/// `key_value` → `KeyValue`.
+fn pascal(snake: &str) -> String {
+    snake
+        .split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next()
+                .map(|f| f.to_ascii_uppercase().to_string() + c.as_str())
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 fn form_kind_str(k: FormFieldKind) -> &'static str {
@@ -152,5 +186,7 @@ fn form_kind_str(k: FormFieldKind) -> &'static str {
         FormFieldKind::String => "string",
         FormFieldKind::Integer => "integer",
         FormFieldKind::Boolean => "boolean",
+        FormFieldKind::Select => "select",
+        FormFieldKind::Text => "text",
     }
 }

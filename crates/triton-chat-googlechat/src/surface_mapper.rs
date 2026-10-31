@@ -135,6 +135,13 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     let mut deferred_dashboards = 0usize;
     for c in &surface.components {
         match c {
+            // Conversation components (and action/template controls):
+            // the shared, no-multi-turn plain-text degradation.
+            c if c.is_conversation() => {
+                if let Some(t) = triton_core::a2ui::text::degrade(c) {
+                    chunks.push(t);
+                }
+            }
             Component::Text { value, .. } => {
                 // The answer: normalise the model's portable markdown (bold,
                 // bullets, links, headers) into Google Chat's text syntax.
@@ -159,7 +166,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
                     let rendered: Vec<String> = items
                         .iter()
                         .map(|i| {
-                            if i.resource.starts_with("https://") {
+                            if triton_core::links::is_allowed_link(&i.resource) {
                                 format!("<{}|{}>", i.resource, i.label)
                             } else {
                                 i.label.clone()
@@ -196,6 +203,9 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             Component::Dashboard { .. } => {
                 deferred_dashboards += 1;
             }
+            // Every remaining kind is a conversation kind, taken above
+            // (`Component::is_conversation` is exhaustive).
+            other => debug_assert!(other.is_conversation()),
         }
     }
     if chunks.is_empty() {
@@ -624,6 +634,7 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
                 options,
                 tool,
                 args_key,
+                ..
             } => Some(InteractiveSpec::Selection {
                 prompt: prompt.clone(),
                 options: options
@@ -638,6 +649,7 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
                 fields,
                 submit_label,
                 tool,
+                ..
             } => Some(InteractiveSpec::Form {
                 title: title.clone(),
                 submit_label: submit_label.clone(),
@@ -661,7 +673,7 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
         for c in &surface.components {
             if let Component::Sources { items } = c {
                 for it in items {
-                    if !it.resource.starts_with("https://") {
+                    if !triton_core::links::is_allowed_link(&it.resource) {
                         continue;
                     }
                     if let Some((skill, id)) = source_skill_id(it) {
@@ -1272,6 +1284,7 @@ mod tests {
                     tool: "narrate".into(),
                     args: serde_json::json!({}),
                     resource: None,
+                    action: None,
                 },
                 Component::Selection {
                     prompt: "pick".into(),
@@ -1281,6 +1294,8 @@ mod tests {
                     }],
                     tool: "narrate".into(),
                     args_key: "s".into(),
+                    style: Default::default(),
+                    submit: None,
                 },
                 Component::Form {
                     title: "Title".into(),
@@ -1291,9 +1306,13 @@ mod tests {
                         label: "L".into(),
                         kind: FormFieldKind::String,
                         required: true,
+                        options: Vec::new(),
+                        style: Default::default(),
                     }],
                     submit_label: "Go".into(),
                     tool: "echo".into(),
+                    preview_label: None,
+                    send_template: None,
                 },
                 Component::Dashboard {
                     title: "Secrets".into(),
@@ -1333,6 +1352,7 @@ mod tests {
                 tool: "narrate".into(),
                 args: serde_json::json!({}),
                 resource: None,
+                action: None,
             }],
         };
         assert!(matches!(render(&s), Err(RenderError::EmptyAfterRender)));

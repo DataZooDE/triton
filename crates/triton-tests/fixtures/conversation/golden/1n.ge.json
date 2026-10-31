@@ -1,0 +1,116 @@
+{
+  "_actions": {
+    "a2": "Change Agent 28",
+    "a3": "What does Agent 28 depend on?"
+  },
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "caption": "Agent 28 · Planned",
+            "columns": [
+              {
+                "field": "label",
+                "header": ""
+              },
+              {
+                "field": "value",
+                "header": ""
+              }
+            ],
+            "component": "MaterialTable",
+            "id": "kv-1",
+            "rows": [
+              {
+                "label": "Capability",
+                "value": "Commercial & service › Sales: Forecast"
+              },
+              {
+                "label": "Owner",
+                "value": "Data Protection Officer"
+              },
+              {
+                "label": "AI Act class",
+                "value": "Minimal"
+              },
+              {
+                "label": "Depends on",
+                "value": "Customer master, Pricing API"
+              },
+              {
+                "label": "Open drafts",
+                "value": "none"
+              }
+            ]
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a2",
+            "label": "Request a change",
+            "variant": "flat"
+          },
+          {
+            "action": {
+              "event": {
+                "context": {},
+                "name": "send_message"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "a3",
+            "label": "Dependencies",
+            "variant": "flat"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "a2",
+              "a3"
+            ],
+            "component": "MaterialRow",
+            "id": "row-4",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "kv-1",
+              "row-4"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}
