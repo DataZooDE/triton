@@ -465,12 +465,14 @@ pub(crate) fn turn_context_for(
     state: &SpecState,
     context_id: &str,
     a2ui: bool,
+    events: Vec<Value>,
 ) -> triton_core::ContextOverrides {
     turn_context(
         &state.config,
         state.a2a.dispatcher.surfaces(),
         context_id,
         a2ui,
+        events,
     )
 }
 
@@ -483,12 +485,19 @@ fn turn_context(
     surfaces: &triton_core::SurfaceRegistry,
     context_id: &str,
     a2ui: bool,
+    events: Vec<Value>,
 ) -> triton_core::ContextOverrides {
     let mut meta = serde_json::Map::new();
     meta.insert("protocol".into(), json!("a2a"));
     meta.insert("a2a_context_id".into(), json!(context_id));
     if let Some(slug) = config.a2a_path.strip_prefix("/a2a/") {
         meta.insert("agent".into(), json!(slug));
+    }
+    // The client's A2UI messages of this turn (clicks with their resolved
+    // bindings, render errors), under `client`: client-asserted data, never
+    // mistaken for Triton-authored keys (doc/upstream-agent-contract.md §2b).
+    if !events.is_empty() {
+        meta.insert("client".into(), json!({ "a2ui_events": events }));
     }
     triton_core::ContextOverrides {
         triton_meta: meta,
@@ -528,7 +537,7 @@ fn wants_immediate_task(params: &Value) -> bool {
 /// meant to read. Non-text parts (files, structured data) are ignored
 /// rather than rejected: a client that also sends a file should still
 /// get an answer to its words.
-fn text_from_params(params: &Value) -> Option<Inbound> {
+fn text_from_params(params: &Value, client: &A2uiClient) -> Option<Inbound> {
     let parts = params.get("message")?.get("parts")?.as_array()?;
     // A2UI button click: Gemini Enterprise posts back the action as a
     // `application/json+a2ui` DataPart. Its signed action id names the
@@ -564,10 +573,129 @@ fn text_from_params(params: &Value) -> Option<Inbound> {
         .collect::<Vec<_>>()
         .join("\n");
     let trimmed = text.trim();
-    (!trimmed.is_empty()).then(|| Inbound {
+    if trimmed.is_empty() {
+        // An event-only turn (a producer's button, a render error): the tool
+        // reads the event from `_triton.client`.
+        return client.fallback.clone().map(|text| Inbound {
+            text,
+            open_doc: None,
+        });
+    }
+    Some(Inbound {
         text: trimmed.to_string(),
         open_doc: None,
     })
+}
+
+/// One turn's A2UI client messages, normalised once for both bindings.
+///
+/// A data part qualifies when the request activated the A2UI extension or the
+/// part itself is typed `application/json+a2ui` (0.3: `metadata.mimeType`;
+/// 1.0: `mediaType`). Its `data` is one client message or an array of them,
+/// each with an object `action` or `error`. At most [`MAX_A2UI_EVENTS`] are
+/// kept, projected onto the v0.9 fields with string types and a byte budget.
+#[derive(Default)]
+pub(crate) struct A2uiClient {
+    pub(crate) events: Vec<Value>,
+    /// Turn text when the message has no text part: `A2UI action: <name>` or
+    /// `A2UI error`.
+    pub(crate) fallback: Option<String>,
+}
+
+/// Upper bound on forwarded A2UI events per turn.
+const MAX_A2UI_EVENTS: usize = 8;
+/// Serialised byte budget for one event's `context` / `error` object.
+const MAX_A2UI_EVENT_OBJECT_BYTES: usize = 8 * 1024;
+/// Longest action name echoed into the fallback text.
+const MAX_A2UI_ACTION_NAME_CHARS: usize = 64;
+
+pub(crate) fn a2ui_client(parts: &[Value], a2ui: bool) -> A2uiClient {
+    let typed = |p: &Value| {
+        let mime = p
+            .get("metadata")
+            .and_then(|m| m.get("mimeType"))
+            .or_else(|| p.get("mediaType"))
+            .and_then(Value::as_str);
+        mime == Some(triton_core::a2ui::ge::MIME)
+    };
+    let is_data = |p: &Value| match p.get("kind").and_then(Value::as_str) {
+        Some(kind) => kind == "data",
+        None => p.get("data").is_some(),
+    };
+    let messages = parts
+        .iter()
+        .filter(|p| is_data(p) && (a2ui || typed(p)))
+        .filter_map(|p| p.get("data"))
+        .flat_map(|d| match d {
+            Value::Array(a) => a.iter().collect::<Vec<_>>(),
+            other => vec![other],
+        })
+        .filter(|m| {
+            m.get("action").is_some_and(Value::is_object)
+                || m.get("error").is_some_and(Value::is_object)
+        })
+        .take(MAX_A2UI_EVENTS);
+
+    let mut client = A2uiClient::default();
+    for m in messages {
+        let mut event = serde_json::Map::new();
+        if let Some(v) = m.get("version").filter(|v| v.is_string()) {
+            event.insert("version".into(), v.clone());
+        }
+        if let Some(action) = m.get("action").and_then(Value::as_object) {
+            let mut projected = serde_json::Map::new();
+            for key in ["name", "surfaceId", "sourceComponentId", "timestamp"] {
+                if let Some(v) = action.get(key).filter(|v| v.is_string()) {
+                    projected.insert(key.into(), v.clone());
+                }
+            }
+            if let Some(ctx) = action.get("context").filter(|c| within_budget(c)) {
+                projected.insert("context".into(), ctx.clone());
+            }
+            if client.fallback.is_none() {
+                let name: String = projected
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("action")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_A2UI_ACTION_NAME_CHARS)
+                    .collect();
+                client.fallback = Some(format!("A2UI action: {name}"));
+            }
+            event.insert("action".into(), Value::Object(projected));
+        }
+        if let Some(error) = m.get("error").filter(|e| e.is_object() && within_budget(e)) {
+            event.insert("error".into(), error.clone());
+            client
+                .fallback
+                .get_or_insert_with(|| "A2UI error".to_string());
+        }
+        client.events.push(Value::Object(event));
+    }
+    client
+}
+
+fn within_budget(v: &Value) -> bool {
+    let ok = serde_json::to_vec(v)
+        .map(|b| b.len() <= MAX_A2UI_EVENT_OBJECT_BYTES)
+        .unwrap_or(false);
+    if !ok {
+        eprintln!(
+            r#"{{"kind":"log","level":"warn","msg":"a2ui event object over {MAX_A2UI_EVENT_OBJECT_BYTES} bytes dropped"}}"#
+        );
+    }
+    ok
+}
+
+/// The message's parts, for [`a2ui_client`].
+fn message_parts(params: &Value) -> &[Value] {
+    params
+        .get("message")
+        .and_then(|m| m.get("parts"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
 }
 
 /// One inbound spec-A2A turn: the text to dispatch, or — for a source
@@ -652,7 +780,8 @@ async fn message_send(
     req: RpcRequest,
     a2ui: bool,
 ) -> Response {
-    let Some(inbound) = text_from_params(&req.params) else {
+    let client = a2ui_client(message_parts(&req.params), a2ui);
+    let Some(inbound) = text_from_params(&req.params, &client) else {
         return rpc_error(
             &req.id,
             INVALID_PARAMS,
@@ -677,6 +806,7 @@ async fn message_send(
         state.a2a.dispatcher.surfaces(),
         &context_id,
         a2ui,
+        client.events,
     );
 
     // A GE source button click resolves to an open-doc sentinel (not a real
@@ -738,7 +868,7 @@ async fn message_send(
             .await;
             let reply = reply_text(&result);
             let mut parts = vec![json!({ "kind": "text", "text": reply })];
-            if let Some(msgs) = triton_core::a2ui::ge::build_messages(&result) {
+            if let Some(msgs) = triton_core::a2ui::ge::build_messages_negotiated(&result, a2ui) {
                 parts.extend(triton_core::a2ui::ge::data_parts(msgs));
             }
             let msg = json!({
@@ -786,7 +916,8 @@ async fn message_stream(
 ) -> Response {
     use futures::StreamExt as _;
 
-    let Some(inbound) = text_from_params(&req.params) else {
+    let client = a2ui_client(message_parts(&req.params), a2ui);
+    let Some(inbound) = text_from_params(&req.params, &client) else {
         return rpc_error(
             &req.id,
             INVALID_PARAMS,
@@ -816,6 +947,7 @@ async fn message_stream(
         state.a2a.dispatcher.surfaces(),
         &context_id,
         a2ui,
+        client.events,
     );
 
     // A GE source button click (open-doc sentinel): emit a one-shot SSE — a
@@ -1049,7 +1181,7 @@ async fn message_stream(
                                 },
                             })));
                         }
-                        if let Some(msgs) = triton_core::a2ui::ge::build_messages(&v) {
+                        if let Some(msgs) = triton_core::a2ui::ge::build_messages_negotiated(&v, a2ui) {
                             frames.push(rpc_frames(json!({
                                 "kind": "artifact-update",
                                 "taskId": task_for_frames,
@@ -1371,6 +1503,11 @@ pub fn reply_text(result: &Value) -> String {
             if !joined.is_empty() {
                 return joined;
             }
+        }
+        // Only producer-built surfaces and no prose: there is no text, and
+        // the result JSON (surfaces, traces) must not become the answer.
+        if surface.get("a2ui").is_some() {
+            return String::new();
         }
     }
     result.to_string()

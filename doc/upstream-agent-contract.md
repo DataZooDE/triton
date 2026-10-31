@@ -124,6 +124,21 @@ Object args carry Triton's reserved `_triton` key:
 - **Embedded (in-process) tools** see the A2A metadata in args. They
   read the channel and surface by overriding
   `Tool::invoke_with_context`.
+- **A2UI client events** (spec A2A 0.3 or 1.0 with the A2UI extension
+  active, or a data part typed `application/json+a2ui`) arrive as
+  `_triton.client.a2ui_events`: the A2UI v0.9 client messages of the turn,
+  projected onto `{version, action: {name, surfaceId, sourceComponentId,
+  timestamp, context}}` / `{version, error}` (string fields, objects up to
+  8 KiB), at most 8. Gemini Enterprise resolves the data bindings in a
+  button's `action.event.context`, so a click carries the values of the
+  surface's inputs. These are **client-asserted**: Triton never vouches for
+  them, and you never learn the `surfaceId` Triton mints. To tie a click to
+  what you issued, put your own correlation token (e.g. a revision) into the
+  button's `action.event.context` and check it when the click comes back;
+  expect a click to arrive twice now and then (a client retry). A turn with
+  only an event part reaches you with `message` = `A2UI action: <name>` (or
+  `A2UI error`). Clicks on Triton's own cards are signed actions and are
+  resolved by Triton as before; only producer surfaces (§4) rely on events.
 
 ### 2a. Optional: argument-schema discovery (`X-Triton-MCP: tools/list`)
 
@@ -224,6 +239,34 @@ Notes for agent authors:
 - Emit the **canonical** surface, not a versioned wire shape — Triton
   builds the negotiated A2UI version and the per-platform chat
   rendering from it (`degrade` rules in `adapter.yaml`).
+- **Producer-built A2UI v0.9** (Gemini Enterprise only): put native
+  surfaces in `surface.a2ui`, a sibling of `components` that every other
+  channel ignores, so keep the prose in a `text` component:
+
+```json
+{ "surface": {
+    "components": [ { "kind": "text", "value": "Three close calls." } ],
+    "a2ui": [ {
+      "components": [ { "id": "root", "component": "MaterialCard", "children": ["b"] },
+                      { "id": "b", "component": "MaterialButton", "label": "Apply",
+                        "action": { "event": { "name": "apply",
+                                    "context": { "rev": 7, "pick": { "path": "/pick" } } } } } ],
+      "data_model": { "pick": "a" },
+      "theme": { "agentDisplayName": "Coverage Matching" } } ] } }
+```
+
+  Each surface (at most 8) goes out verbatim as `createSurface` +
+  `updateComponents` (+ `updateDataModel`) ahead of Triton's own card;
+  `components` must contain `root`; `theme` may set `agentDisplayName` and
+  `primaryColor` (`#rrggbb`). A click on a producer's button comes back as a
+  client event (§2b); the producer handles it. Triton does not vet the
+  components: passthrough is for upstreams the operator trusts like its own
+  code. Producer surfaces only go to clients that negotiated A2UI; other
+  channels see `components`. Measured in Gemini Enterprise (2026-10-31):
+  Material cards, tables, chips, selects, checkboxes, progress bars,
+  VegaChart and Canvas side panels render, and inputs and buttons inside a
+  Canvas work like inline ones; `IFrameSrcdoc` does not render;
+  `createSurface.sendDataModel` is not honoured.
 - Triton owns the dispatch/post audit pair (ADR-6). Agents emit their
   own logs but must not assume their response body is audited.
 
