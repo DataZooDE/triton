@@ -1557,6 +1557,16 @@ a trap the next developer should not have to step in.
   down, was posting to a dropped fake whose port this agent had reused.
   Assertions about "the first request the upstream saw" should select
   requests by a header every real dispatch carries, not by index.
+- **What Gemini Enterprise actually does with A2UI v0.9 (measured
+  2026-10-31, lab app, agent spike).** It keeps a click's action `name`,
+  `surfaceId` and `sourceComponentId`, and resolves data bindings in
+  `action.event.context` — the earlier belief that it "strips
+  name/context" came from Triton's own buttons sending `context: {}`. It
+  does not honour `createSurface.sendDataModel` (message metadata carries
+  only `a2uiClientCapabilities`). Material cards, tables, chips,
+  checkboxes, progress bars, VegaChart and Canvas side panels render;
+  `IFrameSrcdoc` creates no frame at all, inline or in a Canvas. Draw
+  diagrams as VegaChart.
 
 ---
 

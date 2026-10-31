@@ -122,6 +122,10 @@ pub fn open_doc(text: &str) -> Option<OpenDocRef<'_>> {
     let skill = parts.next().unwrap_or("");
     let id = parts.next().unwrap_or("");
     let url = parts.next().unwrap_or("").trim();
+    // Defence in depth: Triton only ever mints https document URLs.
+    if !url.is_empty() && !url.starts_with("https://") {
+        return None;
+    }
     let has_ref = (!skill.is_empty() && !id.is_empty()) || !url.is_empty();
     has_ref.then_some(OpenDocRef {
         label,
@@ -145,6 +149,9 @@ fn split_skill_id(label: &str) -> (&str, &str) {
 /// encoded id came back stripped), so it cannot carry a payload. The uuid does
 /// survive, so it keys the per-card re-ask table below.
 const SURFACE_PREFIX: &str = "triton-answer-";
+/// Producer-built (passthrough) surfaces get their own prefix, so a click on
+/// one never falls through to the numeric `btn-N` table of Triton's cards.
+const PASSTHROUGH_PREFIX: &str = "triton-a2ui-";
 
 /// Bounded, process-wide map: `surfaceId` → { button id number → re-ask
 /// question }. A click echoes `surfaceId` and the component id (`btn-N`), so
@@ -174,10 +181,6 @@ fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, Str
     }
 }
 
-/// Resolve a GE button click to the re-ask question it should run.
-/// `source_component_id` is GE's echoed id (`"btn-N"`); its trailing number
-/// keys the per-card table recorded at build time under `surface_id`. `None` ⇒
-/// not a re-ask (→ caller falls back to the turn's text).
 /// Producer-built surfaces' re-ask tables, keyed by the exact component id
 /// (a producer names its own components; Triton's numeric `btn-N` convention
 /// does not apply). Same FIFO cap as [`SURFACE_QUESTIONS`].
@@ -198,11 +201,16 @@ fn remember_actions(surface_id: &str, actions: std::collections::HashMap<String,
     }
 }
 
+/// Resolve a GE button click to the re-ask question it should run.
+/// `source_component_id` is GE's echoed id (`"btn-N"`); its trailing number
+/// keys the per-card table recorded at build time under `surface_id`. `None` ⇒
+/// not a re-ask (→ caller falls back to the turn's text).
 pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<String> {
-    // A producer-built surface: the exact component id, nothing else.
-    if let Ok(store) = PASSTHROUGH_ACTIONS.lock()
-        && let Some((_, actions)) = store.iter().rev().find(|(sid, _)| sid == surface_id)
-    {
+    // A producer-built surface: the exact component id, nothing else (an
+    // evicted or unknown surface resolves to nothing).
+    if surface_id.starts_with(PASSTHROUGH_PREFIX) {
+        let store = PASSTHROUGH_ACTIONS.lock().ok()?;
+        let (_, actions) = store.iter().rev().find(|(sid, _)| sid == surface_id)?;
         return actions.get(source_component_id).cloned();
     }
     let n: usize = source_component_id.rsplit('-').next()?.parse().ok()?;
@@ -256,9 +264,25 @@ fn beautify_vega_for_ge(spec: &Value) -> Value {
     s
 }
 
-/// Build the A2UI v0.9 message array from a raw surface value
-/// (`result["surface"]["components"]`). Returns `None` when the value carries
-/// no renderable component, so the caller can fall back to a text part.
+/// [`build_messages`] for a request that did or did not activate the A2UI
+/// extension: producer-built surfaces (`surface.a2ui`) only go to a client
+/// that negotiated A2UI.
+pub fn build_messages_negotiated(result: &Value, a2ui: bool) -> Option<Vec<Value>> {
+    if a2ui || result.get("surface").and_then(|s| s.get("a2ui")).is_none() {
+        return build_messages(result);
+    }
+    let mut without = result.clone();
+    if let Some(surface) = without.get_mut("surface").and_then(Value::as_object_mut) {
+        surface.remove("a2ui");
+    }
+    build_messages(&without)
+}
+
+/// Build the A2UI v0.9 message array from a raw surface value: the
+/// producer-built surfaces of `surface.a2ui` first (verbatim, see
+/// [`passthrough_surfaces`]), then Triton's own card from
+/// `surface.components`. Returns `None` when neither yields a surface, so the
+/// caller can fall back to a text part.
 pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     let surface = result.get("surface")?;
     let empty = Vec::new();
@@ -508,6 +532,7 @@ const MAX_PASSTHROUGH_SURFACES: usize = 8;
 const MAX_PASSTHROUGH_ACTIONS: usize = 32;
 const MAX_ACTION_QUESTION_BYTES: usize = 1024;
 const MAX_DISPLAY_NAME_CHARS: usize = 64;
+const MAX_COMPONENT_ID_BYTES: usize = 128;
 
 /// The v0.9 messages for the producer-built surfaces in `surface.a2ui`:
 /// `[{components, data_model?, theme?, actions?}]`, at most
@@ -551,7 +576,7 @@ fn passthrough_messages(surface: &Value) -> Vec<Value> {
         );
         return Vec::new();
     }
-    let surface_id = format!("{SURFACE_PREFIX}{}", uuid::Uuid::new_v4());
+    let surface_id = format!("{PASSTHROUGH_PREFIX}{}", uuid::Uuid::new_v4());
     remember_actions(&surface_id, passthrough_actions(surface.get("actions")));
     let create = json!({
         "surfaceId": surface_id,
@@ -578,18 +603,24 @@ fn passthrough_actions(spec: Option<&Value>) -> std::collections::HashMap<String
     let Some(actions) = spec.and_then(Value::as_object) else {
         return Default::default();
     };
-    let mut kept = std::collections::HashMap::new();
-    for (component_id, question) in actions.iter().take(MAX_PASSTHROUGH_ACTIONS) {
-        match question.as_str() {
-            Some(q) if q.len() <= MAX_ACTION_QUESTION_BYTES && !q.chars().any(char::is_control) => {
-                kept.insert(component_id.clone(), q.to_string());
-            }
-            _ => eprintln!(
-                r#"{{"kind":"log","level":"warn","msg":"a2ui passthrough: action dropped (not a plain question within {MAX_ACTION_QUESTION_BYTES} bytes)"}}"#
-            ),
-        }
+    let valid: Vec<(String, String)> = actions
+        .iter()
+        .filter_map(|(component_id, question)| {
+            let q = question.as_str()?;
+            (component_id.len() <= MAX_COMPONENT_ID_BYTES
+                && q.len() <= MAX_ACTION_QUESTION_BYTES
+                && !q.chars().any(char::is_control))
+            .then(|| (component_id.clone(), q.to_string()))
+        })
+        .collect();
+    if valid.len() != actions.len() || valid.len() > MAX_PASSTHROUGH_ACTIONS {
+        eprintln!(
+            r#"{{"kind":"log","level":"warn","msg":"a2ui passthrough: actions dropped (invalid or beyond the cap)","given":{},"kept":{}}}"#,
+            actions.len(),
+            valid.len().min(MAX_PASSTHROUGH_ACTIONS)
+        );
     }
-    kept
+    valid.into_iter().take(MAX_PASSTHROUGH_ACTIONS).collect()
 }
 
 /// Triton's surface theme with the producer's `agentDisplayName` and
@@ -1010,6 +1041,51 @@ mod tests {
             .filter(|m| m.get("createSurface").is_some())
             .count();
         assert_eq!(creates, MAX_PASSTHROUGH_SURFACES);
+    }
+
+    /// The open-doc round trip only ever opens https documents.
+    #[test]
+    fn open_doc_refuses_non_https_urls() {
+        let forged = format!("{DOC_OPEN_SENTINEL}label\u{1}\u{1}\u{1}http://evil.example/");
+        assert!(open_doc(&forged).is_none());
+        let fine = format!("{DOC_OPEN_SENTINEL}label\u{1}\u{1}\u{1}https://docs.example/x");
+        assert!(open_doc(&fine).is_some());
+    }
+
+    /// Invalid actions do not count against the cap; ids over the length cap
+    /// are dropped; an unknown passthrough surface resolves to nothing.
+    #[test]
+    fn a2ui_action_cap_counts_valid_entries_only() {
+        let mut actions = serde_json::Map::new();
+        for n in 0..10 {
+            actions.insert(format!("bad-{n}"), json!(42));
+        }
+        for n in 0..MAX_PASSTHROUGH_ACTIONS + 5 {
+            actions.insert(format!("ok-{n}"), json!(format!("q{n}")));
+        }
+        actions.insert("x".repeat(MAX_COMPONENT_ID_BYTES + 1), json!("long id"));
+        let kept = passthrough_actions(Some(&Value::Object(actions)));
+        assert_eq!(kept.len(), MAX_PASSTHROUGH_ACTIONS);
+        assert!(kept.values().all(|q| q.starts_with('q')));
+        assert_eq!(question_for("triton-a2ui-unknown", "ok-1"), None);
+    }
+
+    /// Without A2UI negotiated only Triton's own card goes out.
+    #[test]
+    fn negotiated_builder_drops_passthrough_without_a2ui() {
+        let result = json!({ "surface": {
+            "components": [ { "kind": "button", "label": "Again", "tool": "t", "args": { "question": "again" } } ],
+            "a2ui": [ { "components": [ { "id": "root", "component": "MaterialText", "text": "x" } ] } ]
+        }});
+        assert_eq!(build_messages_negotiated(&result, true).unwrap().len(), 4);
+        let plain = build_messages_negotiated(&result, false).unwrap();
+        assert_eq!(plain.len(), 2);
+        assert!(
+            plain[0]["createSurface"]["surfaceId"]
+                .as_str()
+                .unwrap()
+                .starts_with(SURFACE_PREFIX)
+        );
     }
 
     /// A surface without a `root` component cannot render; it is dropped

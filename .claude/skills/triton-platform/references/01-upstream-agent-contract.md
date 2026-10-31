@@ -101,6 +101,16 @@ declared as returning A2UI but the shape doesn't deserialise, the call
 surfaces as a `Tool` error at the API boundary (intentional — the bug
 shows up loudly, not as a silent downgrade).
 
+### (c) Native A2UI v0.9 for Gemini Enterprise (`surface.a2ui`)
+
+A producer that builds v0.9 itself (tables, chips, checkboxes, Canvas side
+panels) puts its surfaces in `surface.a2ui`, beside `components`; every
+other channel ignores the field, so keep the prose in a `text` component.
+Clicks come back as `_triton.client.a2ui_events`, with the values the
+button's `action.event.context` bound. Shape, caps, the `actions` re-ask
+map, the `resolved` flag and the trust model: `doc/upstream-agent-contract.md`
+§2b and §4.
+
 ## Failure semantics
 
 - Non-2xx from your agent → Triton raises `TritonError::Tool`; the

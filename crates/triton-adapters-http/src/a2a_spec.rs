@@ -471,7 +471,7 @@ fn turn_context(
     surfaces: &triton_core::SurfaceRegistry,
     context_id: &str,
     a2ui: bool,
-    params: &Value,
+    events: Vec<Value>,
 ) -> triton_core::ContextOverrides {
     let mut meta = serde_json::Map::new();
     meta.insert("protocol".into(), json!("a2a"));
@@ -482,7 +482,6 @@ fn turn_context(
     // event fields, but never vouches for them — an agent checks `surfaceId`
     // against the surfaces it issued. Nested under `client` so they cannot be
     // mistaken for the Triton-authored keys beside them.
-    let events = a2ui_client_events(params, a2ui);
     if !events.is_empty() {
         meta.insert("client".into(), json!({ "a2ui_events": events }));
     }
@@ -519,50 +518,50 @@ fn wants_immediate_task(params: &Value) -> bool {
         || cfg.get("returnImmediately").and_then(Value::as_bool) == Some(true)
 }
 
-/// Concatenate every text part, which is how a multi-part user turn is
-/// meant to read. Non-text parts (files, structured data) are ignored
-/// rather than rejected: a client that also sends a file should still
-/// get an answer to its words.
-fn text_from_params(params: &Value) -> Option<String> {
-    let parts = params.get("message")?.get("parts")?.as_array()?;
-    // A2UI button click: Gemini Enterprise posts back the action as a
-    // `application/json+a2ui` DataPart. Honour its resolved `question` (bound
-    // by path in the card) as the turn text — this is what makes a follow-up
-    // button re-ask instead of the agent seeing GE's "User action triggered."
-    // placeholder text. Fall back to the plain text parts otherwise.
-    if let Some(q) = a2ui_action_question(parts) {
-        return Some(q);
-    }
-    let text = parts
-        .iter()
-        .filter(|p| p.get("kind").and_then(Value::as_str).unwrap_or("text") == "text")
-        .filter_map(|p| p.get("text").and_then(Value::as_str))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let trimmed = text.trim();
-    if !trimmed.is_empty() {
-        return Some(trimmed.to_string());
-    }
-    // An A2UI event without any text (a standard client posts only the
-    // DataPart): the turn still reaches the agent, which reads the event from
-    // `_triton.client.a2ui_events`.
-    a2ui_messages(parts).find_map(|m| {
-        let action = m.get("action")?;
-        let name = action
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("action");
-        Some(format!("A2UI action: {name}"))
-    })
+/// One turn's A2UI client input, normalised once and shared by
+/// `message/send` and `message/stream`.
+///
+/// A part qualifies when the request activated the A2UI extension or the part
+/// itself is typed `application/json+a2ui`; its `data` is one client message
+/// or an array of them, each with an object `action` or `error`. At most
+/// [`MAX_A2UI_EVENTS`] are taken, projected onto the v0.9 fields with string
+/// types and a byte budget. The click that resolved to a re-ask question is
+/// marked `resolved: true`.
+#[derive(Default)]
+struct A2uiTurn {
+    events: Vec<Value>,
+    /// The re-ask question a click resolved to (Triton's own card or a
+    /// producer's `actions` entry).
+    question: Option<String>,
+    /// Turn text when the request has no text part: `A2UI action: <name>` or
+    /// `A2UI error`.
+    fallback: Option<String>,
 }
 
-/// The A2UI client-to-server messages among `parts`: DataParts whose `data` is
-/// one message object or an array of them, each carrying an object `action`
-/// or `error`.
-fn a2ui_messages(parts: &[Value]) -> impl Iterator<Item = &Value> {
-    parts
+/// Upper bound on forwarded A2UI events per turn.
+const MAX_A2UI_EVENTS: usize = 8;
+/// Serialised byte budget for one event's `context` / `error` object.
+const MAX_A2UI_EVENT_OBJECT_BYTES: usize = 8 * 1024;
+/// Longest action name echoed into the fallback text.
+const MAX_A2UI_ACTION_NAME_CHARS: usize = 64;
+
+fn a2ui_turn(params: &Value, a2ui: bool) -> A2uiTurn {
+    let parts = params
+        .get("message")
+        .and_then(|m| m.get("parts"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let messages = parts
         .iter()
         .filter(|p| p.get("kind").and_then(Value::as_str) == Some("data"))
+        .filter(|p| {
+            a2ui || p
+                .get("metadata")
+                .and_then(|m| m.get("mimeType"))
+                .and_then(Value::as_str)
+                == Some(triton_core::a2ui::ge::MIME)
+        })
         .filter_map(|p| p.get("data"))
         .flat_map(|d| match d {
             Value::Array(a) => a.iter().collect::<Vec<_>>(),
@@ -572,90 +571,92 @@ fn a2ui_messages(parts: &[Value]) -> impl Iterator<Item = &Value> {
             m.get("action").is_some_and(Value::is_object)
                 || m.get("error").is_some_and(Value::is_object)
         })
+        .take(MAX_A2UI_EVENTS);
+
+    let mut turn = A2uiTurn::default();
+    for m in messages {
+        let mut event = serde_json::Map::new();
+        if let Some(v) = m.get("version").filter(|v| v.is_string()) {
+            event.insert("version".into(), v.clone());
+        }
+        if let Some(action) = m.get("action").and_then(Value::as_object) {
+            let mut projected = serde_json::Map::new();
+            for key in ["name", "surfaceId", "sourceComponentId", "timestamp"] {
+                if let Some(v) = action.get(key).filter(|v| v.is_string()) {
+                    projected.insert(key.into(), v.clone());
+                }
+            }
+            if let Some(ctx) = action.get("context").filter(|c| within_budget(c)) {
+                projected.insert("context".into(), ctx.clone());
+            }
+            if turn.question.is_none()
+                && let (Some(sid), Some(cid)) = (
+                    projected.get("surfaceId").and_then(Value::as_str),
+                    projected.get("sourceComponentId").and_then(Value::as_str),
+                )
+                && let Some(q) = triton_core::a2ui::ge::question_for(sid, cid)
+            {
+                turn.question = Some(q);
+                event.insert("resolved".into(), json!(true));
+            }
+            if turn.fallback.is_none() {
+                let name: String = projected
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("action")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(MAX_A2UI_ACTION_NAME_CHARS)
+                    .collect();
+                turn.fallback = Some(format!("A2UI action: {name}"));
+            }
+            event.insert("action".into(), Value::Object(projected));
+        }
+        if let Some(error) = m.get("error").filter(|e| e.is_object() && within_budget(e)) {
+            event.insert("error".into(), error.clone());
+            turn.fallback
+                .get_or_insert_with(|| "A2UI error".to_string());
+        }
+        turn.events.push(Value::Object(event));
+    }
+    turn
 }
 
-/// Upper bound on forwarded A2UI events per turn.
-const MAX_A2UI_EVENTS: usize = 8;
+fn within_budget(v: &Value) -> bool {
+    let ok = serde_json::to_vec(v)
+        .map(|b| b.len() <= MAX_A2UI_EVENT_OBJECT_BYTES)
+        .unwrap_or(false);
+    if !ok {
+        eprintln!(
+            r#"{{"kind":"log","level":"warn","msg":"a2ui event object over {MAX_A2UI_EVENT_OBJECT_BYTES} bytes dropped"}}"#
+        );
+    }
+    ok
+}
 
-/// The turn's A2UI events projected onto the v0.9 fields, for
-/// `_triton.client.a2ui_events`. Only when the request activated A2UI or the
-/// part is typed as A2UI; a plain structured-data part is not an A2UI event.
-fn a2ui_client_events(params: &Value, a2ui: bool) -> Vec<Value> {
-    let Some(parts) = params
+/// The turn text: a click's resolved re-ask question first (this is what
+/// makes a follow-up button re-ask instead of the agent seeing GE's "User
+/// action triggered." placeholder), then the text parts, then the A2UI
+/// fallback for an event-only turn.
+fn turn_text(params: &Value, turn: &A2uiTurn) -> Option<String> {
+    if let Some(q) = &turn.question {
+        return Some(q.clone());
+    }
+    let text = params
         .get("message")
         .and_then(|m| m.get("parts"))
         .and_then(Value::as_array)
-    else {
-        return Vec::new();
-    };
-    let typed_as_a2ui = parts.iter().any(|p| {
-        p.get("metadata")
-            .and_then(|m| m.get("mimeType"))
-            .and_then(Value::as_str)
-            .is_some_and(|t| t == triton_core::a2ui::ge::MIME)
-    });
-    if !a2ui && !typed_as_a2ui {
-        return Vec::new();
+        .into_iter()
+        .flatten()
+        .filter(|p| p.get("kind").and_then(Value::as_str).unwrap_or("text") == "text")
+        .filter_map(|p| p.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let trimmed = text.trim();
+    if !trimmed.is_empty() {
+        return Some(trimmed.to_string());
     }
-    a2ui_messages(parts)
-        .take(MAX_A2UI_EVENTS)
-        .map(|m| {
-            let mut out = serde_json::Map::new();
-            if let Some(v) = m.get("version") {
-                out.insert("version".into(), v.clone());
-            }
-            if let Some(action) = m.get("action").and_then(Value::as_object) {
-                let projected: serde_json::Map<String, Value> = action
-                    .iter()
-                    .filter(|(k, _)| {
-                        matches!(
-                            k.as_str(),
-                            "name" | "surfaceId" | "sourceComponentId" | "timestamp" | "context"
-                        )
-                    })
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                out.insert("action".into(), Value::Object(projected));
-            }
-            if let Some(error) = m.get("error").filter(|e| e.is_object()) {
-                out.insert("error".into(), error.clone());
-            }
-            Value::Object(out)
-        })
-        .collect()
-}
-
-/// Pull a re-ask `question` out of an inbound A2UI `action` DataPart. The
-/// client-to-server A2UI message rides `DataPart.data` (an object or a
-/// one-element array) as `{version, action:{name, context:{question}}}`. We
-/// look for a non-empty string `context.question`; absent ⇒ `None` (a normal
-/// text turn). Tolerant of both the object and array `data` encodings.
-fn a2ui_action_question(parts: &[Value]) -> Option<String> {
-    for m in a2ui_messages(parts) {
-        let Some(action) = m.get("action") else {
-            continue;
-        };
-        // A resolved `context.question`, if a host forwards one.
-        if let Some(q) = action
-            .get("context")
-            .and_then(|c| c.get("question"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-        {
-            return Some(q.to_string());
-        }
-        // Otherwise map `surfaceId` + `sourceComponentId` back to the re-ask
-        // question recorded when the card was built (GE echoes both intact).
-        if let (Some(sid), Some(cid)) = (
-            action.get("surfaceId").and_then(Value::as_str),
-            action.get("sourceComponentId").and_then(Value::as_str),
-        ) && let Some(q) = triton_core::a2ui::ge::question_for(sid, cid)
-        {
-            return Some(q);
-        }
-    }
-    None
+    turn.fallback.clone()
 }
 
 async fn message_send(
@@ -664,7 +665,8 @@ async fn message_send(
     req: RpcRequest,
     a2ui: bool,
 ) -> Response {
-    let Some(text) = text_from_params(&req.params) else {
+    let turn = a2ui_turn(&req.params, a2ui);
+    let Some(text) = turn_text(&req.params, &turn) else {
         return rpc_error(
             &req.id,
             INVALID_PARAMS,
@@ -690,7 +692,7 @@ async fn message_send(
         state.a2a.dispatcher.surfaces(),
         &context_id,
         a2ui,
-        &req.params,
+        turn.events,
     );
 
     // A GE source button click resolves to an open-doc sentinel (not a real
@@ -775,7 +777,7 @@ async fn message_send(
             .await;
             let reply = reply_text(&result);
             let mut parts = vec![json!({ "kind": "text", "text": reply })];
-            if let Some(msgs) = triton_core::a2ui::ge::build_messages(&result) {
+            if let Some(msgs) = triton_core::a2ui::ge::build_messages_negotiated(&result, a2ui) {
                 parts.extend(triton_core::a2ui::ge::data_parts(msgs));
             }
             let msg = json!({
@@ -814,7 +816,8 @@ async fn message_stream(
 ) -> Response {
     use futures::StreamExt as _;
 
-    let Some(text) = text_from_params(&req.params) else {
+    let turn = a2ui_turn(&req.params, a2ui);
+    let Some(text) = turn_text(&req.params, &turn) else {
         return rpc_error(
             &req.id,
             INVALID_PARAMS,
@@ -844,7 +847,7 @@ async fn message_stream(
         state.a2a.dispatcher.surfaces(),
         &context_id,
         a2ui,
-        &req.params,
+        turn.events,
     );
 
     // A GE source button click (open-doc sentinel): emit a one-shot SSE — a
@@ -1036,7 +1039,9 @@ async fn message_stream(
                                 },
                             })));
                         }
-                        if let Some(msgs) = triton_core::a2ui::ge::build_messages(&v) {
+                        if let Some(msgs) =
+                            triton_core::a2ui::ge::build_messages_negotiated(&v, a2ui)
+                        {
                             frames.push(rpc_frames(json!({
                                 "kind": "artifact-update",
                                 "taskId": task_for_frames,
@@ -1359,6 +1364,9 @@ pub(crate) fn reply_text(result: &Value) -> String {
                 return joined;
             }
         }
+        // A surface with no prose (e.g. only producer-built `a2ui`
+        // surfaces) has no text; never send its JSON as the answer.
+        return String::new();
     }
     result.to_string()
 }

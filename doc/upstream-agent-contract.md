@@ -128,10 +128,14 @@ Object args carry Triton's reserved `_triton` key:
   timestamp, context}}` / `{version, error}`, at most 8. Gemini Enterprise
   resolves the data bindings in a button's `action.event.context`, so a
   click carries the values of the surface's inputs. These are
-  **client-asserted**: Triton never vouches for them; check `surfaceId`
-  against the surfaces you issued. A turn with only an event part reaches
-  you with `message` = `A2UI action: <name>` (or the mapped question, see
-  §4).
+  **client-asserted**: Triton never vouches for them, and you never learn
+  the `surfaceId` Triton mints. To tie a click to what you issued, put
+  your own correlation token into the button's `action.event.context`
+  and check it when the click comes back. When a click resolved to a
+  mapped question (§4 `actions`), `message` carries that question and the
+  event is marked `"resolved": true`: act on one of them, not both. A
+  turn with only an event part reaches you with `message` =
+  `A2UI action: <name>` (or `A2UI error`).
 
 ### 2a. Optional: argument-schema discovery (`X-Triton-MCP: tools/list`)
 
@@ -245,7 +249,8 @@ Notes for agent authors:
   to the question its click re-asks (no control characters, at most 1 KiB,
   at most 32); `theme` may set `agentDisplayName` and `primaryColor`
   (`#rrggbb`). Triton does not vet the components: passthrough is for
-  upstreams the operator trusts like its own code. In Gemini Enterprise
+  upstreams the operator trusts like its own code. Producer surfaces only
+  go to clients that negotiated A2UI; other channels see `components`. In Gemini Enterprise
   (measured 2026-10-31) Material cards, tables, chips, checkboxes,
   progress bars, VegaChart and Canvas side panels render; `IFrameSrcdoc`
   does not; `createSurface.sendDataModel` is not honoured.
