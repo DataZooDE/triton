@@ -514,6 +514,7 @@ async fn run_as_task(
                 check_after_seconds,
                 receipt: r,
                 upstream_task_id: up,
+                ..
             }) => {
                 upstream_task_id = Some(up);
                 deadline.get_or_insert(tokio::time::Instant::now() + runner.settings.mcp_wait);

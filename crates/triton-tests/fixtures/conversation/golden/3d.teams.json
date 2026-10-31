@@ -68,6 +68,7 @@
           "data": {
             "ct": "__send_message|{\"tpl\":\"{t1.request}[[ Reason: {t1.reason}]]\"}"
           },
+          "style": "positive",
           "title": "Retire as draft",
           "type": "Action.Execute",
           "verb": "agentAction"

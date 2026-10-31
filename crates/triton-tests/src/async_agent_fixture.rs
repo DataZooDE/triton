@@ -48,6 +48,8 @@ pub struct AsyncPlan {
     pub check_after_seconds: u64,
     /// The hand-over text in the `task` event.
     pub receipt: String,
+    /// The working card's line under the steps, in the `task` event.
+    pub note: Option<String>,
     /// Instead of a task: stream this many `token` events as fast as the
     /// reader takes them, then `done` with their whole text
     /// ([`token_text`]) — a flood for broadcast-lag tests.
@@ -75,6 +77,7 @@ impl Default for AsyncPlan {
             ] } }),
             check_after_seconds: 5,
             receipt: "Your request is filed and still running.".to_string(),
+            note: None,
             tokens: None,
             progress_limit: None,
         }
@@ -201,8 +204,11 @@ async fn handle(
             let _ = tx.send(Ok(frame("done", &done))).await;
             return;
         }
-        let task = json!({ "task_id": task_id, "check_after_seconds": plan.check_after_seconds,
+        let mut task = json!({ "task_id": task_id, "check_after_seconds": plan.check_after_seconds,
             "receipt": plan.receipt });
+        if let Some(note) = &plan.note {
+            task["note"] = json!(note);
+        }
         if tx.send(Ok(frame("task", &task))).await.is_err() {
             return;
         }

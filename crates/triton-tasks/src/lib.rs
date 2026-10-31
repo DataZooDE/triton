@@ -87,6 +87,9 @@ pub struct TaskRecord {
     /// ("filed, still running, the result will be in …"; mock 1k).
     #[serde(default)]
     pub receipt: Option<String>,
+    /// The upstream's line under a working card's steps, if it sent one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     /// The reply as text (clamped).
     #[serde(default)]
     pub result_text: Option<String>,
@@ -133,6 +136,7 @@ impl TaskRecord {
             check_after_seconds: None,
             progress: None,
             receipt: None,
+            note: None,
             result_text: None,
             result: None,
             error: None,
@@ -547,6 +551,8 @@ pub enum TaskEvent {
         upstream_task_id: String,
         check_after_seconds: Option<u64>,
         receipt: Option<String>,
+        /// The upstream's line for a working card ("you can leave this chat").
+        note: Option<String>,
     },
     Progress(Progress),
     /// Terminal success with the upstream's result.
@@ -1006,12 +1012,19 @@ impl Runner {
                                     .map(str::trim)
                                     .filter(|t| !t.is_empty())
                                     .map(|t| clamp(t, 2048));
+                                let note = v
+                                    .get("note")
+                                    .and_then(Value::as_str)
+                                    .map(str::trim)
+                                    .filter(|t| !t.is_empty())
+                                    .map(|t| clamp(t, 512));
                                 upstream_task_id = Some(up.to_string());
                                 backoff = Duration::from_millis(250);
                                 if let Some(mut first) = pending.take() {
                                     first.upstream_task_id = Some(up.to_string());
                                     first.check_after_seconds = check;
                                     first.receipt = receipt.clone();
+                                    first.note = note.clone();
                                     first.updated_ms = now_ms();
                                     // Logged by `put`; the call goes on.
                                     let _ = self.store.put(&first);
@@ -1022,12 +1035,16 @@ impl Runner {
                                         if receipt.is_some() {
                                             r.receipt = receipt.clone();
                                         }
+                                        if note.is_some() {
+                                            r.note = note.clone();
+                                        }
                                     });
                                 }
                                 let _ = tx.send(TaskEvent::Async {
                                     upstream_task_id: up.to_string(),
                                     check_after_seconds: check,
                                     receipt,
+                                    note,
                                 });
                             }
                             StreamEvent::Progress(v) => {
@@ -1168,10 +1185,12 @@ pub fn as_stream_events(
                         upstream_task_id,
                         check_after_seconds,
                         receipt,
+                        note,
                     } => StreamEvent::Task(serde_json::json!({
                         "task_id": upstream_task_id,
                         "check_after_seconds": check_after_seconds,
                         "receipt": receipt,
+                        "note": note,
                     })),
                     TaskEvent::Progress(p) => StreamEvent::Progress(
                         serde_json::json!({ "text": p.text, "step": p.step, "percent": p.percent }),

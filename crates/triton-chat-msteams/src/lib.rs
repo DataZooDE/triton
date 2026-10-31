@@ -3722,6 +3722,7 @@ async fn refresh_card(
         .filter(|r| r.owner.as_deref() == Some(triton_tasks::owner_key(&principal).as_str()));
     let working = |rec: Option<&triton_tasks::TaskRecord>| {
         let mut card = TaskCard::new(rec.and_then(|r| r.receipt.clone()));
+        card.note = rec.and_then(|r| r.note.clone());
         if let Some(r) = rec {
             card.started = std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_millis(
@@ -3893,10 +3894,11 @@ async fn resume_task(adapter: Arc<MsTeamsAdapter>, rec: triton_tasks::TaskRecord
     };
     let age =
         std::time::Duration::from_millis((triton_tasks::now_ms() - rec.created_ms).max(0) as u64);
-    let mut card = d
-        .card_activity_id
-        .clone()
-        .map(|id| TaskCard::resumed(rec.receipt.clone(), age, id));
+    let mut card = d.card_activity_id.clone().map(|id| {
+        let mut card = TaskCard::resumed(rec.receipt.clone(), age, id);
+        card.note = rec.note.clone();
+        card
+    });
     let mut terminal: Option<Result<Value, TritonError>> = None;
     if !rec.state.is_terminal()
         && let Some(rx) = runner.ensure_running(&rec, &principal)

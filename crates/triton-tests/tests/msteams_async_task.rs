@@ -112,6 +112,7 @@ async fn a_group_chat_gets_typing_then_one_card_updated_in_place() {
     let agent = FakeAsyncAgent::start(AsyncPlan {
         total: Duration::from_secs(2),
         tick: Duration::from_millis(300),
+        note: Some("You can leave this chat.".into()),
         ..AsyncPlan::default()
     })
     .await;
@@ -151,6 +152,10 @@ async fn a_group_chat_gets_typing_then_one_card_updated_in_place() {
     );
     assert!(working.contains("\"0:0"), "a running timer: {working}");
     assert!(!working.contains("WORKING"), "{working}");
+    assert!(
+        working.contains("You can leave this chat."),
+        "the upstream's note: {working}"
+    );
     assert!(
         messages[0]["attachments"][0]["content"]["refresh"]["action"]["type"] == "Action.Execute",
         "the working card refreshes itself: {working}"

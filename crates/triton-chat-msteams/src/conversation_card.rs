@@ -189,9 +189,12 @@ impl Builder<'_, '_> {
         Some(execute(title, &token, false))
     }
 
+    /// A template submit: the one action its form asks for, in the host's primary style.
     fn template_action(&mut self, title: &str, template: &str) -> Option<Value> {
         let token = (self.sign)(SEND_MESSAGE_TOOL, &template_args(template))?;
-        Some(execute(title, &token, true))
+        let mut a = execute(title, &token, true);
+        a["style"] = json!("positive");
+        Some(a)
     }
 
     /// The card action for a stateless [`Action`].
@@ -594,8 +597,6 @@ impl Builder<'_, '_> {
             let Some(submit) = self.template_action(label, &signed) else {
                 continue;
             };
-            let mut submit = submit;
-            submit["style"] = json!("positive");
             body.push(json!({ "type": "ActionSet", "actions": [submit] }));
             if let Some(n) = note.filter(|n| !n.is_empty()) {
                 body.push(json!({
