@@ -26,6 +26,15 @@ Code: `crates/triton-upstream/src/lib.rs` (router),
 `crates/triton-upstream/src/static_upstream.rs` (static). Tests:
 `tests/upstream.rs`, `tests/static_upstream.rs`.
 
+Triton also registers its own in-process tools (`echo`, `narrate`,
+`help`, and in a `dev-token` build the demo surfaces such as
+`demo_panel`), and `tools/list` shows them next to the upstream's. A
+public gateway in front of one agent sets `TRITON_BUILTIN_TOOLS=off`:
+no in-process tool is registered, so MCP clients see only the agent's
+tools (a chat `help` command then needs an upstream named `help`). Any
+value other than `on`/`off` (or `true`/`false`, `1`/`0`) fails boot.
+Test: `tests/mcp_protected_resource.rs`.
+
 ## 2. The dispatch request (Triton → agent)
 
 ```

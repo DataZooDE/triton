@@ -244,7 +244,23 @@ async fn main() -> std::io::Result<()> {
                     .collect()
             })
             .unwrap_or_default();
-    let registry = Arc::new(build_registry(&static_upstream_tools));
+    // `TRITON_BUILTIN_TOOLS=off` keeps the in-process tools (`echo`,
+    // `help`, the demo surfaces) out of the registry, so a gateway in
+    // front of one agent lists exactly that agent's tools. An unknown
+    // value fails boot: a typo must not leave the built-ins exposed.
+    let builtin_tools = match builtin_tools_enabled(std::env::var("TRITON_BUILTIN_TOOLS").ok()) {
+        Ok(on) => on,
+        Err(e) => {
+            eprintln!("triton: {e}");
+            std::process::exit(2);
+        }
+    };
+    let registry = Arc::new(if builtin_tools {
+        build_registry(&static_upstream_tools)
+    } else {
+        tracing::info!("TRITON_BUILTIN_TOOLS=off: no in-process tools registered");
+        ToolRegistry::new()
+    });
     // #249: anonymous rejections on a public path (a chat webhook, an
     // unauthenticated /v1/tools probe) coalesce into one audit line per
     // window per protocol, so a background scanner can't evict the ring
@@ -1862,6 +1878,24 @@ async fn main() -> std::io::Result<()> {
 
     tracing::info!("triton: exit");
     serve_result
+}
+
+/// Parse `TRITON_BUILTIN_TOOLS`: unset, empty, `on`/`true`/`1` keep the
+/// in-process tools; `off`/`false`/`0` drop them; anything else is an
+/// error naming the variable.
+fn builtin_tools_enabled(raw: Option<String>) -> Result<bool, String> {
+    match raw
+        .as_deref()
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        None | Some("") | Some("on") | Some("true") | Some("1") => Ok(true),
+        Some("off") | Some("false") | Some("0") => Ok(false),
+        Some(other) => Err(format!(
+            "TRITON_BUILTIN_TOOLS must be on or off (is `{other}`)"
+        )),
+    }
 }
 
 /// Build the in-process tool registry, skipping any tool whose name is
