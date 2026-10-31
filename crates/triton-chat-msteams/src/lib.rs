@@ -15,6 +15,7 @@
 //!   `record_rejection` on every refused inbound and `record_post`
 //!   on every reply attempt — no other audit emission.
 
+pub mod conversation_card;
 pub mod jwt_verifier;
 pub mod md_card;
 pub mod surface_mapper;
@@ -191,6 +192,15 @@ pub struct MsTeamsAdapter {
     verifier: JwtVerifier,
     token_client: TokenClient,
     http: reqwest::Client,
+    /// The email of an Entra member, from the Bot Connector's
+    /// get-member, per (tid, aadObjectId), with the time it was fetched.
+    member_emails: MemberEmails,
+    /// F8b: long-running turns run as tasks (persisted, resumable). Set
+    /// by the host with [`MsTeamsAdapter::with_tasks`]; `None` keeps the
+    /// direct dispatch stream.
+    tasks: Option<triton_tasks::Runner>,
+    /// Task ids this process has claimed to deliver (boot sweep).
+    delivering: std::sync::Mutex<std::collections::HashSet<String>>,
     rate_limit: triton_core::ratelimit::TokenBucket,
     per_tenant_limit: triton_core::ratelimit::PerTenantBuckets,
     courier: CourierConfig,
@@ -610,12 +620,53 @@ impl MsTeamsAdapter {
             verifier,
             token_client,
             http,
+            member_emails: MemberEmails::default(),
+            tasks: None,
+            delivering: Default::default(),
             rate_limit,
             per_tenant_limit,
             courier,
             canonical_path,
             router: None,
         })
+    }
+
+    /// Drive courier turns through the task runner (F8b): an asynchronous
+    /// upstream task is stored with its delivery target, resumed when its
+    /// stream breaks or is cut, bounded by `TRITON_TASK_MAX_SECS`, and
+    /// resumed after a restart by [`MsTeamsAdapter::resume_stored_tasks`].
+    pub fn with_tasks(mut self, runner: triton_tasks::Runner) -> Self {
+        self.tasks = Some(runner);
+        self
+    }
+
+    /// Finish every stored Teams task of THIS adapter (its name and bot app
+    /// id) whose answer was not confirmed delivered — still running, or
+    /// finished while no process delivered it. Call once at boot, after the
+    /// adapter is wrapped in an `Arc`; a second call claims nothing new.
+    pub fn resume_stored_tasks(self: &Arc<Self>) {
+        let Some(runner) = &self.tasks else {
+            return;
+        };
+        for rec in runner.store.list_undelivered(PROTOCOL) {
+            let Some(d) = rec
+                .delivery
+                .clone()
+                .and_then(|v| serde_json::from_value::<Delivery>(v).ok())
+            else {
+                continue;
+            };
+            if d.adapter != self.name || d.bot_app_id != self.audience {
+                continue; // another bot's conversation
+            }
+            // One delivery claim per task in this process.
+            if !self.delivering.lock().unwrap().insert(rec.id.clone()) {
+                continue;
+            }
+            tracing::info!(task = %rec.id, "msteams: finishing a stored task");
+            let adapter = self.clone();
+            tokio::spawn(async move { resume_task(adapter, rec, d).await });
+        }
     }
 
     /// Attach the agent-multiplexing router (host-provided). Call before
@@ -992,6 +1043,10 @@ struct ResolvedSender {
     sub: String,
     scopes: Vec<String>,
     tenant: String,
+    /// The Entra identity Bot Framework vouched for (`azure`
+    /// identity): provider `entra`, tenant = `channelData.tenant.id`. The
+    /// activity carries no email.
+    idp: Option<triton_core::IdpIdentity>,
 }
 
 /// FR-I-7 sender resolution. Returns the resolved sender or a ready
@@ -1236,12 +1291,18 @@ fn resolve_sender(
             (sub.clone(), cfg.scopes.clone(), tenant.to_string())
         }
     };
+    let idp = matches!(adapter.identity, IdentityMode::Azure(_)).then(|| {
+        triton_core::IdpIdentity::new("entra")
+            .tenant(Some(tenant.clone()))
+            .issuer("https://api.botframework.com")
+    });
 
     Ok(ResolvedSender {
         from_id: from.id.clone(),
         sub,
         scopes,
         tenant,
+        idp,
     })
 }
 
@@ -1271,6 +1332,122 @@ fn check_tenant_limit(adapter: &Arc<MsTeamsAdapter>, sub: &str, tenant: &str) ->
     None
 }
 
+/// Cache of member emails: (tid, aadObjectId) → (email, fetched at).
+type MemberEmails = std::sync::Mutex<
+    std::collections::HashMap<(String, String), (Option<String>, std::time::Instant)>,
+>;
+
+/// How long a looked-up email (or its absence) is reused.
+const MEMBER_EMAIL_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
+const MEMBER_EMAIL_MISS_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+/// Bound on the cache; past it, the oldest half is dropped.
+const MEMBER_EMAIL_CAP: usize = 4096;
+
+/// A Teams activity names the Entra user (`aadObjectId`, tid) but
+/// not their email, which the upstream binds members by. Ask the Bot
+/// Connector once — `GET {serviceUrl}/v3/conversations/{id}/members/{aadObjectId}`
+/// (a `TeamsChannelAccount`: `email`, else `userPrincipalName`) — and
+/// cache the answer per (tid, aadObjectId). Best effort: a failed lookup
+/// leaves the email absent and never blocks the turn.
+async fn attach_member_email(
+    adapter: &Arc<MsTeamsAdapter>,
+    verified: &VerifiedClaims,
+    activity: &Activity,
+    sender: &mut ResolvedSender,
+) {
+    let Some(idp) = sender.idp.as_mut() else {
+        return; // only the Entra (`azure`) identity has a member to ask for
+    };
+    let Some(tid) = idp.tenant.clone() else {
+        return;
+    };
+    let key = (tid, sender.sub.clone());
+    let cached = adapter
+        .member_emails
+        .lock()
+        .unwrap()
+        .get(&key)
+        .filter(|(email, at)| {
+            at.elapsed()
+                < if email.is_some() {
+                    MEMBER_EMAIL_TTL
+                } else {
+                    MEMBER_EMAIL_MISS_TTL
+                }
+        })
+        .map(|(email, _)| email.clone());
+    let email = match cached {
+        Some(email) => email,
+        None => {
+            let conversation = activity
+                .conversation
+                .as_ref()
+                .map(|c| c.id.clone())
+                .unwrap_or_default();
+            let email = fetch_member_email(adapter, verified, &conversation, &sender.sub).await;
+            let mut cache = adapter.member_emails.lock().unwrap();
+            if cache.len() >= MEMBER_EMAIL_CAP {
+                let mut by_age: Vec<_> =
+                    cache.iter().map(|(k, (_, at))| (k.clone(), *at)).collect();
+                by_age.sort_by_key(|(_, at)| *at);
+                for (k, _) in by_age.into_iter().take(MEMBER_EMAIL_CAP / 2) {
+                    cache.remove(&k);
+                }
+            }
+            cache.insert(key, (email.clone(), std::time::Instant::now()));
+            email
+        }
+    };
+    *idp = idp.clone().email(email);
+}
+
+async fn fetch_member_email(
+    adapter: &MsTeamsAdapter,
+    verified: &VerifiedClaims,
+    conversation_id: &str,
+    member_id: &str,
+) -> Option<String> {
+    if conversation_id.is_empty() {
+        return None;
+    }
+    let mut url = url::Url::parse(verified.reply_base()).ok()?;
+    url.path_segments_mut().ok()?.pop_if_empty().extend([
+        "v3",
+        "conversations",
+        conversation_id,
+        "members",
+        member_id,
+    ]);
+    let token = adapter.token_client.access_token().await.ok()?;
+    let resp = adapter
+        .http
+        .get(url.to_string())
+        .bearer_auth(&token)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        tracing::debug!(status = %resp.status(), "msteams get-member: no member");
+        return None;
+    }
+    let member: Value = resp.json().await.ok()?;
+    member
+        .get("email")
+        .or_else(|| member.get("userPrincipalName"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|e| e.contains('@') && e.len() <= 128)
+        .map(str::to_owned)
+}
+
+/// The principal of a resolved sender, with its identity provider.
+fn sender_principal(sender: &ResolvedSender) -> Principal {
+    let mut p = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    p.idp = sender.idp.clone();
+    p
+}
+
 fn make_principal(sub: &str, scopes: &[String], tenant: &str) -> Principal {
     Principal {
         sub: sub.to_string(),
@@ -1281,6 +1458,7 @@ fn make_principal(sub: &str, scopes: &[String], tenant: &str) -> Principal {
         trace_id: uuid::Uuid::new_v4().to_string(),
         sender_ref: None,
         conversation_ref: None,
+        idp: None,
     }
 }
 
@@ -1290,10 +1468,11 @@ async fn dispatch_message(
     activity: &Activity,
     text: &str,
 ) -> Response {
-    let sender = match resolve_sender(adapter, activity, verified) {
+    let mut sender = match resolve_sender(adapter, activity, verified) {
         Ok(s) => s,
         Err(resp) => return resp,
     };
+    attach_member_email(adapter, verified, activity, &mut sender).await;
     if let Some(resp) = check_tenant_limit(adapter, &sender.sub, &sender.tenant) {
         return resp;
     }
@@ -1337,7 +1516,7 @@ async fn dispatch_message(
         match router.route(ctx).await {
             triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
                 if text.trim().is_empty() {
-                    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+                    let principal = sender_principal(&sender);
                     let info = format!(
                         "Switched to **{agent_id}**. You can now ask questions directly, or type `/whoami` to inspect active bindings."
                     );
@@ -1367,7 +1546,7 @@ async fn dispatch_message(
                 pending_text,
                 ..
             } => {
-                let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+                let principal = sender_principal(&sender);
                 let chrome = fetch_chrome(adapter, &principal).await;
                 let signed: Vec<(String, String)> = candidates
                     .iter()
@@ -1415,7 +1594,7 @@ async fn dispatch_message(
             }
             triton_chat_routing::RouteOutcome::Info { text }
             | triton_chat_routing::RouteOutcome::Deny { message: text } => {
-                let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+                let principal = sender_principal(&sender);
                 let msg = surface_mapper::RenderedMessage::text_only(text);
                 let body = surface_mapper::build_activity_body(
                     &recipient_id,
@@ -1478,10 +1657,11 @@ async fn handle_task_fetch(
     verified: &VerifiedClaims,
     activity: &Activity,
 ) -> Response {
-    let sender = match resolve_sender(adapter, activity, verified) {
+    let mut sender = match resolve_sender(adapter, activity, verified) {
         Ok(s) => s,
         Err(resp) => return resp,
     };
+    attach_member_email(adapter, verified, activity, &mut sender).await;
     if let Some(resp) = check_tenant_limit(adapter, &sender.sub, &sender.tenant) {
         return resp;
     }
@@ -1518,6 +1698,21 @@ async fn handle_task_fetch(
             return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
         }
     };
+    // 2d: an Embed's "open" button → a URL task module (the host must be in
+    // the Teams app manifest's `validDomains`; the inline fallback card is
+    // already in the conversation for hosts that cannot open it).
+    if tool_name == conversation_card::OPEN_EMBED_TOOL {
+        let url = args.get("u").and_then(Value::as_str).unwrap_or_default();
+        let title = args.get("t").and_then(Value::as_str).unwrap_or_default();
+        if !triton_core::links::is_allowed_link(url) {
+            return (StatusCode::BAD_REQUEST, "unexpected action").into_response();
+        }
+        return (
+            StatusCode::OK,
+            axum::Json(conversation_card::url_task_response(title, url)),
+        )
+            .into_response();
+    }
     let skill = args
         .get("skill")
         .and_then(Value::as_str)
@@ -1528,7 +1723,7 @@ async fn handle_task_fetch(
     }
 
     let title = format!("{skill} \u{b7} {id}");
-    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let principal = sender_principal(&sender);
     let principal_for_post = principal.clone();
     let started = std::time::Instant::now();
     let result = adapter
@@ -1589,10 +1784,11 @@ async fn handle_callback(
     value: &Value,
     kind: CallbackKind,
 ) -> Response {
-    let sender = match resolve_sender(adapter, activity, verified) {
+    let mut sender = match resolve_sender(adapter, activity, verified) {
         Ok(s) => s,
         Err(resp) => return resp,
     };
+    attach_member_email(adapter, verified, activity, &mut sender).await;
     if let Some(resp) = check_tenant_limit(adapter, &sender.sub, &sender.tenant) {
         return resp;
     }
@@ -1642,7 +1838,55 @@ async fn handle_callback(
     // Teams gathers EVERY input on the card with ANY action, so a
     // preset button also submits the (blank) sibling inputs; an empty
     // merge would clobber the button's own preset args.
-    merge_inputs(&mut args, inputs);
+    //
+    // A stateless send-message action (chip, row, template submit) is the
+    // exception: its message/template comes ONLY from the signed token, and
+    // the card inputs fill the template's placeholders from their OWN map.
+    // Merging them into the args first would let a field named `m`/`tpl` —
+    // or a key a client adds to `data` — replace the signed message (F1).
+    // The click is a NEW user message with the complete text, routed exactly
+    // like typed input, never a continuation of the card's turn.
+    if tool_name == triton_correlation::message::SEND_MESSAGE_TOOL {
+        let inputs: std::collections::BTreeMap<String, String> = inputs.into_iter().collect();
+        let text = match triton_correlation::message::resolve(&args, |k| inputs.get(k).cloned()) {
+            Ok(t) => t,
+            Err(e) => {
+                // Name the missing fields without their card namespace
+                // (`t2.status` → `status`).
+                let e = match e {
+                    triton_correlation::message::MessageError::Missing(names) => {
+                        triton_correlation::message::MessageError::Missing(
+                            names
+                                .into_iter()
+                                .map(|n| n.rsplit_once('.').map_or(n.clone(), |(_, b)| b.into()))
+                                .collect(),
+                        )
+                    }
+                    other => other,
+                };
+                return (
+                    StatusCode::OK,
+                    axum::Json(surface_mapper::invoke_message_response(&e.to_string())),
+                )
+                    .into_response();
+            }
+        };
+        match route_typed_text(adapter, verified, activity, &sender, &text).await {
+            Ok((t, a)) => {
+                tool_name = t;
+                args = a;
+            }
+            Err(reply) => {
+                return (
+                    StatusCode::OK,
+                    axum::Json(surface_mapper::invoke_message_response(&reply)),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        merge_inputs(&mut args, inputs);
+    }
 
     // Agent multiplexing (#315): a `__use_agent` chooser click confirms a pick.
     // The router binds the agent and replays the buffered message; the picked
@@ -1847,7 +2091,7 @@ async fn dispatch_and_post_reply(
     // helper is here for when `upstream` lands, where the resolver
     // replaces the asserted identity and the raw id becomes the only
     // way to tell an impersonation from the victim's own session.
-    let mut principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let mut principal = sender_principal(sender);
     // T3 (async-ops): carry the Teams conversationReference into the agent's
     // turn so a tool like `start_operation` can persist it and deliver a result
     // back to this conversation later (the in-process embedded dispatch passes
@@ -1927,7 +2171,7 @@ async fn dispatch_and_refresh_card(
     // helper is here for when `upstream` lands, where the resolver
     // replaces the asserted identity and the raw id becomes the only
     // way to tell an impersonation from the victim's own session.
-    let principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let principal = sender_principal(sender);
     let principal_for_post = principal.clone();
     let image_hint = (tool_name == "render_report")
         .then(|| report_image_url(adapter, &args, &sender.tenant))
@@ -2233,59 +2477,32 @@ fn render_card_content(
     // beside the tenant, so only they can submit its actions.
     sender: &str,
 ) -> Option<Value> {
-    let specs = surface_mapper::interactive_from_result(result);
-    let dashboard = surface_mapper::dashboard_from_result(result);
-    let text = match surface_mapper::try_render_surface(result) {
-        Some(Ok(r)) => r.text,
-        _ => String::new(),
-    };
-    // A reply with headings or tables gets a card even with no controls:
-    // the card renders them as compact native elements, where Teams'
-    // own Markdown renderer would use title-size headings (md_card).
-    let rich = md_card::is_rich_markdown(&text);
-    if specs.is_empty() && dashboard.is_none() && image_url.is_none() && !rich {
-        return None;
-    }
-    let signed: Vec<(surface_mapper::InteractiveSpec, String)> = specs
-        .into_iter()
-        .filter_map(|spec| {
-            match triton_correlation::encode_bound(
-                spec.tool(),
-                &spec.base_args(),
-                adapter.correlation_key.signing(),
-                surface_mapper::MSTEAMS_CORRELATION_CAP,
-                triton_correlation::Binding {
-                    platform: "msteams",
-                    tenant,
-                    sender,
-                },
-                Some(CARD_TOKEN_TTL_SECS),
-            ) {
-                Ok(token) => Some((spec, token)),
-                Err(e) => {
-                    tracing::warn!(
-                        tool = spec.tool(),
-                        error = %e,
-                        "msteams: dropping interactive control (correlation token too large)"
-                    );
-                    None
-                }
-            }
+    // Every control (legacy tool buttons and the conversation components'
+    // complete-message actions alike) is signed with the same bound token
+    // (#250/#287); the composition itself is key-free.
+    let mut sign = |tool: &str, args: &Value| -> Option<String> {
+        triton_correlation::encode_bound(
+            tool,
+            args,
+            adapter.correlation_key.signing(),
+            surface_mapper::MSTEAMS_CORRELATION_CAP,
+            triton_correlation::Binding {
+                platform: "msteams",
+                tenant,
+                sender,
+            },
+            Some(CARD_TOKEN_TTL_SECS),
+        )
+        .map_err(|e| {
+            tracing::warn!(
+                tool,
+                error = %e,
+                "msteams: dropping interactive control (correlation token too large)"
+            );
         })
-        .collect();
-    // Every interactive control dropped, no dashboard, no image →
-    // nothing to put on a card; fall back to text.
-    if signed.is_empty() && dashboard.is_none() && image_url.is_none() && !rich {
-        return None;
-    }
-    Some(surface_mapper::build_adaptive_card(
-        &text,
-        dashboard.as_ref(),
-        &signed,
-        image_url,
-        chart,
-        chrome,
-    ))
+        .ok()
+    };
+    conversation_card::card_for_result(result, image_url, chart, chrome, &mut sign)
 }
 
 /// Deep-search a `render_report` result for a Vega-Lite spec (peacock exposes
@@ -2419,6 +2636,57 @@ fn strip_mention_prefix(text: &str) -> &str {
     trimmed
 }
 
+/// Route a click's complete message as if the user had typed it: through
+/// the agent router when one is configured (a binding picks the agent),
+/// else the adapter's single inbound tool. `Err` carries a text reply for
+/// a router outcome that is not a dispatch (chooser, info, deny).
+async fn route_typed_text(
+    adapter: &Arc<MsTeamsAdapter>,
+    verified: &VerifiedClaims,
+    activity: &Activity,
+    sender: &ResolvedSender,
+    text: &str,
+) -> Result<(String, Value), String> {
+    let Some(router) = adapter.router.clone() else {
+        return Ok(route_command(text, &adapter.inbound_tool));
+    };
+    let conversation_id = activity
+        .conversation
+        .as_ref()
+        .map(|c| c.id.clone())
+        .unwrap_or_default();
+    let bot_id = activity
+        .recipient
+        .as_ref()
+        .map(|r| r.id.clone())
+        .unwrap_or_default();
+    let ctx = triton_chat_routing::RouteCtx {
+        key: triton_chat_routing::ConvKey::msteams(conversation_id.clone(), "", sender.sub.clone()),
+        text,
+        tenant: &sender.tenant,
+        caller_sub: &sender.sub,
+        pick: None,
+        conversation_ref: Some(conversation_reference_json(
+            verified.reply_base(),
+            &conversation_id,
+            &bot_id,
+            &sender.from_id,
+            &sender.tenant,
+            &adapter.correlation_key,
+        )),
+    };
+    match router.route(ctx).await {
+        triton_chat_routing::RouteOutcome::Dispatch { agent_id, text } => {
+            Ok(route_command(&text, &agent_id))
+        }
+        triton_chat_routing::RouteOutcome::Info { text }
+        | triton_chat_routing::RouteOutcome::Deny { message: text } => Err(text),
+        triton_chat_routing::RouteOutcome::Chooser { .. } => {
+            Err("Type `/agents` to pick an agent, then send the request again.".to_string())
+        }
+    }
+}
+
 fn route_command(text: &str, default_tool: &str) -> (String, Value) {
     if let Some(rest) = text.strip_prefix('/') {
         let (tool, subject) = rest.split_once(' ').unwrap_or((rest, ""));
@@ -2533,7 +2801,7 @@ async fn courier_deliver(
     // helper is here for when `upstream` lands, where the resolver
     // replaces the asserted identity and the raw id becomes the only
     // way to tell an impersonation from the victim's own session.
-    let mut principal = make_principal(&sender.sub, &sender.scopes, &sender.tenant);
+    let mut principal = sender_principal(&sender);
     // T3 (async-ops): carry the Teams conversationReference into the agent's
     // turn so a tool like `start_operation` can persist it and deliver the
     // (terminal + progress) result back to THIS conversation later. The inline
@@ -2560,6 +2828,8 @@ async fn courier_deliver(
     // Group: keep a typing ticker alive while the dispatch runs.
     let mut stream_id: Option<String> = None;
     let mut typing_ticker: Option<tokio::task::JoinHandle<()>> = None;
+    // The working card of an asynchronous upstream task, if any.
+    let mut task_card: Option<TaskCard> = None;
     if personal {
         let body = serde_json::json!({
             "type": "typing",
@@ -2595,12 +2865,18 @@ async fn courier_deliver(
             "conversation": { "id": conversation_id },
             "recipient": { "id": sender.from_id },
         });
+        // The first typing activity goes out before the dispatch starts,
+        // so it is ordered before anything the turn posts (the
+        // working card of an asynchronous task can follow at once).
+        if let Err(e) = post_activity(&adapter2, &verified2, &conversation2, &body).await {
+            tracing::debug!(error = %e, "msteams courier: typing activity failed");
+        }
         typing_ticker = Some(tokio::spawn(async move {
             loop {
+                tokio::time::sleep(TYPING_INTERVAL).await;
                 if let Err(e) = post_activity(&adapter2, &verified2, &conversation2, &body).await {
                     tracing::debug!(error = %e, "msteams courier: typing activity failed");
                 }
-                tokio::time::sleep(TYPING_INTERVAL).await;
             }
         }));
     }
@@ -2611,19 +2887,147 @@ async fn courier_deliver(
     // tool yields one terminal Done and this degenerates to exactly
     // the old flow. `a2ui: None` — the courier renders the raw result.
     let started = std::time::Instant::now();
-    let result: Result<Value, TritonError> = match adapter
-        .dispatcher
-        .invoke_streaming(&tool_name, args, principal, PROTOCOL, None)
-        .await
-    {
+    let trace_id = principal.trace_id.clone();
+    // F8b: with a task runner the turn is a task — stored once the
+    // upstream goes asynchronous (with where its answer goes), resumed when
+    // its stream breaks or is cut, bounded by TRITON_TASK_MAX_SECS.
+    let dispatched = match &adapter.tasks {
+        Some(runner) => {
+            let mut rec = triton_tasks::TaskRecord::new(
+                &trace_id,
+                &conversation_id,
+                &tool_name,
+                Some(triton_tasks::owner_key(&principal)),
+            );
+            rec.delivery = Some(
+                Delivery {
+                    service_url: verified.reply_base().to_string(),
+                    conversation_id: conversation_id.clone(),
+                    adapter: adapter.name.clone(),
+                    bot_app_id: adapter.audience.clone(),
+                    bot_id: recipient_id.clone(),
+                    user_id: sender.from_id.clone(),
+                    tenant: sender.tenant.clone(),
+                    sub: sender.sub.clone(),
+                    scopes: sender.scopes.clone(),
+                    idp: sender.idp.clone(),
+                    card_activity_id: None,
+                    delivered: false,
+                }
+                .to_json(),
+            );
+            runner
+                .start(
+                    rec,
+                    triton_tasks::Start::Dispatch(args),
+                    principal,
+                    PROTOCOL,
+                    Default::default(),
+                    triton_tasks::Persist::OnAsync,
+                )
+                .map(|rx| {
+                    triton_tasks::as_stream_events(rx, runner.store.clone(), trace_id.clone())
+                })
+                .map_err(|e| TritonError::Tool(e.to_string()))
+        }
+        None => {
+            adapter
+                .dispatcher
+                .invoke_streaming(&tool_name, args, principal, PROTOCOL, None)
+                .await
+        }
+    };
+    let result: Result<Value, TritonError> = match dispatched {
         Err(e) => Err(e),
         Ok(mut stream) => {
-            use futures::StreamExt as _;
             let mut acc = String::new();
             let mut seq: u64 = 1; // the informative opener was 1
             let mut last_chunk = std::time::Instant::now();
             let mut terminal: Option<Result<Value, TritonError>> = None;
-            while let Some(ev) = stream.next().await {
+            loop {
+                let ev = match next_card_turn(&mut stream, task_card.as_ref()).await {
+                    CardTurn::Event(Some(ev)) => ev,
+                    CardTurn::Event(None) => break,
+                    CardTurn::Flush => {
+                        if let Some(card) = task_card.as_mut()
+                            && let Some(id) = card.activity_id.clone()
+                            && card.due()
+                        {
+                            let body =
+                                card.activity(&recipient_id, &conversation_id, &sender.from_id);
+                            if let Err(e) =
+                                put_activity(&adapter, &verified, &conversation_id, &id, &body)
+                                    .await
+                            {
+                                tracing::debug!(error = %e, "msteams courier: card update failed");
+                            }
+                        }
+                        continue;
+                    }
+                };
+                // Mock 1l: the upstream went asynchronous — one
+                // working card replaces the typing indicator, and progress
+                // updates that card in place.
+                match &ev {
+                    triton_core::stream::StreamEvent::Task(v) if task_card.is_none() => {
+                        if let Some(t) = typing_ticker.take() {
+                            t.abort();
+                        }
+                        let mut card = TaskCard::new(
+                            v.get("receipt").and_then(Value::as_str).map(str::to_owned),
+                        );
+                        let mut body =
+                            card.activity(&recipient_id, &conversation_id, &sender.from_id);
+                        // A personal chat's open stream is closed by the
+                        // card (attachments are legal only on a final).
+                        if let Some(sid) = stream_id.take()
+                            && let Some(obj) = body.as_object_mut()
+                        {
+                            obj.insert(
+                                "entities".into(),
+                                serde_json::json!([{ "type": "streaminfo", "streamId": sid, "streamType": "final" }]),
+                            );
+                        }
+                        match post_activity(&adapter, &verified, &conversation_id, &body).await {
+                            Ok((status, Some(id))) if (200..300).contains(&status) => {
+                                // F8b: remember the card, so a restarted
+                                // Triton answers into it.
+                                if let Some(runner) = &adapter.tasks {
+                                    runner.store.update_running(&trace_id, |r| {
+                                        if let Some(d) = r.delivery.as_mut() {
+                                            d["card_activity_id"] = Value::String(id.clone());
+                                        }
+                                    });
+                                }
+                                card.activity_id = Some(id);
+                            }
+                            other => {
+                                tracing::debug!(?other, "msteams courier: working card not posted");
+                            }
+                        }
+                        task_card = Some(card);
+                        continue;
+                    }
+                    triton_core::stream::StreamEvent::Progress(v) => {
+                        if let Some(card) = task_card.as_mut() {
+                            card.progress(v);
+                            if let Some(id) = card.activity_id.clone()
+                                && card.due()
+                            {
+                                let body =
+                                    card.activity(&recipient_id, &conversation_id, &sender.from_id);
+                                if let Err(e) =
+                                    put_activity(&adapter, &verified, &conversation_id, &id, &body)
+                                        .await
+                                {
+                                    tracing::debug!(error = %e, "msteams courier: card update failed");
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
                 match ev {
                     triton_core::stream::StreamEvent::Token(t) => {
                         acc.push_str(&t);
@@ -2653,7 +3057,9 @@ async fn courier_deliver(
                             last_chunk = std::time::Instant::now();
                         }
                     }
-                    triton_core::stream::StreamEvent::Tool(_) => {}
+                    triton_core::stream::StreamEvent::Tool(_)
+                    | triton_core::stream::StreamEvent::Task(_)
+                    | triton_core::stream::StreamEvent::Progress(_) => {}
                     triton_core::stream::StreamEvent::Done(v) => terminal = Some(Ok(v)),
                     triton_core::stream::StreamEvent::Error { error, .. } => {
                         terminal = Some(Err(error));
@@ -2671,65 +3077,163 @@ async fn courier_deliver(
     if let Some(t) = typing_ticker {
         t.abort();
     }
+    let target = Target {
+        service_url: verified.reply_base().to_string(),
+        conversation_id: conversation_id.clone(),
+        bot_id: recipient_id.clone(),
+        user_id: sender.from_id.clone(),
+        tenant: sender.tenant.clone(),
+    };
+    let delivered = deliver_terminal(
+        &adapter,
+        &target,
+        task_card.as_ref().and_then(|c| c.activity_id.clone()),
+        stream_id,
+        result,
+        &tool_name,
+        &principal_for_post,
+        image_hint,
+        dispatch_latency_ms,
+    )
+    .await;
+    if delivered && let Some(runner) = &adapter.tasks {
+        mark_delivered(runner, &trace_id);
+    }
+}
 
-    let mut body = match result {
+/// Where a terminal answer goes.
+struct Target {
+    service_url: String,
+    conversation_id: String,
+    bot_id: String,
+    user_id: String,
+    tenant: String,
+}
+
+/// The one message a user sees for a failed turn, per error class —
+/// never the upstream's or the transport's own text.
+fn failure_notice(e: &TritonError) -> &'static str {
+    triton_tasks::error_notice(e)
+}
+
+/// Deliver a turn's terminal outcome — shared by the live courier and a
+/// task finished after a restart (review F5). The answer (or the
+/// sanitized failure notice) replaces the working card when there is one
+/// (`updateActivity`, an ambiguous transport error retried once), else
+/// closes the stream or is posted; a refused update falls back to a new
+/// message. One audited post line. Returns whether the user got it (2xx).
+#[allow(clippy::too_many_arguments)]
+async fn deliver_terminal(
+    adapter: &MsTeamsAdapter,
+    target: &Target,
+    card_id: Option<String>,
+    stream_id: Option<String>,
+    outcome: Result<Value, TritonError>,
+    tool_name: &str,
+    principal: &Principal,
+    image_hint: Option<String>,
+    dispatch_latency_ms: u64,
+) -> bool {
+    let (mut body, failed) = match outcome {
         Ok(result_value) => {
-            let chrome = fetch_chrome(&adapter, &principal_for_post).await;
-            build_reply_body(
-                &adapter,
-                &recipient_id,
-                &conversation_id,
-                &sender.from_id,
+            let chrome = fetch_chrome(adapter, principal).await;
+            let body = build_reply_body(
+                adapter,
+                &target.bot_id,
+                &target.conversation_id,
+                &target.user_id,
                 &result_value,
                 image_hint,
-                &principal_for_post,
+                principal,
                 &chrome,
-                &sender.tenant,
+                &target.tenant,
             )
-            .await
+            .await;
+            (body, false)
         }
         Err(e) => {
             tracing::warn!(error = %e, class = %e.class(), "msteams courier dispatch failed");
-            // One audited post line (Dropped + error_response), then a
-            // best-effort visible notice so the user isn't staring at a
-            // dead typing indicator.
+            // The failure is the audited outcome (Dropped + error_response);
+            // the notice is best-effort, so the user isn't left on a dead
+            // indicator or a "working" card.
             adapter.dispatcher.record_post(
-                &tool_name,
+                tool_name,
                 PROTOCOL,
-                &principal_for_post,
+                principal,
                 dispatch_latency_ms,
                 Err((&e, 0, PostOutcome::Dropped, Some("error_response"))),
             );
-            let user_msg = match e.class() {
-                "tool" => {
-                    "I encountered an issue processing that request with our data tools. Please check your query parameters or try again in a moment."
-                }
-                "rate_limited" => {
-                    "The service is temporarily busy. Please wait a moment and try again."
-                }
-                "auth" => "Authentication or authorization check failed for this request.",
-                _ => {
-                    "An unexpected error occurred while processing your request. Please try again."
-                }
-            };
             let notice = serde_json::json!({
                 "type": "message",
-                "from": { "id": recipient_id },
-                "conversation": { "id": conversation_id },
-                "recipient": { "id": sender.from_id },
-                "text": user_msg,
+                "from": { "id": target.bot_id },
+                "conversation": { "id": target.conversation_id },
+                "recipient": { "id": target.user_id },
+                "text": failure_notice(&e),
                 "textFormat": "plain",
             });
-            if let Err(err) = post_activity(&adapter, &verified, &conversation_id, &notice).await {
-                tracing::warn!(error = %err, "msteams courier: error notice not delivered");
-            }
-            return;
+            (notice, true)
         }
     };
-
-    // Close the stream when one is open: the final message carries the
-    // streaminfo terminator (no streamSequence on a final, per the
-    // streaming contract). Attachments are legal here — only here.
+    let audit = |status: u16, latency_ms: u64, detail: Option<&'static str>| {
+        if failed {
+            return;
+        }
+        if (200..300).contains(&status) {
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                principal,
+                latency_ms,
+                Ok((status, PostOutcome::Posted, detail)),
+            );
+        } else {
+            let label = if status == 0 || status >= 500 || status == 429 {
+                PostOutcome::Retry
+            } else {
+                PostOutcome::Dropped
+            };
+            let provider = TritonError::Provider(format!("msteams delivery status {status}"));
+            adapter.dispatcher.record_post(
+                tool_name,
+                PROTOCOL,
+                principal,
+                latency_ms,
+                Err((&provider, status, label, None)),
+            );
+        }
+    };
+    let started = std::time::Instant::now();
+    // An asynchronous task's answer replaces its working card; no
+    // second message carries it.
+    if let Some(id) = &card_id {
+        for _ in 0..2 {
+            match put_activity_to(
+                adapter,
+                &target.service_url,
+                &target.conversation_id,
+                id,
+                &body,
+            )
+            .await
+            {
+                Ok(status) if (200..300).contains(&status) => {
+                    audit(
+                        status,
+                        started.elapsed().as_millis() as u64,
+                        Some("activity_updated"),
+                    );
+                    return true;
+                }
+                Ok(status) => {
+                    tracing::warn!(status, "msteams: card update refused; posting the answer");
+                    break;
+                }
+                Err(e) => tracing::warn!(error = %e, "msteams: card update failed"),
+            }
+        }
+    }
+    // Close an open stream with the final message (no streamSequence on a
+    // final). Attachments are legal here — only here.
     if let Some(sid) = &stream_id
         && let Some(obj) = body.as_object_mut()
     {
@@ -2738,58 +3242,40 @@ async fn courier_deliver(
             serde_json::json!([ { "type": "streaminfo", "streamId": sid, "streamType": "final" } ]),
         );
     }
-
-    let post_started = std::time::Instant::now();
-    let mut outcome = post_activity(&adapter, &verified, &conversation_id, &body).await;
+    let mut outcome =
+        post_activity_to(adapter, &target.service_url, &target.conversation_id, &body).await;
     if stream_id.is_some() && !matches!(&outcome, Ok((status, _)) if (200..300).contains(status)) {
         // A refused stream close (expired stream, ContentStreamNotAllowed)
-        // must not cost the answer: retry once as a plain message and
-        // audit THAT attempt.
+        // must not cost the answer: retry once as a plain message.
         tracing::warn!("msteams courier: streamed final refused; retrying as a plain message");
         if let Some(obj) = body.as_object_mut() {
             obj.remove("entities");
         }
-        outcome = post_activity(&adapter, &verified, &conversation_id, &body).await;
+        outcome =
+            post_activity_to(adapter, &target.service_url, &target.conversation_id, &body).await;
     }
-    let latency_ms = post_started.elapsed().as_millis() as u64;
+    let latency_ms = started.elapsed().as_millis() as u64;
     match outcome {
-        Ok((status, _)) if (200..300).contains(&status) => {
-            adapter.dispatcher.record_post(
-                &tool_name,
-                PROTOCOL,
-                &principal_for_post,
-                latency_ms,
-                Ok((status, PostOutcome::Posted, None)),
-            );
-        }
         Ok((status, _)) => {
-            let label = if status >= 500 || status == 429 {
-                PostOutcome::Retry
-            } else {
-                PostOutcome::Dropped
-            };
-            let provider =
-                TritonError::Provider(format!("msteams activities POST status {status}"));
-            adapter.dispatcher.record_post(
-                &tool_name,
-                PROTOCOL,
-                &principal_for_post,
-                latency_ms,
-                Err((&provider, status, label, None)),
-            );
+            audit(status, latency_ms, None);
+            (200..300).contains(&status)
         }
         Err(e) => {
             tracing::warn!("msteams courier activities POST failed: {e}");
-            let provider = TritonError::Provider(format!("msteams transport: {e}"));
-            adapter.dispatcher.record_post(
-                &tool_name,
-                PROTOCOL,
-                &principal_for_post,
-                latency_ms,
-                Err((&provider, 0, PostOutcome::Retry, None)),
-            );
+            audit(0, latency_ms, None);
+            false
         }
     }
+}
+
+/// Record that a task's answer reached the user (review F4): the boot
+/// sweep finishes only tasks whose answer was not confirmed.
+fn mark_delivered(runner: &triton_tasks::Runner, task_id: &str) {
+    runner.store.update(task_id, |r| {
+        if let Some(d) = r.delivery.as_mut() {
+            d["delivered"] = Value::Bool(true);
+        }
+    });
 }
 
 /// POST one Activity to the conversation, un-audited: the primitive
@@ -2851,6 +3337,404 @@ async fn post_activity_to(
         .ok()
         .and_then(|v| v.get("id").and_then(Value::as_str).map(str::to_owned));
     Ok((status, id))
+}
+
+/// `updateActivity`: replace activity `activity_id` in the conversation
+/// (`PUT /v3/conversations/{id}/activities/{activityId}`). Returns
+/// the HTTP status. Same serviceUrl trust and URL building as
+/// [`post_activity_to`].
+async fn put_activity(
+    adapter: &MsTeamsAdapter,
+    verified: &VerifiedClaims,
+    conversation_id: &str,
+    activity_id: &str,
+    body: &Value,
+) -> Result<u16, String> {
+    put_activity_to(
+        adapter,
+        verified.reply_base(),
+        conversation_id,
+        activity_id,
+        body,
+    )
+    .await
+}
+
+/// [`put_activity`] to an explicit, already-trusted `service_url` (a
+/// resumed task's stored one, which came from a verified inbound JWT).
+async fn put_activity_to(
+    adapter: &MsTeamsAdapter,
+    service_url: &str,
+    conversation_id: &str,
+    activity_id: &str,
+    body: &Value,
+) -> Result<u16, String> {
+    let mut url = url::Url::parse(service_url).map_err(|e| format!("msteams serviceUrl: {e}"))?;
+    url.path_segments_mut()
+        .map_err(|_| "msteams serviceUrl cannot be a base".to_string())?
+        .pop_if_empty()
+        .extend([
+            "v3",
+            "conversations",
+            conversation_id,
+            "activities",
+            activity_id,
+        ]);
+    let access_token = adapter
+        .token_client
+        .access_token()
+        .await
+        .map_err(|e| format!("msteams token: {e}"))?;
+    let mut body = body.clone();
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("entities");
+        obj.insert("id".into(), Value::String(activity_id.to_string()));
+    }
+    let resp = adapter
+        .http
+        .put(url.to_string())
+        .bearer_auth(&access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(resp.status().as_u16())
+}
+
+/// The working card of an asynchronous upstream task (mock 1l): a header
+/// "REQUEST · WORKING · m:ss", the upstream's receipt as the title, and
+/// the latest step. Updated in place at most every [`CARD_UPDATE_EVERY`];
+/// a step that arrives inside the window is held and sent when the window
+/// closes (a trailing flush), so the latest step always shows.
+struct TaskCard {
+    activity_id: Option<String>,
+    started: std::time::Instant,
+    last_update: std::time::Instant,
+    /// A progress event arrived that no update has shown yet.
+    pending: bool,
+    receipt: Option<String>,
+    text: Option<String>,
+    step: Option<String>,
+    percent: Option<u64>,
+}
+
+const CARD_UPDATE_EVERY: std::time::Duration = std::time::Duration::from_millis(1000);
+
+impl TaskCard {
+    fn new(receipt: Option<String>) -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            activity_id: None,
+            started: now,
+            // F8: the first step is due at once; the throttle applies
+            // between updates, not before the first one.
+            last_update: now.checked_sub(CARD_UPDATE_EVERY).unwrap_or(now),
+            pending: false,
+            receipt,
+            text: None,
+            step: None,
+            percent: None,
+        }
+    }
+
+    /// The card of a task resumed after a restart: its age, and the
+    /// activity it lives in.
+    fn resumed(receipt: Option<String>, age: std::time::Duration, activity_id: String) -> Self {
+        let mut card = Self::new(receipt);
+        if let Some(started) = std::time::Instant::now().checked_sub(age) {
+            card.started = started;
+        }
+        card.activity_id = Some(activity_id);
+        card
+    }
+
+    fn progress(&mut self, v: &Value) {
+        if let Some(t) = v.get("text").and_then(Value::as_str) {
+            self.text = Some(surface_mapper::clamp_plain_text(t));
+        }
+        self.step = v.get("step").and_then(Value::as_str).map(str::to_owned);
+        self.percent = v.get("percent").and_then(Value::as_u64).map(|p| p.min(100));
+        self.pending = true;
+    }
+
+    /// Throttle: Teams rate-limits edits; one per second is plenty. `true`
+    /// when an update is to be sent now; the held step is then shown.
+    fn due(&mut self) -> bool {
+        if self.last_update.elapsed() >= CARD_UPDATE_EVERY {
+            self.last_update = std::time::Instant::now();
+            self.pending = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// When the held step is to be flushed: the end of the throttle window,
+    /// if a step is held and the card exists. `None` when nothing waits.
+    fn flush_at(&self) -> Option<tokio::time::Instant> {
+        (self.pending && self.activity_id.is_some())
+            .then(|| tokio::time::Instant::from_std(self.last_update + CARD_UPDATE_EVERY))
+    }
+
+    fn activity(&self, bot: &str, conversation: &str, user: &str) -> Value {
+        let secs = self.started.elapsed().as_secs();
+        let mut body = vec![
+            serde_json::json!({ "type": "TextBlock", "size": "Small", "weight": "Bolder",
+                "isSubtle": true,
+                "text": format!("REQUEST · WORKING · {}:{:02}", secs / 60, secs % 60) }),
+            serde_json::json!({ "type": "TextBlock", "size": "Medium", "weight": "Bolder",
+                "wrap": true,
+                "text": self.receipt.clone().unwrap_or_else(|| "Working on your request".into()) }),
+        ];
+        if let Some(t) = &self.text {
+            body.push(serde_json::json!({ "type": "TextBlock", "wrap": true, "text": t }));
+        }
+        let mut detail = Vec::new();
+        if let Some(s) = &self.step {
+            detail.push(format!("Step {s}"));
+        }
+        if let Some(p) = self.percent {
+            detail.push(format!("{p} %"));
+        }
+        if !detail.is_empty() {
+            body.push(serde_json::json!({ "type": "TextBlock", "isSubtle": true,
+                "size": "Small", "text": detail.join(" · ") }));
+        }
+        serde_json::json!({
+            "type": "message",
+            "from": { "id": bot },
+            "conversation": { "id": conversation },
+            "recipient": { "id": user },
+            "attachments": [{
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": {
+                    "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                    "type": "AdaptiveCard",
+                    "version": "1.5",
+                    "body": body,
+                },
+            }],
+        })
+    }
+}
+
+/// The next thing a task loop acts on: a stream event (or its end), or the
+/// working card's trailing flush.
+enum CardTurn {
+    Event(Option<triton_core::stream::StreamEvent>),
+    Flush,
+}
+
+/// Wait for the next stream event, or for the card's trailing flush when a
+/// step is held — whichever comes first.
+async fn next_card_turn<S>(stream: &mut S, card: Option<&TaskCard>) -> CardTurn
+where
+    S: futures::Stream<Item = triton_core::stream::StreamEvent> + Unpin,
+{
+    use futures::StreamExt as _;
+    match card.and_then(TaskCard::flush_at) {
+        Some(at) => tokio::select! {
+            ev = stream.next() => CardTurn::Event(ev),
+            () = tokio::time::sleep_until(at) => CardTurn::Flush,
+        },
+        None => CardTurn::Event(stream.next().await),
+    }
+}
+
+/// Where a Teams task's answer goes (F8b), stored on its task record. All
+/// fields were server-observed on the verified inbound turn. The task DB
+/// therefore names conversations and senders, and its service URLs receive
+/// the bot's bearer — it is credential-bearing (realizations §7).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Delivery {
+    /// The manifest adapter that owns the conversation, and its bot.
+    adapter: String,
+    bot_app_id: String,
+    service_url: String,
+    conversation_id: String,
+    bot_id: String,
+    user_id: String,
+    tenant: String,
+    sub: String,
+    scopes: Vec<String>,
+    idp: Option<triton_core::IdpIdentity>,
+    card_activity_id: Option<String>,
+    /// The answer reached the user (a 2xx update or post).
+    #[serde(default)]
+    delivered: bool,
+}
+
+impl Delivery {
+    fn to_json(&self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+}
+
+/// The inbound path's checks, applied again before a stored Teams task is
+/// resumed (review F3): the service URL must pass the same host
+/// allow-list, the sender must still be admitted by the CURRENT identity
+/// configuration (with its current scopes), and the rebuilt principal must
+/// own the task. Returns that principal, or why not.
+fn revalidate(
+    adapter: &MsTeamsAdapter,
+    rec: &triton_tasks::TaskRecord,
+    d: &Delivery,
+) -> Result<Principal, &'static str> {
+    if !adapter.verifier.service_url_allowed(&d.service_url) {
+        return Err("service url not allowed");
+    }
+    let (sub, scopes, tenant) = match &adapter.identity {
+        IdentityMode::SenderTable(table) => {
+            let Some(r) = table.resolve(&d.user_id) else {
+                return Err("sender no longer in the sender table");
+            };
+            let (sub, scopes, _groups, tenant) = r.into_parts();
+            (sub, scopes, tenant)
+        }
+        IdentityMode::Azure(cfg) => {
+            if !cfg.allowed_tenants.iter().any(|t| t == &d.tenant) {
+                return Err("tenant no longer allowed");
+            }
+            (d.sub.clone(), cfg.scopes.clone(), d.tenant.clone())
+        }
+    };
+    if sub != d.sub || tenant != d.tenant {
+        return Err("sender identity changed");
+    }
+    let mut principal = make_principal(&sub, &scopes, &tenant);
+    principal.idp = d.idp.clone();
+    principal.trace_id = rec.id.clone();
+    if rec.owner.as_deref() != Some(triton_tasks::owner_key(&principal).as_str()) {
+        return Err("not the task's owner");
+    }
+    principal.conversation_ref = Some(conversation_reference_json(
+        &d.service_url,
+        &d.conversation_id,
+        &d.bot_id,
+        &d.user_id,
+        &d.tenant,
+        &adapter.correlation_key,
+    ));
+    Ok(principal)
+}
+
+/// Finish a stored Teams task this process claimed at boot (F8b): resume
+/// it if it is still running, then deliver its outcome — or, if it ended
+/// while no process delivered it, the stored outcome — into its card,
+/// through the same [`deliver_terminal`] as the live courier.
+async fn resume_task(adapter: Arc<MsTeamsAdapter>, rec: triton_tasks::TaskRecord, d: Delivery) {
+    let Some(runner) = adapter.tasks.clone() else {
+        return;
+    };
+    let principal = match revalidate(&adapter, &rec, &d) {
+        Ok(p) => p,
+        Err(reason) => {
+            tracing::warn!(task = %rec.id, reason, "msteams: resume refused");
+            // Fixed message, nothing posted: the stored target is not
+            // trusted any more.
+            runner.fail(&rec.id, "forbidden", "the task could not be resumed");
+            mark_delivered(&runner, &rec.id);
+            return;
+        }
+    };
+    let age =
+        std::time::Duration::from_millis((triton_tasks::now_ms() - rec.created_ms).max(0) as u64);
+    let mut card = d
+        .card_activity_id
+        .clone()
+        .map(|id| TaskCard::resumed(rec.receipt.clone(), age, id));
+    let mut terminal: Option<Result<Value, TritonError>> = None;
+    if !rec.state.is_terminal()
+        && let Some(rx) = runner.ensure_running(&rec, &principal)
+    {
+        let mut events = triton_tasks::as_stream_events(rx, runner.store.clone(), rec.id.clone());
+        loop {
+            let ev = match next_card_turn(&mut events, card.as_ref()).await {
+                CardTurn::Event(Some(ev)) => ev,
+                CardTurn::Event(None) => break,
+                CardTurn::Flush => {
+                    if let Some(card) = card.as_mut()
+                        && let Some(id) = card.activity_id.clone()
+                        && card.due()
+                    {
+                        let body = card.activity(&d.bot_id, &d.conversation_id, &d.user_id);
+                        let _ = put_activity_to(
+                            &adapter,
+                            &d.service_url,
+                            &d.conversation_id,
+                            &id,
+                            &body,
+                        )
+                        .await;
+                    }
+                    continue;
+                }
+            };
+            match ev {
+                triton_core::stream::StreamEvent::Progress(v) => {
+                    if let Some(card) = card.as_mut() {
+                        card.progress(&v);
+                        if let Some(id) = card.activity_id.clone()
+                            && card.due()
+                        {
+                            let body = card.activity(&d.bot_id, &d.conversation_id, &d.user_id);
+                            let _ = put_activity_to(
+                                &adapter,
+                                &d.service_url,
+                                &d.conversation_id,
+                                &id,
+                                &body,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                triton_core::stream::StreamEvent::Done(v) => terminal = Some(Ok(v)),
+                triton_core::stream::StreamEvent::Error { error, .. } => {
+                    terminal = Some(Err(error));
+                }
+                _ => {}
+            }
+        }
+    }
+    // Not driven here (finished, expired or interrupted while down, or the
+    // stream ended without a terminal event): the stored outcome stands.
+    let outcome = match terminal {
+        Some(t) => t,
+        None => match runner.store.get(&rec.id) {
+            Some(r) if r.state == triton_tasks::TaskState::Completed => {
+                Ok(r.result.clone().unwrap_or_else(|| {
+                    serde_json::json!({ "surface": { "text": r.result_text.clone().unwrap_or_default() } })
+                }))
+            }
+            Some(r) if r.state == triton_tasks::TaskState::Failed => {
+                Err(triton_tasks::stored_error(&r))
+            }
+            _ => return,
+        },
+    };
+    let target = Target {
+        service_url: d.service_url.clone(),
+        conversation_id: d.conversation_id.clone(),
+        bot_id: d.bot_id.clone(),
+        user_id: d.user_id.clone(),
+        tenant: d.tenant.clone(),
+    };
+    let delivered = deliver_terminal(
+        &adapter,
+        &target,
+        card.and_then(|c| c.activity_id),
+        None,
+        outcome,
+        &rec.tool,
+        &principal,
+        None,
+        age.as_millis() as u64,
+    )
+    .await;
+    if delivered {
+        mark_delivered(&runner, &rec.id);
+    }
 }
 
 /// Audit tool label for an agent-initiated (proactive) send — matches the

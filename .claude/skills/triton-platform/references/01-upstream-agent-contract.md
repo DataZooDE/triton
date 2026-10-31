@@ -101,6 +101,17 @@ declared as returning A2UI but the shape doesn't deserialise, the call
 surfaces as a `Tool` error at the API boundary (intentional — the bug
 shows up loudly, not as a silent downgrade).
 
+## Long-running calls (task protocol)
+
+A call that needs minutes answers SSE `task {task_id, check_after_seconds?,
+receipt?}`, then `progress {text, step?, percent?}`, then `done` (the
+surface) or `error {message}`. Triton resumes a broken stream with
+`X-Triton-Task: <task_id>` (never re-sends the request) and shows progress on
+A2A, MCP ("filed" + `check_after_seconds`) and Teams (one card updated in
+place). Keep the stream alive (an event or `: ping` every ≤ 30 s). Normative:
+`doc/upstream-agent-contract.md` §7. Test double:
+`triton_tests::async_agent_fixture::FakeAsyncAgent`.
+
 ## Failure semantics
 
 - Non-2xx from your agent → Triton raises `TritonError::Tool`; the

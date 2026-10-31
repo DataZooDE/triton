@@ -53,7 +53,10 @@ Content-Type: application/json
   built — plain text becomes `{ "message": "<text>" }` (see §6 for the
   current routing limits).
 - **Timeout:** `TRITON_UPSTREAM_TIMEOUT_MS` (default 10 000 ms) per
-  call. Slow agents are reported as `upstream <tool> timed out`.
+  buffered call. Slow agents are reported as `upstream <tool> timed out`.
+  Spec A2A, MCP calls to an upstream tool and Teams dispatch as streams
+  (idle limit `TRITON_STREAM_IDLE_TIMEOUT_MS`, 60 s); a call that needs
+  longer goes asynchronous (§7).
 - **Egress allowlist (NFR-S-4):** outside `env=local`, every mapped
   `host:port` endpoint must pass an SSRF guard or the binary refuses to
   boot. IP literals must be loopback / RFC-1918 private / CGNAT
@@ -131,11 +134,20 @@ To fix that, answer a **`tools/list` introspection**: Triton POSTs `/` with
 `X-Triton-MCP: tools/list` (an empty `{}` body) and expects:
 
 ```json
-{ "tools": [ { "name": "<tool>", "inputSchema": { "type": "object", … } } ] }
+{ "tools": [ {
+    "name": "<tool>",
+    "description": "<what the tool does, for a model choosing it>",
+    "annotations": { "readOnlyHint": true },
+    "inputSchema": { "type": "object", … }
+} ] }
 ```
 
-Triton folds the returned `inputSchema` into `GET /v1/tools` for the matching
-tool name. It is **best-effort and public**: discovery never fails the
+Triton folds the returned `inputSchema` into `GET /v1/tools` (as
+`input_schema`) and MCP `tools/list` for the matching tool name. A string
+`description` and an object `annotations` (the MCP tool-annotation fields) are
+passed through verbatim to both listings; when absent, the listings omit the
+key. An MCP client's model chooses tools by `description`, so an upstream
+exposed over MCP should send one. It is **best-effort and public**: discovery never fails the
 listing, so you may answer it without verifying the bearer (return only the
 schema, never data), and an agent that doesn't implement it simply keeps the
 empty schema (clients fall back to a free-text composer). Optional but
@@ -157,6 +169,7 @@ fresh RS256 JWT minted by Triton itself
 | `tenant` | **Default:** `TRITON_STATIC_UPSTREAM_TENANT` when set, else absent — deployment-level config, *not* the per-sender tenant. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110):** the resolved sender's `Principal.tenant` instead |
 | `triton_sender_scopes` | Absent by default. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (#110/#114):** the resolved sender's scopes as a **JSON array** under this private claim — deliberately NOT the standard OAuth2 `scope`, since it's resolver-derived *authentication* data, not authorization Triton granted; a downstream must opt in to read it. Values are sanitised + capped, and intersected with `TRITON_STATIC_UPSTREAM_SCOPE_ALLOWLIST` when set. Omitted when empty |
 | `triton_sender_groups` | Absent by default. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true`:** the resolved sender's group memberships as a **JSON array** under this private claim — deliberately NOT `roles`, which a downstream like escurel derives admin from, so a resolver-supplied value can never escalate. Sanitised + capped like scopes, and intersected with `TRITON_STATIC_UPSTREAM_GROUP_ALLOWLIST` when set. Omitted when empty. Consume it by pointing your groups claim at `triton_sender_groups` |
+| `idp` / `idp_tenant` / `email` | Absent by default. **With `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true`:** the identity provider that vouched for the caller — `idp` ∈ `google` (opaque Google access token, Gemini Enterprise), `entra` (Entra access token, or the Teams bot's `azure` identity), `oidc` (the deployment's own `TRITON_OIDC_ISSUER`); `idp_tenant` = the Google Workspace `hd` or the Entra `tid` (absent for a generic issuer); `email` = the verified email, lower-cased (Entra: `email`, else `upn`, else `preferred_username`; absent for Teams activities, which carry none). Validated like `sub` before signing |
 | `iat` / `exp` | now / now + TTL, TTL clamped to **≤ 300 s** |
 
 Notes for agent authors:
@@ -288,8 +301,9 @@ Pinned by
   `sender_table`, `self_enrol`, and `upstream`; `telegram`, `whatsapp`,
   `discord`, and `signal` accept `sender_table` only; MS Teams uses
   `azure`.
-- **Minted-token claims** carry `sub` only for the sender (§3): no
-  per-sender `scopes`/`tenant`.
+- **Minted-token claims**: `sub` and `tenant` always; scopes, groups and
+  the identity-provider claims only with
+  `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true` (§3).
 - **Proactive sends** are a different surface: `POST /v1/outbound`
   (#95) with a dedicated audience — and, once #100 lands, a dedicated
   issuer so the agent can sign its own outbound tokens (mirror-image
@@ -301,3 +315,89 @@ Pinned by
   adapters there is no static table, so Triton trusts the caller's
   verified `tenant` (the agent owns its tenant's users) — a weaker,
   deliberate posture gated by the audience + scope.
+
+## 7. Long-running calls: the asynchronous task protocol (ADR-20)
+
+A call that takes longer than a caller waits (seconds to about eleven
+minutes) is answered as a **task**. Triton offers streaming on every A2A,
+MCP and Teams dispatch to an upstream (`Accept: text/event-stream`; the
+REST trio when the client asks for SSE). An agent that wants to go
+asynchronous answers `200` with `Content-Type: text/event-stream` and
+these events (`event:` name + one-line JSON `data:`, blank-line separated):
+
+| Event | `data` | Meaning |
+|---|---|---|
+| `task` | `{"task_id": "<id>", "check_after_seconds"?: n, "receipt"?: "<text>"}` | The call is now the agent's task `task_id` (≤ 200 chars, opaque to Triton). Sent first. `receipt` is the hand-over text for a caller that stops waiting ("filed, still running, the result will be in …"; mock 1k). |
+| `progress` | `{"text": "<step line>", "step"?: "<id or n/m>", "percent"?: 0–100}` | A real step, shown as it arrives (mock 1j). Any number, any time. |
+| `done` | the result — the canonical surface envelope (§4), as a buffered reply would be | Terminal success. |
+| `error` | `{"message": "<text>"}` | Terminal failure; `message` is shown to the caller. Not retried. |
+
+Rules:
+
+- **Keep the connection alive.** Triton cuts a stream that is silent for
+  `TRITON_STREAM_IDLE_TIMEOUT_MS` (default 60 s) or older than
+  `TRITON_STREAM_MAX_DURATION_MS` (default 600 s). Send a `progress` event
+  or an SSE comment line (`: ping`) at least every 30 s. A cut stream is
+  not a failure once `task` was sent: Triton resumes (next rule).
+- **Resume.** To re-attach to a task — after the stream broke, the
+  agent closed it, or Triton restarted — Triton sends
+  `POST /` with the usual `Authorization`, `X-Triton-Tool` and
+  `X-Triton-Channel`, plus **`X-Triton-Task: <task_id>`** and
+  `Accept: text/event-stream`, and the body `{"_triton": {…}}` (no tool
+  args). The agent answers the same stream for that task **from its
+  current state**: `task` again, the latest `progress`, then the rest
+  until `done`/`error` — or at once `done`/`error` if it already ended.
+  `404` (or an `error` event) means the task is unknown. A JSON `2xx` body
+  instead of SSE is taken as the `done` result. A resume must never start
+  the work again.
+- **Identity on resume.** Only the task's OWNER drives a resume (the
+  original caller inside the same Triton process; after a restart, the
+  owner's own `tasks/get` / resubscribe). Ownership is the verified
+  issuer, subject and tenant: a colleague in the same tenant does not see
+  the task, and an audit operator reads it without resuming it. The bearer
+  carries the same claims as the original dispatch, and the body the same
+  `_triton` metadata. Still check that the resuming subject owns the task.
+- **Idempotency.** Triton never re-sends a request it has a `task_id`
+  for; it resumes. A stream that breaks *before* `task` fails the call (it
+  cannot know whether the agent filed it).
+- **Buffered agents are unaffected.** A JSON reply, or an SSE stream of
+  `token`/`tool`/`done` without `task`, behaves as before.
+
+What each caller sees:
+
+| Surface | While running | When done |
+|---|---|---|
+| A2A 0.3 `message/stream` | `status-update` `{state: working, final: false, message: <progress text>, metadata: {step}}` | `artifact-update`, then `status-update completed, final: true` |
+| A2A 1.0 `SendStreamingMessage` / `POST /v1/message:stream` | `statusUpdate` `{status: {state: TASK_STATE_WORKING, message: <progress text>}, metadata: {step, percent}}` | `artifactUpdate`, then `statusUpdate TASK_STATE_COMPLETED` |
+| A2A blocking send (both versions) | after `TRITON_A2A_BLOCK_SECS` (60): the working task, its status message = the `receipt`, `metadata.checkAfterSeconds` | the answer, if it ends within the cap |
+| A2A `tasks/get`, `GetTask`, `ListTasks`, `tasks/resubscribe`, `SubscribeToTask` | the stored task with the latest progress; a resubscribe streams on | completed task with the answer artifact |
+| MCP `tools/call` | after `TRITON_MCP_ASYNC_WAIT_SECS` (20) past `task`: `content: [{text: <receipt>}]`, `structuredContent: {status: "filed", task_id: <the agent's task_id>, check_after_seconds, receipt?}`, `_meta.trace_id` = Triton's trace, `isError: false` — the client checks back with the agent's own status tool, by the agent's id | the normal tool result, if it ends within the wait |
+| Teams (`TRITON_MSTEAMS_ASYNC`) | typing, then ONE Adaptive Card "REQUEST · WORKING · m:ss" (receipt, step line, step/percent), updated in place at most once a second | the same activity replaced by the answer (`updateActivity`) |
+
+Tasks are stored by Triton (`TRITON_TASK_DB`, SQLite; memory when unset)
+for `TRITON_TASK_TTL_SECS` (default 1 day). A task still running after
+`TRITON_TASK_MAX_SECS` (default 3600) is failed as expired. Client streams
+end after `TRITON_A2A_STREAM_MAX_SECS` (default 660) without a terminal
+event; the client resubscribes or polls.
+
+Tasks are bounded by `TRITON_TASK_MAX_SECS` from filing — the open, every
+wait for the next event and the resume budget (resumes back off up to 8 s
+and continue until the deadline). An oversized frame fails the task.
+Only asynchronous MCP calls are stored, and A2A `ListTasks` lists A2A
+tasks only.
+
+Teams turns run through the same task runner and store (`triton-tasks`):
+an asynchronous Teams task is stored with its delivery target (the verified
+conversation reference and the card's activity id), resumed when its stream
+breaks or is cut (`TRITON_STREAM_MAX_DURATION_MS` no longer caps it; the
+deadline is `TRITON_TASK_MAX_SECS`), and resumed at boot after a restart,
+answering into the same card. If the final `updateActivity` is refused,
+the answer is posted as a new message.
+The task DB is credential-bearing (realizations §7: 0600, never shared
+between live processes). At boot, only Teams tasks are swept (they have a delivery target); an A2A
+task left running by a stopped Triton is driven again when its owner reads
+it, and MCP-filed tasks are never resumed by Triton (the client asks the
+agent).
+
+Pinned by `tests/async_tasks.rs` and `tests/msteams_async_task.rs` against
+`triton_tests::async_agent_fixture::FakeAsyncAgent`.

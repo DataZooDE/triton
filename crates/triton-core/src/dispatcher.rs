@@ -81,6 +81,27 @@ pub trait UpstreamDispatch: Send + Sync {
         Ok(stream::once(async move { StreamEvent::Done(value) }).boxed())
     }
 
+    /// Re-attach to a long-running upstream task (upstream contract
+    /// §7): ask the agent behind `tool` for the events of its task
+    /// `task_id` — the latest progress, then the rest until `done` or
+    /// `error`. Used after the original stream broke and after a Triton
+    /// restart. The default has no upstream and refuses.
+    /// `args` is the body to send: no tool args, only Triton's reserved
+    /// `_triton` key of the original turn.
+    async fn resume_streaming(
+        &self,
+        tool: &str,
+        task_id: &str,
+        args: Value,
+        principal: &Principal,
+        ctx: &DispatchContext,
+    ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        let _ = (task_id, args, principal, ctx);
+        Err(TritonError::Validation(format!(
+            "tool {tool} cannot resume a task"
+        )))
+    }
+
     /// MCP-Apps (#143 B): proxy a `resources/read` of an upstream-owned
     /// `ui://<authority>/...` URI to the owning upstream and return its
     /// `{ contents: [...] }`. The `<authority>` is resolved through the
@@ -127,15 +148,28 @@ pub trait UpstreamDispatch: Send + Sync {
         Vec::new()
     }
 
-    /// Input schemas for upstream agents that answer a `tools/list`
+    /// Descriptors of upstream agents that answer a `tools/list`
     /// introspection (`X-Triton-MCP: tools/list`), keyed by tool name. Lets
-    /// `GET /v1/tools` surface an upstream agent's real argument schema
-    /// instead of an empty object, so clients can build input forms. Agents
-    /// that don't answer are simply absent — discovery must never fail the
-    /// listing. The default returns nothing.
-    async fn agent_schemas(&self) -> std::collections::HashMap<String, Value> {
+    /// `GET /v1/tools` and MCP `tools/list` surface an upstream agent's real
+    /// argument schema, description and annotations instead of an empty
+    /// object, so clients can build input forms and models can choose the
+    /// tool. Agents that don't answer are simply absent — discovery must
+    /// never fail the listing. The default returns nothing.
+    async fn agent_tools(&self) -> std::collections::HashMap<String, UpstreamToolInfo> {
         std::collections::HashMap::new()
     }
+}
+
+/// What an upstream's `tools/list` answer says about one tool, as
+/// [`UpstreamDispatch::agent_tools`] returns it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UpstreamToolInfo {
+    /// `inputSchema` (or `input_schema`); `{}` when absent.
+    pub input_schema: Value,
+    /// `description`, when it is a string.
+    pub description: Option<String>,
+    /// `annotations`, when it is an object.
+    pub annotations: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -541,6 +575,26 @@ impl Dispatcher {
         ctx
     }
 
+    /// Is `tool` served by the in-process registry (not an upstream)?
+    pub fn is_in_process(&self, tool: &str) -> bool {
+        self.registry.get(tool).is_some()
+    }
+
+    /// Whether `tool`'s result is an A2UI surface: the in-process tool's
+    /// declaration, else (an upstream agent) whether an upstream is wired —
+    /// the rule [`Self::invoke_with`] applies.
+    pub fn returns_a2ui(&self, tool: &str) -> bool {
+        self.registry
+            .get(tool)
+            .map(|t| t.returns_a2ui())
+            .unwrap_or(self.upstream.is_some())
+    }
+
+    /// Is an upstream router wired?
+    pub fn has_upstream(&self) -> bool {
+        self.upstream.is_some()
+    }
+
     pub fn env(&self) -> &str {
         &self.env
     }
@@ -565,19 +619,25 @@ impl Dispatcher {
             let known: std::collections::HashSet<String> =
                 out.iter().map(|d| d.name.clone()).collect();
             // Best-effort `tools/list` introspection so upstream agents carry
-            // their real argument schema (empty object when an agent doesn't
-            // answer — discovery never fails the listing).
-            let schemas = upstream.agent_schemas().await;
+            // their real argument schema, description and annotations (empty
+            // schema when an agent doesn't answer — discovery never fails the
+            // listing).
+            let mut infos = upstream.agent_tools().await;
             for name in upstream.list_agents().await {
                 if !known.contains(&name) {
-                    let input_schema = schemas.get(&name).cloned().unwrap_or_else(|| json!({}));
+                    let info = infos.remove(&name).unwrap_or_else(|| UpstreamToolInfo {
+                        input_schema: json!({}),
+                        ..UpstreamToolInfo::default()
+                    });
                     out.push(ToolDescriptor {
                         name,
-                        input_schema,
+                        input_schema: info.input_schema,
                         // Assume an upstream may emit a surface so the UI
                         // offers A2UI rendering.
                         returns_a2ui: true,
                         upstream: true,
+                        description: info.description,
+                        annotations: info.annotations,
                     });
                 }
             }
@@ -818,40 +878,101 @@ impl Dispatcher {
                     Some(version) => wrap_stream_a2ui(inner, version),
                     None => inner,
                 };
-                // Everything the single audit line needs, captured by the
-                // finalizer that fires once at stream termination.
-                let metrics = self.metrics.clone();
-                let env = self.env.clone();
-                let protocol = protocol.to_string();
-                let tool = tool_name.to_string();
-                let sub = principal.sub.clone();
-                let tenant = principal.tenant.clone();
-                let trace_id = principal.trace_id.clone();
-                let sender_ref = principal.sender_ref.clone();
-                // Offset from request start to the moment the stream
-                // opened, so `ttfb`/`total` reflect the whole request, not
-                // just the post-200 window the combinator clocks.
-                let open_offset = started.elapsed();
-                let finalized = Finalized::new(inner, move |term: Termination, timing: Timing| {
-                    let total_ms = (open_offset + timing.total).as_millis() as u64;
-                    let ttfb_ms = timing.ttfb.map(|t| (open_offset + t).as_millis() as u64);
-                    emit_stream_audit(StreamAudit {
-                        metrics: &metrics,
-                        env: &env,
-                        protocol: &protocol,
-                        tool: &tool,
-                        sub: &sub,
-                        tenant: &tenant,
-                        sender_ref: sender_ref.as_deref(),
-                        trace_id: &trace_id,
-                        term,
-                        total_ms,
-                        ttfb_ms,
-                    });
-                });
-                Ok(finalized.boxed())
+                Ok(self.audited_stream(inner, tool_name, protocol, &principal, started))
             }
         }
+    }
+
+    /// Resume a long-running upstream task: the same gates and the
+    /// same single deferred audit line as [`Self::invoke_streaming_with`],
+    /// but the upstream is asked for the events of its task `task_id`
+    /// instead of starting a new call.
+    pub async fn resume_streaming_with(
+        &self,
+        tool_name: &str,
+        task_id: &str,
+        principal: Principal,
+        protocol: &str,
+        overrides: ContextOverrides,
+    ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        if self.is_denied(&principal) {
+            return Err(self.deny(tool_name, protocol, &principal));
+        }
+        if let Err(e) = self.can_invoke(&principal, tool_name) {
+            let outcome: Result<Value, TritonError> = Err(e);
+            self.audit_dispatch(tool_name, protocol, &principal, 0, &outcome);
+            match outcome {
+                Err(e) => return Err(e),
+                Ok(_) => unreachable!("constructed as Err"),
+            }
+        }
+        // F11: the resume carries the turn's `_triton` metadata, exactly
+        // as the original dispatch did.
+        let args = prepare_args(json!({}), &overrides);
+        let ctx = self.context(protocol, &overrides);
+        let started = Instant::now();
+        let Some(upstream) = self.upstream.as_ref() else {
+            return Err(TritonError::Validation(format!(
+                "tool {tool_name} cannot resume a task"
+            )));
+        };
+        match upstream
+            .resume_streaming(tool_name, task_id, args, &principal, &ctx)
+            .await
+        {
+            Err(e) => Err(self.fail(
+                tool_name,
+                protocol,
+                &principal,
+                &e,
+                started.elapsed().as_millis() as u64,
+            )),
+            Ok(inner) => Ok(self.audited_stream(inner, tool_name, protocol, &principal, started)),
+        }
+    }
+
+    /// Wrap an open upstream stream so exactly one audit line is emitted
+    /// at its termination (ADR-6).
+    fn audited_stream(
+        &self,
+        inner: BoxStream<'static, StreamEvent>,
+        tool_name: &str,
+        protocol: &str,
+        principal: &Principal,
+        started: Instant,
+    ) -> BoxStream<'static, StreamEvent> {
+        // Everything the single audit line needs, captured by the
+        // finalizer that fires once at stream termination.
+        let metrics = self.metrics.clone();
+        let env = self.env.clone();
+        let protocol = protocol.to_string();
+        let tool = tool_name.to_string();
+        let sub = principal.sub.clone();
+        let tenant = principal.tenant.clone();
+        let trace_id = principal.trace_id.clone();
+        let sender_ref = principal.sender_ref.clone();
+        // Offset from request start to the moment the stream
+        // opened, so `ttfb`/`total` reflect the whole request, not
+        // just the post-200 window the combinator clocks.
+        let open_offset = started.elapsed();
+        let finalized = Finalized::new(inner, move |term: Termination, timing: Timing| {
+            let total_ms = (open_offset + timing.total).as_millis() as u64;
+            let ttfb_ms = timing.ttfb.map(|t| (open_offset + t).as_millis() as u64);
+            emit_stream_audit(StreamAudit {
+                metrics: &metrics,
+                env: &env,
+                protocol: &protocol,
+                tool: &tool,
+                sub: &sub,
+                tenant: &tenant,
+                sender_ref: sender_ref.as_deref(),
+                trace_id: &trace_id,
+                term,
+                total_ms,
+                ttfb_ms,
+            });
+        });
+        finalized.boxed()
     }
 
     /// Dispatch a tool call given pre-parsed args. Emits one audit
@@ -1563,6 +1684,7 @@ mod tests {
             trace_id: "trace-test".into(),
             sender_ref: None,
             conversation_ref: None,
+            idp: None,
         }
     }
 

@@ -14,6 +14,10 @@
 
 #[path = "../a2a.rs"]
 mod a2a;
+#[path = "../a2a_bin.rs"]
+mod a2a_bin;
+#[path = "../a2a_schema.rs"]
+mod a2a_schema;
 #[path = "../a2a_spec.rs"]
 mod a2a_spec;
 #[path = "../a2a_spec_agents.rs"]
@@ -26,6 +30,8 @@ mod a2ui_flutter_fixtures;
 mod a2ui_parity;
 #[path = "../acc_hardening.rs"]
 mod acc_hardening;
+#[path = "../async_tasks.rs"]
+mod async_tasks;
 #[path = "../audit_operator_conjunction.rs"]
 mod audit_operator_conjunction;
 #[path = "../audit_reject_coalescing.rs"]
@@ -34,6 +40,8 @@ mod audit_reject_coalescing;
 mod audit_retrieval;
 #[path = "../audit_tenant_scope.rs"]
 mod audit_tenant_scope;
+#[path = "../bearer_challenge.rs"]
+mod bearer_challenge;
 #[path = "../consumer_smoke.rs"]
 mod consumer_smoke;
 #[path = "../correlation_sender_binding.rs"]
@@ -70,6 +78,8 @@ mod discord_gateway;
 mod echo;
 #[path = "../email_outbound.rs"]
 mod email_outbound;
+#[path = "../entra_delegated_scope.rs"]
+mod entra_delegated_scope;
 #[path = "../explorer_contract.rs"]
 mod explorer_contract;
 #[path = "../forward_principal.rs"]
@@ -82,6 +92,8 @@ mod google_chat;
 mod harness_from_a_consumer_workspace;
 #[path = "../healthz.rs"]
 mod healthz;
+#[path = "../inbound_issuers.rs"]
+mod inbound_issuers;
 #[path = "../manifest.rs"]
 mod manifest;
 #[path = "../manifest_endpoint.rs"]
@@ -90,12 +102,16 @@ mod manifest_endpoint;
 mod mcp;
 #[path = "../mcp_apps_acceptance.rs"]
 mod mcp_apps_acceptance;
+#[path = "../mcp_protected_resource.rs"]
+mod mcp_protected_resource;
 #[path = "../metrics.rs"]
 mod metrics;
 #[path = "../metrics_endpoint.rs"]
 mod metrics_endpoint;
 #[path = "../msteams.rs"]
 mod msteams;
+#[path = "../msteams_async_task.rs"]
+mod msteams_async_task;
 #[path = "../msteams_callback.rs"]
 mod msteams_callback;
 #[path = "../msteams_channel_transport.rs"]
@@ -110,6 +126,8 @@ mod msteams_federated;
 mod msteams_outbound;
 #[path = "../msteams_report_image.rs"]
 mod msteams_report_image;
+#[path = "../msteams_task_resume.rs"]
+mod msteams_task_resume;
 #[path = "../msteams_theme.rs"]
 mod msteams_theme;
 #[path = "../multi_issuer.rs"]
@@ -148,9 +166,21 @@ mod surface_baseline;
 mod surface_hint;
 #[path = "../surface_render.rs"]
 mod surface_render;
+#[path = "../task_review.rs"]
+mod task_review;
 #[path = "../telegram.rs"]
 mod telegram;
 
+#[path = "../conversation_action_key.rs"]
+mod conversation_action_key;
+#[path = "../conversation_components.rs"]
+mod conversation_components;
+#[path = "../conversation_gemini_e2e.rs"]
+mod conversation_gemini_e2e;
+#[path = "../conversation_teams_e2e.rs"]
+mod conversation_teams_e2e;
+#[path = "../conversation_telegram_e2e.rs"]
+mod conversation_telegram_e2e;
 #[path = "../telegram_callback.rs"]
 mod telegram_callback;
 #[path = "../telegram_courier.rs"]
@@ -187,6 +217,8 @@ mod upstream_contract;
 mod upstream_identity_hardening;
 #[path = "../upstream_listing.rs"]
 mod upstream_listing;
+#[path = "../upstream_missing_tool.rs"]
+mod upstream_missing_tool;
 #[path = "../version.rs"]
 mod version;
 #[path = "../whatsapp.rs"]

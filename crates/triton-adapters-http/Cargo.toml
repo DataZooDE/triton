@@ -38,3 +38,7 @@ tokio = { workspace = true }
 tower-http = { version = "0.6", default-features = false, features = ["cors"] }
 tracing = { workspace = true }
 uuid = { version = "1", features = ["v4"] }
+# Long-running tasks (store, hub, runner), shared with the chat adapters.
+triton-tasks = { path = "../triton-tasks" }
+base64 = "0.22"
+url = "2"

@@ -29,11 +29,15 @@ use futures::stream::{BoxStream, StreamExt};
 use serde_json::Value;
 use tokio::sync::RwLock;
 use triton_core::stream::{Finalized, Termination};
-use triton_core::{DispatchContext, Principal, StreamEvent, TritonError, UpstreamDispatch};
+use triton_core::{
+    DispatchContext, Principal, StreamEvent, TritonError, UpstreamDispatch, UpstreamToolInfo,
+};
 
 /// The channel the turn will be rendered on (#352). Informational, like
 /// `X-Triton-Tool`: never used for routing or authorization.
 const CHANNEL_HEADER: &str = "X-Triton-Channel";
+/// Names the upstream task a resume request asks for (contract §7).
+const TASK_HEADER: &str = "X-Triton-Task";
 use triton_identity::JwtSigner;
 
 use crate::sse::decode_sse;
@@ -421,8 +425,35 @@ impl StaticUpstream {
                 // #250: `sub` is signed regardless of `forward_principal`, so
                 // it is validated here rather than inside that branch.
                 validate_signed_field("sub", &principal.sub, MAX_SUB_LEN)?;
-                s.sign(&auds, &principal.sub, &tenant, &scopes, &groups, TOKEN_TTL)
-                    .map_err(|e| TritonError::Tool(format!("mint upstream token: {e}")))
+                // The identity provider's view of the caller rides
+                // under the same opt-in as scopes and groups. The values come
+                // from a verified token, but are validated like every other
+                // signed field before they are signed.
+                let mut extra = serde_json::Map::new();
+                if self.forward_principal
+                    && let Some(idp) = &principal.idp
+                {
+                    validate_signed_field("idp", &idp.name, MAX_TENANT_LEN)?;
+                    extra.insert("idp".into(), Value::String(idp.name.clone()));
+                    if let Some(t) = &idp.tenant {
+                        validate_signed_field("idp_tenant", t, MAX_TENANT_LEN)?;
+                        extra.insert("idp_tenant".into(), Value::String(t.clone()));
+                    }
+                    if let Some(e) = &idp.email {
+                        validate_signed_field("email", e, MAX_SUB_LEN)?;
+                        extra.insert("email".into(), Value::String(e.clone()));
+                    }
+                }
+                s.sign_with_claims(
+                    &auds,
+                    &principal.sub,
+                    &tenant,
+                    &scopes,
+                    &groups,
+                    &extra,
+                    TOKEN_TTL,
+                )
+                .map_err(|e| TritonError::Tool(format!("mint upstream token: {e}")))
             }
             None => Ok(self.token.clone()),
         }
@@ -528,7 +559,11 @@ impl StaticUpstream {
     /// surface an agent's real argument schema. Returns `None` on any fault
     /// (the agent may not implement it) — discovery is best-effort and never
     /// fails the listing.
-    async fn do_list_tools(&self, ep: &str, bearer: &str) -> Option<Vec<(String, Value)>> {
+    async fn do_list_tools(
+        &self,
+        ep: &str,
+        bearer: &str,
+    ) -> Option<Vec<(String, UpstreamToolInfo)>> {
         let resp = self
             .http
             .post(format!("http://{ep}/"))
@@ -546,12 +581,24 @@ impl StaticUpstream {
         let mut out = Vec::new();
         for t in tools {
             if let Some(name) = t.get("name").and_then(Value::as_str) {
-                let schema = t
+                let input_schema = t
                     .get("inputSchema")
                     .or_else(|| t.get("input_schema"))
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
-                out.push((name.to_string(), schema));
+                let description = t
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let annotations = t.get("annotations").filter(|a| a.is_object()).cloned();
+                out.push((
+                    name.to_string(),
+                    UpstreamToolInfo {
+                        input_schema,
+                        description,
+                        annotations,
+                    },
+                ));
             }
         }
         Some(out)
@@ -764,6 +811,73 @@ impl UpstreamDispatch for StaticUpstream {
         principal: &Principal,
         ctx: &DispatchContext,
     ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        self.open_stream(tool, args, principal, ctx, None).await
+    }
+
+    /// Upstream contract §7: the same SSE request, with
+    /// `X-Triton-Task: <task_id>` and no tool args, asking the agent to
+    /// replay the task's latest state and continue until it ends.
+    async fn resume_streaming(
+        &self,
+        tool: &str,
+        task_id: &str,
+        args: Value,
+        principal: &Principal,
+        ctx: &DispatchContext,
+    ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
+        self.open_stream(tool, args, principal, ctx, Some(task_id))
+            .await
+    }
+
+    async fn list_agents(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.map.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    async fn agent_tools(&self) -> HashMap<String, UpstreamToolInfo> {
+        // One bearer for all probes; a synthetic principal (there is no real
+        // caller at listing time). Without a signer this is the static token.
+        let principal = Principal {
+            sub: "triton-introspect".to_string(),
+            scopes: Vec::new(),
+            groups: Vec::new(),
+            tenant: self.tenant.clone(),
+            raw_token: String::new(),
+            trace_id: String::new(),
+            sender_ref: None,
+            conversation_ref: None,
+            idp: None,
+        };
+        let bearer = match self.bearer(&principal) {
+            Ok(b) => b,
+            Err(_) => return HashMap::new(),
+        };
+        // Probe each unique endpoint once — a multi-tool agent serves several
+        // tool names from one endpoint.
+        let endpoints: HashSet<&String> = self.map.values().collect();
+        let mut out = HashMap::new();
+        for ep in endpoints {
+            if let Some(tools) = self.do_list_tools(ep, &bearer).await {
+                for (name, info) in tools {
+                    out.insert(name, info);
+                }
+            }
+        }
+        out
+    }
+}
+
+impl StaticUpstream {
+    /// The streaming request shared by a new call and a task resume.
+    async fn open_stream(
+        &self,
+        tool: &str,
+        args: Value,
+        principal: &Principal,
+        ctx: &DispatchContext,
+        resume: Option<&str>,
+    ) -> Result<BoxStream<'static, StreamEvent>, TritonError> {
         let permission = self.breaker_check(tool).await;
         if !permission.allowed {
             return Err(TritonError::Tool(format!(
@@ -789,10 +903,12 @@ impl UpstreamDispatch for StaticUpstream {
             .bearer_auth(&bearer)
             .header("X-Triton-Tool", tool)
             .header(CHANNEL_HEADER, &ctx.channel)
-            .header(reqwest::header::ACCEPT, "text/event-stream")
-            .json(&args)
-            .send()
-            .await;
+            .header(reqwest::header::ACCEPT, "text/event-stream");
+        let send = match resume {
+            Some(task_id) => send.header(TASK_HEADER, task_id),
+            None => send,
+        };
+        let send = send.json(&args).send().await;
         let resp = match send {
             Ok(r) => r,
             Err(e) => {
@@ -879,43 +995,6 @@ impl UpstreamDispatch for StaticUpstream {
             }
         });
         Ok(finalized.boxed())
-    }
-
-    async fn list_agents(&self) -> Vec<String> {
-        let mut v: Vec<String> = self.map.keys().cloned().collect();
-        v.sort();
-        v
-    }
-
-    async fn agent_schemas(&self) -> HashMap<String, Value> {
-        // One bearer for all probes; a synthetic principal (there is no real
-        // caller at listing time). Without a signer this is the static token.
-        let principal = Principal {
-            sub: "triton-introspect".to_string(),
-            scopes: Vec::new(),
-            groups: Vec::new(),
-            tenant: self.tenant.clone(),
-            raw_token: String::new(),
-            trace_id: String::new(),
-            sender_ref: None,
-            conversation_ref: None,
-        };
-        let bearer = match self.bearer(&principal) {
-            Ok(b) => b,
-            Err(_) => return HashMap::new(),
-        };
-        // Probe each unique endpoint once — a multi-tool agent serves several
-        // tool names from one endpoint.
-        let endpoints: HashSet<&String> = self.map.values().collect();
-        let mut out = HashMap::new();
-        for ep in endpoints {
-            if let Some(tools) = self.do_list_tools(ep, &bearer).await {
-                for (name, schema) in tools {
-                    out.insert(name, schema);
-                }
-            }
-        }
-        out
     }
 }
 
