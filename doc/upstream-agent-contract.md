@@ -121,6 +121,17 @@ Object args carry Triton's reserved `_triton` key:
 - **Embedded (in-process) tools** see the A2A metadata in args. They
   read the channel and surface by overriding
   `Tool::invoke_with_context`.
+- **A2UI client events** (spec A2A with the A2UI extension active, or a
+  part typed `application/json+a2ui`) arrive as
+  `_triton.client.a2ui_events`: the A2UI v0.9 client messages of the turn,
+  projected onto `{version, action: {name, surfaceId, sourceComponentId,
+  timestamp, context}}` / `{version, error}`, at most 8. Gemini Enterprise
+  resolves the data bindings in a button's `action.event.context`, so a
+  click carries the values of the surface's inputs. These are
+  **client-asserted**: Triton never vouches for them; check `surfaceId`
+  against the surfaces you issued. A turn with only an event part reaches
+  you with `message` = `A2UI action: <name>` (or the mapped question, see
+  §4).
 
 ### 2a. Optional: argument-schema discovery (`X-Triton-MCP: tools/list`)
 
@@ -211,6 +222,33 @@ Notes for agent authors:
 - Emit the **canonical** surface, not a versioned wire shape — Triton
   builds the negotiated A2UI version and the per-platform chat
   rendering from it (`degrade` rules in `adapter.yaml`).
+- **Producer-built A2UI v0.9** (Gemini Enterprise only): put native
+  surfaces in `surface.a2ui`, a sibling of `components` that every other
+  channel ignores, so keep the prose in a `text` component:
+
+```json
+{ "surface": {
+    "components": [ { "kind": "text", "value": "Three close calls." } ],
+    "a2ui": [ {
+      "components": [ { "id": "root", "component": "MaterialCard", "children": ["b"] },
+                      { "id": "b", "component": "MaterialButton", "label": "Apply",
+                        "action": { "event": { "name": "apply",
+                                    "context": { "pick": { "path": "/pick" } } } } } ],
+      "data_model": { "pick": "a" },
+      "theme": { "agentDisplayName": "Coverage Matching" },
+      "actions": { "b": "apply the pick" } } ] } }
+```
+
+  Each surface (at most 8) goes out verbatim as `createSurface` +
+  `updateComponents` (+ `updateDataModel`) ahead of Triton's own card;
+  `components` must contain `root`. `actions` maps an exact component id
+  to the question its click re-asks (no control characters, at most 1 KiB,
+  at most 32); `theme` may set `agentDisplayName` and `primaryColor`
+  (`#rrggbb`). Triton does not vet the components: passthrough is for
+  upstreams the operator trusts like its own code. In Gemini Enterprise
+  (measured 2026-10-31) Material cards, tables, chips, checkboxes,
+  progress bars, VegaChart and Canvas side panels render; `IFrameSrcdoc`
+  does not; `createSurface.sendDataModel` is not honoured.
 - Triton owns the dispatch/post audit pair (ADR-6). Agents emit their
   own logs but must not assume their response body is audited.
 

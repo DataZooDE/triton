@@ -476,32 +476,15 @@ fn turn_context(
     let mut meta = serde_json::Map::new();
     meta.insert("protocol".into(), json!("a2a"));
     meta.insert("a2a_context_id".into(), json!(context_id));
-    // The client's A2UI events (a click on a passed-through surface) and the
-    // message metadata, where A2UI `sendDataModel` puts the surface's data
-    // model. Only the producing agent can interpret either, so both ride along
-    // verbatim; absent on a plain text turn.
-    let message = params.get("message");
-    let events: Vec<Value> = message
-        .and_then(|m| m.get("parts"))
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter(|p| p.get("kind").and_then(Value::as_str) == Some("data"))
-        .filter_map(|p| p.get("data"))
-        .flat_map(|d| match d {
-            Value::Array(a) => a.clone(),
-            other => vec![other.clone()],
-        })
-        .filter(|d| d.get("action").is_some() || d.get("error").is_some())
-        .collect();
+    // The client's A2UI events (a click on a producer-built surface, with the
+    // values its action context bound), when this request speaks A2UI. They
+    // are CLIENT-ASSERTED: Triton passes them on, projected onto the v0.9
+    // event fields, but never vouches for them — an agent checks `surfaceId`
+    // against the surfaces it issued. Nested under `client` so they cannot be
+    // mistaken for the Triton-authored keys beside them.
+    let events = a2ui_client_events(params, a2ui);
     if !events.is_empty() {
-        meta.insert("a2ui_events".into(), Value::Array(events));
-    }
-    if let Some(m) = message
-        .and_then(|m| m.get("metadata"))
-        .filter(|m| m.is_object())
-    {
-        meta.insert("a2a_message_metadata".into(), m.clone());
+        meta.insert("client".into(), json!({ "a2ui_events": events }));
     }
     if let Some(slug) = config.a2a_path.strip_prefix("/a2a/") {
         meta.insert("agent".into(), json!(slug));
@@ -557,7 +540,89 @@ fn text_from_params(params: &Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     let trimmed = text.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    if !trimmed.is_empty() {
+        return Some(trimmed.to_string());
+    }
+    // An A2UI event without any text (a standard client posts only the
+    // DataPart): the turn still reaches the agent, which reads the event from
+    // `_triton.client.a2ui_events`.
+    a2ui_messages(parts).find_map(|m| {
+        let action = m.get("action")?;
+        let name = action
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("action");
+        Some(format!("A2UI action: {name}"))
+    })
+}
+
+/// The A2UI client-to-server messages among `parts`: DataParts whose `data` is
+/// one message object or an array of them, each carrying an object `action`
+/// or `error`.
+fn a2ui_messages(parts: &[Value]) -> impl Iterator<Item = &Value> {
+    parts
+        .iter()
+        .filter(|p| p.get("kind").and_then(Value::as_str) == Some("data"))
+        .filter_map(|p| p.get("data"))
+        .flat_map(|d| match d {
+            Value::Array(a) => a.iter().collect::<Vec<_>>(),
+            other => vec![other],
+        })
+        .filter(|m| {
+            m.get("action").is_some_and(Value::is_object)
+                || m.get("error").is_some_and(Value::is_object)
+        })
+}
+
+/// Upper bound on forwarded A2UI events per turn.
+const MAX_A2UI_EVENTS: usize = 8;
+
+/// The turn's A2UI events projected onto the v0.9 fields, for
+/// `_triton.client.a2ui_events`. Only when the request activated A2UI or the
+/// part is typed as A2UI; a plain structured-data part is not an A2UI event.
+fn a2ui_client_events(params: &Value, a2ui: bool) -> Vec<Value> {
+    let Some(parts) = params
+        .get("message")
+        .and_then(|m| m.get("parts"))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let typed_as_a2ui = parts.iter().any(|p| {
+        p.get("metadata")
+            .and_then(|m| m.get("mimeType"))
+            .and_then(Value::as_str)
+            .is_some_and(|t| t == triton_core::a2ui::ge::MIME)
+    });
+    if !a2ui && !typed_as_a2ui {
+        return Vec::new();
+    }
+    a2ui_messages(parts)
+        .take(MAX_A2UI_EVENTS)
+        .map(|m| {
+            let mut out = serde_json::Map::new();
+            if let Some(v) = m.get("version") {
+                out.insert("version".into(), v.clone());
+            }
+            if let Some(action) = m.get("action").and_then(Value::as_object) {
+                let projected: serde_json::Map<String, Value> = action
+                    .iter()
+                    .filter(|(k, _)| {
+                        matches!(
+                            k.as_str(),
+                            "name" | "surfaceId" | "sourceComponentId" | "timestamp" | "context"
+                        )
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                out.insert("action".into(), Value::Object(projected));
+            }
+            if let Some(error) = m.get("error").filter(|e| e.is_object()) {
+                out.insert("error".into(), error.clone());
+            }
+            Value::Object(out)
+        })
+        .collect()
 }
 
 /// Pull a re-ask `question` out of an inbound A2UI `action` DataPart. The
@@ -566,43 +631,28 @@ fn text_from_params(params: &Value) -> Option<String> {
 /// look for a non-empty string `context.question`; absent ⇒ `None` (a normal
 /// text turn). Tolerant of both the object and array `data` encodings.
 fn a2ui_action_question(parts: &[Value]) -> Option<String> {
-    for p in parts {
-        if p.get("kind").and_then(Value::as_str) != Some("data") {
+    for m in a2ui_messages(parts) {
+        let Some(action) = m.get("action") else {
             continue;
-        }
-        let data = p.get("data")?;
-        // `data` may be a single message object or an array of messages.
-        let msgs: Vec<&Value> = match data {
-            Value::Array(a) => a.iter().collect(),
-            obj => vec![obj],
         };
-        for m in msgs {
-            let Some(action) = m.get("action") else {
-                continue;
-            };
-            // A resolved `context.question`, if a host ever forwards context
-            // (GE does not — it posts `context:{}`, overwrites `name`, and
-            // renumbers ids). Kept as a forward-compatible fallback.
-            if let Some(q) = action
-                .get("context")
-                .and_then(|c| c.get("question"))
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-            {
-                return Some(q.to_string());
-            }
-            // GE reality: the only reliable channels are `surfaceId` (we mint
-            // it) and a deterministic `sourceComponentId` (GE's own `btn-N`).
-            // Map them back to the re-ask question via the per-surface table
-            // recorded when the card was built.
-            if let (Some(sid), Some(cid)) = (
-                action.get("surfaceId").and_then(Value::as_str),
-                action.get("sourceComponentId").and_then(Value::as_str),
-            ) && let Some(q) = triton_core::a2ui::ge::question_for(sid, cid)
-            {
-                return Some(q);
-            }
+        // A resolved `context.question`, if a host forwards one.
+        if let Some(q) = action
+            .get("context")
+            .and_then(|c| c.get("question"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(q.to_string());
+        }
+        // Otherwise map `surfaceId` + `sourceComponentId` back to the re-ask
+        // question recorded when the card was built (GE echoes both intact).
+        if let (Some(sid), Some(cid)) = (
+            action.get("surfaceId").and_then(Value::as_str),
+            action.get("sourceComponentId").and_then(Value::as_str),
+        ) && let Some(q) = triton_core::a2ui::ge::question_for(sid, cid)
+        {
+            return Some(q);
         }
     }
     None

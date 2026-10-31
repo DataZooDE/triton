@@ -147,9 +147,10 @@ fn split_skill_id(label: &str) -> (&str, &str) {
 const SURFACE_PREFIX: &str = "triton-answer-";
 
 /// Bounded, process-wide map: `surfaceId` → { button id number → re-ask
-/// question }. GE strips name/context on click and truncates the surfaceId to
-/// the uuid, but PRESERVES the component id — so the recoverable pair is
-/// `(surfaceId-uuid, our btn-N)`, which this table maps back to the question.
+/// question }. A click echoes `surfaceId` and the component id (`btn-N`), so
+/// the pair maps back to the question. (Measured 2026-10-31: GE also keeps the
+/// event `name` and resolves data bindings in `context`; Triton's own buttons
+/// send `context: {}`, so only the id pair carries anything for them.)
 ///
 /// This is process-local, so `dz-agent-template` runs a single replica in lab
 /// (values-lab `replicaCount: 1`); a multi-replica deployment would need a
@@ -177,8 +178,35 @@ fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, Str
 /// `source_component_id` is GE's echoed id (`"btn-N"`); its trailing number
 /// keys the per-card table recorded at build time under `surface_id`. `None` ⇒
 /// not a re-ask (→ caller falls back to the turn's text).
+/// Producer-built surfaces' re-ask tables, keyed by the exact component id
+/// (a producer names its own components; Triton's numeric `btn-N` convention
+/// does not apply). Same FIFO cap as [`SURFACE_QUESTIONS`].
+static PASSTHROUGH_ACTIONS: std::sync::Mutex<
+    Vec<(String, std::collections::HashMap<String, String>)>,
+> = std::sync::Mutex::new(Vec::new());
+
+fn remember_actions(surface_id: &str, actions: std::collections::HashMap<String, String>) {
+    if actions.is_empty() {
+        return;
+    }
+    if let Ok(mut store) = PASSTHROUGH_ACTIONS.lock() {
+        store.push((surface_id.to_string(), actions));
+        let overflow = store.len().saturating_sub(MAX_SURFACES);
+        if overflow > 0 {
+            store.drain(0..overflow);
+        }
+    }
+}
+
 pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<String> {
+    // A producer-built surface: the exact component id, nothing else.
+    if let Ok(store) = PASSTHROUGH_ACTIONS.lock()
+        && let Some((_, actions)) = store.iter().rev().find(|(sid, _)| sid == surface_id)
+    {
+        return actions.get(source_component_id).cloned();
+    }
     let n: usize = source_component_id.rsplit('-').next()?.parse().ok()?;
+
     let store = SURFACE_QUESTIONS.lock().ok()?;
     let hit = store.iter().rev().find(|(sid, _)| sid == surface_id);
     hit.and_then(|(_, m)| m.get(&n).cloned())
@@ -232,10 +260,12 @@ fn beautify_vega_for_ge(spec: &Value) -> Value {
 /// (`result["surface"]["components"]`). Returns `None` when the value carries
 /// no renderable component, so the caller can fall back to a text part.
 pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
-    let components = result
-        .get("surface")
-        .and_then(|s| s.get("components"))
-        .and_then(Value::as_array)?;
+    let surface = result.get("surface")?;
+    let empty = Vec::new();
+    let components = surface
+        .get("components")
+        .and_then(Value::as_array)
+        .unwrap_or(&empty);
 
     // Flat component list (id-referenced); `root_children` collects the ids
     // that hang under the top Column, in surface order.
@@ -248,19 +278,11 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     let mut source_btn_ids: Vec<String> = Vec::new();
     // Predicted-GE-id → re-ask question, for this card's follow-up buttons.
     let mut qmap: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-    // Producers that speak A2UI v0.9 themselves (`kind: "a2ui"`) hand their
-    // surfaces through verbatim, ahead of the card Triton builds below.
-    let passthrough: Vec<Value> = components
-        .iter()
-        .filter(|c| c.get("kind").and_then(Value::as_str) == Some("a2ui"))
-        .flat_map(|c| {
-            c.get("surfaces")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-        })
-        .flat_map(|surface| passthrough_messages(&surface))
-        .collect();
+    // Producers that speak A2UI v0.9 themselves put their surfaces in
+    // `surface.a2ui` — a sibling of `components`, so the typed component
+    // vocabulary (and every channel built on it) never sees them. They go out
+    // first, ahead of the card Triton builds below.
+    let passthrough = passthrough_surfaces(surface.get("a2ui"));
     let mut n = 0usize;
     let id = |prefix: &str, n: &mut usize| {
         *n += 1;
@@ -317,10 +339,9 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                     .and_then(Value::as_str)
                     .filter(|_| tool != "render_report");
                 // MaterialButton takes its `label` directly (no child Text), so
-                // one id per button. GE strips our event name/context and
-                // truncates the surfaceId to its uuid on click, but PRESERVES the
-                // component id — a click echoes `sourceComponentId` equal to the
-                // Button's own `id` (`btn-N`). `n` here is exactly that N, so key
+                // one id per button. A click echoes `sourceComponentId` equal to
+                // the Button's own `id` (`btn-N`); our context is empty, so the
+                // id is the only payload. `n` here is exactly that N, so key
                 // `N → question` for the inbound re-ask lookup (report/other
                 // buttons carry no question and are not recorded).
                 let btn_id = id("btn", &mut n);
@@ -480,15 +501,43 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     Some(messages)
 }
 
-/// The v0.9 messages for one passed-through surface:
-/// `{components, data_model?, send_data_model?, theme?, actions?}`.
+/// Upper bounds for producer-built surfaces: they share one process-wide
+/// re-ask table with every user's cards, so one reply must not be able to
+/// evict the rest.
+const MAX_PASSTHROUGH_SURFACES: usize = 8;
+const MAX_PASSTHROUGH_ACTIONS: usize = 32;
+const MAX_ACTION_QUESTION_BYTES: usize = 1024;
+const MAX_DISPLAY_NAME_CHARS: usize = 64;
+
+/// The v0.9 messages for the producer-built surfaces in `surface.a2ui`:
+/// `[{components, data_model?, theme?, actions?}]`, at most
+/// [`MAX_PASSTHROUGH_SURFACES`].
 ///
-/// `components` is the flat v0.9 component list and must contain the `root`
-/// component; a surface without one is dropped (the client would render an
-/// empty card). `actions` maps a button's `btn-N` id to the question its click
-/// re-asks, recorded under this surface for [`question_for`]: GE echoes only
-/// `surfaceId` and `sourceComponentId` on a click. `theme` is merged over
-/// Triton's defaults, so a producer can name itself (`agentDisplayName`).
+/// Each surface is emitted verbatim as createSurface + updateComponents (+
+/// updateDataModel). `components` is the flat v0.9 component list and must
+/// contain the `root` component; a surface without one is dropped. `actions`
+/// maps a component id to the question its click re-asks (exact id match, see
+/// [`question_for`]). `theme` may set `agentDisplayName` and `primaryColor`
+/// (`#rrggbb`) only. The components themselves are the producer's
+/// responsibility: Triton does not vet them, so passthrough is for upstreams
+/// the operator trusts like its own code.
+fn passthrough_surfaces(spec: Option<&Value>) -> Vec<Value> {
+    let Some(surfaces) = spec.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    if surfaces.len() > MAX_PASSTHROUGH_SURFACES {
+        eprintln!(
+            r#"{{"kind":"log","level":"warn","msg":"a2ui passthrough: surfaces beyond the cap dropped","surfaces":{},"cap":{MAX_PASSTHROUGH_SURFACES}}}"#,
+            surfaces.len()
+        );
+    }
+    surfaces
+        .iter()
+        .take(MAX_PASSTHROUGH_SURFACES)
+        .flat_map(passthrough_messages)
+        .collect()
+}
+
 fn passthrough_messages(surface: &Value) -> Vec<Value> {
     let Some(components) = surface.get("components").and_then(Value::as_array) else {
         return Vec::new();
@@ -497,38 +546,18 @@ fn passthrough_messages(surface: &Value) -> Vec<Value> {
         .iter()
         .any(|c| c.get("id").and_then(Value::as_str) == Some("root"))
     {
+        eprintln!(
+            r#"{{"kind":"log","level":"warn","msg":"a2ui passthrough: surface without a root component dropped"}}"#
+        );
         return Vec::new();
     }
     let surface_id = format!("{SURFACE_PREFIX}{}", uuid::Uuid::new_v4());
-    let qmap: std::collections::HashMap<usize, String> = surface
-        .get("actions")
-        .and_then(Value::as_object)
-        .map(|actions| {
-            actions
-                .iter()
-                .filter_map(|(cid, q)| {
-                    let n = cid.strip_prefix("btn-")?.parse().ok()?;
-                    Some((n, q.as_str()?.to_string()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    remember_surface(&surface_id, qmap);
-
-    let mut theme =
-        json!({ "primaryColor": THEME_PRIMARY_COLOR, "agentDisplayName": "DataZoo Agent" });
-    if let (Some(base), Some(over)) = (
-        theme.as_object_mut(),
-        surface.get("theme").and_then(Value::as_object),
-    ) {
-        for (k, v) in over {
-            base.insert(k.clone(), v.clone());
-        }
-    }
-    let mut create = json!({ "surfaceId": surface_id, "catalogId": BASIC_CATALOG, "theme": theme });
-    if surface.get("send_data_model").and_then(Value::as_bool) == Some(true) {
-        create["sendDataModel"] = json!(true);
-    }
+    remember_actions(&surface_id, passthrough_actions(surface.get("actions")));
+    let create = json!({
+        "surfaceId": surface_id,
+        "catalogId": BASIC_CATALOG,
+        "theme": passthrough_theme(surface.get("theme")),
+    });
     let mut messages = vec![
         json!({ "version": "v0.9", "createSurface": create }),
         json!({ "version": "v0.9", "updateComponents": { "surfaceId": surface_id, "components": components } }),
@@ -540,6 +569,55 @@ fn passthrough_messages(surface: &Value) -> Vec<Value> {
         }));
     }
     messages
+}
+
+/// The producer's `actions`, filtered: string questions without control
+/// characters (so a producer cannot mint Triton's internal open-doc sentinel)
+/// and within the length cap; at most [`MAX_PASSTHROUGH_ACTIONS`].
+fn passthrough_actions(spec: Option<&Value>) -> std::collections::HashMap<String, String> {
+    let Some(actions) = spec.and_then(Value::as_object) else {
+        return Default::default();
+    };
+    let mut kept = std::collections::HashMap::new();
+    for (component_id, question) in actions.iter().take(MAX_PASSTHROUGH_ACTIONS) {
+        match question.as_str() {
+            Some(q) if q.len() <= MAX_ACTION_QUESTION_BYTES && !q.chars().any(char::is_control) => {
+                kept.insert(component_id.clone(), q.to_string());
+            }
+            _ => eprintln!(
+                r#"{{"kind":"log","level":"warn","msg":"a2ui passthrough: action dropped (not a plain question within {MAX_ACTION_QUESTION_BYTES} bytes)"}}"#
+            ),
+        }
+    }
+    kept
+}
+
+/// Triton's surface theme with the producer's `agentDisplayName` and
+/// `primaryColor` applied when they are well-formed; other keys are ignored.
+fn passthrough_theme(spec: Option<&Value>) -> Value {
+    let mut theme =
+        json!({ "primaryColor": THEME_PRIMARY_COLOR, "agentDisplayName": "DataZoo Agent" });
+    let Some(over) = spec.and_then(Value::as_object) else {
+        return theme;
+    };
+    if let Some(name) = over
+        .get("agentDisplayName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        && !name.is_empty()
+        && name.chars().count() <= MAX_DISPLAY_NAME_CHARS
+        && !name.chars().any(char::is_control)
+    {
+        theme["agentDisplayName"] = json!(name);
+    }
+    if let Some(color) = over.get("primaryColor").and_then(Value::as_str)
+        && color.len() == 7
+        && color.starts_with('#')
+        && color[1..].chars().all(|c| c.is_ascii_hexdigit())
+    {
+        theme["primaryColor"] = json!(color);
+    }
+    theme
 }
 
 /// Build a **Canvas-rooted** A2UI surface that shows `url` (the signed,
@@ -753,14 +831,14 @@ mod tests {
         comps.iter().find(|c| c["id"] == id).expect("component id")
     }
 
-    /// A producer that speaks v0.9 itself hands its surfaces through
-    /// verbatim: one createSurface + updateComponents (+ updateDataModel) per
-    /// surface, in order, with the producer's theme and sendDataModel.
+    /// A producer that speaks v0.9 itself puts its surfaces in `surface.a2ui`:
+    /// one createSurface + updateComponents (+ updateDataModel) per surface, in
+    /// order, ahead of Triton's own card.
     #[test]
     fn a2ui_surfaces_pass_through_verbatim() {
-        let result = json!({ "surface": { "components": [
-            { "kind": "text", "value": "Nine requirements, three close calls." },
-            { "kind": "a2ui", "surfaces": [
+        let result = json!({ "surface": {
+            "components": [ { "kind": "text", "value": "Nine requirements, three close calls." } ],
+            "a2ui": [
                 {
                     "components": [
                         { "id": "root", "component": "MaterialCard", "children": ["tbl"] },
@@ -769,18 +847,17 @@ mod tests {
                           "rows": [{ "req": "Easy-Entry" }] }
                     ],
                     "data_model": { "picks": { "r04": "fold-flat mechanism" } },
-                    "send_data_model": true,
-                    "theme": { "agentDisplayName": "Coverage Matching" }
+                    "theme": { "agentDisplayName": "Coverage Matching", "primaryColor": "#004149" }
                 },
                 {
                     "components": [
                         { "id": "root", "component": "Canvas", "cardTitle": "Capability mapping",
-                          "children": ["frame"] },
-                        { "id": "frame", "component": "IFrameSrcdoc", "htmlContent": "<svg></svg>" }
+                          "children": ["chart"] },
+                        { "id": "chart", "component": "VegaChart", "spec": { "mark": "rule" } }
                     ]
                 }
-            ]}
-        ]}});
+            ]
+        }});
         let msgs = build_messages(&result).expect("messages");
         assert_eq!(msgs.len(), 5, "{msgs:?}");
         let s1 = msgs[0]["createSurface"]["surfaceId"]
@@ -789,15 +866,11 @@ mod tests {
             .to_string();
         assert_eq!(msgs[0]["version"], "v0.9");
         assert_eq!(msgs[0]["createSurface"]["catalogId"], BASIC_CATALOG);
-        assert_eq!(msgs[0]["createSurface"]["sendDataModel"], true);
         assert_eq!(
             msgs[0]["createSurface"]["theme"]["agentDisplayName"],
             "Coverage Matching"
         );
-        assert_eq!(
-            msgs[0]["createSurface"]["theme"]["primaryColor"],
-            THEME_PRIMARY_COLOR
-        );
+        assert_eq!(msgs[0]["createSurface"]["theme"]["primaryColor"], "#004149");
         assert_eq!(msgs[1]["updateComponents"]["surfaceId"], s1);
         assert_eq!(
             msgs[1]["updateComponents"]["components"][1]["component"],
@@ -811,47 +884,154 @@ mod tests {
         );
         let s2 = msgs[3]["createSurface"]["surfaceId"].as_str().unwrap();
         assert_ne!(s1, s2, "each surface has its own id");
-        assert!(msgs[3]["createSurface"].get("sendDataModel").is_none());
+        assert_eq!(
+            msgs[3]["createSurface"]["theme"]["agentDisplayName"],
+            "DataZoo Agent"
+        );
         assert_eq!(
             msgs[4]["updateComponents"]["components"][0]["component"],
             "Canvas"
         );
     }
 
-    /// Buttons in a passed-through surface re-ask like Triton's own buttons:
-    /// `actions` maps a `btn-N` component id to the question GE's click
-    /// resolves to (GE echoes only surfaceId + sourceComponentId).
+    /// Passthrough surfaces come first; Triton's own card (buttons, charts)
+    /// follows as its own surface.
     #[test]
-    fn a2ui_actions_feed_the_click_round_trip() {
-        let result = json!({ "surface": { "components": [
-            { "kind": "a2ui", "surfaces": [{
-                "components": [
-                    { "id": "root", "component": "MaterialCard", "children": ["btn-7"] },
-                    { "id": "btn-7", "component": "MaterialButton", "label": "Confirm",
-                      "action": { "event": { "name": "confirm", "context": {} } } }
-                ],
-                "actions": { "btn-7": "Confirm the three close calls" }
-            }]}
-        ]}});
+    fn a2ui_surfaces_precede_tritons_own_card() {
+        let result = json!({ "surface": {
+            "components": [ { "kind": "button", "label": "Again", "tool": "t", "args": { "question": "again" } } ],
+            "a2ui": [ { "components": [ { "id": "root", "component": "MaterialText", "text": "x" } ] } ]
+        }});
+        let msgs = build_messages(&result).expect("messages");
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(
+            msgs[1]["updateComponents"]["components"][0]["component"],
+            "MaterialText"
+        );
+        assert!(msgs[2]["createSurface"]["surfaceId"].is_string());
+        assert_eq!(
+            msgs[3]["updateComponents"]["components"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap()["id"],
+            "root"
+        );
+    }
+
+    /// `actions` re-ask by the EXACT component id: a producer names its own
+    /// components, so `ok-7` or `btn-07` must not resolve to `btn-7`'s question.
+    #[test]
+    fn a2ui_actions_match_exact_component_ids() {
+        let result = json!({ "surface": { "a2ui": [{
+            "components": [
+                { "id": "root", "component": "MaterialCard", "children": ["btn-7", "ok-7"] },
+                { "id": "btn-7", "component": "MaterialButton", "label": "Confirm",
+                  "action": { "event": { "name": "confirm", "context": {} } } },
+                { "id": "ok-7", "component": "MaterialButton", "label": "Other",
+                  "action": { "event": { "name": "other", "context": {} } } }
+            ],
+            "actions": { "btn-7": "Confirm the three close calls" }
+        }]}});
         let msgs = build_messages(&result).expect("messages");
         let sid = msgs[0]["createSurface"]["surfaceId"].as_str().unwrap();
         assert_eq!(
             question_for(sid, "btn-7").as_deref(),
             Some("Confirm the three close calls")
         );
+        assert_eq!(question_for(sid, "ok-7"), None);
+        assert_eq!(question_for(sid, "btn-07"), None);
         assert_eq!(question_for(sid, "btn-8"), None);
+    }
+
+    /// Two passthrough surfaces may both use `btn-1`; each click resolves to its
+    /// own surface's question.
+    #[test]
+    fn a2ui_actions_are_per_surface() {
+        let surface = |q: &str| {
+            json!({
+                "components": [
+                    { "id": "root", "component": "MaterialCard", "children": ["btn-1"] },
+                    { "id": "btn-1", "component": "MaterialButton", "label": "Go",
+                      "action": { "event": { "name": "go", "context": {} } } }
+                ],
+                "actions": { "btn-1": q }
+            })
+        };
+        let result = json!({ "surface": { "a2ui": [surface("first"), surface("second")] } });
+        let msgs = build_messages(&result).expect("messages");
+        let s1 = msgs[0]["createSurface"]["surfaceId"].as_str().unwrap();
+        let s2 = msgs[2]["createSurface"]["surfaceId"].as_str().unwrap();
+        assert_eq!(question_for(s1, "btn-1").as_deref(), Some("first"));
+        assert_eq!(question_for(s2, "btn-1").as_deref(), Some("second"));
+    }
+
+    /// A producer cannot mint Triton's internal open-doc sentinel (or any
+    /// control character) through an action question, nor an oversized one.
+    #[test]
+    fn a2ui_actions_with_control_characters_or_oversized_are_dropped() {
+        let forged = format!("{DOC_OPEN_SENTINEL}x\u{1}\u{1}\u{1}http://evil.example/");
+        let result = json!({ "surface": { "a2ui": [{
+            "components": [ { "id": "root", "component": "MaterialCard", "children": [] } ],
+            "actions": { "btn-1": forged, "btn-2": "x".repeat(MAX_ACTION_QUESTION_BYTES + 1), "btn-3": "fine" }
+        }]}});
+        let msgs = build_messages(&result).expect("messages");
+        let sid = msgs[0]["createSurface"]["surfaceId"].as_str().unwrap();
+        assert_eq!(question_for(sid, "btn-1"), None);
+        assert_eq!(question_for(sid, "btn-2"), None);
+        assert_eq!(question_for(sid, "btn-3").as_deref(), Some("fine"));
+    }
+
+    /// Only `agentDisplayName` and `primaryColor` are taken from the producer,
+    /// and only when well-formed.
+    #[test]
+    fn a2ui_theme_is_allowlisted() {
+        let result = json!({ "surface": { "a2ui": [{
+            "components": [ { "id": "root", "component": "MaterialCard", "children": [] } ],
+            "theme": { "agentDisplayName": "x".repeat(MAX_DISPLAY_NAME_CHARS + 1),
+                       "primaryColor": "red", "logoUrl": "https://evil.example/l.png" }
+        }]}});
+        let msgs = build_messages(&result).expect("messages");
+        let theme = &msgs[0]["createSurface"]["theme"];
+        assert_eq!(theme["agentDisplayName"], "DataZoo Agent");
+        assert_eq!(theme["primaryColor"], THEME_PRIMARY_COLOR);
+        assert!(theme.get("logoUrl").is_none());
+    }
+
+    /// At most MAX_PASSTHROUGH_SURFACES surfaces go out per result.
+    #[test]
+    fn a2ui_surfaces_are_capped() {
+        let one =
+            json!({ "components": [ { "id": "root", "component": "MaterialText", "text": "x" } ] });
+        let result = json!({ "surface": { "a2ui": vec![one; MAX_PASSTHROUGH_SURFACES + 3] } });
+        let msgs = build_messages(&result).expect("messages");
+        let creates = msgs
+            .iter()
+            .filter(|m| m.get("createSurface").is_some())
+            .count();
+        assert_eq!(creates, MAX_PASSTHROUGH_SURFACES);
     }
 
     /// A surface without a `root` component cannot render; it is dropped
     /// rather than sent to a client that would show an empty card.
     #[test]
     fn a2ui_surface_without_root_is_dropped() {
-        let result = json!({ "surface": { "components": [
-            { "kind": "a2ui", "surfaces": [{ "components": [
-                { "id": "card", "component": "MaterialCard", "children": [] }
-            ]}]}
-        ]}});
+        let result = json!({ "surface": { "a2ui": [{ "components": [
+            { "id": "card", "component": "MaterialCard", "children": [] }
+        ]}]}});
         assert!(build_messages(&result).is_none());
+    }
+
+    /// The typed vocabulary every other channel uses ignores `surface.a2ui`, so
+    /// a producer's passthrough never breaks a chat channel or MCP.
+    #[test]
+    fn typed_consumers_ignore_the_a2ui_sibling() {
+        let result = json!({ "surface": {
+            "components": [ { "kind": "text", "value": "still here" } ],
+            "a2ui": [ { "components": [ { "id": "root", "component": "MaterialText", "text": "x" } ] } ]
+        }});
+        let typed = crate::a2ui::extract_surface(&result).expect("typed surface");
+        assert_eq!(typed.components.len(), 1);
     }
 
     #[test]

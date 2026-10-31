@@ -1038,137 +1038,201 @@ async fn a_remote_agent_behind_spec_a2a_gets_the_metadata_and_surface() {
     );
 }
 
-/// The client's A2UI events and the message metadata reach the agent under
-/// `_triton`: a click on a passed-through surface carries the surface's data
-/// model (A2UI `sendDataModel`), and only the agent can interpret it.
+/// POST one JSON-RPC body to `/a2a`, with or without the A2UI extension.
+async fn post_rpc(base: &str, iss: &TestIssuer, body: &Value, a2ui: bool) -> Value {
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let mut req = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .json(body);
+    if a2ui {
+        req = req.header("X-A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI);
+    }
+    let resp = req.send().await.expect("POST");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    resp.json().await.expect("json")
+}
+
+/// A user message whose parts are the given A2UI client event (and the GE
+/// placeholder text when `with_text`).
+fn click(event: Value, with_text: bool) -> Value {
+    let mut parts = vec![json!({
+        "kind": "data", "data": event,
+        "metadata": { "mimeType": triton_core::a2ui::ge::MIME }
+    })];
+    if with_text {
+        parts.insert(
+            0,
+            json!({ "kind": "text", "text": "User action triggered." }),
+        );
+    }
+    json!({ "jsonrpc": "2.0", "id": 1, "method": "message/send", "params": { "message": {
+        "role": "user", "messageId": "m-click", "contextId": "session-3", "parts": parts,
+        "metadata": { "a2uiClientCapabilities": { "supportedCatalogIds": [] } }
+    }}})
+}
+
+/// The A2UI v0.9 messages among an A2A message's parts.
+fn a2ui_parts(message: &Value) -> Vec<Value> {
+    message["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["kind"] == "data")
+        .map(|p| p["data"].clone())
+        .collect()
+}
+
+/// A producer-built surface (`surface.a2ui`) reaches the client verbatim, and
+/// a click on its button re-asks the mapped question while the agent also gets
+/// the click — with the values its action context bound — under
+/// `_triton.client.a2ui_events`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a2ui_events_and_message_metadata_reach_the_agent() {
-    use std::time::Duration;
+async fn a_producer_surface_renders_and_its_click_round_trips() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": {
+        "components": [ { "kind": "text", "value": "Pick the class." } ],
+        "a2ui": [{
+            "components": [
+                { "id": "root", "component": "MaterialCard", "children": ["chips", "btn-1"] },
+                { "id": "chips", "component": "MaterialChips", "value": { "path": "/pick" },
+                  "options": [ { "label": "A", "value": "a" }, { "label": "B", "value": "b" } ] },
+                { "id": "btn-1", "component": "MaterialButton", "label": "Apply",
+                  "action": { "event": { "name": "apply", "context": { "pick": { "path": "/pick" } } } } }
+            ],
+            "data_model": { "pick": "a" },
+            "theme": { "agentDisplayName": "Coverage Matching" },
+            "actions": { "btn-1": "apply the pick" }
+        }]
+    }})).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+
+    let reply = post_rpc(&base, &iss, &send("pick"), true).await;
+    let msgs = a2ui_parts(&reply["result"]);
+    let create = msgs
+        .iter()
+        .find(|m| m.get("createSurface").is_some())
+        .expect("createSurface");
+    assert_eq!(
+        create["createSurface"]["theme"]["agentDisplayName"],
+        "Coverage Matching"
+    );
+    let sid = create["createSurface"]["surfaceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        msgs.iter()
+            .any(|m| m["updateComponents"]["components"][1]["component"] == "MaterialChips")
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m["updateDataModel"]["value"]["pick"] == "a")
+    );
+
+    let event = json!({ "version": "v0.9", "action": {
+        "name": "apply", "surfaceId": sid, "sourceComponentId": "btn-1",
+        "timestamp": "2026-10-31T09:00:00Z", "context": { "pick": "b" }, "injected": "dropped"
+    }});
+    post_rpc(&base, &iss, &click(event, true), true).await;
+    let body = agent.bodies_seen().pop().expect("second dispatch");
+    assert_eq!(body["message"], "apply the pick", "{body}");
+    let forwarded = &body["_triton"]["client"]["a2ui_events"][0];
+    assert_eq!(forwarded["action"]["context"]["pick"], "b", "{body}");
+    assert_eq!(forwarded["action"]["sourceComponentId"], "btn-1");
+    assert!(
+        forwarded["action"].get("injected").is_none(),
+        "projected onto the v0.9 fields"
+    );
+    assert!(
+        body["_triton"].get("a2a_message_metadata").is_none(),
+        "metadata is not forwarded"
+    );
+    assert_eq!(
+        body["_triton"]["protocol"], "a2a",
+        "Triton's own keys untouched"
+    );
+}
+
+/// A standard A2UI client posts only the DataPart: the turn still reaches the
+/// agent, with the event and a synthetic message naming the action.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_event_only_click_reaches_the_agent() {
     use triton_tests::upstream_fixture::FakeAgent;
     let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
-    let upstream = triton_upstream::StaticUpstream::from_spec(
-        &format!("remote={}", agent.host_port()),
-        "dev-token".to_string(),
-        Duration::from_secs(5),
-        Duration::from_secs(5),
-        Duration::from_secs(30),
-        5,
-        Duration::from_secs(30),
-    );
-    let iss = TestIssuer::start().await;
-    let dispatcher = Arc::new(
-        Dispatcher::new(
-            Arc::new(ToolRegistry::new()),
-            "test".to_string(),
-            DispatchControls::unenforced(),
-        )
-        .with_upstream(Arc::new(upstream)),
-    );
-    let opts = EmbedOpts::dev().oidc(iss.issuer_url(), AUD, None).spec_a2a(
-        "Coverage Matching",
-        "Covers requests.",
-        PUBLIC_URL,
-        "remote",
-    );
-    let app = router(dispatcher, &opts);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
-    let token = iss.sign_jwt(claims(&iss.issuer_url()));
-
-    let action = json!({ "version": "v0.9", "action": {
-        "name": "confirm", "surfaceId": "triton-answer-1234", "sourceComponentId": "btn-3",
-        "timestamp": "2026-10-31T09:00:00Z", "context": {}
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let event = json!({ "version": "v0.9", "action": {
+        "name": "confirm_terms", "surfaceId": "triton-answer-unknown", "sourceComponentId": "btn-3",
+        "timestamp": "2026-10-31T09:00:00Z", "context": { "terms": { "klimapaket": true } }
     }});
-    let request = json!({
-        "jsonrpc": "2.0", "id": 1, "method": "message/send",
-        "params": { "message": {
-            "role": "user", "messageId": "m-1", "contextId": "session-3",
-            "parts": [
-                { "kind": "text", "text": "User action triggered." },
-                { "kind": "data", "data": action, "metadata": { "mimeType": "application/json+a2ui" } }
-            ],
-            "metadata": { "a2uiClientDataModel": { "terms": { "Klimapaket Heizung": true } } }
-        }}
-    });
-    let resp = reqwest::Client::new()
-        .post(format!("http://{addr}/a2a"))
-        .bearer_auth(&token)
-        .header("X-A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI)
-        .json(&request)
-        .send()
-        .await
-        .expect("POST");
-    assert!(resp.status().is_success(), "{}", resp.status());
-
+    post_rpc(&base, &iss, &click(event, false), true).await;
     let body = agent.bodies_seen().remove(0);
+    assert_eq!(body["message"], "A2UI action: confirm_terms", "{body}");
     assert_eq!(
-        body["_triton"]["a2ui_events"][0]["action"]["sourceComponentId"], "btn-3",
-        "{body}"
-    );
-    assert_eq!(
-        body["_triton"]["a2ui_events"][0]["action"]["surfaceId"],
-        "triton-answer-1234"
-    );
-    assert_eq!(
-        body["_triton"]["a2a_message_metadata"]["a2uiClientDataModel"]["terms"]["Klimapaket Heizung"],
+        body["_triton"]["client"]["a2ui_events"][0]["action"]["context"]["terms"]["klimapaket"],
         true
     );
 }
 
-/// A plain text turn carries neither key.
+/// Structured data from a client that did not negotiate A2UI and does not type
+/// the part as A2UI is not an A2UI event: no `client` key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_text_turn_carries_no_a2ui_events() {
-    use std::time::Duration;
+async fn plain_structured_data_is_not_an_a2ui_event() {
     use triton_tests::upstream_fixture::FakeAgent;
     let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
-    let upstream = triton_upstream::StaticUpstream::from_spec(
-        &format!("remote={}", agent.host_port()),
-        "dev-token".to_string(),
-        Duration::from_secs(5),
-        Duration::from_secs(5),
-        Duration::from_secs(30),
-        5,
-        Duration::from_secs(30),
-    );
-    let iss = TestIssuer::start().await;
-    let dispatcher = Arc::new(
-        Dispatcher::new(
-            Arc::new(ToolRegistry::new()),
-            "test".to_string(),
-            DispatchControls::unenforced(),
-        )
-        .with_upstream(Arc::new(upstream)),
-    );
-    let opts = EmbedOpts::dev().oidc(iss.issuer_url(), AUD, None).spec_a2a(
-        "Coverage Matching",
-        "Covers requests.",
-        PUBLIC_URL,
-        "remote",
-    );
-    let app = router(dispatcher, &opts);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, app).await;
-    });
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "message/send", "params": { "message": {
+        "role": "user", "messageId": "m-1",
+        "parts": [
+            { "kind": "text", "text": "stock?" },
+            { "kind": "data", "data": { "error": { "code": "inventory_unavailable" } } }
+        ]
+    }}});
+    post_rpc(&base, &iss, &body, false).await;
+    let seen = agent.bodies_seen().remove(0);
+    assert!(seen["_triton"].get("client").is_none(), "{seen}");
+}
+
+/// A plain text turn carries no `client` key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_text_turn_carries_no_client_events() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    post_rpc(&base, &iss, &send("hello"), true).await;
+    let seen = agent.bodies_seen().remove(0);
+    assert!(seen["_triton"].get("client").is_none(), "{seen}");
+}
+
+/// The producer surface also goes out on `message/stream`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_producer_surface_streams() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": {
+        "components": [ { "kind": "text", "value": "Here." } ],
+        "a2ui": [{ "components": [ { "id": "root", "component": "MaterialText", "text": "streamed card" } ] }]
+    }})).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
     let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let mut body = send("hello");
+    body["method"] = json!("message/stream");
     let resp = reqwest::Client::new()
-        .post(format!("http://{addr}/a2a"))
+        .post(format!("{base}/a2a"))
         .bearer_auth(&token)
-        .json(&send("hello"))
+        .header("X-A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI)
+        .json(&body)
         .send()
         .await
         .expect("POST");
     assert!(resp.status().is_success());
-    let body = agent.bodies_seen().remove(0);
-    assert!(body["_triton"].get("a2ui_events").is_none(), "{body}");
-    assert!(
-        body["_triton"].get("a2a_message_metadata").is_none(),
-        "{body}"
-    );
+    let text = resp.text().await.expect("sse");
+    assert!(text.contains("streamed card"), "{text}");
+    assert!(text.contains("createSurface"), "{text}");
 }
 
 /// A spec-A2A host fronting one recording upstream as both the turn's tool
