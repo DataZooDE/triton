@@ -136,7 +136,9 @@ async fn each_agent_card_advertises_its_own_url_and_name() {
         ("supply-planner", "Supply Planner", "Plans."),
     ] {
         for f in FILENAMES {
-            let path = format!("/a2a/{slug}/.well-known/{f}");
+            // `agent-card.json` defaults to the 1.0 card; the 0.3
+            // card these assertions describe is `?version=0.3` there.
+            let path = format!("/a2a/{slug}/.well-known/{f}?version=0.3");
             let resp = reqwest::get(format!("{base}{path}")).await.expect("GET");
             assert_eq!(resp.status(), 200, "{path} must be public");
             let card: Value = resp.json().await.expect("json");
@@ -154,8 +156,8 @@ async fn each_agent_card_advertises_its_own_url_and_name() {
     }
     // The primary card (root + endpoint-relative) is still the primary.
     for path in [
-        "/.well-known/agent-card.json",
-        "/a2a/.well-known/agent-card.json",
+        "/.well-known/agent-card.json?version=0.3",
+        "/a2a/.well-known/agent-card.json?version=0.3",
     ] {
         let card: Value = reqwest::get(format!("{base}{path}"))
             .await

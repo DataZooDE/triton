@@ -128,10 +128,13 @@ where
                     // Transport fault after the stream opened: a pass-through
                     // upstream fault (no Triton-imposed detail).
                     st.done = true;
-                    st.pending
-                        .push_back(StreamEvent::error(triton_core::TritonError::Tool(format!(
-                            "upstream stream error: {e}"
-                        ))));
+                    // Detail-tagged so a long-running task can tell a broken
+                    // connection (resume it) from an upstream `error` frame
+                    // (the task failed).
+                    st.pending.push_back(StreamEvent::error_with_detail(
+                        triton_core::TritonError::Tool(format!("upstream stream error: {e}")),
+                        "upstream_stream_transport",
+                    ));
                 }
                 None => {
                     // Clean EOF: flush a trailing frame that wasn't

@@ -216,7 +216,15 @@ async fn the_agent_card_is_public_and_describes_the_endpoint() {
     ];
     let paths: Vec<String> = filenames
         .iter()
-        .flat_map(|f| [format!("/.well-known/{f}"), format!("/a2a/.well-known/{f}")])
+        // `agent-card.json` defaults to the 1.0 card (a2a_bin.rs pins
+        // it); `?version=0.3` selects the 0.3 card described here, and the
+        // other spellings are 0.3 by default.
+        .flat_map(|f| {
+            [
+                format!("/.well-known/{f}?version=0.3"),
+                format!("/a2a/.well-known/{f}?version=0.3"),
+            ]
+        })
         .collect();
     for path in &paths {
         let resp = reqwest::get(format!("{base}{path}")).await.expect("GET");
@@ -381,7 +389,8 @@ async fn protocol_errors_are_jsonrpc_errors_with_the_right_codes() {
     let (status, body) = rpc(
         &base,
         &token,
-        json!({"jsonrpc":"2.0","id":9,"method":"tasks/cancel","params":{}}),
+        // `tasks/cancel` exists (it answers TaskNotCancelable).
+        json!({"jsonrpc":"2.0","id":9,"method":"tasks/frobnicate","params":{}}),
     )
     .await;
     assert_eq!(status, 200, "a JSON-RPC error is still HTTP 200");
