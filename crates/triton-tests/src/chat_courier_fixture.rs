@@ -534,6 +534,11 @@ struct FakeBotFrameworkState {
     /// test has to be able to produce that, or the retry classification
     /// is pinned by nothing.
     activity_status: Mutex<u16>,
+    /// Answer streaming activities as Teams does (streaming-ux, "Response
+    /// codes"): the request that opens a stream gets `201 {"id": streamId}`
+    /// (the stream's activity id); every later request of that stream,
+    /// including the `final` message, gets `202 {}`. Off by default.
+    teams_streaming: Mutex<bool>,
 }
 
 impl FakeBotFramework {
@@ -562,6 +567,7 @@ impl FakeBotFramework {
             token_requests: Mutex::new(Vec::new()),
             access_token: access_token.to_string(),
             activity_status: Mutex::new(200),
+            teams_streaming: Mutex::new(false),
         });
 
         let discovery_body = json!({
@@ -677,6 +683,16 @@ impl FakeBotFramework {
         *self.state.activity_status.lock().unwrap() = status;
     }
 
+    /// Answer streaming activities with Teams' documented codes from now
+    /// on (see `FakeBotFrameworkState::teams_streaming`).
+    pub fn set_teams_streaming(&self, on: bool) {
+        *self.state.teams_streaming.lock().unwrap() = on;
+    }
+
+    /// The activity id the fixture gives a stream it opens in Teams
+    /// streaming mode.
+    pub const STREAM_ACTIVITY_ID: &'static str = "stream-activity-id";
+
     pub fn captured(&self) -> Vec<CapturedActivity> {
         self.state.captured.lock().unwrap().clone()
     }
@@ -783,6 +799,10 @@ async fn handle_activity_post(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let stream = body["entities"]
+        .as_array()
+        .and_then(|e| e.iter().find(|e| e["type"] == "streaminfo"))
+        .map(|e| e.get("streamId").is_some());
     state.captured.lock().unwrap().push(CapturedActivity {
         conversation_id,
         bearer,
@@ -790,6 +810,21 @@ async fn handle_activity_post(
     });
     let status = *state.activity_status.lock().unwrap();
     let code = axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK);
+    if code.is_success() && *state.teams_streaming.lock().unwrap() {
+        match stream {
+            Some(false) => {
+                return (
+                    axum::http::StatusCode::CREATED,
+                    Json(json!({ "id": FakeBotFramework::STREAM_ACTIVITY_ID })),
+                )
+                    .into_response();
+            }
+            Some(true) => {
+                return (axum::http::StatusCode::ACCEPTED, Json(json!({}))).into_response();
+            }
+            None => {}
+        }
+    }
     if code.is_success() {
         (code, Json(json!({ "id": "stub-activity-id" }))).into_response()
     } else {

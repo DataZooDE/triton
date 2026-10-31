@@ -224,6 +224,55 @@ async fn a_personal_chat_closes_the_stream_with_the_card_then_updates_it() {
     );
 }
 
+/// Teams answers a stream's `final` message with `202 {}` and no id; the
+/// stream's id is the message's activity id (streaming-ux, "Response
+/// codes"). The working card that closes a personal chat's stream must
+/// still be updated in place under that id, and the answer must not
+/// arrive as a second message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_personal_chat_card_is_updated_under_the_stream_id_when_teams_returns_no_id() {
+    let fake = FakeBotFramework::start().await;
+    fake.set_teams_streaming(true);
+    let agent = FakeAsyncAgent::start(AsyncPlan {
+        total: Duration::from_millis(1500),
+        tick: Duration::from_millis(300),
+        ..AsyncPlan::default()
+    })
+    .await;
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(10), env(&fake, &agent)).await;
+    post(&proc, &fake, Some("personal")).await;
+    wait_until(Duration::from_secs(10), || {
+        fake.updates()
+            .iter()
+            .any(|u| card_text(&u.body).contains(ANSWER))
+            || fake
+                .captured()
+                .iter()
+                .any(|c| c.body["type"] == "message" && card_text(&c.body).contains(ANSWER))
+    })
+    .await;
+    let updates = fake.updates();
+    assert!(
+        !updates.is_empty()
+            && updates
+                .iter()
+                .all(|u| u.activity_id == FakeBotFramework::STREAM_ACTIVITY_ID),
+        "the card is updated under the stream's activity id: {updates:#?}"
+    );
+    let messages: Vec<Value> = fake
+        .captured()
+        .into_iter()
+        .map(|c| c.body)
+        .filter(|b| b["type"] == "message")
+        .collect();
+    assert_eq!(
+        messages.len(),
+        1,
+        "only the working card is posted; the answer replaces it: {messages:#?}"
+    );
+    drop(proc);
+}
+
 /// F8: a refused `updateActivity` must not cost the answer — it is posted
 /// as a new message instead.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

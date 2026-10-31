@@ -3021,7 +3021,8 @@ async fn courier_deliver(
                             card.activity(&recipient_id, &conversation_id, &sender.from_id);
                         // A personal chat's open stream is closed by the
                         // card (attachments are legal only on a final).
-                        if let Some(sid) = stream_id.take()
+                        let closed_stream = stream_id.take();
+                        if let Some(sid) = &closed_stream
                             && let Some(obj) = body.as_object_mut()
                         {
                             obj.insert(
@@ -3029,7 +3030,15 @@ async fn courier_deliver(
                                 serde_json::json!([{ "type": "streaminfo", "streamId": sid, "streamType": "final" }]),
                             );
                         }
-                        match post_activity(&adapter, &verified, &conversation_id, &body).await {
+                        // Teams answers a stream's final message `202 {}`:
+                        // the card is the streamed message, whose activity
+                        // id is the stream id (streaming-ux, "Response
+                        // codes"). A refused update later still falls back
+                        // to posting the answer.
+                        let posted = post_activity(&adapter, &verified, &conversation_id, &body)
+                            .await
+                            .map(|(status, id)| (status, id.or(closed_stream)));
+                        match posted {
                             Ok((status, Some(id))) if (200..300).contains(&status) => {
                                 // F8b: remember the card, so a restarted
                                 // Triton answers into it.
