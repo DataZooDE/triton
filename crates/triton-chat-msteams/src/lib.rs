@@ -306,7 +306,19 @@ impl MsTeamsAdapter {
                     .resolve(field)
                     .await
                     .map_err(|e| BuildError::Resolve("outbound.client_secret", e))?;
-                OutboundCredential::Secret(secret)
+                // Optional `outbound.tenant_id`: a single-tenant bot's
+                // secret is only valid at its own tenant's endpoint.
+                let tenant_id = match adapter.outbound.credentials.get("tenant_id") {
+                    Some(field) => Some(
+                        resolver
+                            .resolve(field)
+                            .await
+                            .map_err(|e| BuildError::Resolve("outbound.tenant_id", e))?,
+                    )
+                    .filter(|t| !t.trim().is_empty()),
+                    None => None,
+                };
+                OutboundCredential::Secret { secret, tenant_id }
             }
             (None, Some(field)) => {
                 let token_file = resolver
@@ -573,23 +585,8 @@ impl MsTeamsAdapter {
                     .map_err(|e| BuildError::Unsupported(e.to_string()))?;
             }
         }
-        let token_client = match (outbound_credential, overrides.token_url) {
-            (OutboundCredential::Secret(secret), Some(url)) => {
-                TokenClient::with_token_url(client_id, secret, url)
-            }
-            (OutboundCredential::Secret(secret), None) => TokenClient::new(client_id, secret),
-            (OutboundCredential::Federated { token_file, .. }, Some(url)) => {
-                TokenClient::with_federated_token_url(client_id, token_file, url)
-            }
-            (
-                OutboundCredential::Federated {
-                    token_file,
-                    tenant_id,
-                },
-                None,
-            ) => TokenClient::with_federated_credential(client_id, &tenant_id, token_file)
-                .map_err(|e| BuildError::Unsupported(e.to_string()))?,
-        };
+        let token_client =
+            outbound_token_client(client_id, outbound_credential, overrides.token_url)?;
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(10))
             .build()
@@ -714,11 +711,55 @@ impl MsTeamsAdapter {
 /// the token client is built so the mutually-exclusive check reads
 /// as one decision rather than being spread across construction.
 enum OutboundCredential {
-    Secret(String),
+    /// A static secret; `tenant_id` set for a single-tenant bot.
+    Secret {
+        secret: String,
+        tenant_id: Option<String>,
+    },
     Federated {
         token_file: String,
         tenant_id: String,
     },
+}
+
+/// The outbound token client for one credential mode. `token_url` is the
+/// local-only test override, which wins in every mode.
+fn outbound_token_client(
+    client_id: String,
+    credential: OutboundCredential,
+    token_url: Option<String>,
+) -> Result<TokenClient, BuildError> {
+    Ok(match (credential, token_url) {
+        (OutboundCredential::Secret { secret, .. }, Some(url)) => {
+            TokenClient::with_token_url(client_id, secret, url)
+        }
+        (
+            OutboundCredential::Secret {
+                secret,
+                tenant_id: None,
+            },
+            None,
+        ) => TokenClient::new(client_id, secret),
+        (
+            OutboundCredential::Secret {
+                secret,
+                tenant_id: Some(tenant_id),
+            },
+            None,
+        ) => TokenClient::with_secret_for_tenant(client_id, &tenant_id, secret)
+            .map_err(|e| BuildError::Unsupported(e.to_string()))?,
+        (OutboundCredential::Federated { token_file, .. }, Some(url)) => {
+            TokenClient::with_federated_token_url(client_id, token_file, url)
+        }
+        (
+            OutboundCredential::Federated {
+                token_file,
+                tenant_id,
+            },
+            None,
+        ) => TokenClient::with_federated_credential(client_id, &tenant_id, token_file)
+            .map_err(|e| BuildError::Unsupported(e.to_string()))?,
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -4213,5 +4254,58 @@ mod tests {
         let (t, args) = route_command("/feedback great job", "assistant");
         assert_eq!(t, "feedback");
         assert_eq!(args, serde_json::json!({ "text": "great job" }));
+    }
+}
+
+#[cfg(test)]
+mod outbound_endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn a_secret_with_a_tenant_uses_the_tenant_endpoint() {
+        let c = outbound_token_client(
+            "bot-1".into(),
+            OutboundCredential::Secret {
+                secret: "shhh".into(),
+                tenant_id: Some("28c0071d-815c-4ace-a3b5-9a28bde005fd".into()),
+            },
+            None,
+        )
+        .unwrap_or_else(|e| panic!("builds: {e}"));
+        assert_eq!(
+            c.token_url(),
+            "https://login.microsoftonline.com/28c0071d-815c-4ace-a3b5-9a28bde005fd/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn a_secret_without_a_tenant_keeps_the_multi_tenant_endpoint() {
+        let c = outbound_token_client(
+            "bot-1".into(),
+            OutboundCredential::Secret {
+                secret: "shhh".into(),
+                tenant_id: None,
+            },
+            None,
+        )
+        .unwrap_or_else(|e| panic!("builds: {e}"));
+        assert_eq!(
+            c.token_url(),
+            "https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn the_test_override_still_wins_for_a_tenant_secret() {
+        let c = outbound_token_client(
+            "bot-1".into(),
+            OutboundCredential::Secret {
+                secret: "shhh".into(),
+                tenant_id: Some("tenant-1".into()),
+            },
+            Some("http://127.0.0.1:1/token".into()),
+        )
+        .unwrap_or_else(|e| panic!("builds: {e}"));
+        assert_eq!(c.token_url(), "http://127.0.0.1:1/token");
     }
 }

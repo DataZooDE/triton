@@ -129,6 +129,30 @@ impl TokenClient {
         Self::with_token_url(client_id, client_secret, TOKEN_URL)
     }
 
+    /// Production constructor, client_secret mode for a SINGLE-TENANT
+    /// bot. Azure Bot creates only single-tenant (or managed-identity)
+    /// bots since 2025, and the shared `botframework.com` tenant does
+    /// not know such an app (Entra answers AADSTS700016), so the secret
+    /// is presented at the bot's own tenant endpoint. Only the validated
+    /// tenant segment is interpolated; the host stays hardcoded (NFR-S-4).
+    pub fn with_secret_for_tenant(
+        client_id: impl Into<String>,
+        tenant_id: &str,
+        client_secret: impl Into<String>,
+    ) -> Result<Self, TokenError> {
+        let tenant = validate_tenant_id(tenant_id)?;
+        Ok(Self::build(
+            client_id,
+            Credential::Secret(client_secret.into()),
+            format!("{TOKEN_HOST}/{tenant}/oauth2/v2.0/token"),
+        ))
+    }
+
+    /// The token endpoint this client posts to (not a secret).
+    pub fn token_url(&self) -> &str {
+        &self.token_url
+    }
+
     /// Production constructor, federated mode — no static secret.
     /// `token_file` is the projected ServiceAccount token the pod
     /// presents as `client_assertion` (in Kubernetes:
@@ -352,6 +376,33 @@ mod tests {
         // TokenClient, and TokenClient holds the client_secret — a
         // derived Debug is exactly how secrets end up in logs.
         match TokenClient::with_federated_credential("client-1", "evil.com/x", "/tmp/t") {
+            Err(TokenError::InvalidTenant(t)) => assert_eq!(t, "evil.com/x"),
+            Err(other) => panic!("wrong error: {other}"),
+            Ok(_) => panic!("hostile tenant id must be refused"),
+        }
+    }
+
+    #[test]
+    fn single_tenant_secret_client_targets_its_tenant_endpoint() {
+        // A single-tenant bot (the only kind Azure Bot creates since
+        // 2025) is unknown to the shared `botframework.com` tenant:
+        // Entra answers AADSTS700016 there. Its secret works only at
+        // the bot's own tenant endpoint.
+        let c = TokenClient::with_secret_for_tenant(
+            "client-1",
+            "28c0071d-815c-4ace-a3b5-9a28bde005fd",
+            "shhh",
+        )
+        .expect("valid tenant builds");
+        assert_eq!(
+            c.token_url(),
+            "https://login.microsoftonline.com/28c0071d-815c-4ace-a3b5-9a28bde005fd/oauth2/v2.0/token"
+        );
+    }
+
+    #[test]
+    fn single_tenant_secret_client_refuses_a_hostile_tenant_id() {
+        match TokenClient::with_secret_for_tenant("client-1", "evil.com/x", "shhh") {
             Err(TokenError::InvalidTenant(t)) => assert_eq!(t, "evil.com/x"),
             Err(other) => panic!("wrong error: {other}"),
             Ok(_) => panic!("hostile tenant id must be refused"),
