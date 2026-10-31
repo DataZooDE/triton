@@ -21,8 +21,9 @@
 //! `TextBlock`s render their content as-is.
 
 use serde_json::{Value, json};
-use triton_core::a2ui::{Component, FormFieldKind, SourceItem, Surface, extract_surface};
+use triton_core::a2ui::{Action, Component, FormFieldKind, SourceItem, Surface, extract_surface};
 use triton_core::surface::{Charts, Markdown, SurfaceProfile, Tables};
+use triton_correlation::message::{SEND_MESSAGE_TOOL, text_args};
 
 /// The Adaptive Card chrome (branded header) — fetched per reply from the
 /// report upstream's `get_theme` tool. Peacock owns ALL theming (one CSS of
@@ -229,6 +230,9 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     let mut deferred_dashboards = 0usize;
     for c in &surface.components {
         match c {
+            // Conversation components render as native card elements
+            // (`conversation_card::elements`), never into the text body.
+            c if c.is_conversation_block() => {}
             Component::Text { value, .. } => chunks.push(value.clone()),
             // `Report` is an optional inline chart rendered out-of-band by
             // adapters that support it (Google Chat); ignored by the text mapper.
@@ -249,7 +253,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
                     let rendered: Vec<String> = items
                         .iter()
                         .map(|i| {
-                            if i.resource.starts_with("https://") {
+                            if triton_core::links::is_allowed_link(&i.resource) {
                                 format!("[{}]({})", i.label, i.resource)
                             } else {
                                 i.label.clone()
@@ -270,6 +274,9 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             Component::Selection { .. } => deferred_selections += 1,
             Component::Form { .. } => deferred_forms += 1,
             Component::Dashboard { .. } => deferred_dashboards += 1,
+            // Every remaining kind is a conversation kind, taken above
+            // (`Component::is_conversation` is exhaustive).
+            other => debug_assert!(other.is_conversation()),
         }
     }
     if chunks.is_empty() {
@@ -450,6 +457,8 @@ pub struct FormFieldSpec {
     pub label: String,
     pub kind: FormFieldKind,
     pub required: bool,
+    /// `(label, value)` choices of a `select` field.
+    pub options: Vec<(String, String)>,
 }
 
 /// An interactive component lifted off a Surface. The adapter signs
@@ -490,6 +499,9 @@ pub enum InteractiveSpec {
         skill: String,
         id: String,
     },
+    /// A deep link (`Button` with an `open_url` action) → `Action.OpenUrl`.
+    /// Carries no token: opening a URL needs no callback.
+    OpenUrl { label: String, url: String },
 }
 
 impl InteractiveSpec {
@@ -500,6 +512,7 @@ impl InteractiveSpec {
             | InteractiveSpec::Selection { tool, .. }
             | InteractiveSpec::Form { tool, .. } => tool,
             InteractiveSpec::OpenDoc { .. } => OPEN_DOC_TOOL,
+            InteractiveSpec::OpenUrl { .. } => "",
         }
     }
 
@@ -530,6 +543,25 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
         .components
         .iter()
         .filter_map(|c| match c {
+            // A stateless send-message button: the token carries the complete
+            // message; the callback turns it into a new user turn.
+            Component::Button {
+                label,
+                action: Some(Action::SendMessage { text }),
+                ..
+            } => Some(InteractiveSpec::Button {
+                label: label.clone(),
+                tool: SEND_MESSAGE_TOOL.to_string(),
+                args: text_args(text),
+            }),
+            Component::Button {
+                label,
+                action: Some(Action::OpenUrl { url }),
+                ..
+            } => Some(InteractiveSpec::OpenUrl {
+                label: label.clone(),
+                url: url.clone(),
+            }),
             Component::Button {
                 label, tool, args, ..
             } => Some(InteractiveSpec::Button {
@@ -537,11 +569,21 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
                 tool: tool.clone(),
                 args: args.clone(),
             }),
+            // Template Selection/Form are conversation elements
+            // (`conversation_card`), not tool re-invocations.
+            Component::Selection {
+                submit: Some(_), ..
+            }
+            | Component::Form {
+                send_template: Some(_),
+                ..
+            } => None,
             Component::Selection {
                 prompt,
                 options,
                 tool,
                 args_key,
+                ..
             } => Some(InteractiveSpec::Selection {
                 prompt: prompt.clone(),
                 options: options
@@ -556,6 +598,7 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
                 fields,
                 submit_label,
                 tool,
+                ..
             } => Some(InteractiveSpec::Form {
                 title: title.clone(),
                 submit_label: submit_label.clone(),
@@ -566,6 +609,11 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
                         label: f.label.clone(),
                         kind: f.kind,
                         required: f.required,
+                        options: f
+                            .options
+                            .iter()
+                            .map(|o| (o.label.clone(), o.value.clone()))
+                            .collect(),
                     })
                     .collect(),
                 tool: tool.clone(),
@@ -580,7 +628,7 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
         for c in &surface.components {
             if let Component::Sources { items } = c {
                 for it in items {
-                    if !it.resource.starts_with("https://") {
+                    if !triton_core::links::is_allowed_link(&it.resource) {
                         continue;
                     }
                     if let Some((skill, id)) = source_skill_id(it) {
@@ -820,11 +868,22 @@ fn input_widget(field: &FormFieldSpec) -> Value {
             "label": field.label,
             "isRequired": field.required,
         }),
-        FormFieldKind::String => json!({
+        FormFieldKind::String | FormFieldKind::Text => json!({
             "type": "Input.Text",
             "id": field.name,
             "label": field.label,
             "isRequired": field.required,
+            "isMultiline": matches!(field.kind, FormFieldKind::Text),
+        }),
+        FormFieldKind::Select => json!({
+            "type": "Input.ChoiceSet",
+            "id": field.name,
+            "label": field.label,
+            "isRequired": field.required,
+            "style": "compact",
+            "choices": field.options.iter()
+                .map(|(label, value)| json!({ "title": label, "value": value }))
+                .collect::<Vec<_>>(),
         }),
     }
 }
@@ -963,6 +1022,21 @@ pub fn build_adaptive_card(
     chart: Option<&Value>,
     chrome: &CardChrome,
 ) -> Value {
+    build_adaptive_card_with(text, dashboard, signed, image_url, chart, chrome, &[])
+}
+
+/// [`build_adaptive_card`] plus the conversation-component `elements`
+/// (`crate::conversation_card::elements`), placed after the text, chart and
+/// dashboard and before the interactive inputs.
+pub fn build_adaptive_card_with(
+    text: &str,
+    dashboard: Option<&DashboardData>,
+    signed: &[(InteractiveSpec, String)],
+    image_url: Option<&str>,
+    chart: Option<&Value>,
+    chrome: &CardChrome,
+    elements: &[Value],
+) -> Value {
     let mut body: Vec<Value> = Vec::new();
     body.extend(header_container(chrome));
     // Headings, tables and rules map to compact native elements; plain prose
@@ -989,15 +1063,23 @@ pub fn build_adaptive_card(
             .collect();
         body.push(json!({ "type": "FactSet", "facts": facts }));
     }
+    body.extend(elements.iter().cloned());
 
     let mut actions: Vec<Value> = Vec::new();
     for (spec, token) in signed {
         match spec {
+            // A button carries its whole request in the token: it neither
+            // gathers nor validates the card's inputs (F5).
             InteractiveSpec::Button { label, .. } => {
-                actions.push(execute_action(label, token));
+                let mut a = execute_action(label, token);
+                a["associatedInputs"] = json!("none");
+                actions.push(a);
             }
             InteractiveSpec::OpenDoc { label, .. } => {
                 actions.push(task_fetch_action(&humanize_doc_action_title(label), token));
+            }
+            InteractiveSpec::OpenUrl { label, url } => {
+                actions.push(json!({ "type": "Action.OpenUrl", "title": label, "url": url }));
             }
             InteractiveSpec::Selection {
                 prompt,
@@ -1198,6 +1280,7 @@ mod tests {
                     tool: "narrate".into(),
                     args: json!({}),
                     resource: None,
+                    action: None,
                 },
             ],
         };
@@ -1296,12 +1379,14 @@ mod tests {
                             label: "Material".into(),
                             kind: FormFieldKind::String,
                             required: true,
+                            options: Vec::new(),
                         },
                         FormFieldSpec {
                             name: "urgent".into(),
                             label: "Urgent?".into(),
                             kind: FormFieldKind::Boolean,
                             required: false,
+                            options: Vec::new(),
                         },
                     ],
                     tool: "assistant".into(),

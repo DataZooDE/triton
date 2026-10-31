@@ -1,0 +1,13 @@
+Operations · 8 Agents · 9 capabilities
+Logistics — 2 Agents
+  Forecast: Agent 26 · In delivery
+  Schedule: Agent 14 · Planned
+  Monitor ⚠
+Planning — 3 Agents
+Production — 3 Agents · 1 proposed capability
+
+Expand map ⤢: https://app.example.com/acme/open?view=capability-map&domain=operations&embed=1
+
+Ask next
+› Which Operations Agents have no owner?
+› Which data products does Operations need?

@@ -656,6 +656,7 @@ async fn serve_dashboard_png(
             trace_id: uuid::Uuid::new_v4().to_string(),
             sender_ref: None,
             conversation_ref: None,
+            idp: None,
         };
         return match adapter
             .dispatcher
@@ -1344,6 +1345,7 @@ async fn handle_webhook(
         } else {
             None
         },
+        idp: None,
     };
     let principal_for_post = principal.clone();
 
@@ -2019,7 +2021,9 @@ async fn courier_reply(
                             last_patch = std::time::Instant::now();
                         }
                     }
-                    triton_core::stream::StreamEvent::Tool(_) => {}
+                    triton_core::stream::StreamEvent::Tool(_)
+                    | triton_core::stream::StreamEvent::Task(_)
+                    | triton_core::stream::StreamEvent::Progress(_) => {}
                     triton_core::stream::StreamEvent::Done(v) => terminal = Some(Ok(v)),
                     triton_core::stream::StreamEvent::Error { error, .. } => {
                         terminal = Some(Err(error));

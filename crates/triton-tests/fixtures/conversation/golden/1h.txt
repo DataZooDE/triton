@@ -1,0 +1,7 @@
+Proposal · open · needs review: Retire Agent 25
+Lifecycle: Deployed → Retired
+Reason: Replaced (from your message)
+Assumed: Owner, links and AI Act class unchanged
+Reviewer: Anyone with review rights except you
+
+Open in the portfolio review: https://app.example.com/acme/review/d/01M636Z8XN

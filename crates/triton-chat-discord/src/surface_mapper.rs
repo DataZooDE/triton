@@ -171,6 +171,13 @@ pub fn render(
     let mut first_dashboard: Option<RasterDashboard> = None;
     for c in &surface.components {
         match c {
+            // Conversation components (and action/template controls):
+            // the shared, no-multi-turn plain-text degradation.
+            c if c.is_conversation() => {
+                if let Some(t) = triton_core::a2ui::text::degrade(c) {
+                    chunks.push(md_escape(&t));
+                }
+            }
             Component::Text { value, .. } => {
                 chunks.push(md_escape(value));
             }
@@ -248,6 +255,7 @@ pub fn render(
                 options,
                 tool,
                 args_key,
+                ..
             } => {
                 // Codex PR 25 concern: defer empty option lists.
                 // Discord rejects `options: []` on string-select
@@ -355,6 +363,9 @@ pub fn render(
                     deferred_dashboards += 1;
                 }
             }
+            // Every remaining kind is a conversation kind, taken above
+            // (`Component::is_conversation` is exhaustive).
+            other => debug_assert!(other.is_conversation()),
         }
     }
 
@@ -537,6 +548,7 @@ pub fn try_render_form_modal(
         fields,
         submit_label: _,
         tool,
+        ..
     } = &surface.components[0]
     else {
         return None;
@@ -758,6 +770,7 @@ mod tests {
                     tool: "narrate".into(),
                     args: json!({}),
                     resource: None,
+                    action: None,
                 },
             ],
         };
@@ -796,6 +809,7 @@ mod tests {
                 tool: "narrate".into(),
                 args: json!({}),
                 resource: None,
+                action: None,
             }],
         };
         let r = render(&s, TEST_KEY, "acme", "u1").expect("renders");
@@ -822,6 +836,7 @@ mod tests {
                 tool: "narrate".into(),
                 args: json!({ "s": format!("p{i}") }),
                 resource: None,
+                action: None,
             })
             .collect();
         let s = Surface { components };
@@ -849,6 +864,7 @@ mod tests {
                 tool: "narrate".into(),
                 args: json!({ "s": format!("p{i}") }),
                 resource: None,
+                action: None,
             })
             .collect();
         let s = Surface { components };
@@ -1003,6 +1019,8 @@ mod tests {
                     ],
                     tool: "narrate".into(),
                     args_key: "subject".into(),
+                    style: Default::default(),
+                    submit: None,
                 },
             ],
         };
@@ -1063,6 +1081,8 @@ mod tests {
                     options,
                     tool: "narrate".into(),
                     args_key: "subject".into(),
+                    style: Default::default(),
+                    submit: None,
                 },
             ],
         };

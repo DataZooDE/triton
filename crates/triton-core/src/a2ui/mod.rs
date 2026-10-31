@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod ge;
+pub mod text;
 pub mod v08;
 pub mod v09;
 
@@ -48,8 +49,16 @@ pub enum Component {
     },
     Button {
         label: String,
+        /// Legacy tool-call button: re-invoke `tool` with `args`. Empty when
+        /// the button carries a stateless [`Action`] instead.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         tool: String,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
         args: Value,
+        /// A stateless action: send one complete new message, or open a URL.
+        /// When present it wins over `tool`/`args`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        action: Option<Action>,
         /// Optional MCP-App the button references (`ui://<authority>/…`,
         /// params in the query) — the report-as-surface pattern. Hosts
         /// that can embed resources may auto-open it; others ignore it.
@@ -69,21 +78,43 @@ pub enum Component {
     /// state" rung of the L6′ degradation ladder (FR-D-3): cheaper
     /// surfaces (Telegram inline keyboards) flatten to numbered
     /// prompts, richer surfaces (web) render a SegmentedButton.
+    ///
+    /// Conversation extension: with `submit` set, the chosen option's
+    /// `value` fills the `{<args_key>}` placeholder of `submit.template`, and
+    /// the click sends that ONE complete message as a new turn (no
+    /// multi-turn, no tool re-invocation). `style` picks radio buttons or a
+    /// dropdown where the channel distinguishes them.
     Selection {
         prompt: String,
         options: Vec<SelectionOption>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         tool: String,
+        #[serde(default)]
         args_key: String,
+        #[serde(default, skip_serializing_if = "SelectionStyle::is_default")]
+        style: SelectionStyle,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        submit: Option<SubmitTemplate>,
     },
     /// Multi-field structured input that submits as one tool call.
     /// Used by surfaces that can host real forms (web, Adaptive
     /// Cards); flattens to a sequence of numbered prompts on
     /// text-only surfaces.
+    ///
+    /// Conversation extension: with `send_template` set, submitting fills the
+    /// template's `{<field name>}` placeholders from the inputs and sends that
+    /// ONE complete message as a new turn. Hosts show the template ("will be
+    /// sent as …", label `preview_label`) before the user submits.
     Form {
         title: String,
         fields: Vec<FormField>,
         submit_label: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         tool: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        send_template: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview_label: Option<String>,
     },
     /// Read-only grid of summary tiles. The rasteriser turns this
     /// into a PNG for surfaces that can't render tables (Telegram);
@@ -128,6 +159,226 @@ pub enum Component {
     Sources {
         items: Vec<SourceItem>,
     },
+    /// A list of answer rows (1a–1c), each optionally actionable: a deep
+    /// link (`open_url`) or a complete follow-up request (`send_message`).
+    List {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        items: Vec<ListItem>,
+    },
+    /// Rows with named columns. Cells are display strings keyed by column
+    /// `key`; a row may carry one action like a [`ListItem`].
+    Table {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        columns: Vec<TableColumn>,
+        rows: Vec<TableRow>,
+    },
+    /// One-click complete requests (1d–1f): each chip sends its `message`
+    /// verbatim as a new turn.
+    Chips {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
+        chips: Vec<Chip>,
+    },
+    /// A nested map (2a/2b): nodes with counts, leaf chips and an optional
+    /// action. Expand/collapse and the "only gaps" filter are client-side
+    /// where the channel can do it; nothing round-trips for either.
+    Tree {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        nodes: Vec<TreeNode>,
+        /// Label of the client-side "only gaps" toggle; `None` = no toggle.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gaps_toggle: Option<String>,
+    },
+    /// An info or warning line (stale data, assumptions, limits).
+    Notice {
+        #[serde(default, skip_serializing_if = "Tone::is_default")]
+        tone: Tone,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        text: String,
+    },
+    /// Real progress of a long run (1j–1l): steps done/active/pending and an
+    /// optional overall fraction in `0.0..=1.0`.
+    Progress {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        steps: Vec<ProgressStep>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        fraction: Option<f64>,
+    },
+    /// Label/value pairs; a pair with `before` renders as a change
+    /// (`before → value`), which is how a draft receipt shows its diff.
+    KeyValue {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        pairs: Vec<KeyValuePair>,
+    },
+    /// An embedded read-only page (2d). Hosts that can frame a URL show
+    /// `url`; every other host renders `fallback` inline instead.
+    Embed {
+        url: String,
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<u32>,
+        fallback: Box<Component>,
+    },
+}
+
+/// The dialect wire form of a button's action: a legacy button keeps its
+/// `{tool, args}` byte-for-byte; a stateless [`Action`] emits itself
+/// (`{type: send_message|open_url, …}`). Shared by the v0.8 and v0.9
+/// builders — it is a property of the canonical model, not of either wire.
+pub(crate) fn button_action(tool: &str, args: &Value, action: Option<&Action>) -> Value {
+    match action {
+        Some(a) => serde_json::json!(a),
+        None => serde_json::json!({ "tool": tool, "args": args }),
+    }
+}
+
+/// A stateless action. A `send_message` click becomes a NEW user message
+/// with exactly `text` — the same as if the user had typed it; `open_url`
+/// opens a deep link. Neither needs the card to be remembered anywhere: the
+/// channel signs the payload into the control itself (triton-correlation).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Action {
+    SendMessage { text: String },
+    OpenUrl { url: String },
+}
+
+/// The submit of a template-carrying [`Component::Selection`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubmitTemplate {
+    pub label: String,
+    /// The complete request with `{<args_key>}` where the choice goes.
+    pub template: String,
+    /// Caption for the "will be sent as" preview; hosts default it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SelectionStyle {
+    #[default]
+    Dropdown,
+    Radio,
+}
+
+impl SelectionStyle {
+    fn is_default(&self) -> bool {
+        *self == SelectionStyle::Dropdown
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ListItem {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<Action>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableColumn {
+    pub key: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableRow {
+    pub cells: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<Action>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Chip {
+    pub label: String,
+    /// The complete request a click sends, verbatim.
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeCount {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeNode {
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub counts: Vec<TreeCount>,
+    /// This node itself is a gap (the "only gaps" filter keeps it and its
+    /// ancestors).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub gap: bool,
+    /// Initially expanded where the host collapses nodes.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub expanded: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chips: Vec<Chip>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<Action>,
+    /// Caption of the node's `action` control (hosts default to `label`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<TreeNode>,
+}
+
+impl TreeNode {
+    /// The caption for this node's action control.
+    pub fn action_caption(&self) -> &str {
+        self.action_label.as_deref().unwrap_or(&self.label)
+    }
+
+    /// True when this node or any descendant is a gap.
+    pub fn has_gap(&self) -> bool {
+        self.gap || self.children.iter().any(TreeNode::has_gap)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Tone {
+    #[default]
+    Info,
+    Warn,
+}
+
+impl Tone {
+    fn is_default(&self) -> bool {
+        *self == Tone::Info
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepState {
+    Done,
+    Active,
+    Pending,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProgressStep {
+    pub label: String,
+    pub state: StepState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyValuePair {
+    pub label: String,
+    pub value: String,
+    /// The previous value, for a change (`before → value`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
 }
 
 /// One line of a [`Component::Diff`], tagged by its `op` so a host switches
@@ -219,6 +470,13 @@ pub struct FormField {
     /// `default_value` in Rust only because `default` is a keyword.
     #[serde(default, rename = "default", skip_serializing_if = "Option::is_none")]
     pub default_value: Option<Value>,
+    /// The choices of a `select` field (ignored by every other kind).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<SelectionOption>,
+    /// Radio buttons or a dropdown for a `select` field, where the host
+    /// distinguishes them (1e, 1m).
+    #[serde(default, skip_serializing_if = "SelectionStyle::is_default")]
+    pub style: SelectionStyle,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -227,6 +485,10 @@ pub enum FormFieldKind {
     String,
     Integer,
     Boolean,
+    /// Pick one of `options` (an enum).
+    Select,
+    /// Free multi-line text.
+    Text,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,7 +516,171 @@ pub fn extract_surface(result: &Value) -> Result<Surface, String> {
     let surface = result
         .get("surface")
         .ok_or_else(|| "tool emitted no `surface` field".to_string())?;
-    serde_json::from_value(surface.clone()).map_err(|e| format!("invalid A2UI surface: {e}"))
+    let surface: Surface = serde_json::from_value(surface.clone())
+        .map_err(|e| format!("invalid A2UI surface: {e}"))?;
+    for c in &surface.components {
+        c.check()?;
+    }
+    Ok(Surface {
+        components: surface
+            .components
+            .into_iter()
+            .filter_map(Component::sanitized)
+            .collect(),
+    })
+}
+
+impl Action {
+    /// Only `https://` deep links are actionable (F6). The producer is
+    /// LLM-driven, so a prompt-injected `javascript:`/`file:`/`ms-…:` link
+    /// must never become a one-tap action on any channel. (A local-only
+    /// `http://` host allowance: [`crate::links`].)
+    pub fn is_safe(&self) -> bool {
+        match self {
+            Action::OpenUrl { url } => crate::links::is_allowed_link(url),
+            Action::SendMessage { .. } => true,
+        }
+    }
+}
+
+fn safe(a: Option<Action>) -> Option<Action> {
+    a.filter(Action::is_safe)
+}
+
+fn sanitize_node(mut n: TreeNode) -> TreeNode {
+    n.action = safe(n.action);
+    n.children = n.children.into_iter().map(sanitize_node).collect();
+    n
+}
+
+impl Component {
+    /// True for the conversation components and the stateless-action /
+    /// template controls — everything rendered by the conversation
+    /// mappings (`a2ui::text`, `ge`, the Teams `conversation_card`) rather
+    /// than by a channel's legacy per-kind rules. The ONE place that knows
+    /// the set: the match is exhaustive, so a new kind cannot be added
+    /// without deciding here, and every mapper's `c if c.is_conversation()`
+    /// arm follows (F8).
+    pub fn is_conversation(&self) -> bool {
+        match self {
+            Component::Button { action, .. } => action.is_some(),
+            Component::Selection { submit, .. } => submit.is_some(),
+            Component::Form { send_template, .. } => send_template.is_some(),
+            Component::List { .. }
+            | Component::Table { .. }
+            | Component::Chips { .. }
+            | Component::Tree { .. }
+            | Component::Notice { .. }
+            | Component::Progress { .. }
+            | Component::KeyValue { .. }
+            | Component::Embed { .. } => true,
+            Component::Text { .. }
+            | Component::Narration { .. }
+            | Component::Dashboard { .. }
+            | Component::Report { .. }
+            | Component::Diff { .. }
+            | Component::Sources { .. } => false,
+        }
+    }
+
+    /// The conversation components proper (no legacy-kind extension): the
+    /// kinds with no field renames on the v0.8/v0.9 dialect wire.
+    pub fn is_conversation_block(&self) -> bool {
+        self.is_conversation()
+            && !matches!(
+                self,
+                Component::Button { .. } | Component::Selection { .. } | Component::Form { .. }
+            )
+    }
+
+    /// Structural rules serde cannot express. An embed's fallback is what a
+    /// host shows INSTEAD of the frame, so it must be renderable inline: an
+    /// embed nested there would never be shown and would recurse.
+    pub fn check(&self) -> Result<(), String> {
+        if let Component::Embed { fallback, .. } = self
+            && matches!(**fallback, Component::Embed { .. })
+        {
+            return Err("invalid A2UI surface: an embed's fallback must not be an embed".into());
+        }
+        // A template Selection needs the placeholder name its choice fills;
+        // without it every channel would guess differently (F9).
+        if let Component::Selection {
+            args_key,
+            submit: Some(_),
+            ..
+        } = self
+            && args_key.trim().is_empty()
+        {
+            return Err("invalid A2UI surface: a selection with `submit` needs `args_key`".into());
+        }
+        Ok(())
+    }
+
+    /// Parse one raw component (`{kind, …}`), apply [`Component::check`]
+    /// and [`Component::sanitized`].
+    pub fn parse(raw: &Value) -> Option<Component> {
+        let c: Component = serde_json::from_value(raw.clone()).ok()?;
+        c.check().ok()?;
+        c.sanitized()
+    }
+
+    /// Drop every unsafe link ([`Action::is_safe`]): a row or node keeps
+    /// its content and loses only the action; a button whose only purpose
+    /// was the link disappears. Applied once here, so every channel sees
+    /// the same, already-safe surface.
+    pub fn sanitized(self) -> Option<Component> {
+        Some(match self {
+            Component::Button {
+                action: Some(a), ..
+            } if !a.is_safe() => return None,
+            Component::List { title, items } => Component::List {
+                title,
+                items: items
+                    .into_iter()
+                    .map(|mut i| {
+                        i.action = safe(i.action);
+                        i
+                    })
+                    .collect(),
+            },
+            Component::Table {
+                title,
+                columns,
+                rows,
+            } => Component::Table {
+                title,
+                columns,
+                rows: rows
+                    .into_iter()
+                    .map(|mut r| {
+                        r.action = safe(r.action);
+                        r
+                    })
+                    .collect(),
+            },
+            Component::Tree {
+                title,
+                nodes,
+                gaps_toggle,
+            } => Component::Tree {
+                title,
+                nodes: nodes.into_iter().map(sanitize_node).collect(),
+                gaps_toggle,
+            },
+            Component::Embed {
+                url,
+                title,
+                height,
+                fallback,
+            } => Component::Embed {
+                url,
+                title,
+                height,
+                fallback: Box::new((*fallback).sanitized()?),
+            },
+            other => other,
+        })
+    }
 }
 
 /// Build a version-specific envelope around a [`Surface`].
@@ -338,11 +764,16 @@ fn v09_node_to_component(node: &Value) -> Option<Component> {
         "button" => {
             obj.insert("label".into(), node.get("label")?.clone());
             let action = node.get("action")?;
-            obj.insert("tool".into(), action.get("tool")?.clone());
-            obj.insert(
-                "args".into(),
-                action.get("args").cloned().unwrap_or_else(empty),
-            );
+            if action.get("type").is_some() {
+                // A stateless action rides as-is; the legacy pair is empty.
+                obj.insert("action".into(), action.clone());
+            } else {
+                obj.insert("tool".into(), action.get("tool")?.clone());
+                obj.insert(
+                    "args".into(),
+                    action.get("args").cloned().unwrap_or_else(empty),
+                );
+            }
             if let Some(r) = node.get("resource") {
                 obj.insert("resource".into(), r.clone());
             }
@@ -350,38 +781,15 @@ fn v09_node_to_component(node: &Value) -> Option<Component> {
                 obj.insert("primary".into(), p.clone());
             }
         }
-        "selection" => {
-            for k in ["prompt", "options", "tool", "args_key"] {
-                obj.insert(k.to_string(), node.get(k)?.clone());
-            }
-        }
-        "form" => {
-            for k in ["title", "fields", "submit_label", "tool"] {
-                obj.insert(k.to_string(), node.get(k)?.clone());
-            }
-        }
-        "dashboard" => {
-            for k in ["title", "tiles"] {
-                obj.insert(k.to_string(), node.get(k)?.clone());
-            }
-        }
-        "report" => {
-            obj.insert("report_id".into(), node.get("report_id")?.clone());
-            obj.insert(
-                "args".into(),
-                node.get("args").cloned().unwrap_or_else(empty),
-            );
-            for k in ["title", "series", "labels"] {
-                if let Some(v) = node.get(k) {
-                    obj.insert(k.to_string(), v.clone());
+        // Every other kind carries its canonical field names unchanged.
+        "selection" | "form" | "dashboard" | "report" | "diff" | "sources" | "list" | "table"
+        | "chips" | "tree" | "notice" | "progress" | "key_value" | "embed" => {
+            let map = node.as_object()?;
+            for (k, v) in map {
+                if k != "type" {
+                    obj.insert(k.clone(), v.clone());
                 }
             }
-        }
-        "diff" => {
-            obj.insert("lines".into(), node.get("lines")?.clone());
-        }
-        "sources" => {
-            obj.insert("items".into(), node.get("items")?.clone());
         }
         _ => return None,
     }
@@ -450,6 +858,7 @@ mod reverse_tests {
                     args: json!({ "id": "x" }),
                     resource: Some("ui://peacock/x".into()),
                     primary: true,
+                    action: None,
                 },
                 Component::Selection {
                     prompt: "pick".into(),
@@ -459,6 +868,8 @@ mod reverse_tests {
                     }],
                     tool: "t".into(),
                     args_key: "k".into(),
+                    style: Default::default(),
+                    submit: None,
                 },
                 Component::Form {
                     title: "F".into(),
@@ -469,9 +880,13 @@ mod reverse_tests {
                         required: true,
                         placeholder: Some("how many".into()),
                         default_value: Some(json!(2)),
+                        options: Vec::new(),
+                        style: Default::default(),
                     }],
                     submit_label: "Go".into(),
                     tool: "t".into(),
+                    preview_label: None,
+                    send_template: None,
                 },
                 Component::Dashboard {
                     title: "D".into(),

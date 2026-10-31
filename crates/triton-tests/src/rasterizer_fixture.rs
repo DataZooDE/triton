@@ -201,19 +201,54 @@ fn rasterizer_binary_path() -> PathBuf {
     if let Some(p) = std::env::var_os("CARGO_BIN_EXE_triton-rasterizer") {
         return PathBuf::from(p);
     }
+    // `scripts/check.sh` builds the binary with `cargo build`, which writes
+    // to `CARGO_TARGET_DIR` when it is set; look there before the walk.
+    if let Some(p) = std::env::var_os("CARGO_TARGET_DIR")
+        .and_then(|dir| rasterizer_under(std::path::Path::new(&dir)))
+    {
+        return p;
+    }
     let mut here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     while here.parent().is_some() {
-        let dbg = here.join("target/debug/triton-rasterizer");
-        let rel = here.join("target/release/triton-rasterizer");
-        if dbg.exists() {
-            return dbg;
-        }
-        if rel.exists() {
-            return rel;
+        if let Some(p) = rasterizer_under(&here.join("target")) {
+            return p;
         }
         here.pop();
     }
     panic!(
         "could not locate `triton-rasterizer` binary; run `cargo build --bin triton-rasterizer` first"
     );
+}
+
+/// `<target>/debug/triton-rasterizer`, else the release build, if built.
+fn rasterizer_under(target: &std::path::Path) -> Option<PathBuf> {
+    ["debug", "release"]
+        .iter()
+        .map(|profile| target.join(profile).join("triton-rasterizer"))
+        .find(|p| p.exists())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rasterizer_under;
+
+    #[test]
+    fn a_rasterizer_is_found_under_a_custom_target_dir() {
+        let dir = std::env::temp_dir().join(format!("raster-target-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("release")).unwrap();
+        assert_eq!(rasterizer_under(&dir), None);
+        std::fs::write(dir.join("release/triton-rasterizer"), b"").unwrap();
+        assert_eq!(
+            rasterizer_under(&dir),
+            Some(dir.join("release/triton-rasterizer"))
+        );
+        std::fs::create_dir_all(dir.join("debug")).unwrap();
+        std::fs::write(dir.join("debug/triton-rasterizer"), b"").unwrap();
+        assert_eq!(
+            rasterizer_under(&dir),
+            Some(dir.join("debug/triton-rasterizer")),
+            "debug wins, as before"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

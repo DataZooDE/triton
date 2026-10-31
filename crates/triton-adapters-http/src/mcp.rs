@@ -74,10 +74,20 @@ pub struct McpState {
     pub dispatcher: Arc<Dispatcher>,
     pub sessions: McpSessions,
     pub identity: Arc<IdentityProvider>,
+    /// When set, an upstream tool call runs as a task, so an
+    /// upstream that goes asynchronous gets a "filed" answer
+    /// (`check_after_seconds`) instead of holding the call open.
+    pub tasks: Option<crate::tasks::Runner>,
+    /// Set on a customer path (`/mcp/<slug>`, [`crate::mcp_tenants`]): the
+    /// verified principal must also pass the route's tenant binding.
+    pub route: Option<Arc<crate::mcp_tenants::McpRoute>>,
 }
 
 pub fn router(state: McpState) -> Router {
-    Router::new().route("/", post(rpc)).with_state(state)
+    Router::new()
+        .route("/", post(rpc))
+        .with_state(state)
+        .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
 }
 
 #[derive(Debug, Serialize)]
@@ -96,7 +106,7 @@ struct RpcError {
     message: String,
 }
 
-async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes) -> Response {
+pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes) -> Response {
     // Step 1: parse the body as raw JSON. A malformed body is the
     // only path that yields -32700; anything that parses as JSON
     // but is shape-wrong gets -32600 below.
@@ -159,7 +169,11 @@ async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes) -> Respon
     // principle be unauthenticated, but the substrate ACL already
     // protects the MCP port (architecture §7) so we keep the same
     // identity check across all methods for symmetry with REST/A2A.
-    let principal = match state.identity.verify(&parts).await {
+    let verified = match (state.identity.verify(&parts).await, &state.route) {
+        (Ok(p), Some(route)) => route.admit(&p).map(|()| p),
+        (verified, _) => verified,
+    };
+    let principal = match verified {
         Ok(p) => p,
         Err(e) => {
             state.dispatcher.record_rejection(
@@ -170,9 +184,20 @@ async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes) -> Respon
                 &uuid::Uuid::new_v4().to_string(),
                 &e,
             );
-            return maybe_respond(id_present, id, |id| {
+            // HTTP 401, not a 200 carrying the error: MCP's HTTP
+            // authorization makes a 401 (with `WWW-Authenticate`, added by
+            // the router's `bearer_challenge` layer) the signal on which a
+            // client starts its OAuth flow. The JSON-RPC body is kept.
+            let mut response = maybe_respond(id_present, id, |id| {
                 rpc_error(id, CODE_AUTH, &e.to_string())
             });
+            // A missing delegated scope answers 403 (RFC 6750 §3.1
+            // `insufficient_scope`, ADR-22); every other failure is 401.
+            *response.status_mut() = match e {
+                TritonError::Forbidden(_) => StatusCode::FORBIDDEN,
+                _ => StatusCode::UNAUTHORIZED,
+            };
+            return state.identity.tag_rejection(&e, response);
         }
     };
 
@@ -287,11 +312,20 @@ async fn tools_list_response(id: Value, state: &McpState) -> Response {
         .await
         .into_iter()
         .map(|d| {
-            json!({
+            let mut tool = json!({
                 "name": d.name,
                 "inputSchema": d.input_schema,
                 "x-triton": { "returns_a2ui": d.returns_a2ui, "upstream": d.upstream },
-            })
+            });
+            // The upstream's own description and annotations, verbatim;
+            // absent (not null) when it gave none — both are optional in MCP.
+            if let Some(description) = d.description {
+                tool["description"] = Value::String(description);
+            }
+            if let Some(annotations) = d.annotations {
+                tool["annotations"] = annotations;
+            }
+            tool
         })
         .collect();
     rpc_ok(id, json!({ "tools": tools }))
@@ -318,11 +352,28 @@ async fn tools_call(
         Err(e) => return rpc_error(id, CODE_INVALID_PARAMS, &e),
     };
 
-    match state
-        .dispatcher
-        .invoke(&tool_name, args, principal, "mcp")
-        .await
-    {
+    let outcome = match &state.tasks {
+        Some(runner)
+            if state.dispatcher.has_upstream() && !state.dispatcher.is_in_process(&tool_name) =>
+        {
+            let returns_a2ui = state.dispatcher.returns_a2ui(&tool_name);
+            match run_as_task(runner, &tool_name, args, principal, returns_a2ui).await {
+                Ok(McpOutcome::Done(d)) => Ok(d),
+                Ok(McpOutcome::Filed(filed)) => return rpc_ok(id, filed),
+                Ok(McpOutcome::AgentError(message)) => {
+                    return rpc_error(id, CODE_TOOL_PROVIDER, &message);
+                }
+                Err(e) => Err(e),
+            }
+        }
+        _ => {
+            state
+                .dispatcher
+                .invoke(&tool_name, args, principal, "mcp")
+                .await
+        }
+    };
+    match outcome {
         Ok(mut d) => {
             let trace_id = d.trace_id.clone();
             // Issue #143 (A): an MCP-Apps upstream (e.g. peacock's
@@ -393,8 +444,140 @@ async fn tools_call(
                 }),
             )
         }
-        Err(e) => rpc_error(id, code_for(&e), &e.to_string()),
+        Err(e) => {
+            // An agent-side fault reaches the client (and through its model,
+            // a person) as the neutral notice; the cause — possibly the
+            // upstream's own status line — stays in the log.
+            if matches!(e, TritonError::Tool(_) | TritonError::Provider(_)) {
+                tracing::warn!(tool = %tool_name, error = %e, "mcp tools/call failed");
+                rpc_error(id, code_for(&e), e.user_notice())
+            } else {
+                rpc_error(id, code_for(&e), &e.to_string())
+            }
+        }
     }
+}
+
+enum McpOutcome {
+    Done(triton_core::Dispatch),
+    /// The upstream went asynchronous and did not finish within
+    /// `TRITON_MCP_ASYNC_WAIT_SECS`: the complete `tools/call` result.
+    Filed(Value),
+    /// The upstream failed the call with its own `error` event; the
+    /// message is written for the caller (contract §7).
+    AgentError(String),
+}
+
+/// Run an upstream tool call as a task. Until the upstream says it
+/// went asynchronous, this waits like a plain call; after that, at most
+/// `mcp_wait`. A task that does not finish by then is answered "filed":
+/// the upstream's receipt as text, and `{status: "filed", task_id,
+/// check_after_seconds}` as structured content. The task keeps running;
+/// the caller checks back through the upstream's own status tool.
+async fn run_as_task(
+    runner: &crate::tasks::Runner,
+    tool: &str,
+    args: Value,
+    principal: triton_core::Principal,
+    returns_a2ui: bool,
+) -> Result<McpOutcome, TritonError> {
+    use crate::tasks::{TaskEvent, TaskRecord, owner_key};
+    let started = std::time::Instant::now();
+    let trace_id = principal.trace_id.clone();
+    let rec = TaskRecord::new(&trace_id, &trace_id, tool, Some(owner_key(&principal)));
+    let mut rx = runner
+        .start(
+            rec,
+            crate::tasks::Start::Dispatch(args),
+            principal,
+            "mcp",
+            Default::default(),
+            // F5: a plain call is no task; only an asynchronous one is
+            // stored (so the client can be told it was filed).
+            crate::tasks::Persist::OnAsync,
+        )
+        .map_err(|e| TritonError::Tool(e.to_string()))?;
+    let mut deadline: Option<tokio::time::Instant> = None;
+    let mut check_after = runner.settings.mcp_check_after_secs;
+    let mut receipt: Option<String> = None;
+    let mut upstream_task_id: Option<String> = None;
+    loop {
+        let next = match deadline {
+            Some(d) => match tokio::time::timeout_at(d, rx.recv()).await {
+                Ok(r) => r,
+                Err(_) => break,
+            },
+            None => rx.recv().await,
+        };
+        match next {
+            Ok(TaskEvent::Async {
+                check_after_seconds,
+                receipt: r,
+                upstream_task_id: up,
+            }) => {
+                upstream_task_id = Some(up);
+                deadline.get_or_insert(tokio::time::Instant::now() + runner.settings.mcp_wait);
+                if let Some(c) = check_after_seconds {
+                    check_after = c;
+                }
+                receipt = r.or(receipt);
+            }
+            Ok(TaskEvent::Done(result)) => {
+                return Ok(McpOutcome::Done(triton_core::Dispatch {
+                    result,
+                    trace_id,
+                    latency_ms: started.elapsed().as_millis() as u64,
+                    returns_a2ui,
+                }));
+            }
+            Ok(TaskEvent::Failed { class, message }) => {
+                if class == crate::tasks::CLASS_AGENT {
+                    return Ok(McpOutcome::AgentError(message));
+                }
+                return Err(crate::tasks::error_of(&class, message));
+            }
+            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                // The runner ended; the store has its outcome.
+                return match runner.store.get(&trace_id) {
+                    Some(r) if r.state == crate::tasks::TaskState::Completed => {
+                        Ok(McpOutcome::Done(triton_core::Dispatch {
+                            result: r.result.unwrap_or_else(|| json!({ "surface": { "text": r.result_text.unwrap_or_default() } })),
+                            trace_id,
+                            latency_ms: started.elapsed().as_millis() as u64,
+                            returns_a2ui,
+                        }))
+                    }
+                    Some(r) if r.error_class.as_deref() == Some(crate::tasks::CLASS_AGENT) => {
+                        Ok(McpOutcome::AgentError(r.error.unwrap_or_default()))
+                    }
+                    Some(r) => Err(crate::tasks::stored_error(&r)),
+                    None => Err(TritonError::Tool("the call failed".into())),
+                };
+            }
+        }
+    }
+    let text = receipt.clone().unwrap_or_else(|| {
+        format!(
+            "The request is filed and still running. Check again in about {check_after} seconds."
+        )
+    });
+    // F7: the id the agent's own status tool knows; Triton's trace id
+    // stays in `_meta`.
+    let mut structured = json!({
+        "status": "filed",
+        "task_id": upstream_task_id.unwrap_or_else(|| trace_id.clone()),
+        "check_after_seconds": check_after,
+    });
+    if let Some(r) = receipt {
+        structured["receipt"] = json!(r);
+    }
+    Ok(McpOutcome::Filed(json!({
+        "content": [{ "type": "text", "text": text }],
+        "structuredContent": structured,
+        "isError": false,
+        "_meta": { "trace_id": trace_id },
+    })))
 }
 
 /// Minimal `resources/list` (#143 review, [NIT]): `initialize` advertises

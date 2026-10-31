@@ -1,0 +1,140 @@
+{
+  "_mock_item": "2d Expanded map in the host: canvas/iframe where available, else the 2a/2b tree inline",
+  "surface": {
+    "components": [
+      {
+        "kind": "text",
+        "value": "Commercial & service · 4 Agents · 9 capabilities"
+      },
+      {
+        "kind": "embed",
+        "url": "https://app.example.com/acme/open?view=capability-map&domain=commercial-service&embed=1",
+        "title": "Shown in canvas →",
+        "height": 640,
+        "fallback": {
+          "kind": "tree",
+          "title": "Commercial & service · 4 Agents",
+          "gaps_toggle": "Only gaps",
+          "nodes": [
+            {
+              "label": "Finance",
+              "counts": [
+                {
+                  "label": "Agents",
+                  "value": "0"
+                }
+              ],
+              "children": [
+                {
+                  "label": "Forecast",
+                  "gap": true,
+                  "action_label": "Propose an Agent here",
+                  "action": {
+                    "type": "send_message",
+                    "text": "Propose an Agent for Finance: Forecast"
+                  }
+                },
+                {
+                  "label": "Monitor",
+                  "gap": true,
+                  "action_label": "Propose an Agent here",
+                  "action": {
+                    "type": "send_message",
+                    "text": "Propose an Agent for Finance: Monitor"
+                  }
+                },
+                {
+                  "label": "Schedule",
+                  "gap": true,
+                  "action_label": "Propose an Agent here",
+                  "action": {
+                    "type": "send_message",
+                    "text": "Propose an Agent for Finance: Schedule"
+                  }
+                }
+              ]
+            },
+            {
+              "label": "Sales",
+              "counts": [
+                {
+                  "label": "Agents",
+                  "value": "2"
+                }
+              ],
+              "expanded": true,
+              "children": [
+                {
+                  "label": "Forecast",
+                  "chips": [
+                    {
+                      "label": "Agent 28 · Planned",
+                      "message": "Show Agent 28"
+                    }
+                  ]
+                },
+                {
+                  "label": "Monitor",
+                  "gap": true,
+                  "action_label": "Propose an Agent here",
+                  "action": {
+                    "type": "send_message",
+                    "text": "Propose an Agent for Sales: Monitor"
+                  }
+                },
+                {
+                  "label": "Schedule (proposed)",
+                  "chips": [
+                    {
+                      "label": "Agent 29 · Candidate",
+                      "message": "Show Agent 29"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "label": "Service",
+              "counts": [
+                {
+                  "label": "Agents",
+                  "value": "2"
+                }
+              ],
+              "expanded": true,
+              "children": [
+                {
+                  "label": "Forecast",
+                  "chips": [
+                    {
+                      "label": "Agent 30 · Deployed",
+                      "message": "Show Agent 30"
+                    }
+                  ]
+                },
+                {
+                  "label": "Monitor",
+                  "chips": [
+                    {
+                      "label": "Agent 31 · Assessed",
+                      "message": "Show Agent 31"
+                    }
+                  ]
+                },
+                {
+                  "label": "Schedule",
+                  "gap": true,
+                  "action_label": "Propose an Agent here",
+                  "action": {
+                    "type": "send_message",
+                    "text": "Propose an Agent for Service: Schedule"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

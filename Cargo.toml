@@ -19,6 +19,7 @@ members = [
     "crates/triton-chat-email",
     "crates/triton-chat-twilio",
     "crates/triton-upstream",
+    "crates/triton-tasks",
     "crates/triton-adapters-http",
     "crates/triton-bin",
     "crates/triton-embed",

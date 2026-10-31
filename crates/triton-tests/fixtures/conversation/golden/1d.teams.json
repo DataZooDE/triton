@@ -1,0 +1,47 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "text": "3 Agents match \"Agent 2\", so nothing was changed. Copy the line you mean and send it as a new message:\n\n_Replying \"Agent 20\" alone won't work: each message is read on its own._",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "associatedInputs": "none",
+          "data": {
+            "ct": "__send_message|{\"m\":\"Retire the agent \\\"Agent 2\\\" (Requirements: Forecast)\"}"
+          },
+          "title": "Agent 2 · Requirements: Forecast",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        },
+        {
+          "associatedInputs": "none",
+          "data": {
+            "ct": "__send_message|{\"m\":\"Retire the agent \\\"Agent 20\\\" (Design: Monitor)\"}"
+          },
+          "title": "Agent 20 · Design: Monitor",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        },
+        {
+          "associatedInputs": "none",
+          "data": {
+            "ct": "__send_message|{\"m\":\"Retire the agent \\\"Agent 28\\\" (Sales: Forecast)\"}"
+          },
+          "title": "Agent 28 · Sales: Forecast",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

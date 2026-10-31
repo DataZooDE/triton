@@ -33,6 +33,8 @@
 
 use serde_json::{Value, json};
 
+use super::{Action, Component, FormField, FormFieldKind, StepState, Tone, TreeNode};
+
 /// The A2UI v0.9 A2A-extension URI (agent-card advertisement + activation).
 pub const EXTENSION_URI: &str = "https://a2ui.org/a2a-extension/a2ui/v0.9";
 /// The DataPart MIME type Gemini Enterprise's renderer actually reads.
@@ -61,14 +63,33 @@ pub const BASIC_CATALOG: &str =
 /// gives the charts — so the Material card's primary accents match the chart.
 const THEME_PRIMARY_COLOR: &str = "#1a73e8";
 
-/// Sentinel stored as a source button's re-ask "question": clicking the button
-/// opens the cited document inline rather than dispatching a turn to the agent.
-/// [`question_for`] returns this string like any re-ask; the A2A layer detects
-/// it via [`open_doc`] and replies with the document surface
-/// ([`build_document_material`], or [`build_document_canvas`] under
-/// [`doc_iframe_enabled`]) instead of running the agent. The prefix is a
-/// control char so it can never collide with a question a user could type.
-const DOC_OPEN_SENTINEL: &str = "\u{1}a2ui-open-doc\u{1}";
+/// The in-band form [`question_for`] hands the A2A layer for an open-doc
+/// click, which detects it via [`open_doc`] and replies with the document
+/// surface instead of running the agent.
+///
+/// F7: the click itself is a TYPED, signed action ([`GeAction::OpenDoc`]);
+/// this string exists only so the existing `question_for` → `open_doc`
+/// caller keeps working. Its prefix carries a random per-process nonce, so
+/// caller-supplied text that imitates it opens nothing — only a decoded
+/// signed id can produce it. New callers should use [`action_for`].
+fn doc_sentinel() -> &'static str {
+    static S: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    S.get_or_init(|| format!("\u{1}a2ui-open-doc:{}\u{1}", uuid::Uuid::new_v4()))
+}
+
+/// What a clicked GE component id resolves to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeAction {
+    /// Send this complete message as a new turn.
+    Message(String),
+    /// Open a cited document (no agent turn).
+    OpenDoc {
+        label: String,
+        skill: String,
+        id: String,
+        url: String,
+    },
+}
 
 /// Feature flag (`TRITON_GE_DOC_CANVAS`): emit in-card "Open source" buttons
 /// that open the cited document inline in GE. OFF by default; when off,
@@ -116,7 +137,7 @@ pub struct OpenDocRef<'a> {
 /// an ordinary re-ask or text turn, or when neither a `(skill,id)` pair nor a
 /// `url` is recoverable (nothing to open).
 pub fn open_doc(text: &str) -> Option<OpenDocRef<'_>> {
-    let rest = text.strip_prefix(DOC_OPEN_SENTINEL)?;
+    let rest = text.strip_prefix(doc_sentinel())?;
     let mut parts = rest.splitn(4, '\u{1}');
     let label = parts.next().unwrap_or("");
     let skill = parts.next().unwrap_or("");
@@ -142,46 +163,248 @@ fn split_skill_id(label: &str) -> (&str, &str) {
 /// Fixed surfaceId prefix; a v4 UUID follows. The id is kept SHORT
 /// (`triton-answer-<uuid>`, 50 chars) on purpose: Gemini Enterprise TRUNCATES
 /// the surfaceId to the uuid on a button click (observed on the wire — a longer
-/// encoded id came back stripped), so it cannot carry a payload. The uuid does
-/// survive, so it keys the per-card re-ask table below.
+/// encoded id came back stripped), so it cannot carry a payload.
 const SURFACE_PREFIX: &str = "triton-answer-";
 
-/// Bounded, process-wide map: `surfaceId` → { button id number → re-ask
-/// question }. GE strips name/context on click and truncates the surfaceId to
-/// the uuid, but PRESERVES the component id — so the recoverable pair is
-/// `(surfaceId-uuid, our btn-N)`, which this table maps back to the question.
-///
-/// This is process-local, so `dz-agent-template` runs a single replica in lab
-/// (values-lab `replicaCount: 1`); a multi-replica deployment would need a
-/// shared store keyed by the same surfaceId. FIFO-capped at [`MAX_SURFACES`];
-/// a stale miss falls through to the turn's placeholder text (no crash).
-static SURFACE_QUESTIONS: std::sync::Mutex<
-    Vec<(String, std::collections::HashMap<usize, String>)>,
-> = std::sync::Mutex::new(Vec::new());
-const MAX_SURFACES: usize = 512;
+/// Upper bound on one signed action token carried in a component id. A
+/// complete follow-up request is a sentence, not a document; the cap keeps a
+/// runaway message from bloating every card and bounds the decode work an
+/// inbound click can force.
+pub const GE_ACTION_CAP: usize = 2048;
+/// How long a card's actions stay valid. Long enough for a card that sits in
+/// a conversation over a holiday; short enough that a leaked id is not a
+/// permanent capability. (The message it sends runs under the CLICKER's own
+/// principal either way — the signature only stops crafted payloads.)
+const GE_ACTION_TTL_SECS: u64 = 30 * 24 * 3600;
+/// An open-doc action carries a signed `/docs` URL in a readable id, so it
+/// lives a day, not a month (F7): a leaked card id stops opening the
+/// document long before a send-message one stops sending its text.
+const GE_DOC_TTL_SECS: u64 = 24 * 3600;
+/// Sentinel tool for a signed open-doc action.
+const OPEN_DOC_TOOL: &str = "__open_doc";
+/// Binding platform for GE action tokens, so a GE card id can never be
+/// replayed as a Teams/Telegram token minted under the same key.
+const GE_PLATFORM: &str = "a2ui-ge";
 
-fn remember_surface(surface_id: &str, qmap: std::collections::HashMap<usize, String>) {
-    if qmap.is_empty() {
-        return;
+/// Signs and verifies the **stateless** GE card actions.
+///
+/// GE strips an action's `name`/`context` on click and truncates the
+/// `surfaceId`, but echoes the clicked component's own `id` verbatim as
+/// `sourceComponentId` (verified live, #275). So the id IS the payload: a
+/// clickable component's id is `a<N>-<token>`, where `<token>` is an
+/// HMAC-signed `(SEND_MESSAGE_TOOL, {m: <complete message>})` correlation
+/// token and `<N>` keeps ids unique when two controls send the same text.
+/// Any replica that holds the key recovers the complete message from the id
+/// alone — no card store, no affinity. This replaces the process-local
+/// `SURFACE_QUESTIONS` table.
+///
+/// Key: installed at boot via [`configure_action_key`] from
+/// `TRITON_A2UI_ACTION_KEY` (≥ 16 bytes; a comma-separated list rotates,
+/// first signs). Without it, a random per-process key is used — which
+/// degrades to exactly the old single-process behaviour (a click resolves
+/// only on the replica that rendered the card).
+pub struct ActionSigner {
+    ring: triton_correlation::KeyRing,
+}
+
+impl ActionSigner {
+    /// A signer over an explicit key ring (tests, embedded hosts).
+    pub fn new(ring: triton_correlation::KeyRing) -> Self {
+        Self { ring }
     }
-    if let Ok(mut store) = SURFACE_QUESTIONS.lock() {
-        store.push((surface_id.to_string(), qmap));
-        let overflow = store.len().saturating_sub(MAX_SURFACES);
-        if overflow > 0 {
-            store.drain(0..overflow);
+
+    /// The process-wide signer: the key installed by
+    /// [`configure_action_key`] at boot, else a random per-process key (a
+    /// click then resolves only on the replica that rendered the card —
+    /// the binary warns about that at startup). Core never reads the
+    /// environment itself; the process edge injects the key (F4).
+    pub fn global() -> &'static ActionSigner {
+        if let Some(s) = INSTALLED.get() {
+            return s;
         }
+        static EPHEMERAL: std::sync::OnceLock<ActionSigner> = std::sync::OnceLock::new();
+        EPHEMERAL.get_or_init(|| {
+            let random = format!("{}{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+            ActionSigner {
+                ring: triton_correlation::KeyRing::single(random.into_bytes())
+                    .expect("72 random bytes clear the minimum"),
+            }
+        })
+    }
+
+    fn binding() -> triton_correlation::Binding<'static> {
+        triton_correlation::Binding {
+            platform: GE_PLATFORM,
+            tenant: "",
+            sender: "",
+        }
+    }
+
+    /// Mint the token for "send `message` as a new turn".
+    pub fn sign(&self, message: &str) -> Option<String> {
+        triton_correlation::encode_bound(
+            triton_correlation::message::SEND_MESSAGE_TOOL,
+            &triton_correlation::message::text_args(message),
+            self.ring.signing(),
+            GE_ACTION_CAP,
+            Self::binding(),
+            Some(GE_ACTION_TTL_SECS),
+        )
+        .ok()
+    }
+
+    /// Mint the component id (`a<n>-<token>`) for "open this cited
+    /// document" — signed like a send-message action, typed on decode.
+    pub fn sign_open_doc(
+        &self,
+        n: usize,
+        label: &str,
+        skill: &str,
+        id: &str,
+        url: &str,
+    ) -> Option<String> {
+        let token = triton_correlation::encode_bound(
+            OPEN_DOC_TOOL,
+            &json!({ "l": label, "s": skill, "i": id, "u": url }),
+            self.ring.signing(),
+            GE_ACTION_CAP,
+            Self::binding(),
+            Some(GE_DOC_TTL_SECS),
+        )
+        .ok()?;
+        Some(format!("a{n}-{token}"))
+    }
+
+    /// Recover the complete message from a clicked component id
+    /// (`a<N>-<token>`). `None` for a forged, expired or foreign id, and for
+    /// an open-doc id (use [`ActionSigner::open_action`]).
+    pub fn open(&self, component_id: &str) -> Option<String> {
+        match self.open_action(component_id)? {
+            GeAction::Message(m) => Some(m),
+            GeAction::OpenDoc { .. } => None,
+        }
+    }
+
+    /// Decode a clicked component id into its typed action.
+    pub fn open_action(&self, component_id: &str) -> Option<GeAction> {
+        let rest = component_id.strip_prefix('a')?;
+        let (n, token) = rest.split_once('-')?;
+        if n.is_empty() || !n.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let (tool, args) =
+            triton_correlation::decode_bound_any(token, &self.ring, GE_ACTION_CAP, Self::binding())
+                .ok()?;
+        if tool == OPEN_DOC_TOOL {
+            let f = |k: &str| {
+                args.get(k)
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string()
+            };
+            return Some(GeAction::OpenDoc {
+                label: f("l"),
+                skill: f("s"),
+                id: f("i"),
+                url: f("u"),
+            });
+        }
+        if tool != triton_correlation::message::SEND_MESSAGE_TOOL {
+            return None;
+        }
+        triton_correlation::message::resolve(&args, |_| None)
+            .ok()
+            .map(GeAction::Message)
     }
 }
 
-/// Resolve a GE button click to the re-ask question it should run.
-/// `source_component_id` is GE's echoed id (`"btn-N"`); its trailing number
-/// keys the per-card table recorded at build time under `surface_id`. `None` ⇒
-/// not a re-ask (→ caller falls back to the turn's text).
-pub fn question_for(surface_id: &str, source_component_id: &str) -> Option<String> {
-    let n: usize = source_component_id.rsplit('-').next()?.parse().ok()?;
-    let store = SURFACE_QUESTIONS.lock().ok()?;
-    let hit = store.iter().rev().find(|(sid, _)| sid == surface_id);
-    hit.and_then(|(_, m)| m.get(&n).cloned())
+static INSTALLED: std::sync::OnceLock<ActionSigner> = std::sync::OnceLock::new();
+
+/// What [`configure_action_key`] found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionKeyState {
+    /// A shared key is installed: every replica holding it resolves every
+    /// card id.
+    Configured,
+    /// No key: a random per-process key signs, so clicks resolve on this
+    /// replica only. Fine for one replica; the caller warns.
+    Ephemeral,
+}
+
+/// Install the A2UI action key from its raw operator value
+/// (`TRITON_A2UI_ACTION_KEY`: one key, or `new,old` during a rotation; each
+/// ≥ 16 bytes). Call once at boot, before any card renders. `Err` is a
+/// malformed value — the caller must refuse to start rather than fall back
+/// to a key no other replica shares. A second call keeps the first key.
+pub fn configure_action_key(
+    raw: Option<&str>,
+) -> Result<ActionKeyState, triton_correlation::KeyRingError> {
+    let Some(raw) = raw else {
+        return Ok(ActionKeyState::Ephemeral);
+    };
+    let ring = triton_correlation::KeyRing::parse(raw)?;
+    let _ = INSTALLED.set(ActionSigner { ring });
+    Ok(ActionKeyState::Configured)
+}
+
+/// Resolve a GE button click (the echoed `sourceComponentId`) to its typed
+/// action. `None` ⇒ not one of our actions (forged, expired, foreign).
+pub fn action_for(source_component_id: &str) -> Option<GeAction> {
+    ActionSigner::global().open_action(source_component_id)
+}
+
+/// String form of [`action_for`] for the existing A2A caller: a message
+/// verbatim, an open-doc as the nonce-protected in-band form [`open_doc`]
+/// parses. The surface id is not used (the clicked id is self-contained);
+/// the parameter stays only so that caller's signature is unchanged.
+pub fn question_for(_surface_id: &str, source_component_id: &str) -> Option<String> {
+    Some(match action_for(source_component_id)? {
+        GeAction::Message(m) => m,
+        GeAction::OpenDoc {
+            label,
+            skill,
+            id,
+            url,
+        } => format!("{}{label}\u{1}{skill}\u{1}{id}\u{1}{url}", doc_sentinel()),
+    })
+}
+
+/// Rendering switches for [`build_messages_with`]. Both default OFF because
+/// each depends on something only a live Gemini Enterprise tenant can
+/// confirm; see the field docs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GeOptions {
+    /// Emit `open_url` actions as in-card buttons (`functionCall: openUrl`,
+    /// the composite catalog's own function). OFF: an earlier, malformed
+    /// attempt (`{name: openUrl}` under the basic catalog, #263) was rejected
+    /// live; the spec-correct `{call, args, returnType: void}` form is
+    /// schema-valid but unqualified. When off, deep links ride the prose
+    /// bubble (the producer's text) and rows show their label only.
+    /// Env: `TRITON_GE_OPEN_URL`.
+    pub open_url: bool,
+    /// Render an `embed` as a Canvas side panel with an `IFrameUrl`. OFF:
+    /// the framed host must be on GE's widget allowlist (a Google-side
+    /// request), else the panel shows a security error. When off, the
+    /// embed's `fallback` renders inline. Env: `TRITON_GE_EMBED`.
+    pub embed: bool,
+}
+
+impl GeOptions {
+    /// The process-wide options from the environment.
+    pub fn from_env() -> GeOptions {
+        static OPTS: std::sync::OnceLock<GeOptions> = std::sync::OnceLock::new();
+        *OPTS.get_or_init(|| {
+            let on = |k: &str| {
+                std::env::var(k)
+                    .map(|v| matches!(v.trim(), "1" | "true" | "TRUE" | "yes" | "on"))
+                    .unwrap_or(false)
+            };
+            GeOptions {
+                open_url: on("TRITON_GE_OPEN_URL"),
+                embed: on("TRITON_GE_EMBED"),
+            }
+        })
+    }
 }
 
 /// GE-specific presentation tweaks to peacock's Vega-Lite spec (on a clone —
@@ -229,30 +452,496 @@ fn beautify_vega_for_ge(spec: &Value) -> Value {
 }
 
 /// Build the A2UI v0.9 message array from a raw surface value
-/// (`result["surface"]["components"]`). Returns `None` when the value carries
-/// no renderable component, so the caller can fall back to a text part.
+/// (`result["surface"]["components"]`) with the process-wide signer and
+/// env options. Returns `None` when the value carries no renderable
+/// component, so the caller can fall back to a text part.
 pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
+    build_messages_with(result, ActionSigner::global(), GeOptions::from_env())
+}
+
+/// The flat, id-referenced component list of one card under construction.
+struct Card<'a> {
+    flat: Vec<Value>,
+    n: usize,
+    signer: &'a ActionSigner,
+    opts: GeOptions,
+}
+
+impl Card<'_> {
+    fn next_id(&mut self, prefix: &str) -> String {
+        self.n += 1;
+        format!("{prefix}-{}", self.n)
+    }
+
+    /// Push `comp` under a fresh id and return the id.
+    fn add(&mut self, prefix: &str, mut comp: Value) -> String {
+        let id = self.next_id(prefix);
+        comp["id"] = json!(id);
+        self.flat.push(comp);
+        id
+    }
+
+    fn text(&mut self, text: &str, hint: &str) -> String {
+        self.add(
+            "t",
+            json!({ "component": "MaterialText", "text": text, "usageHint": hint }),
+        )
+    }
+
+    fn column(&mut self, children: Vec<String>) -> String {
+        self.add(
+            "col",
+            json!({ "component": "MaterialColumn", "children": children }),
+        )
+    }
+
+    fn row(&mut self, children: Vec<String>) -> String {
+        self.add(
+            "row",
+            json!({
+                "component": "MaterialRow", "children": children,
+                "justify": "start", "align": "stretch",
+            }),
+        )
+    }
+
+    /// A button that sends `message` as a new turn: its id carries the
+    /// signed payload (see [`ActionSigner`]). `None` when the message is too
+    /// long to sign — the control is dropped rather than shipped dead.
+    fn send_button(&mut self, label: &str, message: &str, variant: &str) -> Option<String> {
+        let Some(token) = self.signer.sign(message) else {
+            tracing::warn!(
+                bytes = message.len(),
+                cap = GE_ACTION_CAP,
+                "a2ui/ge: dropping a send-message control (request too long to sign)"
+            );
+            return None;
+        };
+        self.n += 1;
+        let id = format!("a{}-{token}", self.n);
+        self.flat.push(json!({
+            "id": id,
+            "component": "MaterialButton",
+            "label": label,
+            "variant": variant,
+            "color": "primary",
+            "action": { "event": { "name": "send_message", "context": {} } },
+        }));
+        Some(id)
+    }
+
+    /// An "open this cited document" button (a typed, signed action).
+    fn doc_button(&mut self, label: &str, doc: (&str, &str, &str, &str)) -> Option<String> {
+        self.n += 1;
+        let Some(id) = self
+            .signer
+            .sign_open_doc(self.n, doc.0, doc.1, doc.2, doc.3)
+        else {
+            tracing::warn!("a2ui/ge: dropping an open-doc control (reference too long to sign)");
+            return None;
+        };
+        self.flat.push(json!({
+            "id": id,
+            "component": "MaterialButton",
+            "label": label,
+            "variant": "outlined",
+            "color": "primary",
+            "action": { "event": { "name": "open_doc", "context": {} } },
+        }));
+        Some(id)
+    }
+
+    /// A button that opens `url` client-side — only when enabled.
+    fn url_button(&mut self, label: &str, url: &str) -> Option<String> {
+        if !self.opts.open_url || !crate::links::is_allowed_link(url) {
+            return None;
+        }
+        Some(self.add(
+            "lnk",
+            json!({
+                "component": "MaterialButton",
+                "label": label,
+                "variant": "basic",
+                "color": "primary",
+                "action": { "functionCall": {
+                    "call": "openUrl", "args": { "url": url }, "returnType": "void",
+                } },
+            }),
+        ))
+    }
+
+    fn action_button(&mut self, label: &str, a: &Action, variant: &str) -> Option<String> {
+        match a {
+            Action::SendMessage { text } => self.send_button(label, text, variant),
+            Action::OpenUrl { url } => self.url_button(label, url),
+        }
+    }
+
+    /// Buttons laid out two per `MaterialRow` (GE's row neither wraps nor
+    /// gaps, so four in a row overprint).
+    fn button_rows(&mut self, ids: Vec<String>) -> Vec<String> {
+        let chunks: Vec<Vec<String>> = ids.chunks(2).map(<[String]>::to_vec).collect();
+        chunks.into_iter().map(|c| self.row(c)).collect()
+    }
+
+    /// One conversation component → the ids it adds under the root column.
+    fn component(&mut self, c: &Component) -> Vec<String> {
+        match c {
+            Component::List { title, items } => {
+                let mut ids = Vec::new();
+                if let Some(t) = title {
+                    ids.push(self.text(t, "subtitle1"));
+                }
+                for it in items {
+                    let mut cell = Vec::new();
+                    let head = it
+                        .action
+                        .as_ref()
+                        .and_then(|a| self.action_button(&it.label, a, "basic"));
+                    cell.push(head.unwrap_or_else(|| self.text(&it.label, "body1")));
+                    if let Some(d) = it.detail.as_deref().filter(|d| !d.is_empty()) {
+                        cell.push(self.text(d, "caption"));
+                    }
+                    ids.push(self.column(cell));
+                }
+                ids
+            }
+            Component::Table {
+                title,
+                columns,
+                rows,
+            } => {
+                let mut ids = Vec::new();
+                let cols: Vec<Value> = columns
+                    .iter()
+                    .map(|c| json!({ "header": c.label, "field": c.key }))
+                    .collect();
+                let data: Vec<Value> = rows
+                    .iter()
+                    .map(|r| {
+                        let mut o = serde_json::Map::new();
+                        for c in columns {
+                            o.insert(
+                                c.key.clone(),
+                                json!(r.cells.get(&c.key).cloned().unwrap_or_default()),
+                            );
+                        }
+                        Value::Object(o)
+                    })
+                    .collect();
+                let mut table =
+                    json!({ "component": "MaterialTable", "columns": cols, "rows": data });
+                if let Some(t) = title {
+                    table["caption"] = json!(t);
+                }
+                ids.push(self.add("tbl", table));
+                // A MaterialTable cannot carry a row action: actionable rows
+                // get a button each, labelled by the row's first cell.
+                let first = columns.first().map(|c| c.key.clone()).unwrap_or_default();
+                let btns: Vec<String> = rows
+                    .iter()
+                    .filter_map(|r| {
+                        let a = r.action.as_ref()?;
+                        let label = r.cells.get(&first).cloned().unwrap_or_default();
+                        self.action_button(&label, a, "stroked")
+                    })
+                    .collect();
+                ids.extend(self.button_rows(btns));
+                ids
+            }
+            Component::Chips { prompt, chips } => {
+                let mut ids = Vec::new();
+                if let Some(p) = prompt {
+                    ids.push(self.text(p, "body2"));
+                }
+                let btns: Vec<String> = chips
+                    .iter()
+                    .filter_map(|ch| self.send_button(&ch.label, &ch.message, "stroked"))
+                    .collect();
+                ids.extend(self.button_rows(btns));
+                ids
+            }
+            Component::Tree { title, nodes, .. } => {
+                // The "only gaps" toggle has no GE equivalent (the composite
+                // catalog has no client-side visibility binding), so it is
+                // not rendered; gap nodes are marked and start expanded.
+                let mut ids = Vec::new();
+                if let Some(t) = title {
+                    ids.push(self.text(t, "subtitle1"));
+                }
+                for n in nodes {
+                    ids.push(self.tree_node(n));
+                }
+                ids
+            }
+            Component::Notice { tone, title, text } => {
+                let icon = match tone {
+                    Tone::Info => ("info", "primary"),
+                    Tone::Warn => ("warning", "warn"),
+                };
+                let icon_id = self.add(
+                    "ic",
+                    json!({ "component": "MaterialIcon", "icon": icon.0, "color": icon.1 }),
+                );
+                let body = match title {
+                    Some(t) if !t.is_empty() => format!("{t}: {text}"),
+                    _ => text.clone(),
+                };
+                let text_id = self.text(&body, "body2");
+                vec![self.row(vec![icon_id, text_id])]
+            }
+            Component::Progress {
+                title,
+                steps,
+                fraction,
+            } => {
+                let mut ids = Vec::new();
+                if let Some(t) = title {
+                    ids.push(self.text(t, "subtitle2"));
+                }
+                let bar = match fraction {
+                    Some(f) => json!({
+                        "component": "MaterialProgressBar", "mode": "determinate",
+                        "value": (f.clamp(0.0, 1.0) * 100.0).round(),
+                    }),
+                    None => json!({ "component": "MaterialProgressBar", "mode": "indeterminate" }),
+                };
+                ids.push(self.add("pb", bar));
+                for s in steps {
+                    let icon = match s.state {
+                        StepState::Done => "check_circle",
+                        StepState::Active => "pending",
+                        StepState::Pending => "radio_button_unchecked",
+                    };
+                    let ic = self.add(
+                        "ic",
+                        json!({ "component": "MaterialIcon", "icon": icon, "color": "primary" }),
+                    );
+                    let hint = if s.state == StepState::Active {
+                        "body1"
+                    } else {
+                        "body2"
+                    };
+                    let tx = self.text(&s.label, hint);
+                    ids.push(self.row(vec![ic, tx]));
+                }
+                ids
+            }
+            Component::KeyValue { title, pairs } => {
+                let rows: Vec<Value> = pairs
+                    .iter()
+                    .map(|p| {
+                        let v = match &p.before {
+                            Some(b) => format!("{b} \u{2192} {}", p.value),
+                            None => p.value.clone(),
+                        };
+                        json!({ "label": p.label, "value": v })
+                    })
+                    .collect();
+                let mut t = json!({
+                    "component": "MaterialTable",
+                    "columns": [ { "header": "", "field": "label" }, { "header": "", "field": "value" } ],
+                    "rows": rows,
+                });
+                if let Some(title) = title {
+                    t["caption"] = json!(title);
+                }
+                vec![self.add("kv", t)]
+            }
+            Component::Selection {
+                prompt,
+                options,
+                args_key,
+                submit: Some(sub),
+                ..
+            } => {
+                // GE posts `context: {}` on click, so a radio value chosen
+                // client-side never reaches us. Each option therefore
+                // becomes its own button carrying the template filled with
+                // THAT option — the same complete request, one click.
+                let mut ids = vec![self.text(prompt, "body2")];
+                let btns: Vec<String> = options
+                    .iter()
+                    .filter_map(|o| {
+                        let msg = triton_correlation::message::fill_template(&sub.template, |k| {
+                            (k == args_key).then(|| o.value.clone())
+                        })
+                        .ok()?;
+                        self.send_button(&o.label, &msg, "stroked")
+                    })
+                    .collect();
+                ids.extend(self.button_rows(btns));
+                ids
+            }
+            Component::Form {
+                title,
+                fields,
+                send_template: Some(tpl),
+                preview_label,
+                ..
+            } => self.template_form(title, fields, tpl, preview_label.as_deref()),
+            Component::Button {
+                label,
+                action: Some(a),
+                ..
+            } => self.action_button(label, a, "flat").into_iter().collect(),
+            Component::Embed { fallback, .. } => self.component(fallback),
+            // Prose reaches the card only as an embed's fallback (the bubble
+            // carries the surface's own text/narration).
+            Component::Text { value, .. } => vec![self.text(value, "body1")],
+            Component::Narration { text } => vec![self.text(text, "caption")],
+            _ => Vec::new(),
+        }
+    }
+
+    /// A template form. GE cannot return input values (see Selection), so:
+    /// a form whose template depends on exactly ONE select field expands to
+    /// one button per option; any other form shows its "will be sent as"
+    /// preview for the reader to copy — Gemini cannot submit it.
+    fn template_form(
+        &mut self,
+        title: &str,
+        fields: &[FormField],
+        tpl: &str,
+        preview_label: Option<&str>,
+    ) -> Vec<String> {
+        let mut ids = Vec::new();
+        if !title.is_empty() {
+            ids.push(self.text(title, "subtitle2"));
+        }
+        let names = triton_correlation::message::required_placeholders(tpl);
+        let only_select = match names.as_slice() {
+            [one] => fields
+                .iter()
+                .find(|f| &f.name == one && matches!(f.kind, FormFieldKind::Select)),
+            _ => None,
+        };
+        if let Some(f) = only_select {
+            let btns: Vec<String> = f
+                .options
+                .iter()
+                .filter_map(|o| {
+                    let msg = triton_correlation::message::fill_template(tpl, |k| {
+                        (k == f.name).then(|| o.value.clone())
+                    })
+                    .ok()?;
+                    self.send_button(&o.label, &msg, "stroked")
+                })
+                .collect();
+            ids.extend(self.button_rows(btns));
+            return ids;
+        }
+        let preview = triton_correlation::message::preview_template(tpl, |name| {
+            fields
+                .iter()
+                .find(|f| f.name == name)
+                .map(|f| f.label.clone())
+        });
+        let label = preview_label.unwrap_or("Will be sent as");
+        ids.push(self.text(&format!("{label}: {preview}"), "body2"));
+        ids
+    }
+
+    /// A tree node: a `MaterialExpansionPanel` (client-side expand/collapse)
+    /// when it has anything inside, else a single text line.
+    fn tree_node(&mut self, n: &TreeNode) -> String {
+        let counts: Vec<String> = n
+            .counts
+            .iter()
+            .map(|c| format!("{} {}", c.value, c.label))
+            .collect();
+        let mut description = counts.join(" \u{b7} ");
+        if n.gap {
+            description = format!("\u{26a0} {description}").trim().to_string();
+        }
+        let mut inner: Vec<String> = Vec::new();
+        let chip_btns: Vec<String> = n
+            .chips
+            .iter()
+            .filter_map(|ch| self.send_button(&ch.label, &ch.message, "stroked"))
+            .collect();
+        inner.extend(self.button_rows(chip_btns));
+        if let Some(a) = &n.action {
+            inner.extend(self.action_button(n.action_caption(), a, "basic"));
+        }
+        for c in &n.children {
+            inner.push(self.tree_node(c));
+        }
+        if inner.is_empty() {
+            let line = if description.is_empty() {
+                n.label.clone()
+            } else {
+                format!("{} \u{2014} {description}", n.label)
+            };
+            return self.text(&line, "body2");
+        }
+        let mut panel = json!({
+            "component": "MaterialExpansionPanel",
+            "title": n.label,
+            "expanded": n.expanded || n.gap,
+            "children": inner,
+        });
+        if !description.is_empty() {
+            panel["description"] = json!(description);
+        }
+        self.add("node", panel)
+    }
+}
+
+/// The `createSurface` + `updateComponents` pair for one surface.
+fn surface_pair(flat: Vec<Value>) -> Vec<Value> {
+    let surface_id = format!("{SURFACE_PREFIX}{}", uuid::Uuid::new_v4());
+    vec![
+        json!({
+            "version": "v0.9",
+            "createSurface": {
+                "surfaceId": surface_id,
+                "catalogId": BASIC_CATALOG,
+                // v0.9 styling: `createSurface.theme` (which replaced v0.8's
+                // `styles`) carries theme params the Material renderer
+                // applies — GE uses `primaryColor` for primary buttons and
+                // active borders. Renderers ignore fields they don't use.
+                "theme": {
+                    "primaryColor": THEME_PRIMARY_COLOR,
+                    "agentDisplayName": "DataZoo Agent",
+                },
+            },
+        }),
+        json!({
+            "version": "v0.9",
+            "updateComponents": { "surfaceId": surface_id, "components": flat },
+        }),
+    ]
+}
+
+/// [`build_messages`] with an explicit signer and options (tests, embedded
+/// hosts with their own key).
+pub fn build_messages_with(
+    result: &Value,
+    signer: &ActionSigner,
+    opts: GeOptions,
+) -> Option<Vec<Value>> {
     let components = result
         .get("surface")
         .and_then(|s| s.get("components"))
         .and_then(Value::as_array)?;
 
-    // Flat component list (id-referenced); `root_children` collects the ids
-    // that hang under the top Column, in surface order.
-    let mut flat: Vec<Value> = Vec::new();
+    let mut card = Card {
+        flat: Vec::new(),
+        n: 0,
+        signer,
+        opts,
+    };
+    // `root_children` collects the ids under the top Column, in surface
+    // order. Follow-up buttons and source buttons are collected separately
+    // and laid out last, so secondary document buttons never crowd out or
+    // misalign the primary action chips.
     let mut root_children: Vec<String> = Vec::new();
-    // Action buttons (re-asks, follow-ups) and source buttons are collected
-    // separately so secondary document buttons never crowd out or misalign
-    // the primary action chips.
     let mut action_btn_ids: Vec<String> = Vec::new();
     let mut source_btn_ids: Vec<String> = Vec::new();
-    // Predicted-GE-id → re-ask question, for this card's follow-up buttons.
-    let mut qmap: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-    let mut n = 0usize;
-    let id = |prefix: &str, n: &mut usize| {
-        *n += 1;
-        format!("{prefix}-{n}")
-    };
+    // Embeds that become their own Canvas surface (GE requires Canvas to be
+    // a surface ROOT).
+    let mut canvases: Vec<(String, String, Option<u32>)> = Vec::new();
 
     for c in components {
         let kind = c.get("kind").and_then(Value::as_str).unwrap_or_default();
@@ -260,80 +949,72 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
             // Prose (text/narration) is intentionally NOT put in the card:
             // the streamed answer already renders as the message bubble above
             // the card, and duplicating it inside would show the answer twice.
-            // The card is the rich WIDGET — chart + actions + sources.
             "text" | "narration" => {}
             // Chart. Prefer a NATIVE interactive `VegaChart` when a Vega-Lite
             // `vega_spec` is present (the A2A layer expands the report via
-            // `render_report` and injects peacock's spec) — GE renders it with
-            // tooltips/hover. Otherwise fall back to the static PNG as a basic
-            // `Image` (NOT `MaterialImage`: GE's Material renderer left the
-            // signed URL as a broken/empty <img>; basic Image loads + self-sizes.
-            // Mixing basic + Material is fine — the composite catalog has both).
+            // `render_report` and injects peacock's spec). Otherwise fall back
+            // to the static PNG as a basic `Image` (NOT `MaterialImage`: GE's
+            // Material renderer left the signed URL as a broken/empty <img>).
             "report" => {
                 if let Some(spec) = c.get("vega_spec").filter(|s| s.is_object()) {
-                    let cid = id("chart", &mut n);
-                    flat.push(json!({
-                        "id": cid,
-                        "component": "VegaChart",
-                        "spec": beautify_vega_for_ge(spec),
-                        "height": 300,
-                    }));
+                    let cid = card.add(
+                        "chart",
+                        json!({
+                            "component": "VegaChart",
+                            "spec": beautify_vega_for_ge(spec),
+                            "height": 300,
+                        }),
+                    );
                     root_children.push(cid);
                 } else if let Some(url) = c.get("image_url").and_then(Value::as_str) {
-                    let cid = id("chart", &mut n);
-                    let mut img =
-                        json!({ "id": cid, "component": "Image", "url": url, "fit": "contain" });
+                    let mut img = json!({ "component": "Image", "url": url, "fit": "contain" });
                     if let Some(t) = c.get("title").and_then(Value::as_str) {
                         img["description"] = json!(t);
                     }
-                    flat.push(img);
-                    root_children.push(cid);
+                    root_children.push(card.add("chart", img));
                 }
             }
             "button" => {
+                // A stateless-action button (send_message / open_url).
+                if c.get("action").is_some_and(Value::is_object) {
+                    if let Some(comp) = Component::parse(c) {
+                        action_btn_ids.extend(card.component(&comp));
+                    }
+                    continue;
+                }
                 let label = c.get("label").and_then(Value::as_str).unwrap_or("Open");
                 let tool = c.get("tool").and_then(Value::as_str).unwrap_or_default();
-                // A re-ask follow-up carries `args.message` (the question);
-                // report/other buttons don't (`render_report` opens a report).
-                // Re-ask follow-ups carry the question in `args.question`
-                // (agent-core `AssistantTool`); accept `args.message` too for
-                // other producers. `render_report` opens a report, not a re-ask.
+                // Legacy re-ask follow-up: the question rides in
+                // `args.question` (agent-core `AssistantTool`) or
+                // `args.message`. It is now signed into the button id like
+                // any send-message action. `render_report` opens a report,
+                // not a re-ask, and other tool buttons have nothing GE can
+                // run: they render as before but resolve to no message.
                 let question = c
                     .get("args")
                     .and_then(|a| a.get("question").or_else(|| a.get("message")))
                     .and_then(Value::as_str)
                     .filter(|_| tool != "render_report");
-                // MaterialButton takes its `label` directly (no child Text), so
-                // one id per button. GE strips our event name/context and
-                // truncates the surfaceId to its uuid on click, but PRESERVES the
-                // component id — a click echoes `sourceComponentId` equal to the
-                // Button's own `id` (`btn-N`). `n` here is exactly that N, so key
-                // `N → question` for the inbound re-ask lookup (report/other
-                // buttons carry no question and are not recorded).
-                let btn_id = id("btn", &mut n);
-                if let Some(q) = question {
-                    qmap.insert(n, q.to_string());
-                }
-                // `flat` (Material filled, solid) + `color:primary` (picks up the
-                // surface theme color) → solid buttons with white text, uniform
-                // across the row.
-                flat.push(json!({
-                    "id": btn_id.clone(),
-                    "component": "MaterialButton",
-                    "label": label,
-                    "variant": "flat",
-                    "color": "primary",
-                    "action": { "event": { "name": tool, "context": {} } },
-                }));
-                action_btn_ids.push(btn_id);
+                let id = match question.and_then(|q| card.send_button(label, q, "flat")) {
+                    Some(id) => id,
+                    None => card.add(
+                        "btn",
+                        json!({
+                            "component": "MaterialButton",
+                            "label": label,
+                            "variant": "flat",
+                            "color": "primary",
+                            "action": { "event": { "name": tool, "context": {} } },
+                        }),
+                    ),
+                };
+                action_btn_ids.push(id);
             }
             // Sources: with the Canvas feature OFF (default) they ride the
-            // prose bubble as Markdown links (`reply_text`) — GE's basic
-            // catalog can't hyperlink in-card, so this stays a no-op. With it
-            // ON (allowlist arranged), each https source becomes an OUTLINED
-            // "Open" button; clicking it opens the signed `/docs` page in a
-            // Canvas side panel via the [`open_doc`] round-trip (keyed by the
-            // button's own id, same machinery as a re-ask).
+            // prose bubble as Markdown links (`reply_text`) — this stays a
+            // no-op. With it ON, each https source becomes an OUTLINED "Open"
+            // button whose signed payload is the open-doc sentinel, which the
+            // A2A layer renders instead of running a turn ([`open_doc`]).
             "sources" => {
                 if !doc_canvas_enabled() {
                     continue;
@@ -345,122 +1026,84 @@ pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
                     let Some(url) = it
                         .get("resource")
                         .and_then(Value::as_str)
-                        .filter(|u| u.starts_with("https://"))
+                        .filter(|u| crate::links::is_allowed_link(u))
                     else {
                         continue;
                     };
                     let label = it.get("label").and_then(Value::as_str).unwrap_or("source");
                     let (skill, doc_id) = split_skill_id(label);
-                    let btn_id = id("btn", &mut n);
-                    // Round-trip payload: the click resolves to this sentinel,
-                    // which the A2A layer renders (native Material by default,
-                    // or the /docs iframe when TRITON_GE_DOC_IFRAME) — no agent
-                    // turn. Carries skill/id (for the render dispatch) + url.
-                    qmap.insert(
-                        n,
-                        format!("{DOC_OPEN_SENTINEL}{label}\u{1}{skill}\u{1}{doc_id}\u{1}{url}"),
-                    );
-                    // Shorten long labels cleanly so they don't overprint
-                    let display_label = if label.len() > 24 {
-                        format!("{}…", &label[..23])
+                    // Shorten long labels cleanly so they don't overprint.
+                    let display_label = if label.chars().count() > 24 {
+                        format!("{}…", label.chars().take(23).collect::<String>())
                     } else {
                         label.to_string()
                     };
-                    // Outlined (not filled) so a source reads as a secondary,
-                    // link-like action, distinct from the solid follow-ups.
-                    flat.push(json!({
-                        "id": btn_id.clone(),
-                        "component": "MaterialButton",
-                        "label": format!("Open: {display_label}"),
-                        "variant": "outlined",
-                        "color": "primary",
-                        "action": { "event": { "name": "open_doc", "context": {} } },
-                    }));
-                    source_btn_ids.push(btn_id);
-                    // Cap source buttons in the card to at most 2 so they never crowd out action buttons
+                    if let Some(id) = card.doc_button(
+                        &format!("Open: {display_label}"),
+                        (label, skill, doc_id, url),
+                    ) {
+                        source_btn_ids.push(id);
+                    }
+                    // At most 2 source buttons so they never crowd out actions.
                     if source_btn_ids.len() >= 2 {
                         break;
                     }
                 }
             }
-            _ => {}
+            "embed" if opts.embed => match Component::parse(c) {
+                Some(Component::Embed {
+                    url, title, height, ..
+                }) if crate::links::is_allowed_link(&url) => canvases.push((url, title, height)),
+                Some(comp) => root_children.extend(card.component(&comp)),
+                None => {}
+            },
+            // The conversation components (and template Selection/Form).
+            _ => {
+                if let Some(comp) = Component::parse(c) {
+                    root_children.extend(card.component(&comp));
+                }
+            }
         }
     }
 
-    // Follow-up/report buttons → a small grid: MaterialRow has no wrap and no
-    // gap, so cramming 4 buttons in one row squeezes them and long labels wrap
-    // inside a fixed-height pill (visible "overprinting"). Chunk into rows of
-    // two so each button gets room; the rows stack in the outer Column.
-    // Action buttons are laid out first, followed by secondary source buttons
-    // in their own row, keeping the layout clean and balanced.
-    let mut row_idx = 0;
-    for chunk in action_btn_ids.chunks(2) {
-        let row_id = format!("btn-row-{row_idx}");
-        row_idx += 1;
+    let action_rows = card.button_rows(action_btn_ids);
+    root_children.extend(action_rows);
+    let source_rows = card.button_rows(source_btn_ids);
+    root_children.extend(source_rows);
+
+    let mut messages = Vec::new();
+    if !root_children.is_empty() {
+        // Top: MaterialCard(outlined) → MaterialColumn(root_children).
+        let mut flat = card.flat;
+        flat.push(
+            json!({ "id": "root-col", "component": "MaterialColumn", "children": root_children }),
+        );
         flat.push(json!({
-            "id": row_id.clone(),
-            "component": "MaterialRow",
-            "children": chunk,
-            "justify": "start",
-            "align": "stretch",
+            "id": "root",
+            "component": "MaterialCard",
+            "appearance": "outlined",
+            "children": ["root-col"],
         }));
-        root_children.push(row_id);
+        messages.extend(surface_pair(flat));
     }
-    for chunk in source_btn_ids.chunks(2) {
-        let row_id = format!("btn-row-{row_idx}");
-        row_idx += 1;
-        flat.push(json!({
-            "id": row_id.clone(),
-            "component": "MaterialRow",
-            "children": chunk,
-            "justify": "start",
-            "align": "stretch",
-        }));
-        root_children.push(row_id);
+    for (url, title, height) in canvases {
+        messages.extend(embed_canvas(&url, &title, height.unwrap_or(640), false));
     }
+    (!messages.is_empty()).then_some(messages)
+}
 
-    if root_children.is_empty() {
-        return None;
-    }
-
-    // Top: MaterialCard(outlined) → MaterialColumn(root_children).
-    flat.push(
-        json!({ "id": "root-col", "component": "MaterialColumn", "children": root_children }),
-    );
-    flat.push(json!({
-        "id": "root",
-        "component": "MaterialCard",
-        "appearance": "outlined",
-        "children": ["root-col"],
-    }));
-
-    // Short, unique surfaceId (GE truncates anything longer to the uuid), and
-    // record this card's re-ask table under it for the click round-trip.
-    let surface_id = format!("{SURFACE_PREFIX}{}", uuid::Uuid::new_v4());
-    remember_surface(&surface_id, qmap);
-
-    Some(vec![
+/// A Canvas-rooted surface framing `url` (GE renders a compact opener card
+/// in the stream that opens the side panel).
+fn embed_canvas(url: &str, title: &str, height: u32, auto_open: bool) -> Vec<Value> {
+    surface_pair(vec![
+        json!({ "id": "frame", "component": "IFrameUrl", "url": url, "height": height }),
         json!({
-            "version": "v0.9",
-            "createSurface": {
-                "surfaceId": surface_id,
-                "catalogId": BASIC_CATALOG,
-                // v0.9 styling: `createSurface.theme` (which replaced v0.8's
-                // `styles`) carries theme params the Material renderer applies —
-                // GE uses `primaryColor` for primary buttons and active borders.
-                // We set the DataZoo/Gemini brand blue so the card's accents
-                // match the chart palette (peacock `gemini.css` `--pk-brand`),
-                // and name the agent beside the surface. Renderers ignore fields
-                // they don't use, so this is safe on every A2UI host.
-                "theme": {
-                    "primaryColor": THEME_PRIMARY_COLOR,
-                    "agentDisplayName": "DataZoo Agent",
-                },
-            },
-        }),
-        json!({
-            "version": "v0.9",
-            "updateComponents": { "surfaceId": surface_id, "components": flat },
+            "id": "root",
+            "component": "Canvas",
+            "children": ["frame"],
+            "autoOpen": auto_open,
+            "cardTitle": title,
+            "cardIcon": "account_tree",
         }),
     ])
 }
@@ -718,40 +1361,49 @@ mod tests {
         assert_eq!(img["url"], "https://agent-lab.data-zoo.de/report/img/tok");
 
         // The re-ask MaterialButton carries its label directly (no child Text).
-        // GE strips our name/context on click but PRESERVES the component id, so
-        // the question is recovered via the per-surface table keyed by the
-        // button's own id number (`surfaceId` + `btn-N`).
+        // GE strips our name/context on click but PRESERVES the component id,
+        // so the id itself carries the HMAC-signed complete message
+        // (`a<N>-<token>`): any replica holding the key recovers it, no store.
         let btn = comps
             .iter()
             .find(|c| {
-                c["component"] == "MaterialButton" && c["action"]["event"]["name"] == "assistant"
+                c["component"] == "MaterialButton" && c["action"]["event"]["name"] == "send_message"
             })
             .expect("re-ask button");
         assert_eq!(btn["label"], "What does Initech buy?");
         assert_eq!(btn["variant"], "flat");
         assert_eq!(btn["color"], "primary");
-        // GE echoes the Button's own id on click. This surface: chart=1,
-        // button=2 (MaterialButton needs no child Text) — so `btn-2` resolves.
+        let btn_id = btn["id"].as_str().unwrap();
+        assert!(btn_id.starts_with("a2-"), "{btn_id}");
         let sid = msgs[0]["createSurface"]["surfaceId"].as_str().unwrap();
-        assert_eq!(btn["id"], "btn-2");
         assert_eq!(
-            question_for(sid, "btn-2").as_deref(),
+            question_for(sid, btn_id).as_deref(),
             Some("What does Initech buy?"),
         );
-        // A wrong id / unknown surface resolves to nothing.
-        assert_eq!(question_for(sid, "btn-99"), None);
-        assert_eq!(question_for("nope", "btn-2"), None);
+        // The surface id is irrelevant now — a click on another replica, or
+        // with GE's truncated surfaceId, resolves the same.
+        assert_eq!(
+            question_for("nope", btn_id).as_deref(),
+            Some("What does Initech buy?")
+        );
+        // A forged / legacy / truncated id resolves to nothing.
+        assert_eq!(question_for(sid, "btn-2"), None);
+        assert_eq!(question_for(sid, "a2-garbage.token"), None);
+        let tampered = format!("{}x", btn_id);
+        assert_eq!(question_for(sid, &tampered), None);
 
         // Buttons are laid out in MaterialRows (a grid, ≤2 per row), not
         // stacked as direct Column children.
-        let row = find(comps, "btn-row-0");
-        assert_eq!(row["component"], "MaterialRow");
+        let row = comps
+            .iter()
+            .find(|c| c["component"] == "MaterialRow")
+            .expect("button row");
         assert!(
             row["children"]
                 .as_array()
                 .unwrap()
                 .iter()
-                .any(|c| c == "btn-2"),
+                .any(|c| c == btn_id),
             "button must live inside the Row: {row}"
         );
         assert_eq!(
@@ -759,7 +1411,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .find(|c| *c == "btn-2"),
+                .find(|c| *c == btn_id),
             None,
             "button must NOT be a direct Column child"
         );
@@ -793,6 +1445,36 @@ mod tests {
                 .any(|c| c["action"]["functionCall"].is_object()),
             "no functionCall actions (GE rejects them)"
         );
+    }
+
+    /// Stateless across replicas: two processes that share only the key
+    /// resolve each other's card ids; a different key resolves nothing.
+    #[test]
+    fn a_card_id_signed_on_one_replica_opens_on_another() {
+        let key =
+            || triton_correlation::KeyRing::single(b"shared-a2ui-action-key".to_vec()).unwrap();
+        let (a, b) = (ActionSigner::new(key()), ActionSigner::new(key()));
+        let result = json!({ "surface": { "components": [
+            { "kind": "chips", "chips": [ { "label": "Order matcher",
+              "message": "Who owns the order matcher in Sales?" } ] }
+        ] } });
+        let msgs = build_messages_with(&result, &a, GeOptions::default()).unwrap();
+        let comps = msgs[1]["updateComponents"]["components"]
+            .as_array()
+            .unwrap();
+        let id = comps
+            .iter()
+            .find(|c| c["component"] == "MaterialButton")
+            .and_then(|c| c["id"].as_str())
+            .unwrap();
+        assert_eq!(
+            b.open(id).as_deref(),
+            Some("Who owns the order matcher in Sales?")
+        );
+        let other = ActionSigner::new(
+            triton_correlation::KeyRing::single(b"another-replica-key!".to_vec()).unwrap(),
+        );
+        assert_eq!(other.open(id), None);
     }
 
     #[test]
@@ -865,20 +1547,66 @@ mod tests {
         assert_eq!(frame["url"], "https://agent-lab.data-zoo.de/docs/tok");
     }
 
+    /// F7: an open-doc click is a TYPED action recovered from a signed id,
+    /// never an in-band prefix a caller could type. The legacy text form
+    /// (the bare sentinel) is refused, and the doc-open token lives no
+    /// longer than a day.
     #[test]
-    fn open_doc_round_trips_the_sentinel() {
-        // What a source button stores in the re-ask table, and what the A2A
-        // layer parses back out: label, skill, id (for the native render) + url.
-        let stored = format!(
-            "{DOC_OPEN_SENTINEL}account \u{b7} beverages\u{1}account\u{1}beverages\u{1}https://x/docs/tok"
+    fn open_doc_is_a_typed_signed_action_never_free_text() {
+        let signer = ActionSigner::new(
+            triton_correlation::KeyRing::single(b"open-doc-test-key-123".to_vec()).unwrap(),
         );
-        let doc = open_doc(&stored).expect("parses");
-        assert_eq!(doc.label, "account \u{b7} beverages");
-        assert_eq!(doc.skill, "account");
-        assert_eq!(doc.id, "beverages");
-        assert_eq!(doc.url, "https://x/docs/tok");
-        // An ordinary re-ask question is not an open-doc sentinel.
+        let id = signer
+            .sign_open_doc(
+                1,
+                "account \u{b7} beverages",
+                "account",
+                "beverages",
+                "https://x/docs/tok",
+            )
+            .expect("signs");
+        match signer.open_action(&id) {
+            Some(GeAction::OpenDoc {
+                label,
+                skill,
+                id,
+                url,
+            }) => {
+                assert_eq!(label, "account \u{b7} beverages");
+                assert_eq!((skill.as_str(), id.as_str()), ("account", "beverages"));
+                assert_eq!(url, "https://x/docs/tok");
+            }
+            other => panic!("expected OpenDoc, got {other:?}"),
+        }
+        // A send-message id is a Message, not a doc.
+        let msg = format!("a2-{}", signer.sign("What does Initech buy?").unwrap());
+        assert_eq!(
+            signer.open_action(&msg),
+            Some(GeAction::Message("What does Initech buy?".into()))
+        );
+        // Free text that merely LOOKS like the old sentinel opens nothing.
+        let typed = "\u{1}a2ui-open-doc\u{1}x\u{1}account\u{1}secret\u{1}https://evil/docs";
+        assert!(
+            open_doc(typed).is_none(),
+            "a caller-typed sentinel must not open a doc"
+        );
         assert!(open_doc("What does Initech buy?").is_none());
+        // Expiry: at most 24 h (hour granularity, rounded up → ≤ 25 h).
+        let token = id.split_once('-').unwrap().1;
+        let body = token.split('.').next().unwrap();
+        use base64::Engine;
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(body)
+            .unwrap();
+        let x = serde_json::from_slice::<Value>(&raw).unwrap()["x"]
+            .as_u64()
+            .unwrap();
+        let now_h = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            / 3600;
+        assert!(x <= now_h + 25, "doc-open TTL too long: {x} vs now {now_h}");
     }
 
     #[test]

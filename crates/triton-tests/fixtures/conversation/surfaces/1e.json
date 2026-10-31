@@ -1,0 +1,48 @@
+{
+  "_mock_item": "1e Adaptive Card: pick, then send (Teams · Adaptive Card). Deviations: the button label cannot follow the choice; no Cancel (nothing to cancel, nothing was sent)",
+  "surface": {
+    "components": [
+      {
+        "kind": "text",
+        "value": "3 match \"Agent 2\". Nothing was changed yet."
+      },
+      {
+        "kind": "form",
+        "title": "Which Agent should be retired?",
+        "submit_label": "Retire as draft",
+        "fields": [
+          {
+            "name": "agent",
+            "label": "Agent",
+            "kind": "select",
+            "required": true,
+            "style": "radio",
+            "options": [
+              {
+                "label": "Agent 2 · Requirements: Forecast · Assessed",
+                "value": "Agent 2"
+              },
+              {
+                "label": "Agent 20 · Design: Monitor · Deployed",
+                "value": "Agent 20"
+              },
+              {
+                "label": "Agent 28 · Sales: Forecast · Planned",
+                "value": "Agent 28"
+              }
+            ]
+          },
+          {
+            "name": "reason",
+            "label": "Reason (optional)",
+            "kind": "string",
+            "required": false,
+            "placeholder": "e.g. replaced by Agent 31"
+          }
+        ],
+        "send_template": "Retire the agent \"{agent}\".[[ Reason: {reason}]]",
+        "preview_label": "Will be sent as"
+      }
+    ]
+  }
+}

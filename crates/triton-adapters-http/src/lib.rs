@@ -15,11 +15,16 @@
 
 pub mod a2a;
 pub mod a2a_spec;
+pub mod a2a_v1;
 #[cfg(feature = "capture")]
 pub mod capture;
 pub mod cors;
 pub mod identity;
 pub mod mcp;
+pub mod mcp_tenants;
 pub mod metrics;
 pub mod outbound;
 pub mod rest;
+/// The task store, hub and runner live in `triton-tasks` (shared with the
+/// Teams adapter); re-exported under the historical path.
+pub use triton_tasks as tasks;

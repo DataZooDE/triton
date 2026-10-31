@@ -86,6 +86,13 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
 
     for c in &surface.components {
         match c {
+            // Conversation components (and action/template controls):
+            // the shared, no-multi-turn plain-text degradation.
+            c if c.is_conversation() => {
+                if let Some(t) = triton_core::a2ui::text::degrade(c) {
+                    chunks.push(t);
+                }
+            }
             Component::Text { value, .. } => chunks.push(value.clone()),
             Component::Narration { text } => chunks.push(format!("_{text}_")),
             Component::Sources { items } => {
@@ -108,6 +115,9 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
             Component::Selection { .. } => deferred_selections += 1,
             Component::Form { .. } => deferred_forms += 1,
             Component::Dashboard { .. } => deferred_dashboards += 1,
+            // Every remaining kind is a conversation kind, taken above
+            // (`Component::is_conversation` is exhaustive).
+            other => debug_assert!(other.is_conversation()),
         }
     }
 
@@ -175,18 +185,23 @@ mod tests {
                     tool: "t".to_string(),
                     args: serde_json::json!({}),
                     resource: None,
+                    action: None,
                 },
                 Component::Selection {
                     prompt: "pick".to_string(),
                     options: vec![],
                     tool: "t".to_string(),
                     args_key: "x".to_string(),
+                    style: Default::default(),
+                    submit: None,
                 },
                 Component::Form {
                     title: "f".to_string(),
                     fields: vec![],
                     submit_label: "Submit".to_string(),
                     tool: "t".to_string(),
+                    preview_label: None,
+                    send_template: None,
                 },
                 Component::Dashboard {
                     title: "d".to_string(),

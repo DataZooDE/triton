@@ -14,7 +14,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio_util::sync::CancellationToken;
-use triton_adapters_http::a2a::{A2aState, InMemoryTaskStore};
+use triton_adapters_http::a2a::A2aState;
 use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{McpSessions, McpState};
 use triton_adapters_http::rest::RestState;
@@ -28,6 +28,7 @@ use triton_rasterizer::{
 };
 use triton_secrets::{LiteralResolver, SecretResolver};
 
+mod ingress;
 mod optional_adapters;
 mod settings;
 mod surfaces;
@@ -47,6 +48,47 @@ async fn main() -> std::io::Result<()> {
     let started = std::time::Instant::now();
     init_tracing();
     let settings = Arc::new(Settings::from_args());
+
+    // The A2UI action key signs every Gemini Enterprise card action. A
+    // malformed value would otherwise leave each replica on its own random
+    // key — clicks that land elsewhere silently do nothing — so it fails
+    // boot closed; an unset one is fine for a single replica and said so.
+    match triton_core::a2ui::ge::configure_action_key(
+        std::env::var("TRITON_A2UI_ACTION_KEY").ok().as_deref(),
+    ) {
+        Ok(triton_core::a2ui::ge::ActionKeyState::Configured) => {
+            tracing::info!("TRITON_A2UI_ACTION_KEY configured: A2UI card actions are replica-safe");
+        }
+        Ok(triton_core::a2ui::ge::ActionKeyState::Ephemeral) => {
+            tracing::warn!(
+                "TRITON_A2UI_ACTION_KEY unset: A2UI card actions use a per-process key and \
+                 resolve on this single replica only; set the same key on every replica"
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "TRITON_A2UI_ACTION_KEY is invalid; refusing to start");
+            std::process::exit(2);
+        }
+    }
+
+    // Plain-http links for local end-to-end tests only. Outside
+    // `local` the allowance would turn an injected http link into an
+    // action, so it fails boot closed.
+    if !settings.allow_http_link_hosts.is_empty() {
+        if settings.env != "local" {
+            tracing::error!(
+                env = %settings.env,
+                hosts = ?settings.allow_http_link_hosts,
+                "non-`local` env MUST NOT set TRITON_ALLOW_HTTP_LINK_HOSTS; refusing to start",
+            );
+            std::process::exit(2);
+        }
+        triton_core::links::allow_http_hosts(settings.allow_http_link_hosts.iter().cloned());
+        tracing::warn!(
+            hosts = ?triton_core::links::http_hosts(),
+            "TRITON_ALLOW_HTTP_LINK_HOSTS: plain http links to these hosts are kept (local only)",
+        );
+    }
 
     // v0.2 manifest, if configured. Loaded BEFORE we bind any
     // listeners — a malformed `adapter.yaml` must cause a clean
@@ -87,6 +129,20 @@ async fn main() -> std::io::Result<()> {
         None
     };
 
+    // One MCP endpoint per customer (TRITON_MCP_TENANTS): `/mcp/<slug>`
+    // plus its RFC 9728 metadata, at absolute paths, merged later into
+    // whichever router serves MCP. Validated before any port is bound, so
+    // a refused configuration never races a listener.
+    let mcp_routes = match ingress::mcp_routes(&settings.ingress, settings.oidc_issuer.as_deref()) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("triton: {e}");
+            std::process::exit(2);
+        }
+    };
+    for r in &mcp_routes {
+        tracing::info!(slug = %r.slug, tenant = %r.data_tenant, resource = %r.resource, "per-customer MCP endpoint");
+    }
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
 
@@ -471,10 +527,45 @@ async fn main() -> std::io::Result<()> {
     // Only consulted when the `dev-token` feature is compiled in AND no
     // OIDC verifier is configured (OIDC always wins, ADR-10).
     let dev_token = std::env::var("TRITON_DEV_TOKEN").unwrap_or_else(|_| "dev-token".to_string());
-    let identity = Arc::new(
-        IdentityProvider::with_forwarded_auth(oidc_verifier, settings.trust_forwarded_auth)
-            .with_dev_token(dev_token),
-    );
+    // Further inbound issuers beside the deployment's own — Entra
+    // (allow-listed customer tenants) and opaque Google access tokens.
+    let mut verifiers: Vec<Arc<OidcVerifier>> = oidc_verifier.into_iter().collect();
+    let mut advertised_providers: Vec<(String, String)> = verifiers
+        .iter()
+        .map(|v| (v.issuer().to_string(), v.audience().to_string()))
+        .collect();
+    let google_access = match ingress::identity_providers(
+        &settings.ingress,
+        &settings.env,
+        &mut verifiers,
+        &mut advertised_providers,
+    ) {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::error!(error = %e, "inbound identity configuration refused");
+            eprintln!("triton: {e}");
+            std::process::exit(2);
+        }
+    };
+    let mut identity_provider =
+        IdentityProvider::with_verifiers(verifiers, settings.trust_forwarded_auth)
+            .with_dev_token(dev_token);
+    // ADR-22: a 403 from the Entra scope check names the scope. The
+    // scopes were validated with the Entra verifier above.
+    let entra_scopes = ingress::entra_scopes(&settings.ingress).unwrap_or_default();
+    if !entra_scopes.is_empty() {
+        identity_provider = match identity_provider.with_scope_challenge(&entra_scopes) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("triton: TRITON_ENTRA_SCOPES: {e}");
+                std::process::exit(2);
+            }
+        };
+    }
+    if let Some(g) = google_access {
+        identity_provider = identity_provider.with_google_access(g);
+    }
+    let identity = Arc::new(identity_provider);
 
     let manifest_arc = manifest.as_ref().map(|m| Arc::new(m.clone()));
     let rest_state = RestState {
@@ -488,9 +579,20 @@ async fn main() -> std::io::Result<()> {
         // Parsed once at boot, not per request (#306 crew F7).
         audit_operators: Arc::new(audit_operators.clone()),
     };
+    // Long-running tasks — SQLite at TRITON_TASK_DB, else memory.
+    let task_store = match ingress::task_store(&settings.ingress) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("triton: {e}");
+            std::process::exit(2);
+        }
+    };
+    let task_settings = Arc::new(ingress::task_settings(&settings.ingress));
     let a2a_state = A2aState {
         dispatcher: dispatcher.clone(),
-        tasks: InMemoryTaskStore::new(),
+        tasks: task_store,
+        hub: triton_adapters_http::tasks::TaskHub::new(),
+        task_settings: task_settings.clone(),
         identity: identity.clone(),
         // #306 crew F1: `tasks/get` scopes on a trace id.
         audit_operators: Arc::new(audit_operators.clone()),
@@ -499,6 +601,8 @@ async fn main() -> std::io::Result<()> {
         dispatcher: dispatcher.clone(),
         sessions: McpSessions::new(),
         identity: identity.clone(),
+        tasks: Some(a2a_state.runner()),
+        route: None,
     };
 
     // v0.2 chat-channel adapters. Each manifest-declared adapter
@@ -1249,10 +1353,15 @@ async fn main() -> std::io::Result<()> {
                                 canonical_claimed = true;
                             }
                             tracing::info!(adapter = %name, "msteams webhook adapter wired");
+                            // F8b: long-running Teams turns are tasks in the
+                            // same store as A2A's (persisted with
+                            // TRITON_TASK_DB); stored ones resume at boot.
+                            let built = built.with_tasks(a2a_state.runner());
                             // Keep an Arc for the outbound courier registry
                             // (proactive async-operation delivery) before
                             // `router()` consumes one — mirrors the WhatsApp arm.
                             let built = Arc::new(built);
+                            built.resume_stored_tasks();
                             outbound_couriers.insert(
                                 name.to_string(),
                                 built.clone() as Arc<dyn triton_core::OutboundCourier>,
@@ -1529,8 +1638,36 @@ async fn main() -> std::io::Result<()> {
             }),
         };
 
+    let mcp_tenant_router =
+        triton_adapters_http::mcp_tenants::router(mcp_state.clone(), &mcp_routes);
     let mcp_router = triton_adapters_http::mcp::router(mcp_state);
-    let a2a_router = triton_adapters_http::a2a::router(a2a_state);
+    // Spec A2A (0.3 + 1.0) beside the Triton-shaped route, when
+    // TRITON_A2A_PUBLIC_URL is set. The cards are served endpoint-relative
+    // (the A2A listener's root, or `/a2a` single-port) and — single-port —
+    // also at the origin root, where browser-time discovery looks.
+    let spec_a2a = match ingress::spec_a2a_config(&settings.ingress) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("triton: {e}");
+            std::process::exit(2);
+        }
+    };
+    let mut root_card: Option<axum::Router> = None;
+    let a2a_router = match spec_a2a {
+        Some(cfg) => {
+            tracing::info!(url = %cfg.public_url, tool = %cfg.default_tool, "spec A2A (0.3 + 1.0) enabled");
+            let card = triton_adapters_http::a2a_spec::card_state(
+                cfg.clone(),
+                dispatcher.clone(),
+                advertised_providers.clone(),
+            );
+            root_card = Some(triton_adapters_http::a2a_spec::card_router(card.clone()));
+            triton_adapters_http::a2a::router(a2a_state.clone()).merge(
+                triton_adapters_http::a2a_spec::spec_routes(a2a_state.clone(), cfg, card),
+            )
+        }
+        None => triton_adapters_http::a2a::router(a2a_state.clone()),
+    };
     let rest_router = triton_adapters_http::rest::router(rest_state);
     let rest_router = match outbound_state {
         Some(os) => rest_router.merge(triton_adapters_http::outbound::router(os)),
@@ -1561,7 +1698,11 @@ async fn main() -> std::io::Result<()> {
         // get no-op serve-futures since their ports are never bound.
         let mut combined = rest_router
             .nest("/mcp", mcp_router)
+            .merge(mcp_tenant_router)
             .nest("/a2a", a2a_router);
+        if let Some(cards) = root_card.take() {
+            combined = combined.merge(cards);
+        }
         // Mount chat webhook adapters (e.g. `/whatsapp/webhook`) on the
         // same port so a single kamal-proxy TLS route fronts both the REST
         // trio and the inbound webhook (one public host, one cert).
@@ -1586,6 +1727,7 @@ async fn main() -> std::io::Result<()> {
         use std::future::IntoFuture;
         // Three-port default: each surface gets its own CORS-wrapped router
         // on its own listener (byte-for-byte the prior behavior).
+        let mcp_router = mcp_router.merge(mcp_tenant_router);
         let mcp_router = match &cors_layer {
             Some(l) => mcp_router.layer(l.clone()),
             None => mcp_router,

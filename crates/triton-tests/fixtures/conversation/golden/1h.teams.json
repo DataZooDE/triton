@@ -1,0 +1,44 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "title": "Open in the portfolio review",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/review/d/01M636Z8XN"
+    }
+  ],
+  "body": [
+    {
+      "text": "Proposal · open · needs review: Retire Agent 25",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "facts": [
+        {
+          "title": "Lifecycle",
+          "value": "Deployed → Retired"
+        },
+        {
+          "title": "Reason",
+          "value": "Replaced (from your message)"
+        },
+        {
+          "title": "Assumed",
+          "value": "Owner, links and AI Act class unchanged"
+        },
+        {
+          "title": "Reviewer",
+          "value": "Anyone with review rights except you"
+        }
+      ],
+      "type": "FactSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

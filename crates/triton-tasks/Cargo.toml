@@ -1,0 +1,24 @@
+[package]
+name = "triton-tasks"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# Long-running tasks (ADR-20): the task store (SQLite or memory), the
+# live-event hub and the runner. Its own crate so the HTTP trio and the chat
+# adapters (Teams) drive tasks the same way.
+
+[dependencies]
+triton-core = { path = "../triton-core" }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+# Bundled, so the binary stays self-contained (NFR-PT-2).
+rusqlite = { version = "0.37", features = ["bundled"] }
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }

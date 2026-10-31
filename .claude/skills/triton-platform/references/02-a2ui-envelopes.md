@@ -30,8 +30,36 @@ Each component is tagged by `kind` (snake_case). The full vocabulary
 | `sources` | `items[]` of `{label, resource}` | Click-to-open references to the documents a turn wrote. The items' `ui://` resources ride ONE LEVEL DOWN by design — hosts never auto-open sources; chat channels degrade to a plain "Sources: …" label line. |
 
 `options` items are `{label, value}`. `form` fields are `{name,
-label, kind, required}` where `kind ∈ {string, integer, boolean}`.
-`dashboard` tiles are `{label, value, trend?}`.
+label, kind, required, placeholder?, default?, options?}` where
+`kind ∈ {string, integer, boolean, select, text}` (`select` takes
+`options`, `text` is multi-line). `dashboard` tiles are
+`{label, value, trend?}`.
+
+### Conversation components (stateless actions)
+
+Rule: **a click sends one complete new request.** An `action` is
+`{"type":"send_message","text":"<the full request>"}` or
+`{"type":"open_url","url":"https://…"}`. Triton signs it into the control
+itself (HMAC, `triton-correlation`), so a click on any replica becomes a
+new user message with exactly that text — never a continuation.
+
+| `kind` | Fields |
+|---|---|
+| `button` | `label`, `action`, `primary?` (legacy `tool`/`args` still works) |
+| `list` | `title?`, `items[]` of `{label, detail?, action?}` |
+| `table` | `title?`, `columns[]` of `{key, label}`, `rows[]` of `{cells: {key: text}, action?}` |
+| `chips` | `prompt?`, `chips[]` of `{label, message}` (`message` is sent verbatim) |
+| `tree` | `title?`, `gaps_toggle?` (label), `nodes[]` of `{label, counts?[{label, value}], gap?, expanded?, chips?, action?, action_label?, children?}` |
+| `notice` | `tone?` (`info` default \| `warn`), `title?`, `text` |
+| `progress` | `title?`, `steps[]` of `{label, state: done\|active\|pending}`, `fraction?` (0..1) |
+| `key_value` | `title?`, `pairs[]` of `{label, value, before?}` (`before` → shown as `before → value`) |
+| `selection` | + `style?` (`radio`\|`dropdown`), `submit?` `{label, template, preview_label?}` — the chosen `value` fills `{<args_key>}` (`args_key` required with `submit`) |
+| `form` | + `send_template?` (`{field}` placeholders; `[[ … ]]` marks an optional segment, dropped when its fields are empty), `preview_label?` ("will be sent as"); a `select` field takes `style: radio` |
+| `embed` | `url`, `title`, `height?`, `fallback` (one component, shown where the host cannot frame the URL) |
+
+Channel mapping and limits (Gemini Enterprise A2UI v0.9, Teams Adaptive
+Cards, text): `references/05`. Fixtures for every conversation mock item:
+`crates/triton-tests/fixtures/conversation/`.
 
 ## Example
 

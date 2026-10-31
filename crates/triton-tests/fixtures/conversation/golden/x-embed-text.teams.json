@@ -1,0 +1,30 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "text": "The capability map has 9 agents and 2 gaps.",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "data": {
+            "ct": "__open_embed|{\"t\":\"Open the capability map\",\"u\":\"https://app.example.com/acme/open?view=capability-map&embed=1\"}",
+            "msteams": {
+              "type": "task/fetch"
+            }
+          },
+          "title": "Open the capability map",
+          "type": "Action.Submit"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

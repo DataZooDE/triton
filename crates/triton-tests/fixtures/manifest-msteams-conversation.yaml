@@ -1,0 +1,46 @@
+# Integration manifest — the conversation components through the
+# Teams webhook. Plain inbound text routes to the static-upstream
+# `assistant` agent, which answers with a surface carrying every
+# conversation component; the tool DECLARES them, so boot also proves the
+# new component kinds and degrade rules parse and pass M-COVERAGE-1.
+version: "0.2"
+
+adapters:
+  msteams:
+    kind: ms_teams
+    tool: assistant
+    inbound:
+      kind: webhook
+      signature: bot_framework_jwt
+      audience: triton-msteams-test-appid
+    outbound:
+      kind: bot_connector
+      client_id: triton-msteams-test-appid
+      client_secret: literal-client-secret-for-test
+    identity:
+      kind: sender_table
+      table: '{"29:1abc":{"sub":"alice","scopes":["chat"],"tenant":"acme"}}'
+    degrade:
+      text: passthrough
+      narration: passthrough
+      buttons: adaptive_card
+      selections: adaptive_card
+      forms: adaptive_card
+      dashboard: rasterised_png
+      lists: adaptive_card
+      tables: adaptive_card_column_set
+      chips: adaptive_card
+      trees: adaptive_card
+      notices: adaptive_card
+      progress: status_lines
+      key_values: adaptive_card
+      embeds: task_module
+    rate_limit:
+      messages_per_sec: 25
+      burst: 50
+    correlation_key: correlation-key-for-test
+
+tools:
+  assistant:
+    surface_components: [text, buttons, selections, forms, lists, tables, chips,
+                         trees, notices, progress, key_values, embeds]

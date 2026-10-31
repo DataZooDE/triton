@@ -1,0 +1,54 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "title": "Open in the portfolio",
+      "type": "Action.OpenUrl",
+      "url": "https://app.example.com/acme/analyse?q=Agent%202"
+    }
+  ],
+  "body": [
+    {
+      "text": "3 Agents match. Pick one; it is sent as a new, complete request.",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "associatedInputs": "none",
+          "data": {
+            "ct": "__send_message|{\"m\":\"Retire the agent \\\"Agent 2\\\" (Requirements: Forecast)\"}"
+          },
+          "title": "Agent 2 · Req. Forecast",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        },
+        {
+          "associatedInputs": "none",
+          "data": {
+            "ct": "__send_message|{\"m\":\"Retire the agent \\\"Agent 20\\\" (Design: Monitor)\"}"
+          },
+          "title": "Agent 20 · Design Monitor",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        },
+        {
+          "associatedInputs": "none",
+          "data": {
+            "ct": "__send_message|{\"m\":\"Retire the agent \\\"Agent 28\\\" (Sales: Forecast)\"}"
+          },
+          "title": "Agent 28 · Sales Forecast",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

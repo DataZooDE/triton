@@ -2247,6 +2247,9 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "tracing",
+ "triton-correlation",
+ "url",
  "uuid",
 ]
 

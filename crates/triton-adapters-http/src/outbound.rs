@@ -61,6 +61,7 @@ pub fn router(state: OutboundState) -> Router {
     Router::new()
         .route("/v1/outbound", post(outbound_send))
         .with_state(state)
+        .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,7 +107,7 @@ async fn outbound_send(
                 &uuid::Uuid::new_v4().to_string(),
                 &e,
             );
-            return error_response(&e, None);
+            return state.identity.tag_rejection(&e, error_response(&e, None));
         }
     };
 

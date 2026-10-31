@@ -1,0 +1,257 @@
+{
+  "_actions": {},
+  "messages": [
+    {
+      "createSurface": {
+        "catalogId": "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json",
+        "surfaceId": "SURFACE",
+        "theme": {
+          "agentDisplayName": "DataZoo Agent",
+          "primaryColor": "#1a73e8"
+        }
+      },
+      "version": "v0.9"
+    },
+    {
+      "updateComponents": {
+        "components": [
+          {
+            "component": "MaterialText",
+            "id": "t-1",
+            "text": "Agent · capability · owner",
+            "usageHint": "subtitle1"
+          },
+          {
+            "action": {
+              "functionCall": {
+                "args": {
+                  "url": "https://app.example.com/acme/open?object=agent%3Aagent-3"
+                },
+                "call": "openUrl",
+                "returnType": "void"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "lnk-2",
+            "label": "Agent 3",
+            "variant": "basic"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-3",
+            "text": "Requirements: Monitor · Head of IT Operations",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "lnk-2",
+              "t-3"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-4"
+          },
+          {
+            "action": {
+              "functionCall": {
+                "args": {
+                  "url": "https://app.example.com/acme/open?object=agent%3Aagent-8"
+                },
+                "call": "openUrl",
+                "returnType": "void"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "lnk-5",
+            "label": "Agent 8",
+            "variant": "basic"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-6",
+            "text": "Design: Schedule · Data Protection Officer",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "lnk-5",
+              "t-6"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-7"
+          },
+          {
+            "action": {
+              "functionCall": {
+                "args": {
+                  "url": "https://app.example.com/acme/open?object=agent%3Aagent-12"
+                },
+                "call": "openUrl",
+                "returnType": "void"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "lnk-8",
+            "label": "Agent 12",
+            "variant": "basic"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-9",
+            "text": "Design: Forecast · no owner",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "lnk-8",
+              "t-9"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-10"
+          },
+          {
+            "action": {
+              "functionCall": {
+                "args": {
+                  "url": "https://app.example.com/acme/open?object=agent%3Aagent-17"
+                },
+                "call": "openUrl",
+                "returnType": "void"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "lnk-11",
+            "label": "Agent 17",
+            "variant": "basic"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-12",
+            "text": "Validation: Forecast · Head of Quality Assurance",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "lnk-11",
+              "t-12"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-13"
+          },
+          {
+            "action": {
+              "functionCall": {
+                "args": {
+                  "url": "https://app.example.com/acme/open?object=agent%3Aagent-21"
+                },
+                "call": "openUrl",
+                "returnType": "void"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "lnk-14",
+            "label": "Agent 21",
+            "variant": "basic"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-15",
+            "text": "Planning: Schedule · Head of Production Planning",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "lnk-14",
+              "t-15"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-16"
+          },
+          {
+            "action": {
+              "functionCall": {
+                "args": {
+                  "url": "https://app.example.com/acme/open?object=agent%3Aagent-28"
+                },
+                "call": "openUrl",
+                "returnType": "void"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "lnk-17",
+            "label": "Agent 28",
+            "variant": "basic"
+          },
+          {
+            "component": "MaterialText",
+            "id": "t-18",
+            "text": "Sales: Forecast · Data Protection Officer",
+            "usageHint": "caption"
+          },
+          {
+            "children": [
+              "lnk-17",
+              "t-18"
+            ],
+            "component": "MaterialColumn",
+            "id": "col-19"
+          },
+          {
+            "action": {
+              "functionCall": {
+                "args": {
+                  "url": "https://app.example.com/acme/analyse?lifecycle=planned"
+                },
+                "call": "openUrl",
+                "returnType": "void"
+              }
+            },
+            "color": "primary",
+            "component": "MaterialButton",
+            "id": "lnk-20",
+            "label": "Open in the portfolio",
+            "variant": "basic"
+          },
+          {
+            "align": "stretch",
+            "children": [
+              "lnk-20"
+            ],
+            "component": "MaterialRow",
+            "id": "row-21",
+            "justify": "start"
+          },
+          {
+            "children": [
+              "t-1",
+              "col-4",
+              "col-7",
+              "col-10",
+              "col-13",
+              "col-16",
+              "col-19",
+              "row-21"
+            ],
+            "component": "MaterialColumn",
+            "id": "root-col"
+          },
+          {
+            "appearance": "outlined",
+            "children": [
+              "root-col"
+            ],
+            "component": "MaterialCard",
+            "id": "root"
+          }
+        ],
+        "surfaceId": "SURFACE"
+      },
+      "version": "v0.9"
+    }
+  ]
+}

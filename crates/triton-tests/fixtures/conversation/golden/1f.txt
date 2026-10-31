@@ -1,0 +1,7 @@
+3 Agents match. Pick one; it is sent as a new, complete request.
+
+› Retire the agent "Agent 2" (Requirements: Forecast)
+› Retire the agent "Agent 20" (Design: Monitor)
+› Retire the agent "Agent 28" (Sales: Forecast)
+
+Open in the portfolio: https://app.example.com/acme/analyse?q=Agent%202

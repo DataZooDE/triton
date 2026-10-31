@@ -65,6 +65,15 @@ triton-embed = { path = "../triton-embed" }
 # (not mounted in the `triton` binary) can be tested against a real
 # recording upstream over TCP (#352).
 triton-upstream = { path = "../triton-upstream" }
+# Validates the conversation-component output against the vendored official
+# A2UI v0.9 and Adaptive Cards JSON schemas (schemas/README.md).
+# The Teams card composition (key-free) the conversation golden tests render.
+triton-chat-msteams = { path = "../triton-chat-msteams" }
 # Implementing triton-core's `Tool` trait (it is #[async_trait]) for the
 # in-process router in tests/multi_issuer.rs.
 async-trait = "0.1"
+# Validates A2A cards, tasks and events against the vendored official A2A
+# 0.3.0 and 1.0.0 JSON schemas (fixtures/a2a). No network resolution.
+jsonschema = { version = "0.60", default-features = false }
+# Edit a task DB between two Triton runs (tampering and policy tests).
+rusqlite = { version = "0.37", features = ["bundled"] }

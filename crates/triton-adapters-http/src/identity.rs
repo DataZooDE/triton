@@ -30,7 +30,7 @@ use axum::http::HeaderName;
 use axum::http::header::AUTHORIZATION;
 use axum::http::request::Parts;
 use triton_core::{Principal, TritonError};
-use triton_identity::{GoogleAccessTokenVerifier, OidcVerifier, issuer_matches, unverified_issuer};
+use triton_identity::{GoogleAccessTokenVerifier, OidcVerifier, unverified_issuer};
 
 /// Header set by the upstream `oauth2-proxy` sidecar
 /// (`--pass-user-headers=true`). Matches what `auth-portal-dz`
@@ -70,7 +70,16 @@ pub struct IdentityProvider {
     /// has no readable `iss` (i.e. is not a JWT); JWTs always route to `oidc`.
     /// Validated by introspection (audience + hosted domain, fail-closed).
     google_access: Option<Arc<GoogleAccessTokenVerifier>>,
+    /// The scope(s) a 403 `insufficient_scope` challenge names: the Entra
+    /// API's delegated scope (`TRITON_ENTRA_SCOPES`). Prebuilt at boot.
+    scope_challenge: Option<axum::http::HeaderValue>,
 }
+
+/// Marks a response whose 403 came from the identity boundary's scope check,
+/// so [`bearer_challenge`] adds `error="insufficient_scope"`. Other 403s
+/// (revocation, tenant scoping) carry no marker and get no challenge.
+#[derive(Clone)]
+pub struct InsufficientScope(pub axum::http::HeaderValue);
 
 impl IdentityProvider {
     /// Backwards-compatible constructor that disables the
@@ -82,6 +91,7 @@ impl IdentityProvider {
             trust_forwarded_auth: false,
             dev_token: DEFAULT_DEV_TOKEN.to_string(),
             google_access: None,
+            scope_challenge: None,
         }
     }
 
@@ -93,6 +103,7 @@ impl IdentityProvider {
             trust_forwarded_auth,
             dev_token: DEFAULT_DEV_TOKEN.to_string(),
             google_access: None,
+            scope_challenge: None,
         }
     }
 
@@ -107,6 +118,7 @@ impl IdentityProvider {
             trust_forwarded_auth,
             dev_token: DEFAULT_DEV_TOKEN.to_string(),
             google_access: None,
+            scope_challenge: None,
         }
     }
 
@@ -123,6 +135,43 @@ impl IdentityProvider {
     pub fn with_google_access(mut self, verifier: Arc<GoogleAccessTokenVerifier>) -> Self {
         self.google_access = Some(verifier);
         self
+    }
+
+    /// The scopes a 403 `insufficient_scope` challenge names (RFC 6750
+    /// §3.1). Fails when they are not RFC 6749 scope tokens, so the header
+    /// can never be dropped at request time.
+    pub fn with_scope_challenge(mut self, scopes: &[String]) -> Result<Self, String> {
+        if let Some(bad) = scopes
+            .iter()
+            .find(|s| !crate::mcp_tenants::is_scope_token(s))
+        {
+            return Err(format!("`{bad}` is not an RFC 6749 scope token"));
+        }
+        let value = format!(
+            r#"Bearer realm="triton", error="insufficient_scope", scope="{}""#,
+            scopes.join(" ")
+        );
+        self.scope_challenge = Some(
+            axum::http::HeaderValue::from_str(&value)
+                .map_err(|e| format!("challenge `{value}` is not a header: {e}"))?,
+        );
+        Ok(self)
+    }
+
+    /// Tag the response a face built for a failed [`Self::verify`]: a 403
+    /// from the scope check gets the [`InsufficientScope`] marker the
+    /// challenge layer acts on. Any other response passes through.
+    pub fn tag_rejection(
+        &self,
+        e: &TritonError,
+        mut response: axum::response::Response,
+    ) -> axum::response::Response {
+        if let (TritonError::Forbidden(_), Some(v)) = (e, &self.scope_challenge) {
+            response
+                .extensions_mut()
+                .insert(InsufficientScope(v.clone()));
+        }
+        response
     }
 
     pub async fn verify(&self, parts: &Parts) -> Result<Principal, TritonError> {
@@ -184,7 +233,7 @@ impl IdentityProvider {
         let verifier = self
             .oidc
             .iter()
-            .find(|v| issuer_matches(v.issuer(), &claimed))
+            .find(|v| v.accepts_issuer(&claimed))
             .ok_or_else(|| {
                 // Name the rejected issuer, not the accepted list: the
                 // operator can read the accepted pairs from /v1/runtime,
@@ -195,6 +244,48 @@ impl IdentityProvider {
             })?;
         verifier.verify(token).await
     }
+}
+
+/// RFC 6750 §3: every 401 carries a `WWW-Authenticate: Bearer` challenge,
+/// and a 403 from the identity boundary's scope check (tagged
+/// [`InsufficientScope`]) carries `error="insufficient_scope"` and the scope.
+/// A request without credentials gets the bare challenge; one whose
+/// credential did not verify gets `error="invalid_token"`. MCP clients
+/// (claude.ai, ChatGPT) start their OAuth flow only on a 401 with this
+/// header, and A2A client libraries act on it too. Applied as a layer on
+/// each authenticated router, so no handler has to remember it; a response
+/// that already names a challenge is left alone.
+pub async fn bearer_challenge(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let had_credentials = request.headers().contains_key(AUTHORIZATION);
+    let mut response = next.run(request).await;
+    if response.status() == axum::http::StatusCode::FORBIDDEN
+        && let Some(InsufficientScope(v)) =
+            response.extensions().get::<InsufficientScope>().cloned()
+    {
+        response
+            .headers_mut()
+            .insert(axum::http::header::WWW_AUTHENTICATE, v);
+        return response;
+    }
+    if response.status() == axum::http::StatusCode::UNAUTHORIZED
+        && !response
+            .headers()
+            .contains_key(axum::http::header::WWW_AUTHENTICATE)
+    {
+        let challenge = if had_credentials {
+            r#"Bearer realm="triton", error="invalid_token""#
+        } else {
+            r#"Bearer realm="triton""#
+        };
+        response.headers_mut().insert(
+            axum::http::header::WWW_AUTHENTICATE,
+            axum::http::HeaderValue::from_static(challenge),
+        );
+    }
+    response
 }
 
 fn bearer_from(parts: &Parts) -> Result<&str, TritonError> {
@@ -248,6 +339,7 @@ fn forwarded_email_principal(email: &str) -> Principal {
         trace_id: uuid::Uuid::new_v4().to_string(),
         sender_ref: None,
         conversation_ref: None,
+        idp: None,
     }
 }
 
@@ -305,6 +397,7 @@ fn verify_dev_or_reject(token: &str, expected: &str) -> Result<Principal, Triton
         trace_id: uuid::Uuid::new_v4().to_string(),
         sender_ref: None,
         conversation_ref: None,
+        idp: None,
     })
 }
 

@@ -125,6 +125,15 @@ pub struct ToolDescriptor {
     /// emit surfaces). Lets the Explorer tag them and still call them.
     #[serde(default)]
     pub upstream: bool,
+    /// The upstream's own tool description (MCP `description`), passed
+    /// through verbatim. A model chooses tools by it. Absent when the
+    /// upstream gives none; in-process tools carry none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The upstream's MCP tool `annotations` (`readOnlyHint`, `title`, …),
+    /// passed through verbatim when it is an object.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotations: Option<Value>,
 }
 
 /// Registry of tools the dispatcher knows about. Sorted by name so
@@ -164,6 +173,8 @@ impl ToolRegistry {
                 input_schema: t.input_schema(),
                 returns_a2ui: t.returns_a2ui(),
                 upstream: false,
+                description: None,
+                annotations: None,
             })
             .collect()
     }

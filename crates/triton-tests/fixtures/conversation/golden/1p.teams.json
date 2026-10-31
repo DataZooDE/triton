@@ -1,0 +1,57 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "associatedInputs": "none",
+      "data": {
+        "ct": "__send_message|{\"m\":\"Set the owner of Agent 28 to \\\"Finance operations\\\". Reason: Finance took over the process in October.\"}"
+      },
+      "title": "Check again with current version",
+      "type": "Action.Execute",
+      "verb": "agentAction"
+    }
+  ],
+  "body": [
+    {
+      "items": [
+        {
+          "text": "Agent 28 changed",
+          "type": "TextBlock",
+          "weight": "Bolder",
+          "wrap": true
+        },
+        {
+          "text": "Changed at 18:10 since this card was shown: lifecycle Planned → In delivery. Your change was not filed.",
+          "type": "TextBlock",
+          "wrap": true
+        }
+      ],
+      "style": "warning",
+      "type": "Container"
+    },
+    {
+      "text": "Your input is kept:",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "facts": [
+        {
+          "title": "Owner",
+          "value": "Finance operations"
+        },
+        {
+          "title": "Reason",
+          "value": "Finance took over the process in October."
+        }
+      ],
+      "type": "FactSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

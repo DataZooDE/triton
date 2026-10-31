@@ -1,0 +1,6 @@
+ⓘ As of 18:03. If someone else changes it first, we tell you.
+
+Change Agent 28
+› Set the ‹What to change› of Agent 28 to "‹New value›". Reason: ‹Why›
+  What to change: Owner | Lifecycle | AI Act class
+  New value: Finance operations (Org. unit) | Data Protection Officer

@@ -1,0 +1,30 @@
+{
+  "_mock_item": "1l Card that updates in place — working state (Teams · Adaptive Card)",
+  "surface": {
+    "components": [
+      {
+        "kind": "text",
+        "value": "**Owners for Agents without one**"
+      },
+      {
+        "kind": "progress",
+        "title": "Request · working · 1:10",
+        "fraction": 0.6,
+        "steps": [
+          {
+            "label": "Found 4 Agents without an owner",
+            "state": "done"
+          },
+          {
+            "label": "Step 2 of 3 · drafting proposals",
+            "state": "active"
+          },
+          {
+            "label": "Filing drafts for review",
+            "state": "pending"
+          }
+        ]
+      }
+    ]
+  }
+}

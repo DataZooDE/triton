@@ -7,6 +7,8 @@ license.workspace = true
 publish = false
 
 [dependencies]
+# Long-running Teams turns run as tasks (persisted, resumable).
+triton-tasks = { path = "../triton-tasks" }
 async-trait = "0.1"
 tokio-util = { workspace = true, features = ["rt"] }
 # Decode an upstream-rendered chart PNG (peacock render_report `png_base64`)

@@ -1,0 +1,899 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "actions": [
+    {
+      "associatedInputs": "none",
+      "data": {
+        "ct": "__send_message|{\"m\":\"Find Agents by capability\"}"
+      },
+      "title": "Change domain",
+      "type": "Action.Execute",
+      "verb": "agentAction"
+    }
+  ],
+  "body": [
+    {
+      "text": "_Portfolio as of 18:03. Nothing was changed._",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "text": "Commercial & service · 4 Agents",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "targetElements": [
+            "node-21",
+            "node-29",
+            "node-37",
+            "node-41"
+          ],
+          "title": "Only gaps",
+          "type": "Action.ToggleVisibility"
+        }
+      ],
+      "type": "ActionSet"
+    },
+    {
+      "id": "node-1",
+      "items": [
+        {
+          "columns": [
+            {
+              "items": [
+                {
+                  "id": "open-3",
+                  "isVisible": false,
+                  "text": "▾",
+                  "type": "TextBlock"
+                },
+                {
+                  "id": "closed-4",
+                  "isVisible": true,
+                  "text": "▸",
+                  "type": "TextBlock"
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            },
+            {
+              "items": [
+                {
+                  "color": "Default",
+                  "text": "Finance",
+                  "type": "TextBlock",
+                  "weight": "Default",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "stretch"
+            },
+            {
+              "items": [
+                {
+                  "isSubtle": true,
+                  "text": "0 Agents",
+                  "type": "TextBlock",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            }
+          ],
+          "selectAction": {
+            "targetElements": [
+              "kids-2",
+              "open-3",
+              "closed-4"
+            ],
+            "type": "Action.ToggleVisibility"
+          },
+          "type": "ColumnSet"
+        },
+        {
+          "id": "kids-2",
+          "isVisible": false,
+          "items": [
+            {
+              "columns": [
+                {
+                  "items": [],
+                  "type": "Column",
+                  "width": "12px"
+                },
+                {
+                  "items": [
+                    {
+                      "id": "node-5",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Warning",
+                                  "text": "Forecast",
+                                  "type": "TextBlock",
+                                  "weight": "Bolder",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Propose an Agent for Finance: Forecast\"}"
+                            },
+                            "title": "Propose an Agent here",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-9",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Warning",
+                                  "text": "Monitor",
+                                  "type": "TextBlock",
+                                  "weight": "Bolder",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Propose an Agent for Finance: Monitor\"}"
+                            },
+                            "title": "Propose an Agent here",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-13",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Warning",
+                                  "text": "Schedule",
+                                  "type": "TextBlock",
+                                  "weight": "Bolder",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Propose an Agent for Finance: Schedule\"}"
+                            },
+                            "title": "Propose an Agent here",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    }
+                  ],
+                  "type": "Column",
+                  "width": "stretch"
+                }
+              ],
+              "type": "ColumnSet"
+            }
+          ],
+          "spacing": "None",
+          "type": "Container"
+        }
+      ],
+      "spacing": "Small",
+      "type": "Container"
+    },
+    {
+      "id": "node-17",
+      "items": [
+        {
+          "columns": [
+            {
+              "items": [
+                {
+                  "id": "open-19",
+                  "isVisible": true,
+                  "text": "▾",
+                  "type": "TextBlock"
+                },
+                {
+                  "id": "closed-20",
+                  "isVisible": false,
+                  "text": "▸",
+                  "type": "TextBlock"
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            },
+            {
+              "items": [
+                {
+                  "color": "Default",
+                  "text": "Sales",
+                  "type": "TextBlock",
+                  "weight": "Default",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "stretch"
+            },
+            {
+              "items": [
+                {
+                  "isSubtle": true,
+                  "text": "2 Agents",
+                  "type": "TextBlock",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            }
+          ],
+          "selectAction": {
+            "targetElements": [
+              "kids-18",
+              "open-19",
+              "closed-20"
+            ],
+            "type": "Action.ToggleVisibility"
+          },
+          "type": "ColumnSet"
+        },
+        {
+          "id": "kids-18",
+          "isVisible": true,
+          "items": [
+            {
+              "columns": [
+                {
+                  "items": [],
+                  "type": "Column",
+                  "width": "12px"
+                },
+                {
+                  "items": [
+                    {
+                      "id": "node-21",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "id": "open-23",
+                                  "isVisible": false,
+                                  "text": "▾",
+                                  "type": "TextBlock"
+                                },
+                                {
+                                  "id": "closed-24",
+                                  "isVisible": true,
+                                  "text": "▸",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Forecast",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "targetElements": [
+                              "kids-22",
+                              "open-23",
+                              "closed-24"
+                            ],
+                            "type": "Action.ToggleVisibility"
+                          },
+                          "type": "ColumnSet"
+                        },
+                        {
+                          "id": "kids-22",
+                          "isVisible": false,
+                          "items": [
+                            {
+                              "columns": [
+                                {
+                                  "items": [],
+                                  "type": "Column",
+                                  "width": "12px"
+                                },
+                                {
+                                  "items": [
+                                    {
+                                      "actions": [
+                                        {
+                                          "associatedInputs": "none",
+                                          "data": {
+                                            "ct": "__send_message|{\"m\":\"Show Agent 28\"}"
+                                          },
+                                          "title": "Agent 28 · Planned",
+                                          "type": "Action.Execute",
+                                          "verb": "agentAction"
+                                        }
+                                      ],
+                                      "type": "ActionSet"
+                                    }
+                                  ],
+                                  "type": "Column",
+                                  "width": "stretch"
+                                }
+                              ],
+                              "type": "ColumnSet"
+                            }
+                          ],
+                          "spacing": "None",
+                          "type": "Container"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-25",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Warning",
+                                  "text": "Monitor",
+                                  "type": "TextBlock",
+                                  "weight": "Bolder",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Propose an Agent for Sales: Monitor\"}"
+                            },
+                            "title": "Propose an Agent here",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-29",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "id": "open-31",
+                                  "isVisible": false,
+                                  "text": "▾",
+                                  "type": "TextBlock"
+                                },
+                                {
+                                  "id": "closed-32",
+                                  "isVisible": true,
+                                  "text": "▸",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Schedule (proposed)",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "targetElements": [
+                              "kids-30",
+                              "open-31",
+                              "closed-32"
+                            ],
+                            "type": "Action.ToggleVisibility"
+                          },
+                          "type": "ColumnSet"
+                        },
+                        {
+                          "id": "kids-30",
+                          "isVisible": false,
+                          "items": [
+                            {
+                              "columns": [
+                                {
+                                  "items": [],
+                                  "type": "Column",
+                                  "width": "12px"
+                                },
+                                {
+                                  "items": [
+                                    {
+                                      "actions": [
+                                        {
+                                          "associatedInputs": "none",
+                                          "data": {
+                                            "ct": "__send_message|{\"m\":\"Show Agent 29\"}"
+                                          },
+                                          "title": "Agent 29 · Candidate",
+                                          "type": "Action.Execute",
+                                          "verb": "agentAction"
+                                        }
+                                      ],
+                                      "type": "ActionSet"
+                                    }
+                                  ],
+                                  "type": "Column",
+                                  "width": "stretch"
+                                }
+                              ],
+                              "type": "ColumnSet"
+                            }
+                          ],
+                          "spacing": "None",
+                          "type": "Container"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    }
+                  ],
+                  "type": "Column",
+                  "width": "stretch"
+                }
+              ],
+              "type": "ColumnSet"
+            }
+          ],
+          "spacing": "None",
+          "type": "Container"
+        }
+      ],
+      "spacing": "Small",
+      "type": "Container"
+    },
+    {
+      "id": "node-33",
+      "items": [
+        {
+          "columns": [
+            {
+              "items": [
+                {
+                  "id": "open-35",
+                  "isVisible": true,
+                  "text": "▾",
+                  "type": "TextBlock"
+                },
+                {
+                  "id": "closed-36",
+                  "isVisible": false,
+                  "text": "▸",
+                  "type": "TextBlock"
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            },
+            {
+              "items": [
+                {
+                  "color": "Default",
+                  "text": "Service",
+                  "type": "TextBlock",
+                  "weight": "Default",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "stretch"
+            },
+            {
+              "items": [
+                {
+                  "isSubtle": true,
+                  "text": "2 Agents",
+                  "type": "TextBlock",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            }
+          ],
+          "selectAction": {
+            "targetElements": [
+              "kids-34",
+              "open-35",
+              "closed-36"
+            ],
+            "type": "Action.ToggleVisibility"
+          },
+          "type": "ColumnSet"
+        },
+        {
+          "id": "kids-34",
+          "isVisible": true,
+          "items": [
+            {
+              "columns": [
+                {
+                  "items": [],
+                  "type": "Column",
+                  "width": "12px"
+                },
+                {
+                  "items": [
+                    {
+                      "id": "node-37",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "id": "open-39",
+                                  "isVisible": false,
+                                  "text": "▾",
+                                  "type": "TextBlock"
+                                },
+                                {
+                                  "id": "closed-40",
+                                  "isVisible": true,
+                                  "text": "▸",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Forecast",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "targetElements": [
+                              "kids-38",
+                              "open-39",
+                              "closed-40"
+                            ],
+                            "type": "Action.ToggleVisibility"
+                          },
+                          "type": "ColumnSet"
+                        },
+                        {
+                          "id": "kids-38",
+                          "isVisible": false,
+                          "items": [
+                            {
+                              "columns": [
+                                {
+                                  "items": [],
+                                  "type": "Column",
+                                  "width": "12px"
+                                },
+                                {
+                                  "items": [
+                                    {
+                                      "actions": [
+                                        {
+                                          "associatedInputs": "none",
+                                          "data": {
+                                            "ct": "__send_message|{\"m\":\"Show Agent 30\"}"
+                                          },
+                                          "title": "Agent 30 · Deployed",
+                                          "type": "Action.Execute",
+                                          "verb": "agentAction"
+                                        }
+                                      ],
+                                      "type": "ActionSet"
+                                    }
+                                  ],
+                                  "type": "Column",
+                                  "width": "stretch"
+                                }
+                              ],
+                              "type": "ColumnSet"
+                            }
+                          ],
+                          "spacing": "None",
+                          "type": "Container"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-41",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "id": "open-43",
+                                  "isVisible": false,
+                                  "text": "▾",
+                                  "type": "TextBlock"
+                                },
+                                {
+                                  "id": "closed-44",
+                                  "isVisible": true,
+                                  "text": "▸",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Monitor",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "targetElements": [
+                              "kids-42",
+                              "open-43",
+                              "closed-44"
+                            ],
+                            "type": "Action.ToggleVisibility"
+                          },
+                          "type": "ColumnSet"
+                        },
+                        {
+                          "id": "kids-42",
+                          "isVisible": false,
+                          "items": [
+                            {
+                              "columns": [
+                                {
+                                  "items": [],
+                                  "type": "Column",
+                                  "width": "12px"
+                                },
+                                {
+                                  "items": [
+                                    {
+                                      "actions": [
+                                        {
+                                          "associatedInputs": "none",
+                                          "data": {
+                                            "ct": "__send_message|{\"m\":\"Show Agent 31\"}"
+                                          },
+                                          "title": "Agent 31 · Assessed",
+                                          "type": "Action.Execute",
+                                          "verb": "agentAction"
+                                        }
+                                      ],
+                                      "type": "ActionSet"
+                                    }
+                                  ],
+                                  "type": "Column",
+                                  "width": "stretch"
+                                }
+                              ],
+                              "type": "ColumnSet"
+                            }
+                          ],
+                          "spacing": "None",
+                          "type": "Container"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-45",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Warning",
+                                  "text": "Schedule",
+                                  "type": "TextBlock",
+                                  "weight": "Bolder",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Propose an Agent for Service: Schedule\"}"
+                            },
+                            "title": "Propose an Agent here",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    }
+                  ],
+                  "type": "Column",
+                  "width": "stretch"
+                }
+              ],
+              "type": "ColumnSet"
+            }
+          ],
+          "spacing": "None",
+          "type": "Container"
+        }
+      ],
+      "spacing": "Small",
+      "type": "Container"
+    },
+    {
+      "actions": [
+        {
+          "data": {
+            "ct": "__open_embed|{\"t\":\"Expand map ⤢\",\"u\":\"https://app.example.com/acme/open?view=capability-map&domain=commercial-service&embed=1\"}",
+            "msteams": {
+              "type": "task/fetch"
+            }
+          },
+          "title": "Expand map ⤢",
+          "type": "Action.Submit"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

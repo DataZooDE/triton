@@ -1,0 +1,7 @@
+⚠ Agent 28 changed: Changed at 18:10 since this card was shown: lifecycle Planned → In delivery. Your change was not filed.
+
+Your input is kept:
+Owner: Finance operations
+Reason: Finance took over the process in October.
+
+› Set the owner of Agent 28 to "Finance operations". Reason: Finance took over the process in October.

@@ -38,13 +38,14 @@ fn component_to_json(c: &Component) -> Value {
             label,
             tool,
             args,
+            action,
             resource,
             primary,
         } => {
             let mut b = json!({
                 "type": "button",
                 "label": label,
-                "action": { "tool": tool, "args": args }
+                "action": super::button_action(tool, args, action.as_ref())
             });
             if let Some(r) = resource {
                 b["resource"] = json!(r);
@@ -59,28 +60,50 @@ fn component_to_json(c: &Component) -> Value {
             options,
             tool,
             args_key,
-        } => json!({
-            "type": "selection",
-            "prompt": prompt,
-            "options": options.iter().map(|o| json!({
-                "label": o.label,
-                "value": o.value,
-            })).collect::<Vec<_>>(),
-            "tool": tool,
-            "args_key": args_key,
-        }),
+            style,
+            submit,
+        } => {
+            let mut o = json!({
+                "type": "selection",
+                "prompt": prompt,
+                "options": options.iter().map(|o| json!({
+                    "label": o.label,
+                    "value": o.value,
+                })).collect::<Vec<_>>(),
+                "tool": tool,
+                "args_key": args_key,
+            });
+            if *style != super::SelectionStyle::Dropdown {
+                o["style"] = json!(style);
+            }
+            if let Some(sub) = submit {
+                o["submit"] = json!(sub);
+            }
+            o
+        }
         Component::Form {
             title,
             fields,
             submit_label,
             tool,
-        } => json!({
-            "type": "form",
-            "title": title,
-            "fields": fields.iter().map(form_field_to_json).collect::<Vec<_>>(),
-            "submit_label": submit_label,
-            "tool": tool,
-        }),
+            send_template,
+            preview_label,
+        } => {
+            let mut o = json!({
+                "type": "form",
+                "title": title,
+                "fields": fields.iter().map(form_field_to_json).collect::<Vec<_>>(),
+                "submit_label": submit_label,
+                "tool": tool,
+            });
+            if let Some(t) = send_template {
+                o["send_template"] = json!(t);
+            }
+            if let Some(p) = preview_label {
+                o["preview_label"] = json!(p);
+            }
+            o
+        }
         Component::Dashboard { title, tiles } => json!({
             "type": "dashboard",
             "title": title,
@@ -126,6 +149,21 @@ fn component_to_json(c: &Component) -> Value {
                 "resource": i.resource,
             })).collect::<Vec<_>>(),
         }),
+        // The conversation components carry no renamed fields: the
+        // node is the canonical object with `kind` spelled `type`, which is
+        // also what the reverse mapping in `mod.rs` undoes.
+        // Every remaining kind is a conversation block
+        // (`Component::is_conversation_block`): no renamed fields.
+        _ => {
+            debug_assert!(c.is_conversation_block());
+            let mut v = serde_json::to_value(c).unwrap_or_default();
+            if let Some(obj) = v.as_object_mut()
+                && let Some(kind) = obj.remove("kind")
+            {
+                obj.insert("type".into(), kind);
+            }
+            v
+        }
     }
 }
 
@@ -144,6 +182,12 @@ fn form_field_to_json(f: &FormField) -> Value {
     if let Some(d) = &f.default_value {
         o["default"] = d.clone();
     }
+    if !f.options.is_empty() {
+        o["options"] = json!(f.options);
+    }
+    if f.style == super::SelectionStyle::Radio {
+        o["style"] = json!(f.style);
+    }
     o
 }
 
@@ -152,6 +196,8 @@ fn form_kind_str(k: FormFieldKind) -> &'static str {
         FormFieldKind::String => "string",
         FormFieldKind::Integer => "integer",
         FormFieldKind::Boolean => "boolean",
+        FormFieldKind::Select => "select",
+        FormFieldKind::Text => "text",
     }
 }
 
@@ -215,6 +261,7 @@ mod heron_vocabulary_tests {
                 args: json!({ "id": "p1" }),
                 resource: None,
                 primary: true,
+                action: None,
             },
             Component::Button {
                 label: "Reject".into(),
@@ -222,6 +269,7 @@ mod heron_vocabulary_tests {
                 args: json!({}),
                 resource: None,
                 primary: false,
+                action: None,
             },
         ]);
         assert_eq!(s[0]["primary"], true);
@@ -251,6 +299,8 @@ mod heron_vocabulary_tests {
                     required: false,
                     placeholder: Some("e.g. 30d".into()),
                     default_value: Some(json!("30d")),
+                    options: Vec::new(),
+                    style: Default::default(),
                 },
                 FormField {
                     name: "dry".into(),
@@ -259,8 +309,12 @@ mod heron_vocabulary_tests {
                     required: true,
                     placeholder: None,
                     default_value: None,
+                    options: Vec::new(),
+                    style: Default::default(),
                 },
             ],
+            preview_label: None,
+            send_template: None,
         }]);
         let fields = s[0]["fields"].as_array().expect("fields");
         assert_eq!(fields[0]["placeholder"], "e.g. 30d");

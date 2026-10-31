@@ -40,9 +40,6 @@ use triton_core::Dispatcher;
 
 use crate::a2a::{A2aState, TaskState};
 
-/// The A2A protocol version this facade implements.
-const PROTOCOL_VERSION: &str = "0.3.0";
-
 /// JSON-RPC error codes. The first four are standard JSON-RPC 2.0; the
 /// `-32001` code is A2A's own `TaskNotFound`.
 const PARSE_ERROR: i32 = -32700;
@@ -50,7 +47,6 @@ const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
-const TASK_NOT_FOUND: i32 = -32001;
 
 /// What the Agent Card advertises, and which tool prose is dispatched to.
 /// Supplied by the host (triton-embed's `EmbedOpts`), because only the
@@ -69,15 +65,22 @@ pub struct SpecA2aConfig {
     pub a2a_path: String,
     /// The tool plain text is dispatched to.
     pub default_tool: String,
+    /// The card's skills (A2A `AgentSkill` objects). `None` derives them
+    /// (see `a2a_v1::skills`).
+    pub skills: Option<Vec<Value>>,
 }
 
 impl SpecA2aConfig {
-    fn endpoint_url(&self) -> String {
-        format!(
-            "{}/{}",
-            self.public_url.trim_end_matches('/'),
-            self.a2a_path.trim_start_matches('/')
-        )
+    /// The endpoint a card advertises: the public URL plus the A2A path
+    /// (the binary sets the path empty and the full endpoint as the URL).
+    pub(crate) fn endpoint_url(&self) -> String {
+        let base = self.public_url.trim_end_matches('/');
+        let path = self.a2a_path.trim_matches('/');
+        if path.is_empty() {
+            base.to_string()
+        } else {
+            format!("{base}/{path}")
+        }
     }
 }
 
@@ -121,9 +124,36 @@ const CARD_FILENAMES: &[&str] = &[
 pub fn card_router(state: CardState) -> Router {
     let mut r = Router::new();
     for name in CARD_FILENAMES {
-        r = r.route(&format!("/.well-known/{name}"), get(agent_card));
+        r = r.route(&format!("/.well-known/{name}"), card_route(name));
     }
     r.with_state(state)
+}
+
+/// `agent-card.json` is the 1.0 card (`?version=0.3` selects 0.3);
+/// every other spelling is the 0.3 card Copilot Studio and Gemini
+/// Enterprise read.
+fn card_route(name: &str) -> axum::routing::MethodRouter<CardState> {
+    let default = if *name == *"agent-card.json" {
+        crate::a2a_v1::Version::V10
+    } else {
+        crate::a2a_v1::Version::V03
+    };
+    get(
+        move |State(state): State<CardState>, uri: axum::http::Uri| async move {
+            crate::a2a_v1::card_response(&state, uri.query(), default)
+        },
+    )
+}
+
+/// The whole spec face for one endpoint, to be merged into the router
+/// nested at that endpoint: JSON-RPC (0.3 and 1.0) at its root, the 1.0
+/// HTTP+JSON binding under `/v1`, and the endpoint-relative cards. Used by
+/// the binary and the embedded host alike.
+pub fn spec_routes(state: A2aState, config: SpecA2aConfig, card: CardState) -> Router {
+    let config = Arc::new(config);
+    jsonrpc_router(state.clone(), config.clone())
+        .merge(crate::a2a_v1::rest_router(state, config))
+        .merge(card_router_nested(card))
 }
 
 /// The same card routes, intended to be merged INTO the router that is
@@ -139,6 +169,7 @@ pub fn jsonrpc_router(state: A2aState, config: Arc<SpecA2aConfig>) -> Router {
     Router::new()
         .route("/", post(jsonrpc))
         .with_state(SpecState { a2a: state, config })
+        .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
 }
 
 /// Why a per-agent slug was refused. See [`validate_agent_slug`].
@@ -211,140 +242,34 @@ pub fn agent_router(
     validate_agent_slug(slug)?;
     let mut cards = Router::new();
     for name in CARD_FILENAMES {
-        cards = cards.route(&format!("/{slug}/.well-known/{name}"), get(agent_card));
+        cards = cards.route(&format!("/{slug}/.well-known/{name}"), card_route(name));
     }
     let config = card.config.clone();
     Ok(Router::new()
         .route(&format!("/{slug}"), post(jsonrpc))
-        .with_state(SpecState { a2a: state, config })
+        .with_state(SpecState {
+            a2a: state.clone(),
+            config: config.clone(),
+        })
+        .nest(
+            &format!("/{slug}"),
+            crate::a2a_v1::rest_router(state, config),
+        )
+        .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
         .merge(cards.with_state(card)))
 }
 
 #[derive(Clone)]
-struct SpecState {
-    a2a: A2aState,
-    config: Arc<SpecA2aConfig>,
+pub(crate) struct SpecState {
+    pub(crate) a2a: A2aState,
+    pub(crate) config: Arc<SpecA2aConfig>,
 }
 
-/// The Agent Card. **Unauthenticated on purpose**: discovery is what a
-/// caller does BEFORE it has a credential, and the card's whole job is
-/// to say which credential to bring. It contains only what is already
-/// public — the agent's name, its endpoint, its tool names, and the
-/// issuer/audience pairs it accepts (both are public identifiers that
-/// already appear in PR diffs and browser URLs). No secret, and nothing
-/// an unauthenticated caller could not learn by reading the deployment's
-/// configuration.
-async fn agent_card(State(state): State<CardState>) -> Response {
-    let cfg = &state.config;
-
-    // Skills come from the live tool registry rather than a hand-kept
-    // list, so the card cannot drift from what the agent can actually do.
-    let skills: Vec<Value> = state
-        .dispatcher
-        .descriptors()
-        .into_iter()
-        .map(|d| {
-            json!({
-                "id": d.name,
-                "name": d.name,
-                "description": format!("Triton tool `{}`", d.name),
-                "tags": ["triton"],
-            })
-        })
-        .collect();
-
-    let mut card = json!({
-        "protocolVersion": PROTOCOL_VERSION,
-        "name": cfg.name,
-        "description": cfg.description,
-        "url": cfg.endpoint_url(),
-        "preferredTransport": "JSONRPC",
-        "version": cfg.version,
-        "capabilities": {
-            // `message/stream` is implemented (#635 P6) — SSE of JSON-RPC
-            // responses: Task(working) → artifact-updates → final
-            // status-update. Flipped in the same commit that added the
-            // method, never before.
-            "streaming": true,
-            "pushNotifications": false,
-            // A2UI v0.9 (a2ui.org): the agent can return interactive UI
-            // (cards, charts-as-images, buttons) as an `application/json+a2ui`
-            // DataPart. Gemini Enterprise activates it via the
-            // `X-A2A-Extensions` header and renders it from the basic catalog.
-            "extensions": [{
-                "uri": triton_core::a2ui::ge::EXTENSION_URI,
-                "description": "Ability to render A2UI v0.9",
-                "required": false,
-                "params": {
-                    "supportedCatalogIds": [triton_core::a2ui::ge::BASIC_CATALOG],
-                    "acceptsInlineCatalogs": false,
-                },
-            }],
-        },
-        "defaultInputModes": ["text/plain"],
-        "defaultOutputModes": ["text/plain"],
-        "skills": skills,
-    });
-
-    if !state.oidc_providers.is_empty() {
-        // Two ways to advertise the same accepted credential:
-        //
-        // `bearer` (an `http`/`JWT` scheme) states, in prose, which
-        // issuer/audience a caller that ALREADY HOLDS a token must bring.
-        // It is what GE and hand-configured callers read.
-        //
-        // `oidc_<n>` (`openIdConnect` schemes) give a caller that must first
-        // OBTAIN a token a machine-readable OpenID Connect discovery URL —
-        // `<issuer>/.well-known/openid-configuration`, which resolves to the
-        // authorization + token endpoints. Copilot Studio's A2A connector in
-        // its "Dynamic" auth mode builds a connection's login settings FROM
-        // this: without it the wizard fails `RegisterDynamicClient… ServerUrl
-        // … missing` (observed 2026-09-19) because a bare `bearer` scheme
-        // names no server.
-        //
-        // Crucially, `security` lists ONLY the wire authentication scheme (`bearer`).
-        // Listing `oidc_<n>` as runtime requirements in `security` breaks OpenAPI
-        // consumers (including Microsoft Copilot Studio / Power Platform custom
-        // connectors), because `openIdConnect` is a discovery mechanism rather
-        // than a request-level authorization scheme. When listed in `security`,
-        // Power Platform's runtime dispatcher attempts to resolve an unexecutable
-        // auth requirement and aborts with SystemError before dispatching any
-        // HTTP request.
-        let mut schemes = serde_json::Map::new();
-        schemes.insert(
-            "bearer".to_owned(),
-            json!({
-                "type": "http",
-                "scheme": "bearer",
-                "bearerFormat": "JWT",
-                "description": state
-                    .oidc_providers
-                    .iter()
-                    .map(|(iss, aud)| format!("issuer {iss} / audience {aud}"))
-                    .collect::<Vec<_>>()
-                    .join("; or "),
-            }),
-        );
-        for (i, (iss, aud)) in state.oidc_providers.iter().enumerate() {
-            let name = format!("oidc_{i}");
-            schemes.insert(
-                name.clone(),
-                json!({
-                    "type": "openIdConnect",
-                    "description": format!("OpenID Connect discovery for {iss} (audience {aud})"),
-                    "openIdConnectUrl": format!(
-                        "{}/.well-known/openid-configuration",
-                        iss.trim_end_matches('/'),
-                    ),
-                }),
-            );
-        }
-        card["securitySchemes"] = Value::Object(schemes);
-        card["security"] = json!([{ "bearer": [] }]);
-    }
-
-    (StatusCode::OK, Json(card)).into_response()
-}
+// The Agent Card is built in `a2a_v1` (`card_v10`, `card_v03`). It is
+// **unauthenticated on purpose**: discovery is what a caller does BEFORE it
+// has a credential, and the card's whole job is to say which credential to
+// bring. It contains only what is already public — the agent's name, its
+// endpoint, its skills, and the issuer/audience pairs it accepts.
 
 #[derive(Debug, Deserialize)]
 struct RpcRequest {
@@ -395,9 +320,14 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
                 &e,
             );
             // 401, not a JSON-RPC error body: an unauthenticated caller
-            // needs the HTTP status its client library already handles.
-            return (
-                StatusCode::UNAUTHORIZED,
+            // needs the HTTP status its client library already handles. A
+            // token without the delegated scope is a 403 (ADR-22).
+            let status = match e {
+                triton_core::TritonError::Forbidden(_) => StatusCode::FORBIDDEN,
+                _ => StatusCode::UNAUTHORIZED,
+            };
+            let response = (
+                status,
                 Json(json!({
                     "jsonrpc": "2.0",
                     "id": Value::Null,
@@ -405,6 +335,7 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
                 })),
             )
                 .into_response();
+            return state.a2a.identity.tag_rejection(&e, response);
         }
     };
 
@@ -416,6 +347,7 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
     let inbound_ext = parts
         .headers
         .get("x-a2a-extensions")
+        .or_else(|| parts.headers.get("a2a-extensions"))
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
     tracing::info!(x_a2a_extensions = ?inbound_ext, "a2a inbound extension activation");
@@ -429,17 +361,75 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
         return rpc_error(&req.id, INVALID_REQUEST, "jsonrpc must be \"2.0\"");
     }
 
+    // The protocol version is chosen per request. An unsupported
+    // version is answered in the form of the version the method name
+    // belongs to (`message/send` is 0.3, `SendMessage` is 1.0).
+    use crate::a2a_v1::{self as v1, A2aError, Version};
+    let version = match v1::requested_version(&parts.headers, parts.uri.query()) {
+        Ok(v) => v,
+        Err(raw) => {
+            let e = A2aError::VersionNotSupported(raw);
+            return if req.method.contains('/') || !v1::is_v10_method(&req.method) {
+                v1::rpc_error_v03(&req.id, &e)
+            } else {
+                v1::rpc_error_v10(&req.id, &e)
+            };
+        }
+    };
+    if version == Version::V10 {
+        let method = req.method.clone();
+        let mut resp =
+            v1::jsonrpc_v10(state, principal, req.id, &method, req.params, echo_a2ui).await;
+        if echo_a2ui
+            && let Ok(v) = axum::http::HeaderValue::from_str(triton_core::a2ui::ge::EXTENSION_URI)
+        {
+            resp.headers_mut().insert("a2a-extensions", v);
+        }
+        return resp;
+    }
+
     let mut resp = match req.method.as_str() {
         "message/send" => message_send(state, principal, req, echo_a2ui).await,
         "message/stream" => message_stream(state, principal, req, echo_a2ui).await,
         "tasks/get" => tasks_get(state, req, &principal),
+        "tasks/cancel" => {
+            let e = match req.params.get("id").and_then(Value::as_str) {
+                None => A2aError::InvalidParams("params.id is required".into()),
+                Some(id) => match v1::readable(&state.a2a, &principal, id).map(|(r, _)| r) {
+                    Ok(_) => A2aError::TaskNotCancelable,
+                    Err(e) => e,
+                },
+            };
+            v1::rpc_error_v03(&req.id, &e)
+        }
+        "tasks/resubscribe" => {
+            let framing = v1::Framing::JsonRpc03(req.id.clone());
+            match v1::op_subscribe(&state, &principal, &req.params, framing, false) {
+                Ok(r) => r,
+                // The official 0.3 clients read a streaming method's answer
+                // as an event stream only, errors included.
+                Err(e) => v1::error_stream(json!({
+                    "jsonrpc": "2.0", "id": req.id, "error": e.body_v03(),
+                })),
+            }
+        }
+        "tasks/pushNotificationConfig/set"
+        | "tasks/pushNotificationConfig/get"
+        | "tasks/pushNotificationConfig/list"
+        | "tasks/pushNotificationConfig/delete" => {
+            v1::rpc_error_v03(&req.id, &A2aError::PushNotSupported)
+        }
+        "agent/getAuthenticatedExtendedCard" => {
+            v1::rpc_error_v03(&req.id, &A2aError::ExtendedCardNotConfigured)
+        }
         // Named explicitly so a caller learns which methods exist rather
         // than only that this one does not.
         other => rpc_error(
             &req.id,
             METHOD_NOT_FOUND,
             format!(
-                "unsupported method `{other}`; this agent implements message/send, message/stream, tasks/get"
+                "unsupported method `{other}`; this agent implements message/send, message/stream, \
+                 tasks/get, tasks/cancel, tasks/resubscribe (A2A 0.3; send A2A-Version: 1.0 for 1.0)"
             ),
         ),
     };
@@ -460,6 +450,28 @@ fn activates_a2ui(header: Option<&str>) -> bool {
         h.split(',')
             .any(|uri| uri.trim() == triton_core::a2ui::ge::EXTENSION_URI)
     })
+}
+
+/// [`activates_a2ui`] over a request's headers: 0.3's `X-A2A-Extensions`
+/// or 1.0's `A2A-Extensions`.
+pub(crate) fn activates_a2ui_headers(headers: &axum::http::HeaderMap) -> bool {
+    ["x-a2a-extensions", "a2a-extensions"]
+        .iter()
+        .any(|name| activates_a2ui(headers.get(*name).and_then(|v| v.to_str().ok())))
+}
+
+/// [`turn_context`] for a spec state.
+pub(crate) fn turn_context_for(
+    state: &SpecState,
+    context_id: &str,
+    a2ui: bool,
+) -> triton_core::ContextOverrides {
+    turn_context(
+        &state.config,
+        state.a2a.dispatcher.surfaces(),
+        context_id,
+        a2ui,
+    )
 }
 
 /// The per-turn context spec A2A adds to a dispatch (#352): `_triton`
@@ -495,6 +507,10 @@ fn turn_context(
     }
 }
 
+/// Marks a stream error whose message is already the text a person sees
+/// ([`crate::tasks::user_text`]) — never audited, local to this module.
+const USER_TEXT: &str = "a2a_user_text";
+
 /// Does the client want the Task back immediately instead of blocking
 /// to a terminal state? The spec's `MessageSendConfiguration` has
 /// carried this under two names across revisions (`blocking: false` in
@@ -512,15 +528,34 @@ fn wants_immediate_task(params: &Value) -> bool {
 /// meant to read. Non-text parts (files, structured data) are ignored
 /// rather than rejected: a client that also sends a file should still
 /// get an answer to its words.
-fn text_from_params(params: &Value) -> Option<String> {
+fn text_from_params(params: &Value) -> Option<Inbound> {
     let parts = params.get("message")?.get("parts")?.as_array()?;
     // A2UI button click: Gemini Enterprise posts back the action as a
-    // `application/json+a2ui` DataPart. Honour its resolved `question` (bound
-    // by path in the card) as the turn text — this is what makes a follow-up
-    // button re-ask instead of the agent seeing GE's "User action triggered."
-    // placeholder text. Fall back to the plain text parts otherwise.
-    if let Some(q) = a2ui_action_question(parts) {
-        return Some(q);
+    // `application/json+a2ui` DataPart. Its signed action id names the
+    // complete message to send (or a document to open) — this is what makes
+    // a follow-up button re-ask instead of the agent seeing GE's "User
+    // action triggered." placeholder text. Fall back to the text parts.
+    if let Some(action) = a2ui_action(parts) {
+        return Some(match action {
+            triton_core::a2ui::ge::GeAction::Message(text) => Inbound {
+                text,
+                open_doc: None,
+            },
+            triton_core::a2ui::ge::GeAction::OpenDoc {
+                label,
+                skill,
+                id,
+                url,
+            } => Inbound {
+                text: label.clone(),
+                open_doc: Some(OpenDoc {
+                    label,
+                    skill,
+                    id,
+                    url,
+                }),
+            },
+        });
     }
     let text = parts
         .iter()
@@ -529,20 +564,60 @@ fn text_from_params(params: &Value) -> Option<String> {
         .collect::<Vec<_>>()
         .join("\n");
     let trimmed = text.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    (!trimmed.is_empty()).then(|| Inbound {
+        text: trimmed.to_string(),
+        open_doc: None,
+    })
 }
 
-/// Pull a re-ask `question` out of an inbound A2UI `action` DataPart. The
-/// client-to-server A2UI message rides `DataPart.data` (an object or a
-/// one-element array) as `{version, action:{name, context:{question}}}`. We
-/// look for a non-empty string `context.question`; absent ⇒ `None` (a normal
-/// text turn). Tolerant of both the object and array `data` encodings.
-fn a2ui_action_question(parts: &[Value]) -> Option<String> {
+/// One inbound spec-A2A turn: the text to dispatch, or — for a source
+/// button — the document to open instead of an agent turn.
+struct Inbound {
+    text: String,
+    open_doc: Option<OpenDoc>,
+}
+
+struct OpenDoc {
+    label: String,
+    skill: String,
+    id: String,
+    url: String,
+}
+
+impl OpenDoc {
+    fn as_ref(&self) -> triton_core::a2ui::ge::OpenDocRef<'_> {
+        triton_core::a2ui::ge::OpenDocRef {
+            label: &self.label,
+            skill: &self.skill,
+            id: &self.id,
+            url: &self.url,
+        }
+    }
+}
+
+/// The action of an inbound A2UI `action` DataPart. The client-to-server
+/// A2UI message rides `DataPart.data` (an object or a one-element array)
+/// as `{version, action:{name, context, sourceComponentId}}`. A resolved
+/// `context.question` wins when a host forwards one (GE does not — it posts
+/// `context:{}`); otherwise the signed, self-contained
+/// `sourceComponentId` Triton minted for the button names the action
+/// (`ge::action_for`). Absent or forged ⇒ `None` (a normal text turn).
+///
+/// Both Part shapes count as a data part: 0.3's `{kind: "data", data}` and
+/// 1.0's `{data, mediaType?}` (a 1.0 Part has no `kind`; its content is a
+/// oneof, so a `data` member is the data part).
+pub(crate) fn a2ui_action(parts: &[Value]) -> Option<triton_core::a2ui::ge::GeAction> {
     for p in parts {
-        if p.get("kind").and_then(Value::as_str) != Some("data") {
+        let is_data = match p.get("kind").and_then(Value::as_str) {
+            Some(kind) => kind == "data",
+            None => p.get("data").is_some(),
+        };
+        if !is_data {
             continue;
         }
-        let data = p.get("data")?;
+        let Some(data) = p.get("data") else {
+            continue;
+        };
         // `data` may be a single message object or an array of messages.
         let msgs: Vec<&Value> = match data {
             Value::Array(a) => a.iter().collect(),
@@ -552,9 +627,6 @@ fn a2ui_action_question(parts: &[Value]) -> Option<String> {
             let Some(action) = m.get("action") else {
                 continue;
             };
-            // A resolved `context.question`, if a host ever forwards context
-            // (GE does not — it posts `context:{}`, overwrites `name`, and
-            // renumbers ids). Kept as a forward-compatible fallback.
             if let Some(q) = action
                 .get("context")
                 .and_then(|c| c.get("question"))
@@ -562,18 +634,12 @@ fn a2ui_action_question(parts: &[Value]) -> Option<String> {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                return Some(q.to_string());
+                return Some(triton_core::a2ui::ge::GeAction::Message(q.to_string()));
             }
-            // GE reality: the only reliable channels are `surfaceId` (we mint
-            // it) and a deterministic `sourceComponentId` (GE's own `btn-N`).
-            // Map them back to the re-ask question via the per-surface table
-            // recorded when the card was built.
-            if let (Some(sid), Some(cid)) = (
-                action.get("surfaceId").and_then(Value::as_str),
-                action.get("sourceComponentId").and_then(Value::as_str),
-            ) && let Some(q) = triton_core::a2ui::ge::question_for(sid, cid)
+            if let Some(cid) = action.get("sourceComponentId").and_then(Value::as_str)
+                && let Some(a) = triton_core::a2ui::ge::action_for(cid)
             {
-                return Some(q);
+                return Some(a);
             }
         }
     }
@@ -586,13 +652,14 @@ async fn message_send(
     req: RpcRequest,
     a2ui: bool,
 ) -> Response {
-    let Some(text) = text_from_params(&req.params) else {
+    let Some(inbound) = text_from_params(&req.params) else {
         return rpc_error(
             &req.id,
             INVALID_PARAMS,
             "params.message.parts must contain at least one non-empty text part",
         );
     };
+    let text = inbound.text.clone();
     // A2A 0.3.0 requires `contextId` on Task; honor a client-supplied
     // `message.contextId`, else generate one (strict clients reject its
     // absence). Also stamped on the returned Message for follow-ups.
@@ -604,8 +671,6 @@ async fn message_send(
         .filter(|id| !id.trim().is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let trace_id = principal.trace_id.clone();
-    let tool = state.config.default_tool.clone();
     // #352: one context for the whole turn, re-dispatches included.
     let overrides = turn_context(
         &state.config,
@@ -618,7 +683,7 @@ async fn message_send(
     // agent turn): reply directly with the document surface — native Material
     // by default (a render_report(document) dispatch), or the /docs iframe
     // when TRITON_GE_DOC_IFRAME.
-    if let Some(doc) = triton_core::a2ui::ge::open_doc(&text) {
+    if let Some(doc) = inbound.open_doc.as_ref().map(OpenDoc::as_ref) {
         let parts = doc_open_parts(&state.a2a.dispatcher, &principal, &doc, &overrides).await;
         let msg = json!({
             "kind": "message",
@@ -630,62 +695,39 @@ async fn message_send(
         return rpc_ok(&req.id, msg);
     }
 
-    // #635 P6 — disconnect-safe by construction: the dispatch runs in a
-    // SPAWNED task that records its terminal state (and the clamped
-    // reply) into the store from inside itself. The handler merely
-    // awaits the JoinHandle, so a client hanging up mid-turn drops the
-    // await, never the dispatch — the answer completes and `tasks/get`
-    // returns it. This is the same bug class as the Teams webhook 499
-    // (a 23s answer computed and lost to a cancelled future), fixed the
-    // same way.
-    state.a2a.tasks.record(&trace_id, TaskState::Working);
-    let dispatcher = state.a2a.dispatcher.clone();
-    // Kept for the post-dispatch report→VegaChart expansion (the invoke below
-    // consumes its own clone).
+    // #635 P6 — disconnect-safe by construction, and long-running:
+    // the dispatch runs in a SPAWNED task runner that records every state
+    // change (the clamped reply on completion) in the task store. The
+    // handler merely waits on the runner's events, so a client hanging up
+    // mid-turn drops the wait, never the dispatch — the answer completes
+    // and `tasks/get` returns it. This is the same bug class as the Teams
+    // webhook 499 (a 23s answer computed and lost to a cancelled future).
     let vega_dispatcher = state.a2a.dispatcher.clone();
     let vega_principal = principal.clone();
-    let tasks = state.a2a.tasks.clone();
-    let task_trace = trace_id.clone();
     let vega_overrides = overrides.clone();
-    let handle = tokio::spawn(async move {
-        let out = dispatcher
-            .invoke_with(
-                &tool,
-                json!({ "message": text }),
-                principal,
-                "a2a",
-                overrides,
-            )
-            .await;
-        match &out {
-            Ok(d) => tasks.record_entry(
-                &task_trace,
-                TaskState::Completed,
-                Some(&reply_text(&d.result)),
-                None,
-            ),
-            Err(e) => {
-                tasks.record_entry(&task_trace, TaskState::Failed, None, Some(&e.to_string()));
-            }
-        }
-        out
-    });
+    let (rec, mut rx) =
+        match crate::a2a_v1::start_task(&state, &principal, &text, &context_id, overrides) {
+            Ok(x) => x,
+            Err(e) => return rpc_error(&req.id, INTERNAL_ERROR, e.message()),
+        };
 
     if wants_immediate_task(&req.params) {
         // The spec: return the Task right away; the client polls
         // `tasks/get`. The spawned dispatch keeps running.
         let task = json!({
             "kind": "task",
-            "id": trace_id,
+            "id": rec.id,
             "contextId": context_id,
             "status": { "state": "working" },
         });
         return rpc_ok(&req.id, task);
     }
 
-    match handle.await {
-        Ok(Ok(d)) => {
-            let mut result = d.result;
+    // Blocking is the default, capped (`TRITON_A2A_BLOCK_SECS`) so a
+    // platform's HTTP timeout is not reached: at the cap the working task
+    // comes back and the caller polls or resubscribes.
+    match crate::tasks::wait_terminal(&mut rx, state.a2a.task_settings.block).await {
+        Some(crate::tasks::TaskEvent::Done(mut result)) => {
             // Expand a report into a native interactive VegaChart for GE.
             inject_report_vega(
                 &vega_dispatcher,
@@ -705,17 +747,26 @@ async fn message_send(
                 "messageId": uuid::Uuid::new_v4().to_string(),
                 "parts": parts,
                 // The task id, so a caller can follow up via tasks/get.
-                "taskId": d.trace_id,
+                "taskId": rec.id,
                 "contextId": context_id,
             });
             rpc_ok(&req.id, msg)
         }
-        Ok(Err(e)) => rpc_error(&req.id, INTERNAL_ERROR, e.to_string()),
-        Err(join_err) => rpc_error(
-            &req.id,
-            INTERNAL_ERROR,
-            format!("dispatch task join error: {join_err}"),
-        ),
+        Some(crate::tasks::TaskEvent::Failed { class, message }) => {
+            tracing::warn!(task = %rec.id, class = %class, error = %message, "a2a message/send failed");
+            rpc_error(
+                &req.id,
+                INTERNAL_ERROR,
+                crate::tasks::user_text(&class, &message),
+            )
+        }
+        _ => {
+            let rec = state.a2a.tasks.get(&rec.id).unwrap_or(rec);
+            rpc_ok(
+                &req.id,
+                crate::a2a_v1::task_v03(&crate::a2a_v1::handover(rec)),
+            )
+        }
     }
 }
 
@@ -735,15 +786,15 @@ async fn message_stream(
 ) -> Response {
     use futures::StreamExt as _;
 
-    let Some(text) = text_from_params(&req.params) else {
+    let Some(inbound) = text_from_params(&req.params) else {
         return rpc_error(
             &req.id,
             INVALID_PARAMS,
             "params.message.parts must contain at least one non-empty text part",
         );
     };
+    let text = inbound.text.clone();
     let trace_id = principal.trace_id.clone();
-    let tool = state.config.default_tool.clone();
     let rpc_id = req.id.clone();
 
     // A2A 0.3.0 requires `contextId` on Task / TaskStatusUpdateEvent /
@@ -771,7 +822,7 @@ async fn message_stream(
     // working task, the document surface as a final artifact, and a completed
     // status. Native Material by default (a render_report(document) dispatch),
     // or the /docs iframe when TRITON_GE_DOC_IFRAME.
-    if let Some(doc) = triton_core::a2ui::ge::open_doc(&text) {
+    if let Some(doc) = inbound.open_doc.as_ref().map(OpenDoc::as_ref) {
         let parts = doc_open_parts(&state.a2a.dispatcher, &principal, &doc, &overrides).await;
         state.a2a.tasks.record_entry(
             &trace_id,
@@ -809,36 +860,60 @@ async fn message_stream(
             .into_response();
     }
 
-    state.a2a.tasks.record(&trace_id, TaskState::Working);
-    // Kept for the terminal report→VegaChart expansion (invoke_streaming
-    // consumes `principal`).
+    // Kept for the terminal report→VegaChart expansion.
     let vega_dispatcher = state.a2a.dispatcher.clone();
     let vega_principal = principal.clone();
     let vega_overrides = overrides.clone();
-    let events = match state
-        .a2a
-        .dispatcher
-        .invoke_streaming_with(
-            &tool,
-            json!({ "message": text }),
-            principal,
-            "a2a",
-            None,
-            overrides,
-        )
-        .await
-    {
-        Ok(ev) => ev,
-        Err(e) => {
-            state
-                .a2a
-                .tasks
-                .record_entry(&trace_id, TaskState::Failed, None, Some(&e.to_string()));
-            return rpc_error(&req.id, INTERNAL_ERROR, e.to_string());
+    // The turn runs as a task; the stream follows its events until
+    // it ends or `TRITON_A2A_STREAM_MAX_SECS` passes (then the client
+    // resubscribes with `tasks/resubscribe`).
+    let (_rec, rx) =
+        match crate::a2a_v1::start_task(&state, &principal, &text, &context_id, overrides) {
+            Ok(x) => x,
+            Err(e) => return rpc_error(&req.id, INTERNAL_ERROR, e.message()),
+        };
+    let deadline = tokio::time::Instant::now() + state.a2a.task_settings.stream_max;
+    // F4: a reader that falls behind the broadcast loses token deltas; the
+    // final artifact then carries the whole reply (append: false).
+    let lagged = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let lagged_rx = lagged.clone();
+    let events = futures::stream::unfold((rx, false), move |(mut rx, ended)| {
+        let lagged_rx = lagged_rx.clone();
+        async move {
+            use crate::tasks::TaskEvent as T;
+            use triton_core::stream::StreamEvent as S;
+            if ended {
+                return None;
+            }
+            loop {
+                let ev = match tokio::time::timeout_at(deadline, rx.recv()).await {
+                    Err(_) | Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                        return None;
+                    }
+                    Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                        lagged_rx.store(true, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                    Ok(Ok(ev)) => ev,
+                };
+                let terminal = ev.is_terminal();
+                let out = match ev {
+                    T::Token(t) => S::Token(t),
+                    T::Progress(p) => S::Progress(json!({ "text": p.text, "step": p.step })),
+                    T::Async { .. } => continue,
+                    T::Done(v) => S::Done(v),
+                    // The rendered text rides the error; the frame below
+                    // shows it as it is (`USER_TEXT`).
+                    T::Failed { class, message } => S::error_with_detail(
+                        triton_core::TritonError::Tool(crate::tasks::user_text(&class, &message)),
+                        USER_TEXT,
+                    ),
+                };
+                return Some((out, (rx, terminal)));
+            }
         }
-    };
+    });
 
-    let tasks = state.a2a.tasks.clone();
     let task_id = trace_id.clone();
     let rpc = move |result: Value| serde_json::json!({ "jsonrpc": "2.0", "id": rpc_id.clone(), "result": result });
     let initial = rpc(json!({
@@ -870,8 +945,8 @@ async fn message_stream(
             let ctx_for_frames = ctx_for_frames.clone();
             let artifact_id = artifact_id.clone();
             let a2ui_artifact_id = a2ui_artifact_id.clone();
-            let tasks = tasks.clone();
             let streamed = streamed.clone();
+            let lagged = lagged.clone();
             let vega_dispatcher = vega_dispatcher.clone();
             let vega_principal = vega_principal.clone();
             let vega_overrides = vega_overrides.clone();
@@ -890,7 +965,28 @@ async fn message_stream(
                             },
                         }))]
                     }
-                    triton_core::stream::StreamEvent::Tool(_) => Vec::new(),
+                    triton_core::stream::StreamEvent::Progress(p) => {
+                        // A real step, as a non-final working status
+                        // (mock 1j: status lines, replaced by the answer).
+                        let text = p.get("text").and_then(Value::as_str).unwrap_or("");
+                        let mut update = json!({
+                            "kind": "status-update",
+                            "taskId": task_for_frames,
+                            "contextId": ctx_for_frames,
+                            "status": { "state": "working", "message": {
+                                "kind": "message", "role": "agent",
+                                "messageId": uuid::Uuid::new_v4().to_string(),
+                                "parts": [{ "kind": "text", "text": text }],
+                            } },
+                            "final": false,
+                        });
+                        if let Some(step) = p.get("step").and_then(Value::as_str) {
+                            update["metadata"] = json!({ "step": step });
+                        }
+                        vec![rpc_frames(update)]
+                    }
+                    triton_core::stream::StreamEvent::Tool(_)
+                    | triton_core::stream::StreamEvent::Task(_) => Vec::new(),
                     triton_core::stream::StreamEvent::Done(v) => {
                         let mut v = v;
                         // Expand a report into a native interactive VegaChart
@@ -902,14 +998,11 @@ async fn message_stream(
                             &vega_overrides,
                         )
                         .await;
-                        let did_stream = streamed.load(Ordering::Relaxed);
+                        // The runner already recorded the task; only the frames
+                        // remain. A lagged reader missed deltas: resend whole.
+                        let did_stream =
+                            streamed.load(Ordering::Relaxed) && !lagged.load(Ordering::Relaxed);
                         let reply = reply_text(&v);
-                        tasks.record_entry(
-                            &task_for_frames,
-                            TaskState::Completed,
-                            Some(&reply),
-                            None,
-                        );
                         // Keep the prose and A2UI as separate artifacts. Token
                         // deltas append to the prose artifact; putting A2UI in
                         // its last chunk makes clients merge structured parts
@@ -977,13 +1070,13 @@ async fn message_stream(
                         })));
                         frames
                     }
-                    triton_core::stream::StreamEvent::Error { error, .. } => {
-                        tasks.record_entry(
-                            &task_for_frames,
-                            TaskState::Failed,
-                            None,
-                            Some(&error.to_string()),
-                        );
+                    triton_core::stream::StreamEvent::Error { error, detail } => {
+                        tracing::warn!(task = %task_for_frames, error = %error, "a2a message/stream failed");
+                        let text = if detail == Some(USER_TEXT) {
+                            error.message()
+                        } else {
+                            crate::tasks::error_notice(&error)
+                        };
                         vec![rpc_frames(json!({
                             "kind": "status-update",
                             "taskId": task_for_frames,
@@ -991,7 +1084,7 @@ async fn message_stream(
                             "status": { "state": "failed", "message": {
                                 "kind": "message", "role": "agent",
                                 "messageId": uuid::Uuid::new_v4().to_string(),
-                                "parts": [{ "kind": "text", "text": error.to_string() }],
+                                "parts": [{ "kind": "text", "text": text }],
                             } },
                             "final": true,
                         }))]
@@ -1212,7 +1305,7 @@ pub(crate) fn sources_markdown(result: &Value) -> Option<String> {
     (!links.is_empty()).then(|| format!("Sources: {}", links.join(" · ")))
 }
 
-pub(crate) fn reply_text(result: &Value) -> String {
+pub fn reply_text(result: &Value) -> String {
     for key in ["text", "message", "answer"] {
         if let Some(s) = result.get(key).and_then(Value::as_str) {
             return s.to_string();
@@ -1291,70 +1384,13 @@ fn tasks_get(
     let Some(id) = req.params.get("id").and_then(Value::as_str) else {
         return rpc_error(&req.id, INVALID_PARAMS, "params.id is required");
     };
-    // #306 crew F1: a task id IS a trace_id, and the store keyed on it
-    // alone — so naming another tenant's id returned their dispatch
-    // answer. That is the same pivot `/v1/trace` closes, one surface
-    // over, and it needed no out-of-band knowledge: ids come back in
-    // every `message/send` reply.
-    //
-    // The rule is `/v1/trace`'s, deliberately: the caller must have at
-    // least one VISIBLE audit entry for this trace, which means a step of
-    // it ran under their tenant. Reusing it rather than recording an
-    // owner on `TaskEntry` keeps one answer to "may this caller see this
-    // trace" instead of two that can drift — and it covers tasks created
-    // through either face of the adapter without touching seven
-    // `record_entry` call sites.
-    if !crate::rest::may_read_trace(principal, &state.a2a.audit_operators, state.a2a.env(), id) {
-        // NOT_FOUND rather than a refusal: ids must stay unenumerable, so
-        // "someone else's task" and "no such task" have to look identical.
-        return rpc_error(&req.id, TASK_NOT_FOUND, "task not found");
-    }
-    if let Err(e) = state
-        .a2a
-        .dispatcher
-        .deny_if_revoked(principal, "tasks/get", "a2a")
-    {
-        return rpc_error(&req.id, INTERNAL_ERROR, e.to_string());
-    }
-    match state.a2a.tasks.entry(id) {
-        Some(entry) => {
-            let st = entry.state.unwrap_or(TaskState::Submitted);
-            let mut task = json!({
-                "kind": "task",
-                "id": id,
-                "status": { "state": match st {
-                    TaskState::Submitted => "submitted",
-                    TaskState::Working => "working",
-                    TaskState::Completed => "completed",
-                    TaskState::Failed => "failed",
-                } },
-            });
-            // Completed: the stored (clamped) reply rides as an
-            // artifact — this is what makes a disconnected
-            // `message/send` recoverable by polling.
-            if st == TaskState::Completed
-                && let Some(result) = &entry.result
-            {
-                task["artifacts"] = json!([{
-                    "artifactId": uuid::Uuid::new_v4().to_string(),
-                    "parts": [{ "kind": "text", "text": result }],
-                }]);
-            }
-            if st == TaskState::Failed
-                && let Some(error) = &entry.error
-            {
-                task["status"]["message"] = json!({
-                    "kind": "message", "role": "agent",
-                    "messageId": uuid::Uuid::new_v4().to_string(),
-                    "parts": [{ "kind": "text", "text": error }],
-                });
-            }
-            rpc_ok(&req.id, task)
-        }
-        // The store is bounded and restart-clean, so "not found" also
-        // covers "evicted" and "from a previous process". A caller
-        // cannot distinguish those, and the spec has one code for it.
-        None => rpc_error(&req.id, TASK_NOT_FOUND, format!("no task `{id}`")),
+    // #306 crew F1: a task id IS a trace id; only its owner (or a caller
+    // with a visible audit entry for the trace, as for `/v1/trace`) reads
+    // it, and "someone else's task" looks exactly like "no such task".
+    // A task left working by a previous process is resumed here.
+    match crate::a2a_v1::readable_live(&state.a2a, principal, id) {
+        Ok((rec, _)) => rpc_ok(&req.id, crate::a2a_v1::task_v03(&rec)),
+        Err(e) => crate::a2a_v1::rpc_error_v03(&req.id, &e),
     }
 }
 

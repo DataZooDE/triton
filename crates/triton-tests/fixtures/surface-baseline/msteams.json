@@ -5,6 +5,7 @@
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "actions": [
           {
+            "associatedInputs": "none",
             "data": {
               "ct": "<redacted>"
             },
@@ -13,6 +14,7 @@
             "verb": "agentAction"
           },
           {
+            "associatedInputs": "none",
             "data": {
               "ct": "<redacted>"
             },
@@ -21,6 +23,7 @@
             "verb": "agentAction"
           },
           {
+            "associatedInputs": "none",
             "data": {
               "ct": "<redacted>"
             },
@@ -29,6 +32,7 @@
             "verb": "agentAction"
           },
           {
+            "associatedInputs": "none",
             "data": {
               "ct": "<redacted>"
             },

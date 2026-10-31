@@ -427,7 +427,22 @@ fn coerce(field: &FormField, raw: &str) -> Result<Value, String> {
         return Ok(Value::Null);
     }
     match field.kind {
-        FormFieldKind::String => Ok(Value::String(raw.to_string())),
+        FormFieldKind::String | FormFieldKind::Text => Ok(Value::String(raw.to_string())),
+        // A select answer must be one of the options (by value or label).
+        FormFieldKind::Select => field
+            .options
+            .iter()
+            .find(|o| o.value.eq_ignore_ascii_case(raw) || o.label.eq_ignore_ascii_case(raw))
+            .map(|o| Value::String(o.value.clone()))
+            .ok_or_else(|| {
+                let opts: Vec<&str> = field.options.iter().map(|o| o.label.as_str()).collect();
+                format!(
+                    "expected one of {} for `{}`, got `{}`.",
+                    opts.join(", "),
+                    field.label,
+                    clip(raw, 32)
+                )
+            }),
         FormFieldKind::Integer => match raw.parse::<i64>() {
             Ok(n) => Ok(Value::from(n)),
             Err(_) => Err(format!(
@@ -526,6 +541,8 @@ mod tests {
             label: label.into(),
             kind,
             required,
+            options: Vec::new(),
+            style: Default::default(),
         }
     }
 

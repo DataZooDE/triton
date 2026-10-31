@@ -1,0 +1,10 @@
+3 drafts ready for review
+1. New: Agent "Planning preparation"
+2. New: Agent "Planning approval"
+3. Change: Agent 21 → Retired
+
+ⓘ From: "Split the planning Agent into preparation and approval."
+
+ⓘ Assumed: both new Agents keep owner Head of Production Planning.
+
+Review all 3: https://app.example.com/acme/review/c/7Q2K

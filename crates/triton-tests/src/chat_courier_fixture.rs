@@ -511,6 +511,17 @@ pub struct FakeBotFramework {
 
 struct FakeBotFrameworkState {
     captured: Mutex<Vec<CapturedActivity>>,
+    /// `updateActivity` calls (`PUT …/activities/{activityId}`).
+    updates: Mutex<Vec<CapturedUpdate>>,
+    /// Status the `PUT` route answers with. Default 200.
+    update_status: Mutex<u16>,
+    /// Hold every `PUT` this long before answering (it is captured on
+    /// arrival) — a process killed meanwhile never learns it landed.
+    update_delay: Mutex<std::time::Duration>,
+    /// Conversation members by the id they are looked up with
+    /// (`GET …/members/{memberId}`), and how often that was asked.
+    members: Mutex<std::collections::HashMap<String, Value>>,
+    member_lookups: Mutex<Vec<String>>,
     /// Raw form bodies POSTed to the token endpoint, so a test can
     /// assert WHICH grant the client used (client_secret vs
     /// client_assertion) rather than only that a token came back.
@@ -543,6 +554,11 @@ impl FakeBotFramework {
 
         let state = Arc::new(FakeBotFrameworkState {
             captured: Mutex::new(Vec::new()),
+            updates: Mutex::new(Vec::new()),
+            update_status: Mutex::new(200),
+            update_delay: Mutex::new(std::time::Duration::ZERO),
+            members: Mutex::new(std::collections::HashMap::new()),
+            member_lookups: Mutex::new(Vec::new()),
             token_requests: Mutex::new(Vec::new()),
             access_token: access_token.to_string(),
             activity_status: Mutex::new(200),
@@ -601,7 +617,15 @@ impl FakeBotFramework {
             )
             .route(
                 "/v3/conversations/{conversation_id}/activities",
-                post(handle_activity_post).with_state(activities_state),
+                post(handle_activity_post).with_state(activities_state.clone()),
+            )
+            .route(
+                "/v3/conversations/{conversation_id}/activities/{activity_id}",
+                axum::routing::put(handle_activity_put).with_state(activities_state.clone()),
+            )
+            .route(
+                "/v3/conversations/{conversation_id}/members/{member_id}",
+                axum::routing::get(handle_member_get).with_state(activities_state),
             );
 
         tokio::spawn(async move {
@@ -657,9 +681,93 @@ impl FakeBotFramework {
         self.state.captured.lock().unwrap().clone()
     }
 
+    /// Hold `updateActivity` answers for `delay` from now on.
+    pub fn set_update_delay(&self, delay: std::time::Duration) {
+        *self.state.update_delay.lock().unwrap() = delay;
+    }
+
+    /// Make `updateActivity` answer `status` from now on.
+    pub fn set_update_status(&self, status: u16) {
+        *self.state.update_status.lock().unwrap() = status;
+    }
+
+    /// Serve `member` (a `TeamsChannelAccount`) for `GET
+    /// …/members/{member_id}`.
+    pub fn add_member(&self, member_id: &str, member: Value) {
+        self.state
+            .members
+            .lock()
+            .unwrap()
+            .insert(member_id.to_string(), member);
+    }
+
+    /// The member ids looked up, in order.
+    pub fn member_lookups(&self) -> Vec<String> {
+        self.state.member_lookups.lock().unwrap().clone()
+    }
+
+    /// Every `updateActivity` (`PUT …/activities/{id}`) the fixture saw.
+    pub fn updates(&self) -> Vec<CapturedUpdate> {
+        self.state.updates.lock().unwrap().clone()
+    }
+
     /// Raw form bodies seen at the token endpoint, in order.
     pub fn token_requests(&self) -> Vec<String> {
         self.state.token_requests.lock().unwrap().clone()
+    }
+}
+
+/// One captured `updateActivity`: the Bot Connector's
+/// `PUT /v3/conversations/{conversationId}/activities/{activityId}`.
+#[derive(Debug, Clone)]
+pub struct CapturedUpdate {
+    pub conversation_id: String,
+    pub activity_id: String,
+    pub bearer: String,
+    pub body: Value,
+}
+
+async fn handle_activity_put(
+    axum::extract::State(state): axum::extract::State<Arc<FakeBotFrameworkState>>,
+    axum::extract::Path((conversation_id, activity_id)): axum::extract::Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<Value>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    state.updates.lock().unwrap().push(CapturedUpdate {
+        conversation_id,
+        activity_id: activity_id.clone(),
+        bearer,
+        body,
+    });
+    let delay = *state.update_delay.lock().unwrap();
+    if !delay.is_zero() {
+        tokio::time::sleep(delay).await;
+    }
+    let status = *state.update_status.lock().unwrap();
+    let code = axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::OK);
+    (code, Json(json!({ "id": activity_id }))).into_response()
+}
+
+async fn handle_member_get(
+    axum::extract::State(state): axum::extract::State<Arc<FakeBotFrameworkState>>,
+    axum::extract::Path((_conversation_id, member_id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    state.member_lookups.lock().unwrap().push(member_id.clone());
+    let member = state.members.lock().unwrap().get(&member_id).cloned();
+    match member {
+        Some(m) => Json(m).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(json!({ "error": { "code": "MemberNotFoundInConversation" } })),
+        )
+            .into_response(),
     }
 }
 

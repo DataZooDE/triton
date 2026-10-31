@@ -1,0 +1,58 @@
+{
+  "_mock_item": "1n Object card: one Agent (Teams / A2UI); Request a change opens 1o",
+  "surface": {
+    "components": [
+      {
+        "kind": "key_value",
+        "title": "Agent 28 · Planned",
+        "pairs": [
+          {
+            "label": "Capability",
+            "value": "Commercial & service › Sales: Forecast"
+          },
+          {
+            "label": "Owner",
+            "value": "Data Protection Officer"
+          },
+          {
+            "label": "AI Act class",
+            "value": "Minimal"
+          },
+          {
+            "label": "Depends on",
+            "value": "Customer master, Pricing API"
+          },
+          {
+            "label": "Open drafts",
+            "value": "none"
+          }
+        ]
+      },
+      {
+        "kind": "button",
+        "label": "Request a change",
+        "primary": true,
+        "action": {
+          "type": "send_message",
+          "text": "Change Agent 28"
+        }
+      },
+      {
+        "kind": "button",
+        "label": "Dependencies",
+        "action": {
+          "type": "send_message",
+          "text": "What does Agent 28 depend on?"
+        }
+      },
+      {
+        "kind": "button",
+        "label": "Open in the portfolio",
+        "action": {
+          "type": "open_url",
+          "url": "https://app.example.com/acme/open?object=agent%3Aagent-28"
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,477 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "text": "Operations · 8 Agents · 9 capabilities",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "targetElements": [
+            "node-5",
+            "node-13",
+            "node-17",
+            "node-21"
+          ],
+          "title": "Only gaps",
+          "type": "Action.ToggleVisibility"
+        }
+      ],
+      "type": "ActionSet"
+    },
+    {
+      "id": "node-1",
+      "items": [
+        {
+          "columns": [
+            {
+              "items": [
+                {
+                  "id": "open-3",
+                  "isVisible": true,
+                  "text": "▾",
+                  "type": "TextBlock"
+                },
+                {
+                  "id": "closed-4",
+                  "isVisible": false,
+                  "text": "▸",
+                  "type": "TextBlock"
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            },
+            {
+              "items": [
+                {
+                  "color": "Default",
+                  "text": "Logistics",
+                  "type": "TextBlock",
+                  "weight": "Default",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "stretch"
+            },
+            {
+              "items": [
+                {
+                  "isSubtle": true,
+                  "text": "2 Agents",
+                  "type": "TextBlock",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            }
+          ],
+          "selectAction": {
+            "targetElements": [
+              "kids-2",
+              "open-3",
+              "closed-4"
+            ],
+            "type": "Action.ToggleVisibility"
+          },
+          "type": "ColumnSet"
+        },
+        {
+          "id": "kids-2",
+          "isVisible": true,
+          "items": [
+            {
+              "columns": [
+                {
+                  "items": [],
+                  "type": "Column",
+                  "width": "12px"
+                },
+                {
+                  "items": [
+                    {
+                      "id": "node-5",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "id": "open-7",
+                                  "isVisible": false,
+                                  "text": "▾",
+                                  "type": "TextBlock"
+                                },
+                                {
+                                  "id": "closed-8",
+                                  "isVisible": true,
+                                  "text": "▸",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Forecast",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "targetElements": [
+                              "kids-6",
+                              "open-7",
+                              "closed-8"
+                            ],
+                            "type": "Action.ToggleVisibility"
+                          },
+                          "type": "ColumnSet"
+                        },
+                        {
+                          "id": "kids-6",
+                          "isVisible": false,
+                          "items": [
+                            {
+                              "columns": [
+                                {
+                                  "items": [],
+                                  "type": "Column",
+                                  "width": "12px"
+                                },
+                                {
+                                  "items": [
+                                    {
+                                      "actions": [
+                                        {
+                                          "associatedInputs": "none",
+                                          "data": {
+                                            "ct": "__send_message|{\"m\":\"Show Agent 26\"}"
+                                          },
+                                          "title": "Agent 26 · In delivery",
+                                          "type": "Action.Execute",
+                                          "verb": "agentAction"
+                                        }
+                                      ],
+                                      "type": "ActionSet"
+                                    }
+                                  ],
+                                  "type": "Column",
+                                  "width": "stretch"
+                                }
+                              ],
+                              "type": "ColumnSet"
+                            }
+                          ],
+                          "spacing": "None",
+                          "type": "Container"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-9",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "text": "•",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Warning",
+                                  "text": "Monitor",
+                                  "type": "TextBlock",
+                                  "weight": "Bolder",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "associatedInputs": "none",
+                            "data": {
+                              "ct": "__send_message|{\"m\":\"Propose an Agent for Logistics: Monitor\"}"
+                            },
+                            "title": "none · propose",
+                            "type": "Action.Execute",
+                            "verb": "agentAction"
+                          },
+                          "type": "ColumnSet"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    },
+                    {
+                      "id": "node-13",
+                      "items": [
+                        {
+                          "columns": [
+                            {
+                              "items": [
+                                {
+                                  "id": "open-15",
+                                  "isVisible": false,
+                                  "text": "▾",
+                                  "type": "TextBlock"
+                                },
+                                {
+                                  "id": "closed-16",
+                                  "isVisible": true,
+                                  "text": "▸",
+                                  "type": "TextBlock"
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "auto"
+                            },
+                            {
+                              "items": [
+                                {
+                                  "color": "Default",
+                                  "text": "Schedule",
+                                  "type": "TextBlock",
+                                  "weight": "Default",
+                                  "wrap": true
+                                }
+                              ],
+                              "type": "Column",
+                              "width": "stretch"
+                            }
+                          ],
+                          "selectAction": {
+                            "targetElements": [
+                              "kids-14",
+                              "open-15",
+                              "closed-16"
+                            ],
+                            "type": "Action.ToggleVisibility"
+                          },
+                          "type": "ColumnSet"
+                        },
+                        {
+                          "id": "kids-14",
+                          "isVisible": false,
+                          "items": [
+                            {
+                              "columns": [
+                                {
+                                  "items": [],
+                                  "type": "Column",
+                                  "width": "12px"
+                                },
+                                {
+                                  "items": [
+                                    {
+                                      "actions": [
+                                        {
+                                          "associatedInputs": "none",
+                                          "data": {
+                                            "ct": "__send_message|{\"m\":\"Show Agent 14\"}"
+                                          },
+                                          "title": "Agent 14 · Planned",
+                                          "type": "Action.Execute",
+                                          "verb": "agentAction"
+                                        }
+                                      ],
+                                      "type": "ActionSet"
+                                    }
+                                  ],
+                                  "type": "Column",
+                                  "width": "stretch"
+                                }
+                              ],
+                              "type": "ColumnSet"
+                            }
+                          ],
+                          "spacing": "None",
+                          "type": "Container"
+                        }
+                      ],
+                      "spacing": "Small",
+                      "type": "Container"
+                    }
+                  ],
+                  "type": "Column",
+                  "width": "stretch"
+                }
+              ],
+              "type": "ColumnSet"
+            }
+          ],
+          "spacing": "None",
+          "type": "Container"
+        }
+      ],
+      "spacing": "Small",
+      "type": "Container"
+    },
+    {
+      "id": "node-17",
+      "items": [
+        {
+          "columns": [
+            {
+              "items": [
+                {
+                  "text": "•",
+                  "type": "TextBlock"
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            },
+            {
+              "items": [
+                {
+                  "color": "Default",
+                  "text": "Planning",
+                  "type": "TextBlock",
+                  "weight": "Default",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "stretch"
+            },
+            {
+              "items": [
+                {
+                  "isSubtle": true,
+                  "text": "3 Agents",
+                  "type": "TextBlock",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            }
+          ],
+          "type": "ColumnSet"
+        }
+      ],
+      "spacing": "Small",
+      "type": "Container"
+    },
+    {
+      "id": "node-21",
+      "items": [
+        {
+          "columns": [
+            {
+              "items": [
+                {
+                  "text": "•",
+                  "type": "TextBlock"
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            },
+            {
+              "items": [
+                {
+                  "color": "Default",
+                  "text": "Production",
+                  "type": "TextBlock",
+                  "weight": "Default",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "stretch"
+            },
+            {
+              "items": [
+                {
+                  "isSubtle": true,
+                  "text": "3 Agents · 1 proposed capability",
+                  "type": "TextBlock",
+                  "wrap": true
+                }
+              ],
+              "type": "Column",
+              "width": "auto"
+            }
+          ],
+          "type": "ColumnSet"
+        }
+      ],
+      "spacing": "Small",
+      "type": "Container"
+    },
+    {
+      "actions": [
+        {
+          "data": {
+            "ct": "__open_embed|{\"t\":\"Expand map ⤢\",\"u\":\"https://app.example.com/acme/open?view=capability-map&domain=operations&embed=1\"}",
+            "msteams": {
+              "type": "task/fetch"
+            }
+          },
+          "title": "Expand map ⤢",
+          "type": "Action.Submit"
+        }
+      ],
+      "type": "ActionSet"
+    },
+    {
+      "text": "Ask next",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "associatedInputs": "none",
+          "data": {
+            "ct": "__send_message|{\"m\":\"Which Operations Agents have no owner?\"}"
+          },
+          "title": "Operations Agents without owner",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        },
+        {
+          "associatedInputs": "none",
+          "data": {
+            "ct": "__send_message|{\"m\":\"Which data products does Operations need?\"}"
+          },
+          "title": "Data products Operations needs",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

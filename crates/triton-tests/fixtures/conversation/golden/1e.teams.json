@@ -1,0 +1,70 @@
+{
+  "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+  "body": [
+    {
+      "text": "3 match \"Agent 2\". Nothing was changed yet.",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "text": "Which Agent should be retired?",
+      "type": "TextBlock",
+      "weight": "Bolder",
+      "wrap": true
+    },
+    {
+      "choices": [
+        {
+          "title": "Agent 2 · Requirements: Forecast · Assessed",
+          "value": "Agent 2"
+        },
+        {
+          "title": "Agent 20 · Design: Monitor · Deployed",
+          "value": "Agent 20"
+        },
+        {
+          "title": "Agent 28 · Sales: Forecast · Planned",
+          "value": "Agent 28"
+        }
+      ],
+      "id": "t1.agent",
+      "isRequired": true,
+      "label": "Agent",
+      "style": "expanded",
+      "type": "Input.ChoiceSet"
+    },
+    {
+      "id": "t1.reason",
+      "isMultiline": false,
+      "isRequired": false,
+      "label": "Reason (optional)",
+      "placeholder": "e.g. replaced by Agent 31",
+      "type": "Input.Text"
+    },
+    {
+      "isSubtle": true,
+      "size": "Small",
+      "text": "Will be sent as: Retire the agent \"‹Agent›\". Reason: ‹Reason (optional)›",
+      "type": "TextBlock",
+      "wrap": true
+    },
+    {
+      "actions": [
+        {
+          "data": {
+            "ct": "__send_message|{\"tpl\":\"Retire the agent \\\"{t1.agent}\\\".[[ Reason: {t1.reason}]]\"}"
+          },
+          "title": "Retire as draft",
+          "type": "Action.Execute",
+          "verb": "agentAction"
+        }
+      ],
+      "type": "ActionSet"
+    }
+  ],
+  "msteams": {
+    "width": "Full"
+  },
+  "type": "AdaptiveCard",
+  "version": "1.4"
+}

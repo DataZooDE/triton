@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+pub mod async_agent_fixture;
 pub mod chat_courier_fixture;
 pub mod discord_gateway_fixture;
 mod oidc_fixture;

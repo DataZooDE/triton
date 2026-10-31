@@ -16,6 +16,8 @@ base64 = "0.22"
 jsonwebtoken = "9"
 reqwest = { workspace = true }
 serde = { workspace = true }
+# Hashes Google access tokens for the userinfo hosted-domain cache key.
+sha2 = "0.10"
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

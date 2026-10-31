@@ -32,6 +32,13 @@ pub enum StreamEvent {
     Tool(Value),
     /// An incremental token delta from the upstream LLM.
     Token(String),
+    /// The upstream went asynchronous (upstream contract §7): the
+    /// call is now a long-running task with this upstream id,
+    /// `{"task_id": "…", "check_after_seconds"?: n}`. Not terminal.
+    Task(Value),
+    /// Human-readable progress of a long-running task,
+    /// `{"text": "…", "step"?: "…"}`. Not terminal.
+    Progress(Value),
     /// Terminal success — carries the tool result (or, after the A2UI
     /// layer wraps it, the built envelope).
     Done(Value),
@@ -86,6 +93,8 @@ impl StreamEvent {
         match self {
             Self::Tool(_) => "tool",
             Self::Token(_) => "token",
+            Self::Task(_) => "task",
+            Self::Progress(_) => "progress",
             Self::Done(_) => "done",
             Self::Error { .. } => "error",
         }
@@ -99,7 +108,7 @@ impl StreamEvent {
     /// The `data:` payload as a JSON value.
     pub fn data(&self) -> Value {
         match self {
-            Self::Tool(v) | Self::Done(v) => v.clone(),
+            Self::Tool(v) | Self::Done(v) | Self::Task(v) | Self::Progress(v) => v.clone(),
             Self::Token(delta) => json!({ "delta": delta }),
             Self::Error { error, .. } => {
                 json!({ "error": error.class(), "message": error.to_string() })
@@ -132,6 +141,8 @@ impl StreamEvent {
                 Self::Token(delta)
             }
             "done" => Self::Done(parse_value(data)),
+            "task" => Self::Task(parse_value(data)),
+            "progress" => Self::Progress(parse_value(data)),
             "error" => {
                 // An upstream error frame is, from Triton's vantage, a
                 // Tool fault regardless of the upstream's own class.

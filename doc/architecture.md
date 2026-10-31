@@ -398,6 +398,17 @@ every credential field is resolved against Vault (NFR-S-5), and
 the gateway refuses to start on any failure. The v0.1 "no config
 files" stance is superseded for the chat-channel surface area.
 
+**A2UI card actions (Gemini Enterprise).** Conversation-component actions
+(chips, row actions, template submits) are signed into the clicked
+component's id, so any replica resolves a click without a card store:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `TRITON_A2UI_ACTION_KEY` | unset → per-process random key, boot warns "single replica only" | Shared HMAC key for GE card actions (≥ 16 bytes; `new,old` rotates, first signs). **Every replica must carry the same value.** A malformed value fails boot (exit 2). Inject it as a secret, like the adapters' `correlation_key`. |
+| `TRITON_ALLOW_HTTP_LINK_HOSTS` | empty → only `https://` links | Comma-separated hosts whose plain `http://` links (deep links, sources, embeds) are kept on every channel, e.g. `127.0.0.1,localhost` for local end-to-end tests. Exact host match after URL parsing, any port. **Local only:** a non-empty value outside `TRITON_ENV=local` fails boot (exit 2). |
+| `TRITON_GE_OPEN_URL` | off | Render `open_url` actions as in-card `functionCall openUrl` buttons. Off until qualified live; links then ride the prose. |
+| `TRITON_GE_EMBED` | off | Render an `embed` as a Canvas + `IFrameUrl` surface; the framed host must be on GE's widget allowlist. Off: the embed's fallback renders inline. |
+
 ### 8.2 Logging vs audit
 
 Two distinct stdout channels (by JSON `kind` field, not separate
@@ -418,13 +429,26 @@ Four typed dispatcher errors translate per protocol:
 
 | Variant | REST status | A2A `metadata.error` | MCP JSON-RPC code |
 |---|---|---|---|
-| `Auth` | 401 | `"auth"` | `-32001` |
+| `Auth` | 401 | `"auth"` | `-32001`, on HTTP 401 |
 | `Validation` | 400 | `"validation"` | `-32602` (invalid params) |
 | `Tool` | 502 (or 504 on timeout, 503 on `circuit_open`) | `"tool"` | `-32000` (custom) |
 | `Provider` | 502 | `"provider"` | `-32000` |
 
 Adapters MUST NOT inspect the inner error message for status
 mapping; the variant alone determines protocol semantics.
+
+Every 401, on every face, carries an RFC 6750 challenge
+(`WWW-Authenticate: Bearer realm="triton"`, plus `error="invalid_token"`
+when a credential was sent but did not verify), added by the
+`identity::bearer_challenge` layer on each authenticated router. MCP
+answers an auth failure with HTTP 401 and keeps the JSON-RPC `-32001`
+body: MCP clients start their OAuth flow only on a 401 with that header.
+On a per-customer MCP path (`/mcp/<slug>`, ADR-22) the challenge also
+names the RFC 9728 metadata (`resource_metadata="…"`) and the `scope`;
+an Entra token without the delegated scope gets 403 with
+`error="insufficient_scope"` and the scope, on every face (ADR-22):
+`IdentityProvider::tag_rejection` marks that 403 and the
+`bearer_challenge` layer adds the challenge. Other 403s get none.
 
 ### 8.4 Threading and async
 
@@ -717,6 +741,10 @@ walkthrough at `doc/consumer-integration-tests.md`.
 | ADR-15 (v0.2) | **Two-record audit per chat-channel invocation, sharing one `trace_id`.** The dispatcher emits an `AuditPhase::Dispatch` record at receipt; the outbound courier emits an `AuditPhase::Post` record at platform-API response with `status ∈ {posted, retry, dropped}`. Signature rejections produce an `AuditPhase::Rejected` record before the dispatcher is reached. Schema otherwise identical to the v0.1 dispatcher / upstream pair. | Preserves audit symmetry across the async path: a single query keyed by `trace_id` returns the complete exchange. Verifies M-ASYNC-1. Supersedes the v0.1 FR-AU-1 wording that assumed exactly one inbound line + one upstream line per call. |
 | ADR-17 (v0.2) | **Agent-initiated proactive dispatch is a first-class HTTP surface (`POST /v1/outbound`, #95) gated by a dedicated OIDC audience.** Registered upstream agents send to a known principal outside any inbound turn; Triton resolves the target adapter's `OutboundCourier` (a `triton-core` trait each chat adapter implements), reusing the same surface mapper + courier + `record_post` audit as the inbound reply leg (ADR-6/ADR-15). The bearer MUST carry `TRITON_OUTBOUND_AUDIENCE` — a SEPARATE verifier from the trio's — so a token minted for one surface cannot drive the other. | Centralises platform credentials, template selection, and the audit pivot in Triton rather than pushing them into every agent. A single `OidcVerifier` validates one `aud`, so per-surface authorisation requires a second verifier, not a widened audience list. |
 | ADR-18 (v0.2) | **WhatsApp Cloud API is its own adapter kind (`whatsapp_cloud`, #94), distinct from the Baileys `whatsapp_web` socket.** Cloud adds `hmac256` inbound, the Graph `messages` courier, message **templates** (Triton owns selection: the agent hints a `category` + supplies `variables`, the manifest's `templates` map names the Meta-approved template), and interactive buttons/lists. A per-recipient in-memory 24-hour service window (stamped on inbound, G-8) decides free-form vs template. | The two transports have different ToS, credentials, and capabilities; conflating them under one kind hid the distinction and blocked closed-set reasoning. Templates are required for proactive sends outside the service window (pairs with ADR-17). |
+| ADR-19 | **Spec A2A 0.3 and 1.0 on one endpoint in the binary.** `TRITON_A2A_PUBLIC_URL` + `TRITON_A2A_DEFAULT_TOOL` mount JSON-RPC (0.3 and 1.0) at the A2A endpoint and the 1.0 HTTP+JSON binding under `<endpoint>/v1`; `A2A-Version` (header or query) selects per request — absent or `0.3` → 0.3, `1.0` → 1.0, else `-32009` in the method's version's error form. `agent-card.json` is the 1.0 card, `agent.json` and the other spellings the 0.3 card; the card URL is configured, never derived. No multi-turn, no cancel, no push, no extended card. | Gemini Enterprise registered a 0.3.0 card and Copilot Studio documents 0.3 `message/send`, while 1.0 is the current protocol; one endpoint for both avoids two registrations and two task stores. Version translation lives in `a2a_v1.rs`, so the 0.3 face (A2UI parts, Vega expansion) keeps its exact behaviour. Gemini drops non-443 ports, so a bound socket address is never a valid card URL. |
+| ADR-20 | **Long-running upstream calls are tasks, persisted when configured.** An upstream may answer a streamed dispatch with `task`/`progress`/`done`/`error` (contract §7); a task runner per turn records state in a task store and broadcasts it to blocking sends, streams, `tasks/get` and resubscribes. A broken stream or a restart RESUMES the upstream task (`X-Triton-Task`), never re-files it. The store is SQLite at `TRITON_TASK_DB`, process memory when unset. | A run takes up to ~11 minutes; no client holds a connection that long and A2A expects `tasks/get` and resubscribe to work. **Deliberate exception to G-8 / "no on-disk state":** opt-in, one file, bounded rows (clamped text, TTL), and the deployment that sets it accepts a volume. Without it Triton stays restart-clean and an interrupted task fails with a "send it again" message. One shared instance (deployment decision) makes a local file sufficient; several replicas — or a blue/green overlap on one file — would need a shared store and a cross-process hub: revisit then. A task is its owner's (verified issuer + subject + tenant): no tenant-mate reads it, an audit operator reads it read-only, only the owner's read resumes it. |
+| ADR-21 | **Several inbound issuers in the binary, and the provider on the principal.** Beside `TRITON_OIDC_ISSUER`: Entra multi-tenant (`TRITON_ENTRA_AUDIENCE`, allow-listed `tid`s) and opaque Google access tokens by tokeninfo (`TRITON_GOOGLE_ACCESS_AUDIENCES`, required `TRITON_GOOGLE_ACCESS_ALLOWED_HD`; tokeninfo has no `hd` for an access token, so the hosted domain comes from OIDC userinfo, see `doc/google-access-tokens.md`). The principal carries `idp` (`google`/`entra`/`oidc`), `idp_tenant` (`hd`/`tid`) and `email`; forwarded only with `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL`. | One shared Triton fronts Gemini (Google), Copilot/Teams/MCP (Entra) for many customers; the upstream maps a person to a member by email within the allowed provider tenants, so it needs those three facts from a verified source, not from the request. Endpoint overrides exist for tests only and are refused outside `env=local`. |
+| ADR-22 | **One MCP path per customer, each an RFC 9728 protected resource (author decision 2026-10-31).** `TRITON_MCP_TENANTS=<slug>=<data tenant>:<tid>` serves `/mcp/<slug>` with metadata at `/.well-known/oauth-protected-resource/mcp/<slug>` naming `https://login.microsoftonline.com/<tid>/v2.0`; the 401 carries `resource_metadata`. A token there must be an Entra token from exactly that issuer and map to that data tenant; any other is 401 `invalid_token`. It must also carry the delegated scope in `scp`; an app-only token or a token for another permission gets 403 `insufficient_scope`. That scope rule holds for every Entra token on every face (REST, MCP, A2A 0.3/1.0), with `TRITON_ENTRA_SCOPES` as the one scope setting; there is no app-only access, and slugs stay readable (lead decisions 2026-10-31). Boot refuses a deployment `TRITON_OIDC_ISSUER` under the Entra authority alongside the routes. `/mcp` stays single-issuer. | Claude and ChatGPT find the authorization server only through protected resource metadata, and Entra has no issuer for "some customer". Entra v2 accepts the clients' RFC 8707 `resource` when it equals an Application ID URI, so no authorization-server facade is built; `doc/mcp-oauth-discovery.md` has the evidence, the deployment checklist and the contingency facade. |
 | ADR-16 | **The `pub` surface of `crates/triton-tests` is a supported consumer-facing API, not an internal test artifact.** Public items (`TritonProcess`, `TestIssuer`, `FakeConsul`, `FakeVault`, `FakeAgent`, chat-platform fakes) MUST go through one minor-version deprecation cycle — a `#[deprecated]` warning that compiles for one release — before removal or breaking signature change. The crate is consumed via git/path dependency inside DataZoo-internal workspaces; no crates.io publication is in scope. | FR-T-2 makes consumer integration tests a first-class requirement. Letting the harness surface drift freely under "it's just tests" cover would silently break every downstream app's CI on routine refactors and erode the App-author concern in §4 (requirements). A deprecation discipline is the cheapest way to keep the surface honest without a crates.io release engineering tax. |
 
 ## 10. Quality scenarios

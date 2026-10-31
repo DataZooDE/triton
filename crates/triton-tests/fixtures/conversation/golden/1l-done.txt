@@ -1,0 +1,9 @@
+**4 drafts ready for review**
+
+Request · done · 3:52
+✓ Found 4 Agents without an owner
+✓ Drafted proposals
+✓ Filed drafts for review
+[##########] 100 %
+
+Review all 4: https://app.example.com/acme/review/c/9H4P

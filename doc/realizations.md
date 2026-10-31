@@ -1557,6 +1557,41 @@ a trap the next developer should not have to step in.
   down, was posting to a dropped fake whose port this agent had reused.
   Assertions about "the first request the upstream saw" should select
   requests by a header every real dispatch carries, not by index.
+- **Validate configuration before binding a port.** The first
+  per-customer MCP route check (`TRITON_MCP_TENANTS`) ran after the
+  listeners were bound. A refused configuration then failed for the
+  wrong reason under the parallel suite (`AddrInUse` from a reused free
+  port) instead of naming the variable. Boot checks belong before the
+  first `TcpListener::bind`.
+- **An all-digit tenant id cannot test case handling.** The negative test
+  for an upper-case GUID in `iss` passed against code that accepted it,
+  because `11111111-…-555555555555` has no letters to upper-case. A
+  fixture id meant to exercise case must contain hex letters.
+- **Every Entra token needs the delegated scope, on every face (lead
+  decision 2026-10-31).** The multi-tenant Entra verifier refuses a token
+  whose `scp` holds none of the configured scopes (`TRITON_ENTRA_SCOPES`,
+  default `<audience>/access_as_user`, compared by last path segment) with
+  `Forbidden`. Every face answers 403, with `WWW-Authenticate: Bearer
+  realm="triton", error="insufficient_scope", scope="…"` where it has a
+  challenge layer: REST tools, plain and per-customer MCP, the Triton-shaped
+  A2A route, and spec A2A 0.3 and 1.0 (JSON-RPC and HTTP+JSON, where 1.0
+  says `PERMISSION_DENIED`). Before this, an app-only (client-credentials)
+  token from an allow-listed tenant (`roles`, no `scp`, no user) reached
+  the upstream, and only the upstream's email mapping stood in the way.
+  Decisions:
+  1. The check covers every Entra face, not only `/mcp/<slug>`.
+  2. There is no machine-to-machine (app-only) access, so no app-role
+     alternative.
+  3. Slugs stay readable; opaque slugs are a deployment option.
+
+  Google access tokens and the Teams bot identity are not Entra access
+  tokens and are unchanged. The embedding API's `oidc_entra_multitenant`
+  (a machine-caller pair) keeps no scope check, because `required_scopes`
+  stays empty there.
+
+  The marker matters: only a 403 tagged `InsufficientScope` by
+  `IdentityProvider::tag_rejection` gets the challenge. A revocation or
+  tenant-scoping 403 does not.
 
 ---
 
@@ -2268,3 +2303,85 @@ the inbound turn through both handoff paths and keep their reference values
 identical. Thread identity also has to reach the Chat create-message request
 with `messageReplyOption`, since a `thread` body field alone starts a new
 thread under the API's default option.
+
+### A task stream must not be a second dispatch (2026-10-31)
+
+The first idea for surviving a broken upstream stream was to retry the
+call. For a long-running agent that files a request, a retry files it
+twice. The upstream's `task` event is what makes recovery safe: once Triton
+has a task id it only ever RESUMES (`X-Triton-Task`), and a stream that
+breaks before `task` fails the call instead. The fake agent counts filed
+calls separately from resumes so tests can pin this.
+
+The `sse.rs` transport error now carries `status_detail:
+upstream_stream_transport`; without a detail a cut connection and an
+upstream `error` frame looked identical, and only the second must fail a
+task.
+
+### Spawned Teams typing raced the first card (2026-10-31)
+
+The group-chat typing ticker was a spawned loop whose first POST could run
+after the dispatch had already posted an asynchronous task's card. The
+first typing activity is now awaited before the dispatch; the ticker only
+repeats it.
+
+### Task ownership is not trace visibility (2026-10-31, crew review)
+
+`tasks/get` first reused `/v1/trace`'s rule, which admits any caller with a
+visible audit entry — including tenant-mates. With Entra tid → tenant
+mapping a tenant is a whole customer organisation, and a non-owner's read
+could even resume the upstream task under the reader's credentials. Owned
+records are now owner-only (issuer + sub + tenant; two generic issuers both
+used to collapse to `oidc`), operators read without resuming, and only
+ownerless legacy records keep the trace rule.
+
+### A stale snapshot must not write (2026-10-31, crew review)
+
+`ensure_running` read a record, then checked the hub. A runner that
+finished in between left a `working` snapshot with no live hub, and the
+reader failed or resumed a completed task. The claim now re-reads the store
+under the hub lock, every non-runner write is `update_running` (never
+touches a terminal row), and the hub entry is closed by a drop guard.
+
+### Known limits kept on purpose
+
+- No boot sweep: an orphaned task runs again only when its owner reads it.
+- (Resolved 2026-10-31, F8b) The runner moved to its own crate,
+  `triton-tasks`, so the Teams courier drives long turns through it: the
+  task record carries a `delivery` (conversation reference, card id,
+  sender) and Teams tasks are swept and resumed at boot.
+- The Teams email comes from the Bot Connector's get-member (cached per
+  tid + aadObjectId for an hour, a miss for five minutes); the first
+  message of a person pays one connector round-trip before dispatch.
+
+### The task DB is credential-bearing, and never shared (2026-10-31, F8b review)
+
+A stored Teams task carries where its answer goes: the conversation, the
+sender, and the Bot Connector service URL that will receive the bot's bearer
+token. Treat `TRITON_TASK_DB` (and its `-wal`/`-shm` files) like a secret:
+mode 0600, on the process's own volume, never shared and never copied off
+the host. Resume re-checks the service URL against the same host allow-list
+as the inbound path, re-derives the sender's scopes and tenant from the
+CURRENT manifest, and requires the rebuilt principal to own the task; a
+record that fails any of these is failed with a fixed message and nothing is
+posted.
+
+The task hub is per process. Two live processes on one DB file (a blue/green
+overlap, an RWX volume with replicas > 1) would both finish the same task.
+Until a lease column (instance id + heartbeat) exists, do not let two
+processes open the same file.
+
+### Execution state is not delivery state (2026-10-31, F8b review)
+
+The runner writes `completed` before the courier delivers, so a crash in
+between left a finished task that no sweep selected — its card stayed on
+"working". Delivery is now tracked apart (`delivery.delivered`, set after a
+2xx update or post); the boot sweep selects undelivered Teams rows whatever
+their execution state and renders the stored outcome (answer, failure by
+class, expiry) into the card. Delivery is at-least-once: an update in
+flight when the process died is sent again.
+
+Future note: when a channel courier and the runner both write a running task,
+make the store's read-modify-write atomic first (it is, since this review:
+one lock across get/change/put, terminal re-check inside it).
+

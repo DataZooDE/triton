@@ -96,6 +96,9 @@ enum AgentMode {
     ///   captured verbatim in `bodies_seen` so the relay can be asserted
     ///   byte-for-byte (C).
     McpApps,
+    /// Answer every tool call `404 {"error": "unknown tool"}` — an upstream
+    /// that does not serve the tool Triton routed to it.
+    NotFound,
 }
 
 impl FakeAgent {
@@ -159,6 +162,11 @@ impl FakeAgent {
     /// and `updateModelContext` off the `X-Triton-MCP` header (#143).
     pub async fn start_mcp_apps() -> Self {
         Self::start(AgentMode::McpApps, 0, None).await
+    }
+
+    /// Answer every tool call `404` (see [`AgentMode::NotFound`]).
+    pub async fn start_not_found() -> Self {
+        Self::start(AgentMode::NotFound, 0, None).await
     }
 
     async fn start(mode: AgentMode, fail_first: u32, fixed_response: Option<Value>) -> Self {
@@ -270,6 +278,8 @@ async fn handler(
             AgentMode::McpApps => Json(json!({
                 "tools": [{
                     "name": "render_report",
+                    "description": "Render a named report as an interactive view.",
+                    "annotations": { "readOnlyHint": true, "title": "Render report" },
                     "inputSchema": {
                         "type": "object",
                         "properties": { "report_id": { "type": "string" } },
@@ -314,7 +324,8 @@ async fn handler(
         | AgentMode::StreamingSurface
         | AgentMode::StreamingHang
         | AgentMode::StreamingSlowDrip
-        | AgentMode::McpApps => false,
+        | AgentMode::McpApps
+        | AgentMode::NotFound => false,
         AgentMode::AlwaysFail => true,
         AgentMode::FailingThenRecover => {
             let mut left = state.failures_remaining.lock().unwrap();
@@ -335,6 +346,11 @@ async fn handler(
     }
 
     match mode {
+        AgentMode::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "unknown tool" })),
+        )
+            .into_response(),
         AgentMode::Returning => {
             let body = state.fixed_response.clone().unwrap_or(Value::Null);
             Json(body).into_response()

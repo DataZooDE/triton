@@ -11,8 +11,7 @@
 //! (`task:get`, `task:cancel`) can plug in without touching the
 //! adapter signature. By construction, restart wipes the store.
 
-use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -31,129 +30,21 @@ use triton_core::{A2uiVersion, Dispatcher, TritonError, envelope};
 use crate::identity::IdentityProvider;
 use crate::rest::{sse_response, wants_sse};
 
-/// Upper bound on retained tasks. Every inbound A2A call records one
-/// entry; without a cap the map grows for the life of the process
-/// (Codex robustness review). Bounded FIFO: the oldest entries
-/// scroll off. Restart-clean by construction (G-8).
-const TASK_STORE_CAPACITY: usize = 1024;
+/// The task store and state now live in [`crate::tasks`]; these
+/// names keep the adapter's public surface.
+pub use crate::tasks::{TaskState, TaskStore};
 
-/// FR-A-7 task store. In-process memory; restart-clean by
-/// construction (G-8). The echo tool finishes synchronously, so
-/// every recorded task is immediately `Completed` or `Failed`.
-/// Bounded at [`TASK_STORE_CAPACITY`] with FIFO eviction.
-#[derive(Clone, Default)]
-pub struct InMemoryTaskStore {
-    inner: Arc<Mutex<TaskStoreInner>>,
-}
-
-#[derive(Default)]
-struct TaskStoreInner {
-    states: HashMap<String, TaskEntry>,
-    /// Insertion order of the keys in `states`, for FIFO eviction.
-    order: VecDeque<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TaskState {
-    /// #635 P6: recorded before the dispatch is spawned, so a client
-    /// polling immediately after `returnImmediately` sees the task.
-    Submitted,
-    /// The spawned dispatch is running.
-    Working,
-    Completed,
-    Failed,
-}
-
-/// One retained task: its lifecycle state plus — for `Completed` — the
-/// reply text, CLAMPED so a bounded store cannot become an unbounded
-/// result cache, and for `Failed` the error string. This is what makes
-/// `message/send` disconnect-safe: the answer survives the client
-/// hanging up and `tasks/get` returns it.
-#[derive(Debug, Clone, Default)]
-pub struct TaskEntry {
-    pub state: Option<TaskState>,
-    pub result: Option<String>,
-    pub error: Option<String>,
-}
-
-/// Cap on the stored reply text per task — mirrors the chat adapters'
-/// text ceilings; the full result was already delivered to any client
-/// that stayed connected.
-const TASK_RESULT_MAX_BYTES: usize = 32 * 1024;
-
-fn clamp_result(s: &str) -> String {
-    if s.len() <= TASK_RESULT_MAX_BYTES {
-        return s.to_string();
-    }
-    let mut cut = TASK_RESULT_MAX_BYTES;
-    while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}…", &s[..cut])
-}
-
-impl InMemoryTaskStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn get(&self, trace_id: &str) -> Option<TaskState> {
-        self.inner
-            .lock()
-            .unwrap()
-            .states
-            .get(trace_id)
-            .and_then(|e| e.state)
-    }
-
-    /// The full entry (state + stored result/error), for `tasks/get`.
-    pub fn entry(&self, trace_id: &str) -> Option<TaskEntry> {
-        self.inner.lock().unwrap().states.get(trace_id).cloned()
-    }
-
-    /// `pub(crate)` rather than private: the spec-A2A facade in
-    /// `a2a_spec` records into the SAME store, so `tasks/get` answers
-    /// for a task created by either face of the adapter. Still not part
-    /// of the public API — nothing outside this crate writes task state.
-    pub(crate) fn record(&self, trace_id: &str, state: TaskState) {
-        self.record_entry(trace_id, state, None, None);
-    }
-
-    /// Record a terminal state WITH its payload (clamped result text on
-    /// Completed, error string on Failed).
-    pub(crate) fn record_entry(
-        &self,
-        trace_id: &str,
-        state: TaskState,
-        result: Option<&str>,
-        error: Option<&str>,
-    ) {
-        let mut g = self.inner.lock().unwrap();
-        let is_new = !g.states.contains_key(trace_id);
-        let entry = g.states.entry(trace_id.to_string()).or_default();
-        entry.state = Some(state);
-        if let Some(r) = result {
-            entry.result = Some(clamp_result(r));
-        }
-        if let Some(e) = error {
-            entry.error = Some(clamp_result(e));
-        }
-        if is_new {
-            g.order.push_back(trace_id.to_string());
-            while g.order.len() > TASK_STORE_CAPACITY {
-                if let Some(old) = g.order.pop_front() {
-                    g.states.remove(&old);
-                }
-            }
-        }
-    }
-}
+/// The historical name of the store: process memory by default.
+pub type InMemoryTaskStore = TaskStore;
 
 #[derive(Clone)]
 pub struct A2aState {
     pub dispatcher: Arc<Dispatcher>,
-    pub tasks: InMemoryTaskStore,
+    pub tasks: TaskStore,
+    /// Live tasks of this process.
+    pub hub: crate::tasks::TaskHub,
+    /// Block, stream and task limits.
+    pub task_settings: Arc<crate::tasks::TaskSettings>,
     pub identity: Arc<IdentityProvider>,
     /// #306 crew F1: `tasks/get` answers on a trace id, so it needs the
     /// same tenant-scoping inputs `/v1/trace` uses. Parsed once at boot,
@@ -167,12 +58,24 @@ impl A2aState {
     pub fn env(&self) -> &str {
         self.dispatcher.env()
     }
+
+    /// The runner that drives this state's long-running tasks.
+    pub fn runner(&self) -> crate::tasks::Runner {
+        crate::tasks::Runner {
+            dispatcher: self.dispatcher.clone(),
+            store: self.tasks.clone(),
+            hub: self.hub.clone(),
+            settings: self.task_settings.clone(),
+            render: std::sync::Arc::new(crate::a2a_spec::reply_text),
+        }
+    }
 }
 
 pub fn router(state: A2aState) -> Router {
     Router::new()
         .route("/message:send", post(message_send))
         .with_state(state)
+        .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
 }
 
 #[derive(Debug, Deserialize)]
@@ -239,7 +142,7 @@ async fn message_send(State(state): State<A2aState>, parts: Parts, body: Bytes) 
                 &uuid::Uuid::new_v4().to_string(),
                 &e,
             );
-            return a2a_error(&e);
+            return state.identity.tag_rejection(&e, a2a_error(&e));
         }
     };
 
@@ -440,35 +343,16 @@ fn a2a_error_with_trace_opt(e: &TritonError, trace_id: Option<&str>) -> Response
 
 #[cfg(test)]
 mod tests {
-    use super::{InMemoryTaskStore, TASK_STORE_CAPACITY, TaskState};
+    use super::{InMemoryTaskStore, TaskState};
 
-    #[test]
-    fn task_store_is_bounded_and_evicts_oldest() {
-        let store = InMemoryTaskStore::new();
-        // Record well past capacity.
-        for i in 0..(TASK_STORE_CAPACITY + 50) {
-            store.record(&format!("trace-{i}"), TaskState::Completed);
-        }
-        // The map never exceeds the cap.
-        assert_eq!(
-            store.inner.lock().unwrap().states.len(),
-            TASK_STORE_CAPACITY
-        );
-        // Oldest scrolled off; newest retained.
-        assert!(store.get("trace-0").is_none());
-        assert!(
-            store
-                .get(&format!("trace-{}", TASK_STORE_CAPACITY + 49))
-                .is_some()
-        );
-    }
-
+    // Bounding and eviction are pinned in `tasks.rs`; this pins the legacy
+    // entry points the Triton-shaped route uses.
     #[test]
     fn task_store_update_keeps_one_entry() {
         let store = InMemoryTaskStore::new();
         store.record("t", TaskState::Completed);
         store.record("t", TaskState::Failed);
-        assert_eq!(store.inner.lock().unwrap().states.len(), 1);
-        assert_eq!(store.inner.lock().unwrap().order.len(), 1);
+        assert_eq!(store.state("t"), Some(TaskState::Failed));
+        assert!(store.get("t").is_some());
     }
 }

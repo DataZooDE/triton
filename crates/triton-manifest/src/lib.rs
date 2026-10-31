@@ -278,6 +278,22 @@ pub enum ComponentKind {
     /// An inline report reference: image-hosting adapters (Google Chat)
     /// expand it to the upstream-rendered chart; others drop it.
     Report,
+    /// Answer rows with optional deep-link / follow-up actions (`list`).
+    Lists,
+    /// Column-keyed rows (`table`).
+    Tables,
+    /// One-click complete requests (`chips`).
+    Chips,
+    /// A nested map with counts and leaf chips (`tree`).
+    Trees,
+    /// Info / warning lines (`notice`).
+    Notices,
+    /// Steps of a long run (`progress`).
+    Progress,
+    /// Label/value pairs and before→after changes (`key_value`).
+    KeyValues,
+    /// An embedded read-only page with an inline fallback (`embed`).
+    Embeds,
 }
 
 impl std::fmt::Display for ComponentKind {
@@ -292,6 +308,14 @@ impl std::fmt::Display for ComponentKind {
             ComponentKind::Dashboard => "dashboard",
             ComponentKind::Sources => "sources",
             ComponentKind::Report => "report",
+            ComponentKind::Lists => "lists",
+            ComponentKind::Tables => "tables",
+            ComponentKind::Chips => "chips",
+            ComponentKind::Trees => "trees",
+            ComponentKind::Notices => "notices",
+            ComponentKind::Progress => "progress",
+            ComponentKind::KeyValues => "key_values",
+            ComponentKind::Embeds => "embeds",
         };
         f.write_str(s)
     }
@@ -312,6 +336,22 @@ pub enum DegradeRule {
     NumberedPrompts,
     RasterisedPng,
     CardV2,
+    /// Conversation-component text degradations (`triton_core::a2ui::text`):
+    /// `1. label — detail` rows, deep links as URLs.
+    NumberedList,
+    /// Each one-click request as a complete line to copy and send (`› …`).
+    CopyLines,
+    /// A tree as an indented map (two spaces per level).
+    IndentedText,
+    /// Steps as `✓ / ▶ / ○` status lines.
+    StatusLines,
+    /// `Label: value` / `Label: before → value` lines.
+    KeyValueLines,
+    /// An embed shows its inline `fallback` component (plus the URL).
+    InlineFallback,
+    /// Teams: an embed opens in a task module (`task/fetch` → URL), with
+    /// the inline fallback card in the conversation.
+    TaskModule,
 }
 
 /// A credential value: an `env://` reference (the production-safe shape),
@@ -417,6 +457,34 @@ mod component_kind_tests {
         assert_eq!(kinds.len(), 5);
         assert_eq!(kinds[3].to_string(), "sources");
         assert_eq!(kinds[4].to_string(), "report");
+    }
+}
+
+#[cfg(test)]
+mod conversation_component_tests {
+    use super::{ComponentKind, DegradeRule};
+    use std::collections::BTreeMap;
+
+    /// The conversation components are declarable kinds with their
+    /// own degrade rules, so M-COVERAGE-1 can demand a rule for each on
+    /// every chat adapter that serves a tool emitting them.
+    #[test]
+    fn conversation_kinds_and_rules_parse_and_display() {
+        let table: BTreeMap<ComponentKind, DegradeRule> = serde_yaml_ng::from_str(
+            "{lists: numbered_list, tables: numbered_list, chips: copy_lines, \
+              trees: indented_text, notices: passthrough, progress: status_lines, \
+              key_values: key_value_lines, embeds: inline_fallback}",
+        )
+        .expect("a text-channel degrade table parses");
+        assert_eq!(table.len(), 8);
+        assert_eq!(table[&ComponentKind::Chips], DegradeRule::CopyLines);
+        let teams: BTreeMap<ComponentKind, DegradeRule> =
+            serde_yaml_ng::from_str("{trees: adaptive_card, embeds: task_module}").unwrap();
+        assert_eq!(teams[&ComponentKind::Embeds], DegradeRule::TaskModule);
+        assert_eq!(ComponentKind::KeyValues.to_string(), "key_values");
+        assert_eq!(ComponentKind::Embeds.to_string(), "embeds");
+        // A typo is still refused at parse time (closed set).
+        assert!(serde_yaml_ng::from_str::<DegradeRule>("copy_line").is_err());
     }
 }
 

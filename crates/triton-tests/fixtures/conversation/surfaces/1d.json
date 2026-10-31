@@ -1,0 +1,32 @@
+{
+  "_mock_item": "1d Plain text: copy one line (Gemini / Copilot, text only)",
+  "surface": {
+    "components": [
+      {
+        "kind": "text",
+        "value": "3 Agents match \"Agent 2\", so nothing was changed. Copy the line you mean and send it as a new message:"
+      },
+      {
+        "kind": "chips",
+        "chips": [
+          {
+            "label": "Agent 2 · Requirements: Forecast",
+            "message": "Retire the agent \"Agent 2\" (Requirements: Forecast)"
+          },
+          {
+            "label": "Agent 20 · Design: Monitor",
+            "message": "Retire the agent \"Agent 20\" (Design: Monitor)"
+          },
+          {
+            "label": "Agent 28 · Sales: Forecast",
+            "message": "Retire the agent \"Agent 28\" (Sales: Forecast)"
+          }
+        ]
+      },
+      {
+        "kind": "narration",
+        "text": "Replying \"Agent 20\" alone won't work: each message is read on its own."
+      }
+    ]
+  }
+}

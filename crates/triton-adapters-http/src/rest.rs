@@ -129,6 +129,7 @@ pub fn router(state: RestState) -> Router {
         .route("/v1/metrics", get(metrics_view))
         .route("/v1/surface/render", post(surface_render))
         .with_state(state)
+        .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
 }
 
 /// `GET /.well-known/openid-configuration` — OIDC discovery for Triton's
@@ -168,7 +169,7 @@ async fn metrics_view(State(state): State<RestState>, parts: Parts) -> Response 
             &uuid::Uuid::new_v4().to_string(),
             &e,
         );
-        return error_response(&e, None);
+        return state.identity.tag_rejection(&e, error_response(&e, None));
     }
     let body = state.metrics.render();
     (
@@ -236,7 +237,7 @@ async fn surface_render(
             &uuid::Uuid::new_v4().to_string(),
             &e,
         );
-        return error_response(&e, None);
+        return state.identity.tag_rejection(&e, error_response(&e, None));
     }
 
     // The button-bearing mappers (Telegram, Discord) sign
@@ -491,7 +492,7 @@ async fn manifest_view(State(state): State<RestState>, parts: Parts) -> Response
             &uuid::Uuid::new_v4().to_string(),
             &e,
         );
-        return error_response(&e, None);
+        return state.identity.tag_rejection(&e, error_response(&e, None));
     }
     // #352: every channel's surface descriptor, keyed by channel, so a
     // worker composing a proactive push can tailor it to the delivery
@@ -639,7 +640,7 @@ async fn audit_tail(
                 &uuid::Uuid::new_v4().to_string(),
                 &e,
             );
-            return error_response(&e, None);
+            return state.identity.tag_rejection(&e, error_response(&e, None));
         }
     };
     if let Err(e) = state
@@ -752,7 +753,7 @@ async fn trace_view(
                 &uuid::Uuid::new_v4().to_string(),
                 &e,
             );
-            return error_response(&e, None);
+            return state.identity.tag_rejection(&e, error_response(&e, None));
         }
     };
     if let Err(e) = state
@@ -814,7 +815,7 @@ async fn list_tools(State(state): State<RestState>, parts: Parts) -> Response {
             &uuid::Uuid::new_v4().to_string(),
             &e,
         );
-        return error_response(&e, None);
+        return state.identity.tag_rejection(&e, error_response(&e, None));
     }
     Json(json!({ "tools": state.dispatcher.descriptors_all().await })).into_response()
 }
@@ -858,7 +859,7 @@ async fn invoke_tool(
                 &uuid::Uuid::new_v4().to_string(),
                 &e,
             );
-            return error_response(&e, None);
+            return state.identity.tag_rejection(&e, error_response(&e, None));
         }
     };
     let trace_id = principal.trace_id.clone();
@@ -1081,6 +1082,7 @@ mod trace_scope_tests {
             trace_id: "t".into(),
             sender_ref: None,
             conversation_ref: None,
+            idp: None,
         }
     }
 
