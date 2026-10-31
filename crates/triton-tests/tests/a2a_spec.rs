@@ -1047,6 +1047,323 @@ async fn a_remote_agent_behind_spec_a2a_gets_the_metadata_and_surface() {
     );
 }
 
+/// POST one JSON-RPC body to `/a2a`, with or without the A2UI extension.
+async fn post_rpc(base: &str, iss: &TestIssuer, body: &Value, a2ui: bool) -> Value {
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let mut req = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .json(body);
+    if a2ui {
+        req = req.header("X-A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI);
+    }
+    let resp = req.send().await.expect("POST");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    resp.json().await.expect("json")
+}
+
+/// A user message whose parts are the given A2UI client event (and the GE
+/// placeholder text when `with_text`).
+fn click(event: Value, with_text: bool) -> Value {
+    let mut parts = vec![json!({
+        "kind": "data", "data": event,
+        "metadata": { "mimeType": triton_core::a2ui::ge::MIME }
+    })];
+    if with_text {
+        parts.insert(
+            0,
+            json!({ "kind": "text", "text": "User action triggered." }),
+        );
+    }
+    json!({ "jsonrpc": "2.0", "id": 1, "method": "message/send", "params": { "message": {
+        "role": "user", "messageId": "m-click", "contextId": "session-3", "parts": parts,
+        "metadata": { "a2uiClientCapabilities": { "supportedCatalogIds": [] } }
+    }}})
+}
+
+/// The A2UI v0.9 messages among an A2A message's parts.
+fn a2ui_parts(message: &Value) -> Vec<Value> {
+    message["parts"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|p| p["kind"] == "data")
+        .map(|p| p["data"].clone())
+        .collect()
+}
+
+/// A producer-built surface (`surface.a2ui`) reaches the client verbatim, and
+/// a click on its button reaches the agent with the turn's text and the click
+/// — with the values its action context bound — under
+/// `_triton.client.a2ui_events`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_producer_surface_renders_and_its_click_round_trips() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": {
+        "components": [ { "kind": "text", "value": "Pick the class." } ],
+        "a2ui": [{
+            "components": [
+                { "id": "root", "component": "MaterialCard", "children": ["chips", "btn-1"] },
+                { "id": "chips", "component": "MaterialChips", "value": { "path": "/pick" },
+                  "options": [ { "label": "A", "value": "a" }, { "label": "B", "value": "b" } ] },
+                { "id": "btn-1", "component": "MaterialButton", "label": "Apply",
+                  "action": { "event": { "name": "apply", "context": { "pick": { "path": "/pick" } } } } }
+            ],
+            "data_model": { "pick": "a" },
+            "theme": { "agentDisplayName": "Coverage Matching" }
+        }]
+    }})).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+
+    let reply = post_rpc(&base, &iss, &send("pick"), true).await;
+    let msgs = a2ui_parts(&reply["result"]);
+    let create = msgs
+        .iter()
+        .find(|m| m.get("createSurface").is_some())
+        .expect("createSurface");
+    assert_eq!(
+        create["createSurface"]["theme"]["agentDisplayName"],
+        "Coverage Matching"
+    );
+    let sid = create["createSurface"]["surfaceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        msgs.iter()
+            .any(|m| m["updateComponents"]["components"][1]["component"] == "MaterialChips")
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m["updateDataModel"]["value"]["pick"] == "a")
+    );
+
+    let event = json!({ "version": "v0.9", "action": {
+        "name": "apply", "surfaceId": sid, "sourceComponentId": "btn-1",
+        "timestamp": "2026-10-31T09:00:00Z", "context": { "pick": "b" }, "injected": "dropped"
+    }});
+    post_rpc(&base, &iss, &click(event, true), true).await;
+    let body = agent.bodies_seen().pop().expect("second dispatch");
+    assert_eq!(body["message"], "User action triggered.", "{body}");
+    let forwarded = &body["_triton"]["client"]["a2ui_events"][0];
+    assert_eq!(forwarded["action"]["context"]["pick"], "b", "{body}");
+    assert_eq!(forwarded["action"]["sourceComponentId"], "btn-1");
+    assert!(
+        forwarded["action"].get("injected").is_none(),
+        "projected onto the v0.9 fields"
+    );
+    assert!(
+        body["_triton"].get("a2a_message_metadata").is_none(),
+        "metadata is not forwarded"
+    );
+    assert_eq!(
+        body["_triton"]["protocol"], "a2a",
+        "Triton's own keys untouched"
+    );
+}
+
+/// A standard A2UI client posts only the DataPart: the turn still reaches the
+/// agent, with the event and a synthetic message naming the action.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_event_only_click_reaches_the_agent() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let event = json!({ "version": "v0.9", "action": {
+        "name": "confirm_terms", "surfaceId": "triton-answer-unknown", "sourceComponentId": "btn-3",
+        "timestamp": "2026-10-31T09:00:00Z", "context": { "terms": { "klimapaket": true } }
+    }});
+    post_rpc(&base, &iss, &click(event, false), true).await;
+    let body = agent.bodies_seen().remove(0);
+    assert_eq!(body["message"], "A2UI action: confirm_terms", "{body}");
+    assert_eq!(
+        body["_triton"]["client"]["a2ui_events"][0]["action"]["context"]["terms"]["klimapaket"],
+        true
+    );
+}
+
+/// Structured data from a client that did not negotiate A2UI and does not type
+/// the part as A2UI is not an A2UI event: no `client` key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plain_structured_data_is_not_an_a2ui_event() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "message/send", "params": { "message": {
+        "role": "user", "messageId": "m-1",
+        "parts": [
+            { "kind": "text", "text": "stock?" },
+            { "kind": "data", "data": { "error": { "code": "inventory_unavailable" } } }
+        ]
+    }}});
+    post_rpc(&base, &iss, &body, false).await;
+    let seen = agent.bodies_seen().remove(0);
+    assert!(seen["_triton"].get("client").is_none(), "{seen}");
+}
+
+/// A plain text turn carries no `client` key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_text_turn_carries_no_client_events() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    post_rpc(&base, &iss, &send("hello"), true).await;
+    let seen = agent.bodies_seen().remove(0);
+    assert!(seen["_triton"].get("client").is_none(), "{seen}");
+}
+
+/// The producer surface also goes out on `message/stream`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_producer_surface_streams() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": {
+        "components": [ { "kind": "text", "value": "Here." } ],
+        "a2ui": [{ "components": [ { "id": "root", "component": "MaterialText", "text": "streamed card" } ] }]
+    }})).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let mut body = send("hello");
+    body["method"] = json!("message/stream");
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .header("X-A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI)
+        .json(&body)
+        .send()
+        .await
+        .expect("POST");
+    assert!(resp.status().is_success());
+    let text = resp.text().await.expect("sse");
+    assert!(text.contains("streamed card"), "{text}");
+    assert!(text.contains("createSurface"), "{text}");
+}
+
+/// An error-only A2UI turn reaches the agent with the error event.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_error_only_turn_reaches_the_agent() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let event = json!({ "version": "v0.9", "error": { "code": "VALIDATION_FAILED",
+        "surfaceId": "triton-a2ui-1", "path": "/components/0", "message": "bad" } });
+    post_rpc(&base, &iss, &click(event, false), true).await;
+    let body = agent.bodies_seen().remove(0);
+    assert_eq!(body["message"], "A2UI error");
+    assert_eq!(
+        body["_triton"]["client"]["a2ui_events"][0]["error"]["code"],
+        "VALIDATION_FAILED"
+    );
+}
+
+/// Without A2UI negotiated, an untyped data-only action is not a turn.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_untyped_data_only_action_without_a2ui_is_rejected() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let body = json!({ "jsonrpc": "2.0", "id": 1, "method": "message/send", "params": { "message": {
+        "role": "user", "messageId": "m-1",
+        "parts": [ { "kind": "data", "data": { "action": { "name": "x" } } } ]
+    }}});
+    let reply = post_rpc(&base, &iss, &body, false).await;
+    assert!(reply.get("error").is_some(), "{reply}");
+    assert!(agent.bodies_seen().is_empty());
+}
+
+/// A result with only producer surfaces sends an empty text part, never the
+/// result JSON (actions, traces) as the answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_a2ui_only_result_has_no_json_text() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": {
+        "a2ui": [{ "components": [ { "id": "root", "component": "MaterialText", "text": "card" } ],
+                   "actions": { "root": "secret question" } }]
+    }, "_meta": { "tool_trace": [ { "tool": "x" } ] } }))
+    .await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let reply = post_rpc(&base, &iss, &send("hi"), true).await;
+    let text = reply["result"]["parts"][0]["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !text.contains("secret question") && !text.contains("tool_trace"),
+        "{text}"
+    );
+    assert!(
+        a2ui_parts(&reply["result"])
+            .iter()
+            .any(|m| m.get("createSurface").is_some())
+    );
+}
+
+/// A client that did not negotiate A2UI gets no producer surfaces.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn producer_surfaces_need_a2ui_negotiated() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": {
+        "components": [ { "kind": "text", "value": "Here." } ],
+        "a2ui": [{ "components": [ { "id": "root", "component": "MaterialText", "text": "card" } ] }]
+    }})).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let reply = post_rpc(&base, &iss, &send("hi"), false).await;
+    assert!(!reply.to_string().contains("createSurface"), "{reply}");
+    assert_eq!(reply["result"]["parts"][0]["text"], "Here.");
+}
+
+/// The click round trip also works on `message/stream`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_streamed_click_round_trips() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": {
+        "components": [ { "kind": "text", "value": "Go?" } ],
+        "a2ui": [{ "components": [
+            { "id": "root", "component": "MaterialCard", "children": ["go"] },
+            { "id": "go", "component": "MaterialButton", "label": "Go",
+              "action": { "event": { "name": "go", "context": { "v": 1 } } } } ] }]
+    }}))
+    .await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let reply = post_rpc(&base, &iss, &send("start"), true).await;
+    let sid = a2ui_parts(&reply["result"])
+        .iter()
+        .find_map(|m| m["createSurface"]["surfaceId"].as_str().map(str::to_string))
+        .expect("surface id");
+    let mut req = click(
+        json!({ "version": "v0.9", "action": { "name": "go", "surfaceId": sid,
+        "sourceComponentId": "go", "timestamp": "2026-10-31T09:00:00Z", "context": { "v": 2 } } }),
+        true,
+    );
+    req["method"] = json!("message/stream");
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .header("X-A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI)
+        .json(&req)
+        .send()
+        .await
+        .expect("POST");
+    assert!(resp.status().is_success());
+    let _ = resp.text().await;
+    let body = agent.bodies_seen().pop().unwrap();
+    assert_eq!(body["message"], "User action triggered.");
+    assert_eq!(
+        body["_triton"]["client"]["a2ui_events"][0]["action"]["context"]["v"],
+        2
+    );
+}
+
 /// A spec-A2A host fronting one recording upstream as both the turn's tool
 /// (`remote`) and `render_report`, with `surfaces` as its registry.
 async fn remote_spec_host(
@@ -1148,4 +1465,41 @@ async fn the_report_redispatch_keeps_the_turns_context() {
     assert_eq!(body["_triton"]["protocol"], "a2a", "{body}");
     assert_eq!(body["_triton"]["a2a_context_id"], "session-9");
     assert_eq!(body["_triton"]["surface"]["buttons"]["supported"], true);
+}
+
+/// The A2A 1.0 binding forwards the click the same way: a 1.0 data part
+/// (`{data, mediaType}`, no `kind`) with no text part reaches the agent with
+/// the event under `_triton.client` and the action named in the message.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_v1_click_reaches_the_agent() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let event = json!({ "version": "v0.9", "action": {
+        "name": "apply_picks", "surfaceId": "triton-a2ui-x", "sourceComponentId": "apply",
+        "timestamp": "2026-10-31T09:00:00Z", "context": { "picks": { "r13": "seat_track" } }
+    }});
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .header("A2A-Version", "1.0")
+        .header("A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI)
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {
+            "message": { "role": "ROLE_USER", "messageId": "m-v1",
+                         "parts": [ { "data": event, "mediaType": triton_core::a2ui::ge::MIME } ] }
+        }}))
+        .send()
+        .await
+        .expect("POST");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let reply: Value = resp.json().await.expect("json");
+    assert!(reply.get("error").is_none(), "{reply}");
+    let body = agent.bodies_seen().remove(0);
+    assert_eq!(body["message"], "A2UI action: apply_picks", "{body}");
+    assert_eq!(
+        body["_triton"]["client"]["a2ui_events"][0]["action"]["context"]["picks"]["r13"],
+        "seat_track"
+    );
 }
