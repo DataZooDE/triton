@@ -260,6 +260,7 @@ impl EmbedOpts {
             public_url: public_url.into(),
             a2a_path: "/a2a".to_string(),
             default_tool: default_tool.into(),
+            skills: None,
         });
         self
     }
@@ -298,6 +299,7 @@ impl EmbedOpts {
             public_url: String::new(),
             a2a_path,
             default_tool: tool.into(),
+            skills: None,
         });
         Ok(self)
     }
@@ -330,6 +332,22 @@ impl EmbedOpts {
 /// rejected while `/healthz` keeps answering. `/v1/runtime` reports the
 /// issuer precisely so that state is visible rather than inferred.
 pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
+    // F4: the A2UI action key, injected once per process from the host's
+    // environment. A malformed value refuses to serve (a random fallback
+    // would break every click that lands on another replica, silently).
+    static ACTION_KEY: std::sync::Once = std::sync::Once::new();
+    ACTION_KEY.call_once(|| {
+        match triton_core::a2ui::ge::configure_action_key(
+            std::env::var("TRITON_A2UI_ACTION_KEY").ok().as_deref(),
+        ) {
+            Ok(triton_core::a2ui::ge::ActionKeyState::Configured) => {}
+            Ok(triton_core::a2ui::ge::ActionKeyState::Ephemeral) => eprintln!(
+                "triton-embed: TRITON_A2UI_ACTION_KEY unset: A2UI card actions resolve on \
+                 this single replica only"
+            ),
+            Err(e) => panic!("TRITON_A2UI_ACTION_KEY is invalid ({e}); refusing to serve"),
+        }
+    });
     // #306 crew F7: `router` is a public entry point — an embedding host
     // that merges its own routes (dz-agent-template does) calls this and
     // never `serve_dispatcher`, so announcing only there left exactly the
@@ -411,11 +429,15 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         dispatcher: dispatcher.clone(),
         sessions: McpSessions::new(),
         identity: identity.clone(),
+        tasks: None,
+        route: None,
     };
     let dispatcher_for_card = dispatcher.clone();
     let a2a_state = A2aState {
         dispatcher,
         tasks: InMemoryTaskStore::new(),
+        hub: Default::default(),
+        task_settings: Default::default(),
         identity,
         // #306 crew F1: `tasks/get` scopes on a trace id.
         audit_operators,
@@ -430,16 +452,15 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
     // endpoint URL, not the origin (see a2a_spec::card_router).
     let a2a_router = match &opts.spec_a2a {
         Some(cfg) => {
-            let mut r = a2a::router(a2a_state.clone())
-                .merge(a2a_spec::jsonrpc_router(
-                    a2a_state.clone(),
-                    Arc::new(cfg.clone()),
-                ))
-                .merge(a2a_spec::card_router_nested(a2a_spec::card_state(
+            let mut r = a2a::router(a2a_state.clone()).merge(a2a_spec::spec_routes(
+                a2a_state.clone(),
+                cfg.clone(),
+                a2a_spec::card_state(
                     cfg.clone(),
                     dispatcher_for_card.clone(),
                     opts.oidc_providers.clone(),
-                )));
+                ),
+            ));
             // Per-agent faces at `/a2a/<slug>`: same state (identity, task
             // store) as the root route, origin + version from the primary.
             for agent in &opts.spec_a2a_agents {
