@@ -13,7 +13,7 @@ use jsonwebtoken::jwk::JwkSet;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
-use triton_core::{Principal, TritonError};
+use triton_core::{IdpIdentity, Principal, TritonError};
 
 pub mod signer;
 pub use signer::JwtSigner;
@@ -39,8 +39,11 @@ pub const ENTRA_MULTI_TENANT_ISSUER: &str = "https://login.microsoftonline.com/{
 /// Entra's global (multi-tenant) signing keys. Every tenant's tokens are
 /// signed by the SAME key set, so the multi-tenant verifier pins this one
 /// JWKS instead of discovering per-tenant.
-const ENTRA_COMMON_JWKS_URL: &str =
+pub const ENTRA_COMMON_JWKS_URL: &str =
     "https://login.microsoftonline.com/organizations/discovery/v2.0/keys";
+
+/// The Entra authority every production tenant issuer lives under.
+pub const ENTRA_AUTHORITY: &str = "https://login.microsoftonline.com";
 
 /// Multi-tenant Entra (Azure AD) acceptance policy (ADR-0021, #673/#675).
 ///
@@ -55,6 +58,17 @@ const ENTRA_COMMON_JWKS_URL: &str =
 pub struct EntraMultiTenant {
     /// `tid` (lowercased Entra tenant GUID) → data-tenant name.
     pub tenant_map: HashMap<String, String>,
+    /// The authority tenant issuers live under: [`ENTRA_AUTHORITY`] in
+    /// production. A local test authority is the only other value, and the
+    /// binary admits it only in `env=local`.
+    pub authority: String,
+    /// Delegated scopes, as Entra writes them into `scp` (`access_as_user`,
+    /// not `api://<app>/access_as_user`): a token must carry at least one,
+    /// else verification fails with [`TritonError::Forbidden`]
+    /// (`insufficient_scope`). That refuses app-only (client-credentials)
+    /// tokens, which carry `roles` and no `scp`. Empty = no scope check
+    /// (the embedding API's machine-caller pair).
+    pub required_scopes: Vec<String>,
 }
 
 /// Configuration to build an [`OidcVerifier`].
@@ -78,6 +92,10 @@ pub struct OidcConfig {
     /// `tid` must be allow-listed, and `Principal::tenant` is the mapped
     /// tenant. `None` = ordinary single-issuer verification.
     pub multi_tenant_entra: Option<EntraMultiTenant>,
+    /// The provider name the resolved principal carries (`idp`). `None`
+    /// derives it: `entra` for Entra issuers, `google` for
+    /// `accounts.google.com`, `oidc` otherwise.
+    pub idp_name: Option<String>,
 }
 
 impl OidcConfig {
@@ -88,7 +106,14 @@ impl OidcConfig {
             jwks_url: None,
             refresh_interval: Duration::from_secs(30),
             multi_tenant_entra: None,
+            idp_name: None,
         }
+    }
+
+    /// Name the provider for the resolved principal's `idp`.
+    pub fn with_idp_name(mut self, name: impl Into<String>) -> Self {
+        self.idp_name = Some(name.into());
+        self
     }
 
     /// Pin the JWKS document URL, bypassing OIDC discovery (#100).
@@ -105,13 +130,44 @@ impl OidcConfig {
         audience: impl Into<String>,
         tenant_map: HashMap<String, String>,
     ) -> Self {
+        Self::entra_multi_tenant_at(audience, tenant_map, ENTRA_AUTHORITY, ENTRA_COMMON_JWKS_URL)
+    }
+
+    /// [`Self::entra_multi_tenant`] under an explicit authority and JWKS
+    /// URL. Production uses the defaults; integration tests point both at
+    /// a local issuer so the full path (issuer shape, tid allow-list,
+    /// signature) runs against real keys.
+    pub fn entra_multi_tenant_at(
+        audience: impl Into<String>,
+        tenant_map: HashMap<String, String>,
+        authority: impl Into<String>,
+        jwks_url: impl Into<String>,
+    ) -> Self {
+        let authority = authority.into().trim_end_matches('/').to_string();
         Self {
-            issuer: ENTRA_MULTI_TENANT_ISSUER.to_string(),
+            issuer: format!("{authority}/{{tenantid}}/v2.0"),
             audience: audience.into(),
-            jwks_url: Some(ENTRA_COMMON_JWKS_URL.to_string()),
+            jwks_url: Some(jwks_url.into()),
             refresh_interval: Duration::from_secs(30),
-            multi_tenant_entra: Some(EntraMultiTenant { tenant_map }),
+            multi_tenant_entra: Some(EntraMultiTenant {
+                tenant_map: tenant_map
+                    .into_iter()
+                    .map(|(k, v)| (k.to_ascii_lowercase(), v))
+                    .collect(),
+                authority,
+                required_scopes: Vec::new(),
+            }),
+            idp_name: Some("entra".to_string()),
         }
+    }
+
+    /// Require one of these delegated scopes (`scp` values) on an Entra
+    /// multi-tenant token. No effect on an ordinary single-issuer config.
+    pub fn with_required_scopes(mut self, scopes: Vec<String>) -> Self {
+        if let Some(mt) = self.multi_tenant_entra.as_mut() {
+            mt.required_scopes = scopes;
+        }
+        self
     }
 }
 
@@ -142,6 +198,32 @@ impl OidcVerifier {
     /// The audience this verifier requires.
     pub fn audience(&self) -> &str {
         &self.config.audience
+    }
+
+    /// Should a token claiming issuer `iss` be offered to this verifier?
+    /// Exact (trailing-slash tolerant) for an ordinary issuer; for Entra
+    /// multi-tenant, any well-formed tenant issuer under the configured
+    /// authority. Selection only — [`Self::verify`] still checks everything.
+    pub fn accepts_issuer(&self, iss: &str) -> bool {
+        match &self.config.multi_tenant_entra {
+            Some(mt) => entra_tid_under(&mt.authority, iss.trim_end_matches('/')).is_some(),
+            None => issuer_matches(&self.config.issuer, iss),
+        }
+    }
+
+    /// The provider name for principals this verifier resolves.
+    fn idp_name(&self) -> String {
+        if let Some(n) = &self.config.idp_name {
+            return n.clone();
+        }
+        let iss = self.config.issuer.trim_end_matches('/');
+        if iss.starts_with(ENTRA_AUTHORITY) || iss.starts_with("https://sts.windows.net") {
+            "entra".to_string()
+        } else if iss == "https://accounts.google.com" || iss == "accounts.google.com" {
+            "google".to_string()
+        } else {
+            "oidc".to_string()
+        }
     }
 
     pub fn new(config: OidcConfig) -> Self {
@@ -178,7 +260,7 @@ impl OidcVerifier {
             Some(mt) => {
                 let iss = unverified_issuer(raw_token)
                     .ok_or_else(|| TritonError::Auth("token has no readable iss".into()))?;
-                let tid = entra_tid_from_issuer(&iss).ok_or_else(|| {
+                let tid = entra_tid_under(&mt.authority, &iss).ok_or_else(|| {
                     TritonError::Auth(format!(
                         "issuer {iss} is not a tenant-scoped Entra v2 issuer"
                     ))
@@ -236,6 +318,43 @@ impl OidcVerifier {
             }
             None => claims.tenant.clone().unwrap_or_else(|| "-".to_string()),
         };
+        // Delegated access only (ADR-22): checked after the issuer, tenant
+        // and signature, so a token from the wrong directory stays a 401.
+        if let Some(mt) = &self.config.multi_tenant_entra
+            && !mt.required_scopes.is_empty()
+            && !scopes.iter().any(|s| mt.required_scopes.contains(s))
+        {
+            return Err(TritonError::Forbidden(format!(
+                "insufficient_scope: the token carries none of the delegated scopes {}",
+                mt.required_scopes.join(" ")
+            )));
+        }
+        let idp_name = self.idp_name();
+        let idp_tenant = match (&mt_ctx, idp_name.as_str()) {
+            (Some((_, tid, _)), _) => Some(tid.clone()),
+            (None, "entra") => claims.tid.clone(),
+            (None, "google") => claims.hd.clone(),
+            _ => None,
+        };
+        // Entra access tokens carry no `email` unless the app registration
+        // adds the optional claim; the sign-in name (`upn` for members,
+        // `preferred_username` otherwise) is the address the person uses.
+        let email = match idp_name.as_str() {
+            "entra" => claims
+                .email
+                .clone()
+                .or_else(|| claims.upn.clone())
+                .or_else(|| claims.preferred_username.clone()),
+            _ => claims.email.clone(),
+        };
+        let verified_issuer = match &mt_ctx {
+            Some((iss, _, _)) => iss.clone(),
+            None => self.config.issuer.trim_end_matches('/').to_string(),
+        };
+        let idp = IdpIdentity::new(idp_name)
+            .tenant(idp_tenant)
+            .email(email)
+            .issuer(verified_issuer);
         Ok(Principal {
             sub: claims.sub,
             scopes,
@@ -245,6 +364,7 @@ impl OidcVerifier {
             trace_id: uuid::Uuid::new_v4().to_string(),
             sender_ref: None,
             conversation_ref: None,
+            idp: Some(idp),
         })
     }
 
@@ -411,6 +531,19 @@ struct TokenClaims {
     /// (anti-mix-up), and the allow-list maps it to the data tenant.
     #[serde(default)]
     tid: Option<String>,
+    /// Verified email, when the issuer includes it (Google ID tokens, most
+    /// generic issuers, Entra with the optional claim).
+    #[serde(default)]
+    email: Option<String>,
+    /// Entra sign-in names, used for the principal's email when `email` is
+    /// absent.
+    #[serde(default)]
+    upn: Option<String>,
+    #[serde(default)]
+    preferred_username: Option<String>,
+    /// Google Workspace hosted domain (Google ID tokens).
+    #[serde(default)]
+    hd: Option<String>,
     /// OAuth2 RFC 6749 single-string form; whitespace-split into
     /// scopes. Some issuers use the `scp` array form instead.
     #[serde(default)]
@@ -504,8 +637,15 @@ pub fn issuer_matches(configured: &str, from_token: &str) -> bool {
 /// `login.microsoftonline.com.evil` fails), and `<tid>` must be an
 /// `8-4-4-4-12` lowercase-hex GUID.
 pub(crate) fn entra_tid_from_issuer(iss: &str) -> Option<String> {
+    entra_tid_under(ENTRA_AUTHORITY, iss)
+}
+
+/// [`entra_tid_from_issuer`] under an explicit authority (exact prefix,
+/// then exactly one GUID segment and `/v2.0`).
+pub(crate) fn entra_tid_under(authority: &str, iss: &str) -> Option<String> {
     let mid = iss
-        .strip_prefix("https://login.microsoftonline.com/")?
+        .strip_prefix(authority.trim_end_matches('/'))?
+        .strip_prefix('/')?
         .strip_suffix("/v2.0")?;
     is_entra_guid(mid).then(|| mid.to_ascii_lowercase())
 }
@@ -575,32 +715,59 @@ fn json_as_i64(v: Option<&serde_json::Value>) -> Option<i64> {
 }
 
 /// Identity distilled from a validated tokeninfo response.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct GoogleIdentity {
     sub: String,
     scopes: Vec<String>,
-    /// Token expiry (unix secs) — used to bound the cache TTL.
     exp: i64,
+    /// The domain the token was admitted under (`hd`, or the email
+    /// domain when Google sent no `hd`), lower-cased.
+    domain: Option<String>,
+    /// The data tenant the admitted domain maps to, when the verifier was
+    /// configured with a domain → tenant map.
+    tenant: Option<String>,
 }
 
-/// Pure, fail-closed validation of a tokeninfo response against the configured
-/// audience and hosted domain. Every missing/invalid field is a rejection.
-/// Unit-tested without any HTTP.
+/// The single-audience, single-domain form the unit tests pin; see
+/// [`validate_google_tokeninfo_with`].
+#[cfg(test)]
 fn validate_google_tokeninfo(
     info: &GoogleTokenInfo,
     audience: &str,
     allowed_hd: Option<&str>,
     now_unix: i64,
 ) -> Result<GoogleIdentity, TritonError> {
-    // (1) Audience MUST equal our client id. Without this, an access token
-    // minted for ANY Google client would be accepted here — the confused-
-    // deputy / token-substitution hole. This is the load-bearing check.
-    if info.aud.as_deref() != Some(audience) {
+    let allowed: Option<HashMap<String, Option<String>>> =
+        allowed_hd.map(|hd| HashMap::from([(hd.to_ascii_lowercase(), None)]));
+    validate_google_tokeninfo_with(
+        info,
+        &[audience.to_string()],
+        allowed.as_ref(),
+        false,
+        now_unix,
+    )
+}
+
+/// Fail-closed tokeninfo validation: the audience must be one of
+/// `audiences`, the email present and verified, the domain allowed (when
+/// `allowed` is set; the `hd` claim is authoritative when present, the
+/// email domain only a fallback), and the token unexpired.
+fn validate_google_tokeninfo_with(
+    info: &GoogleTokenInfo,
+    audiences: &[String],
+    allowed: Option<&HashMap<String, Option<String>>>,
+    require_hd: bool,
+    now_unix: i64,
+) -> Result<GoogleIdentity, TritonError> {
+    if !info
+        .aud
+        .as_deref()
+        .is_some_and(|a| audiences.iter().any(|x| x == a))
+    {
         return Err(TritonError::Auth(
             "google access token audience mismatch".into(),
         ));
     }
-    // (2) A verified email is required.
     let email = info
         .email
         .as_deref()
@@ -611,28 +778,34 @@ fn validate_google_tokeninfo(
             "google access token email is not verified".into(),
         ));
     }
-    // (3) Hosted-domain boundary (mirrors ADR-0017 pair-1). Prefer the `hd`
-    // claim; fall back to the email domain when `hd` is absent.
-    if let Some(hd) = allowed_hd {
-        // The `hd` (Workspace hosted-domain) claim is AUTHORITATIVE when
-        // present: a conflicting `hd` is rejected even if the email domain
-        // matches (aliases/vanity domains make the email domain only a
-        // heuristic). Fall back to the email domain ONLY when `hd` is absent.
-        // Case-insensitive (DNS labels are).
-        let domain_ok = match info.hd.as_deref() {
-            Some(h) => h.trim().eq_ignore_ascii_case(hd),
-            None => email
-                .rsplit('@')
-                .next()
-                .is_some_and(|d| d.eq_ignore_ascii_case(hd)),
-        };
-        if !domain_ok {
-            return Err(TritonError::Auth(
-                "google access token is outside the allowed domain".into(),
-            ));
+    // The `hd` (Workspace hosted-domain) claim is AUTHORITATIVE when
+    // present: a conflicting `hd` is rejected even if the email domain
+    // matches (aliases/vanity domains make the email domain only a
+    // heuristic). Fall back to the email domain ONLY when `hd` is absent.
+    let domain = match info.hd.as_deref().map(str::trim).filter(|h| !h.is_empty()) {
+        Some(h) => Some(h.to_ascii_lowercase()),
+        None => email.rsplit('@').next().map(str::to_ascii_lowercase),
+    };
+    // F9: with `require_hd` (the binary's policy) only a Workspace member
+    // is admitted; a consumer account registered on the customer's email
+    // domain carries no `hd` and is refused.
+    if require_hd && info.hd.as_deref().map(str::trim).is_none_or(str::is_empty) {
+        return Err(TritonError::Auth(
+            "google access token has no hosted domain (hd); only Workspace accounts are admitted"
+                .into(),
+        ));
+    }
+    let mut tenant = None;
+    if let Some(allowed) = allowed {
+        match domain.as_deref().and_then(|d| allowed.get(d)) {
+            Some(mapped) => tenant = mapped.clone(),
+            None => {
+                return Err(TritonError::Auth(
+                    "google access token is outside the allowed domain".into(),
+                ));
+            }
         }
     }
-    // (4) Expiry.
     let exp = json_as_i64(info.exp.as_ref())
         .ok_or_else(|| TritonError::Auth("google access token has no exp".into()))?;
     if exp <= now_unix {
@@ -649,23 +822,35 @@ fn validate_google_tokeninfo(
         sub: email.to_string(),
         scopes,
         exp,
+        // Only a real `hd` is the provider tenant; a consumer account has
+        // none even when its email domain was matched.
+        domain: info
+            .hd
+            .as_deref()
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| !h.is_empty()),
+        tenant,
     })
 }
 
 struct GoogleCacheEntry {
-    sub: String,
-    scopes: Vec<String>,
+    id: GoogleIdentity,
     expires: Instant,
 }
 
-/// Verifier for Google **opaque** OAuth access tokens forwarded over A2A
-/// (Gemini Enterprise). Validation is by introspection against Google's
-/// tokeninfo endpoint plus [`validate_google_tokeninfo`]; results are cached by
-/// token for up to 5 minutes (bounded) so it is not one network call per
-/// request. Fail-closed on every error.
+/// Verifies **opaque Google OAuth access tokens** (what Gemini Enterprise
+/// forwards) by introspection at Google's tokeninfo endpoint.
+///
+/// Accepts a token whose audience is one of the configured OAuth client
+/// ids and whose user is in one of the allowed hosted domains. Each domain
+/// may map to a data tenant (`Principal::tenant`); unmapped, the tenant
+/// stays the reserved `-` (the historical single-domain behaviour).
 pub struct GoogleAccessTokenVerifier {
-    audience: String,
-    allowed_hd: Option<String>,
+    audiences: Vec<String>,
+    /// Allowed domain → optional data tenant. `None` = any domain.
+    allowed: Option<HashMap<String, Option<String>>>,
+    /// Admit only tokens with a real `hd` (no email-domain fallback).
+    require_hd: bool,
     tokeninfo_url: String,
     http: reqwest::Client,
     cache: RwLock<HashMap<String, GoogleCacheEntry>>,
@@ -673,11 +858,36 @@ pub struct GoogleAccessTokenVerifier {
 
 impl GoogleAccessTokenVerifier {
     pub fn new(audience: impl Into<String>, allowed_hd: Option<String>) -> Self {
+        let allowed = allowed_hd
+            .map(|d| d.trim().to_ascii_lowercase())
+            .filter(|d| !d.is_empty())
+            .map(|d| HashMap::from([(d, None)]));
+        let mut v = Self::with_policy(vec![audience.into()], allowed);
+        // The historical single-domain constructor keeps its email-domain
+        // fallback for embedding hosts that rely on it.
+        v.require_hd = false;
+        v
+    }
+
+    /// Several audiences (one OAuth client per platform registration) and
+    /// a domain → tenant map. `allowed: None` admits any domain; the binary
+    /// refuses to boot that way, an embedding host may choose it.
+    pub fn with_policy(
+        audiences: Vec<String>,
+        allowed: Option<HashMap<String, Option<String>>>,
+    ) -> Self {
         Self {
-            audience: audience.into(),
-            allowed_hd: allowed_hd
-                .map(|d| d.trim().to_ascii_lowercase())
-                .filter(|d| !d.is_empty()),
+            audiences: audiences
+                .into_iter()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+                .collect(),
+            allowed: allowed.map(|m| {
+                m.into_iter()
+                    .map(|(d, t)| (d.trim().to_ascii_lowercase(), t))
+                    .collect()
+            }),
+            require_hd: true,
             tokeninfo_url: GOOGLE_TOKENINFO_URL.to_string(),
             http: reqwest::Client::builder()
                 .timeout(Duration::from_secs(3))
@@ -690,23 +900,27 @@ impl GoogleAccessTokenVerifier {
         }
     }
 
-    /// The audience this verifier requires (the Google OAuth client id).
+    /// The first audience this verifier accepts (the Google OAuth client id).
     pub fn audience(&self) -> &str {
-        &self.audience
+        self.audiences.first().map(String::as_str).unwrap_or("")
     }
 
-    /// Test-only: point introspection at a local fake tokeninfo server.
-    /// Compiled out of release builds so it can never be wired to an env
-    /// var (SSRF footgun — crew F9).
-    #[cfg(test)]
+    /// Every accepted audience.
+    pub fn audiences(&self) -> &[String] {
+        &self.audiences
+    }
+
+    /// Point introspection at another tokeninfo endpoint. The binary allows
+    /// this only in `env=local` (integration tests); production uses
+    /// Google's.
     pub fn with_tokeninfo_url(mut self, url: impl Into<String>) -> Self {
         self.tokeninfo_url = url.into();
         self
     }
 
     pub async fn verify(&self, raw_token: &str) -> Result<Principal, TritonError> {
-        if let Some((sub, scopes)) = self.cache_get(raw_token).await {
-            return Ok(self.principal(sub, scopes, raw_token));
+        if let Some(id) = self.cache_get(raw_token).await {
+            return Ok(self.principal(id, raw_token));
         }
         let resp = self
             .http
@@ -715,14 +929,11 @@ impl GoogleAccessTokenVerifier {
             .send()
             .await
             .map_err(|e| {
-                // reqwest's Display embeds the request URL, which carries the
-                // `?access_token=` bearer — strip it before it reaches logs or
-                // the client error body (crew F2).
+                // The token is in the query string: log without the URL.
                 tracing::warn!(error = %e.without_url(), "google tokeninfo request failed");
                 TritonError::Auth("google tokeninfo request failed".into())
             })?;
         if !resp.status().is_success() {
-            // 400 = invalid/expired token; any non-2xx is a fail-closed reject.
             return Err(TritonError::Auth(
                 "google access token rejected by tokeninfo".into(),
             ));
@@ -732,35 +943,45 @@ impl GoogleAccessTokenVerifier {
             TritonError::Auth("google tokeninfo decode failed".into())
         })?;
         let now = now_unix();
-        let id = validate_google_tokeninfo(&info, &self.audience, self.allowed_hd.as_deref(), now)?;
-        // Cache for min(remaining lifetime, 5 min). A token revoked at Google
-        // stays admitted for up to this window (crew F6 — documented tradeoff;
-        // there is no live revocation channel).
+        let id = validate_google_tokeninfo_with(
+            &info,
+            &self.audiences,
+            self.allowed.as_ref(),
+            self.require_hd,
+            now,
+        )?;
+        // Cache until expiry, at most 5 minutes (re-introspect periodically
+        // so a revoked token stops working within the window).
         let ttl = (id.exp - now).clamp(0, 300) as u64;
         self.cache_put(raw_token, &id, Duration::from_secs(ttl))
             .await;
-        Ok(self.principal(id.sub, id.scopes, raw_token))
+        Ok(self.principal(id, raw_token))
     }
 
-    fn principal(&self, sub: String, scopes: Vec<String>, raw_token: &str) -> Principal {
+    fn principal(&self, id: GoogleIdentity, raw_token: &str) -> Principal {
+        let idp = IdpIdentity::new("google")
+            .tenant(id.domain.clone())
+            .email(Some(id.sub.clone()))
+            .issuer("https://accounts.google.com");
         Principal {
-            sub,
-            scopes,
+            sub: id.sub,
+            scopes: id.scopes,
             groups: Vec::new(),
-            // Google access-token callers carry no tenant claim; the agent's
-            // own escurel signer applies its default tenant (single-tenant).
-            tenant: "-".to_string(),
+            // Unmapped: the reserved `-` (no data tenant). A domain → tenant
+            // map makes the admitted domain's tenant the principal's.
+            tenant: id.tenant.unwrap_or_else(|| "-".to_string()),
             raw_token: raw_token.to_string(),
             trace_id: uuid::Uuid::new_v4().to_string(),
             sender_ref: None,
             conversation_ref: None,
+            idp: Some(idp),
         }
     }
 
-    async fn cache_get(&self, token: &str) -> Option<(String, Vec<String>)> {
+    async fn cache_get(&self, token: &str) -> Option<GoogleIdentity> {
         let cache = self.cache.read().await;
         let e = cache.get(token)?;
-        (e.expires > Instant::now()).then(|| (e.sub.clone(), e.scopes.clone()))
+        (e.expires > Instant::now()).then(|| e.id.clone())
     }
 
     async fn cache_put(&self, token: &str, id: &GoogleIdentity, ttl: Duration) {
@@ -778,8 +999,7 @@ impl GoogleAccessTokenVerifier {
         cache.insert(
             token.to_string(),
             GoogleCacheEntry {
-                sub: id.sub.clone(),
-                scopes: id.scopes.clone(),
+                id: id.clone(),
                 expires: now + ttl,
             },
         );

@@ -387,6 +387,7 @@ impl SignalAdapter {
             trace_id: uuid::Uuid::new_v4().to_string(),
             sender_ref: None,
             conversation_ref: None,
+            idp: None,
         };
         let (tool_name, args) = route_command(body, &self.inbound_tool);
         let principal_for_post = principal.clone();

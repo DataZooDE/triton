@@ -626,6 +626,7 @@ async fn handle_message_component(
         trace_id: uuid::Uuid::new_v4().to_string(),
         sender_ref: None,
         conversation_ref: None,
+        idp: None,
     };
     let principal_for_post = principal.clone();
 
@@ -861,6 +862,7 @@ async fn handle_application_command(
         trace_id: uuid::Uuid::new_v4().to_string(),
         sender_ref: None,
         conversation_ref: None,
+        idp: None,
     };
     let principal_for_post = principal.clone();
 
@@ -1188,6 +1190,7 @@ async fn handle_modal_submit(
         trace_id: uuid::Uuid::new_v4().to_string(),
         sender_ref: None,
         conversation_ref: None,
+        idp: None,
     };
     let principal_for_post = principal.clone();
 

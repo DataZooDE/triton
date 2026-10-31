@@ -113,6 +113,32 @@ impl JwtSigner {
         groups: &[String],
         ttl: Duration,
     ) -> Result<String, String> {
+        self.sign_with_claims(
+            audiences,
+            subject,
+            tenant,
+            scopes,
+            groups,
+            &serde_json::Map::new(),
+            ttl,
+        )
+    }
+
+    /// [`Self::sign`] plus additional string claims (the forwarded
+    /// identity-provider claims `email`, `idp`, `idp_tenant`). A key that
+    /// collides with a registered or Triton-owned claim is ignored, so an
+    /// extra can never overwrite `iss`, `aud`, `sub`, `exp` or `tenant`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn sign_with_claims(
+        &self,
+        audiences: &[&str],
+        subject: &str,
+        tenant: &str,
+        scopes: &[String],
+        groups: &[String],
+        extra: &serde_json::Map<String, serde_json::Value>,
+        ttl: Duration,
+    ) -> Result<String, String> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| format!("clock: {e}"))?
@@ -133,6 +159,23 @@ impl JwtSigner {
         }
         if !groups.is_empty() {
             claims["triton_sender_groups"] = json!(groups);
+        }
+        const RESERVED: &[&str] = &[
+            "iss",
+            "aud",
+            "sub",
+            "iat",
+            "exp",
+            "nbf",
+            "jti",
+            "tenant",
+            "triton_sender_scopes",
+            "triton_sender_groups",
+        ];
+        for (k, v) in extra {
+            if !RESERVED.contains(&k.as_str()) {
+                claims[k] = v.clone();
+            }
         }
         let mut header = Header::new(Algorithm::RS256);
         header.kid = Some(self.kid.clone());

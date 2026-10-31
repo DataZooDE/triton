@@ -64,6 +64,65 @@ pub struct Principal {
     /// today it serves the in-process embedded host.)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_ref: Option<serde_json::Value>,
+    /// The external identity provider that vouched for this caller, when
+    /// the inbound path verified one: which provider (`google`,
+    /// `entra`, `oidc`, `msteams`), the provider's own tenant (Google
+    /// `hd`, Entra `tid`) and the verified email. `None` on paths without
+    /// a provider (dev token, forwarded auth, sender tables). Forwarded to
+    /// a static upstream as the `idp`, `idp_tenant` and `email` claims only
+    /// with `TRITON_STATIC_UPSTREAM_FORWARD_PRINCIPAL=true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idp: Option<IdpIdentity>,
+}
+
+/// What an external identity provider asserted about a caller. Every field
+/// comes from a verified token (or a provider's own introspection), never
+/// from a request body or header.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct IdpIdentity {
+    /// `google`, `entra`, `oidc` (any other configured issuer) or
+    /// `msteams` (the Bot Framework channel identity).
+    pub name: String,
+    /// The provider's tenant: Google Workspace `hd`, Entra `tid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant: Option<String>,
+    /// The verified email (lower-cased), or the Entra sign-in name when
+    /// the token carries no `email` claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    /// The verified issuer that vouched for the caller (the token's `iss`,
+    /// `https://accounts.google.com`, `https://api.botframework.com`).
+    /// Distinguishes two configured issuers that share a provider name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issuer: Option<String>,
+}
+
+impl IdpIdentity {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            tenant: None,
+            email: None,
+            issuer: None,
+        }
+    }
+
+    pub fn issuer(mut self, issuer: impl Into<String>) -> Self {
+        self.issuer = Some(issuer.into());
+        self
+    }
+
+    pub fn tenant(mut self, tenant: Option<String>) -> Self {
+        self.tenant = tenant.filter(|t| !t.trim().is_empty());
+        self
+    }
+
+    pub fn email(mut self, email: Option<String>) -> Self {
+        self.email = email
+            .map(|e| e.trim().to_ascii_lowercase())
+            .filter(|e| !e.is_empty());
+        self
+    }
 }
 
 /// Cap on a principal field accepted from an out-of-process identity
@@ -152,6 +211,7 @@ impl fmt::Debug for Principal {
             .field("tenant", &self.tenant)
             .field("raw_token", &"<redacted>")
             .field("trace_id", &self.trace_id)
+            .field("idp", &self.idp)
             .finish()
     }
 }
