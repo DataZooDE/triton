@@ -101,9 +101,20 @@ async fn every_card_spelling_under_the_03_base_is_the_03_card_pointing_at_it() {
             card["securitySchemes"]["oidc_0"]["type"], "openIdConnect",
             "{path}: {card:#}"
         );
-        // Everything but the endpoint is the existing 0.3 card.
+        // A plain-text card: no streaming, no extensions advertised
+        // (message/stream stays callable, see below).
+        assert_eq!(card["capabilities"]["streaming"], false, "{path}: {card:#}");
+        assert_eq!(
+            card["capabilities"].get("extensions"),
+            None,
+            "{path}: {card:#}"
+        );
+        assert_eq!(card["defaultInputModes"], json!(["text/plain"]), "{path}");
+        assert_eq!(card["defaultOutputModes"], json!(["text/plain"]), "{path}");
+        // Everything else is the existing 0.3 card.
         let mut same = card.clone();
         same["url"] = reference["url"].clone();
+        same["capabilities"] = reference["capabilities"].clone();
         assert_eq!(same, reference, "{path}");
 
         let preflight = client
@@ -258,4 +269,26 @@ async fn three_port_mode_serves_the_03_base_on_the_a2a_listener() {
     .await;
     assert_eq!(status, 200, "{sent}");
     assert_eq!(sent["result"]["kind"], "message", "{sent}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_endpoint_cards_keep_streaming_and_the_a2ui_extension() {
+    let agent = agent().await;
+    let triton =
+        TritonProcess::spawn_with_env(Duration::from_secs(10), a2a_env(&agent, true)).await;
+    for path in ["/a2a/.well-known/agent.json", "/.well-known/agent.json"] {
+        let card: Value = reqwest::get(triton.rest_url(path))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(card["capabilities"]["streaming"], true, "{path}");
+        assert!(
+            card["capabilities"]["extensions"]
+                .as_array()
+                .is_some_and(|e| !e.is_empty()),
+            "{path}: {card:#}"
+        );
+    }
 }
