@@ -102,6 +102,8 @@ mod manifest_endpoint;
 mod mcp;
 #[path = "../mcp_apps_acceptance.rs"]
 mod mcp_apps_acceptance;
+#[path = "../mcp_era.rs"]
+mod mcp_era;
 #[path = "../mcp_protected_resource.rs"]
 mod mcp_protected_resource;
 #[path = "../metrics.rs"]

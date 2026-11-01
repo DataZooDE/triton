@@ -43,7 +43,7 @@ const ORIGIN: &str = "https://agents.example.test";
 const OIDC_AUD: &str = "triton-trio";
 const ENTRA_AUD: &str = "api://triton-mcp";
 const SCOPE: &str = "api://triton-mcp/access_as_user";
-const TID_ACME: &str = "11111111-2222-3333-4444-abcdefabcdef";
+pub(crate) const TID_ACME: &str = "11111111-2222-3333-4444-abcdefabcdef";
 const TID_GLOBEX: &str = "99999999-8888-7777-6666-555555555555";
 
 fn now() -> i64 {
@@ -53,11 +53,11 @@ fn now() -> i64 {
         .as_secs() as i64
 }
 
-struct Rig {
-    triton: TritonProcess,
+pub(crate) struct Rig {
+    pub(crate) triton: TritonProcess,
     agent: FakeAgent,
     oidc: TestIssuer,
-    entra: TestIssuer,
+    pub(crate) entra: TestIssuer,
     _google: FakeTokeninfo,
 }
 
@@ -138,7 +138,7 @@ async fn rig_with(single_port: bool, overrides: &[(&str, &str)]) -> Rig {
     }
 }
 
-async fn rig() -> Rig {
+pub(crate) async fn rig() -> Rig {
     rig_with(true, &[]).await
 }
 
@@ -156,7 +156,7 @@ fn entra_claims(entra: &TestIssuer, tid: &str) -> Value {
     })
 }
 
-fn entra_token(entra: &TestIssuer, tid: &str) -> String {
+pub(crate) fn entra_token(entra: &TestIssuer, tid: &str) -> String {
     entra.sign_jwt(entra_claims(entra, tid))
 }
 
