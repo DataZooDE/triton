@@ -36,7 +36,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::{Value, json};
-use triton_core::a2ui::{build_envelope, extract_surface};
+use triton_core::a2ui::{build_envelope, extract_surface, mcp_app};
 use triton_core::{A2uiVersion, Dispatcher, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
@@ -535,6 +535,11 @@ async fn tools_list_response(id: Value, state: &McpState) -> Response {
             if let Some(annotations) = d.annotations {
                 tool["annotations"] = annotations;
             }
+            // A tool that answers with a surface names the answer-card
+            // widget, so an MCP Apps host (Claude, ChatGPT) renders it.
+            if widget_enabled() && d.upstream && d.returns_a2ui {
+                tool["_meta"] = widget_tool_meta();
+            }
             tool
         })
         .collect();
@@ -628,6 +633,12 @@ async fn tools_call(
             // Structured clients still get the full typed envelope in
             // `structuredContent` below, unchanged.
             let reply_text = crate::a2a_spec::reply_text(&d.result);
+            // The answer-card widget's data, from the canonical surface (and
+            // before the A2UI wrap). A result that brings its own MCP App
+            // (`_meta.ui`) keeps it; there is no card to draw then.
+            let widget = (widget_enabled() && ui_meta.is_none())
+                .then(|| mcp_app::widget_data(&d.result))
+                .flatten();
             if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
                 return rpc_error(id, code_for(&e), &e.to_string());
             }
@@ -636,7 +647,10 @@ async fn tools_call(
             // `content` is the flattened prose+chart+sources (above);
             // `structuredContent` is the canonical typed envelope, the
             // same dict REST/A2A get.
-            let env_v = envelope(&d);
+            let mut env_v = envelope(&d);
+            if let Some(w) = widget {
+                env_v["widget"] = w;
+            }
             let mut meta = json!({ "trace_id": trace_id });
             if let Some(ui) = ui_meta {
                 meta["ui"] = ui;
@@ -797,16 +811,63 @@ async fn run_as_task(
 /// resources are loaded on demand via `resources/read` (#143 B), not
 /// listed here (upstream enumeration is optional in v1).
 fn resources_list(id: Value) -> Response {
-    rpc_ok(
-        id,
-        json!({
-            "resources": [{
-                "uri": "ui://triton/runtime.html",
-                "name": "triton-runtime",
-                "mimeType": "text/html"
-            }]
-        }),
-    )
+    let mut resources = vec![json!({
+        "uri": "ui://triton/runtime.html",
+        "name": "triton-runtime",
+        "mimeType": "text/html"
+    })];
+    if widget_enabled() {
+        resources.push(json!({
+            "uri": mcp_app::resource_uri(),
+            "name": "answer-card",
+            "title": "Answer card",
+            "description": WIDGET_DESCRIPTION,
+            "mimeType": mcp_app::MIME_TYPE,
+            "_meta": widget_resource_meta(),
+        }));
+    }
+    rpc_ok(id, json!({ "resources": resources }))
+}
+
+/// `TRITON_MCP_APP_WIDGET=off` keeps the answer-card widget out of
+/// `tools/list`, `resources/*` and the results (on by default): a host
+/// without MCP Apps ignores it anyway, so the switch is for a host that
+/// renders it badly.
+fn widget_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        !std::env::var("TRITON_MCP_APP_WIDGET")
+            .map(|v| matches!(v.trim(), "0" | "false" | "off" | "no"))
+            .unwrap_or(false)
+    })
+}
+
+const WIDGET_DESCRIPTION: &str = "Shows the answer as a card: a table, facts, a map or a form, \
+     with buttons that send a complete follow-up request or open a link.";
+
+/// The tool descriptor `_meta` that points an MCP Apps host at the widget:
+/// the MCP Apps key (`ui.resourceUri`), its deprecated flat form, and the
+/// ChatGPT Apps SDK alias (`openai/outputTemplate`).
+fn widget_tool_meta() -> Value {
+    let uri = mcp_app::resource_uri();
+    json!({
+        "ui": { "resourceUri": uri },
+        "ui/resourceUri": uri,
+        "openai/outputTemplate": uri,
+    })
+}
+
+/// The resource `_meta`: no network at all (inline CSS and JS), drawn in
+/// the host's border.
+fn widget_resource_meta() -> Value {
+    json!({
+        "ui": {
+            "csp": { "connectDomains": [], "resourceDomains": [] },
+            "prefersBorder": true,
+        },
+        "openai/widgetDescription": WIDGET_DESCRIPTION,
+        "openai/widgetPrefersBorder": true,
+    })
 }
 
 async fn resources_read(
@@ -834,6 +895,21 @@ async fn resources_read(
                     // not serve the Lit runtime; the resource exists
                     // for MCP-spec compliance only.
                     "text": "<!-- triton runtime stub; see realizations.md §1 -->"
+                }]
+            }),
+        );
+    }
+    // The answer-card widget, any revision of its URI (a host may have
+    // listed the tools before an upgrade): always the current page.
+    if widget_enabled() && mcp_app::is_widget_uri(&uri) {
+        return rpc_ok(
+            id,
+            json!({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": mcp_app::MIME_TYPE,
+                    "text": mcp_app::widget_html(),
+                    "_meta": widget_resource_meta(),
                 }]
             }),
         );

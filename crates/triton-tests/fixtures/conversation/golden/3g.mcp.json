@@ -1,0 +1,30 @@
+{
+  "actions": [
+    {
+      "action": {
+        "text": "Propose an owner for every Agent without one.",
+        "type": "send_message"
+      },
+      "label": "Try again",
+      "primary": true
+    },
+    {
+      "action": {
+        "type": "open_url",
+        "url": "https://app.example.com/acme/open?request=r1"
+      },
+      "label": "Open in Inbox",
+      "primary": false
+    }
+  ],
+  "body": [
+    {
+      "text": "We tried three times and stopped. Nothing was changed.",
+      "title": "Couldn't answer this",
+      "tone": "attention",
+      "type": "notice"
+    }
+  ],
+  "tone": "attention",
+  "version": 1
+}

@@ -201,6 +201,38 @@ pub fn rename_placeholders(template: &str, rename: impl Fn(&str) -> String) -> S
     out
 }
 
+/// The template as data for a client that composes the request itself (an
+/// MCP Apps widget): `{text}` literal parts, `{field}` required
+/// placeholders, and `{optional: [...]}` segments that are kept only when
+/// every placeholder inside has a non-blank value. Filling these parts
+/// (values trimmed) gives exactly [`fill_template`]'s result.
+pub fn template_parts(template: &str) -> Value {
+    fn flat(part: &str) -> Vec<Value> {
+        let mut out = Vec::new();
+        let mut last = 0usize;
+        for (name, start, end) in scan(part) {
+            if start > last {
+                out.push(json!({ "text": &part[last..start] }));
+            }
+            out.push(json!({ "field": name }));
+            last = end;
+        }
+        if last < part.len() {
+            out.push(json!({ "text": &part[last..] }));
+        }
+        out
+    }
+    let mut out = Vec::new();
+    for (part, optional) in segments(template) {
+        if optional {
+            out.push(json!({ "optional": flat(part) }));
+        } else {
+            out.extend(flat(part));
+        }
+    }
+    Value::Array(out)
+}
+
 /// Turn a verified send-message payload plus the user's submitted inputs
 /// into the complete message text.
 pub fn resolve(
@@ -382,6 +414,29 @@ mod tests {
         assert_eq!(
             resolve(&args, |k| got.get(k).cloned()).unwrap(),
             "Open the capability map"
+        );
+    }
+
+    /// A widget composes the request on the client: the parsed parts must
+    /// carry exactly what `fill_template` reads (literal text, required
+    /// placeholders, optional segments), so a client fill matches it.
+    #[test]
+    fn template_parts_mirror_fill_template() {
+        let tpl = "Set {a} to \"{b}\".[[ Reason: {reason}]] {x y} done";
+        assert_eq!(
+            template_parts(tpl),
+            serde_json::json!([
+                { "text": "Set " }, { "field": "a" }, { "text": " to \"" }, { "field": "b" },
+                { "text": "\"." },
+                { "optional": [ { "text": " Reason: " }, { "field": "reason" } ] },
+                { "text": " {x y} done" }
+            ])
+        );
+        assert_eq!(
+            template_parts("[[unclosed {a}"),
+            serde_json::json!([
+                { "text": "[[unclosed " }, { "field": "a" }
+            ])
         );
     }
 }

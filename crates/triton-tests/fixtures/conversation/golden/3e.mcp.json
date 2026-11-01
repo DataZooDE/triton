@@ -1,0 +1,37 @@
+{
+  "actions": [
+    {
+      "action": {
+        "type": "open_url",
+        "url": "https://app.example.com/acme/open?draft=d1"
+      },
+      "label": "Open draft",
+      "primary": true
+    }
+  ],
+  "body": [
+    {
+      "pairs": [
+        {
+          "before": "Deployed",
+          "label": "Lifecycle",
+          "value": "Retired"
+        },
+        {
+          "label": "Reason",
+          "value": "Replaced (from your message)"
+        },
+        {
+          "label": "Assumed",
+          "value": "Owner, links and AI Act class unchanged"
+        }
+      ],
+      "type": "facts"
+    }
+  ],
+  "header": {
+    "context": "Goes live once a colleague accepts it.",
+    "title": "Retire Agent 20: filed for review"
+  },
+  "version": 1
+}

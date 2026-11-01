@@ -1,0 +1,69 @@
+{
+  "actions": [],
+  "body": [
+    {
+      "groups": [
+        {
+          "fields": [
+            {
+              "kind": "select",
+              "label": "Agent",
+              "name": "agent",
+              "options": [
+                {
+                  "label": "Agent 2 · Requirements: Forecast · Assessed",
+                  "value": "Agent 2"
+                },
+                {
+                  "label": "Agent 20 · Design: Monitor · Deployed",
+                  "value": "Agent 20"
+                },
+                {
+                  "label": "Agent 28 · Sales: Forecast · Planned",
+                  "value": "Agent 28"
+                }
+              ],
+              "required": true,
+              "style": "radio"
+            },
+            {
+              "kind": "string",
+              "label": "Reason (optional)",
+              "name": "reason",
+              "placeholder": "e.g. replaced by Agent 31"
+            }
+          ],
+          "preview": {
+            "label": "Will be sent as",
+            "text": "Retire the agent \"‹Agent›\". Reason: ‹Reason (optional)›"
+          },
+          "template": [
+            {
+              "text": "Retire the agent \""
+            },
+            {
+              "field": "agent"
+            },
+            {
+              "text": "\"."
+            },
+            {
+              "optional": [
+                {
+                  "text": " Reason: "
+                },
+                {
+                  "field": "reason"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "submit_label": "Retire as draft",
+      "title": "Which Agent should be retired?",
+      "type": "form"
+    }
+  ],
+  "version": 1
+}

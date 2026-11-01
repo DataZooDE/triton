@@ -1,0 +1,96 @@
+{
+  "actions": [],
+  "body": [
+    {
+      "text": "As of 18:03. If someone else changes it first, we tell you.",
+      "tone": "info",
+      "type": "notice"
+    },
+    {
+      "groups": [
+        {
+          "fields": [
+            {
+              "default": "owner",
+              "kind": "select",
+              "label": "What to change",
+              "name": "field",
+              "options": [
+                {
+                  "label": "Owner",
+                  "value": "owner"
+                },
+                {
+                  "label": "Lifecycle",
+                  "value": "lifecycle"
+                },
+                {
+                  "label": "AI Act class",
+                  "value": "AI Act class"
+                }
+              ],
+              "required": true
+            },
+            {
+              "kind": "select",
+              "label": "New value",
+              "name": "value",
+              "options": [
+                {
+                  "label": "Finance operations (Org. unit)",
+                  "value": "Finance operations"
+                },
+                {
+                  "label": "Data Protection Officer",
+                  "value": "Data Protection Officer"
+                }
+              ],
+              "required": true
+            },
+            {
+              "kind": "text",
+              "label": "Why",
+              "name": "reason",
+              "placeholder": "Finance took over the process in October."
+            }
+          ],
+          "preview": {
+            "label": "Will be sent as",
+            "text": "Set the ‹What to change› of Agent 28 to \"‹New value›\". Reason: ‹Why›"
+          },
+          "template": [
+            {
+              "text": "Set the "
+            },
+            {
+              "field": "field"
+            },
+            {
+              "text": " of Agent 28 to \""
+            },
+            {
+              "field": "value"
+            },
+            {
+              "text": "\"."
+            },
+            {
+              "optional": [
+                {
+                  "text": " Reason: "
+                },
+                {
+                  "field": "reason"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "submit_label": "File as draft for review",
+      "title": "Change Agent 28",
+      "type": "form"
+    }
+  ],
+  "version": 1
+}

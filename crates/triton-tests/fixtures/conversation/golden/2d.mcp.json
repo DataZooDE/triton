@@ -1,0 +1,135 @@
+{
+  "actions": [
+    {
+      "action": {
+        "type": "open_url",
+        "url": "https://app.example.com/acme/open?view=capability-map&domain=commercial-service&embed=1"
+      },
+      "label": "Shown in canvas →",
+      "primary": false
+    }
+  ],
+  "body": [
+    {
+      "gaps_toggle": "Only gaps",
+      "nodes": [
+        {
+          "children": [
+            {
+              "action": {
+                "text": "Propose an Agent for Finance: Forecast",
+                "type": "send_message"
+              },
+              "action_label": "Propose an Agent here",
+              "gap": true,
+              "label": "Forecast"
+            },
+            {
+              "action": {
+                "text": "Propose an Agent for Finance: Monitor",
+                "type": "send_message"
+              },
+              "action_label": "Propose an Agent here",
+              "gap": true,
+              "label": "Monitor"
+            },
+            {
+              "action": {
+                "text": "Propose an Agent for Finance: Schedule",
+                "type": "send_message"
+              },
+              "action_label": "Propose an Agent here",
+              "gap": true,
+              "label": "Schedule"
+            }
+          ],
+          "count": "0 Agents",
+          "label": "Finance"
+        },
+        {
+          "children": [
+            {
+              "chips": [
+                {
+                  "action": {
+                    "text": "Show Agent 28",
+                    "type": "send_message"
+                  },
+                  "label": "Agent 28 · Planned"
+                }
+              ],
+              "label": "Forecast"
+            },
+            {
+              "action": {
+                "text": "Propose an Agent for Sales: Monitor",
+                "type": "send_message"
+              },
+              "action_label": "Propose an Agent here",
+              "gap": true,
+              "label": "Monitor"
+            },
+            {
+              "chips": [
+                {
+                  "action": {
+                    "text": "Show Agent 29",
+                    "type": "send_message"
+                  },
+                  "label": "Agent 29 · Candidate"
+                }
+              ],
+              "label": "Schedule (proposed)"
+            }
+          ],
+          "count": "2 Agents",
+          "expanded": true,
+          "label": "Sales"
+        },
+        {
+          "children": [
+            {
+              "chips": [
+                {
+                  "action": {
+                    "text": "Show Agent 30",
+                    "type": "send_message"
+                  },
+                  "label": "Agent 30 · Deployed"
+                }
+              ],
+              "label": "Forecast"
+            },
+            {
+              "chips": [
+                {
+                  "action": {
+                    "text": "Show Agent 31",
+                    "type": "send_message"
+                  },
+                  "label": "Agent 31 · Assessed"
+                }
+              ],
+              "label": "Monitor"
+            },
+            {
+              "action": {
+                "text": "Propose an Agent for Service: Schedule",
+                "type": "send_message"
+              },
+              "action_label": "Propose an Agent here",
+              "gap": true,
+              "label": "Schedule"
+            }
+          ],
+          "count": "2 Agents",
+          "expanded": true,
+          "label": "Service"
+        }
+      ],
+      "title": "Commercial & service · 4 Agents",
+      "type": "tree"
+    }
+  ],
+  "version": 1
+}

@@ -1,0 +1,119 @@
+{
+  "actions": [
+    {
+      "action": {
+        "type": "open_url",
+        "url": "https://app.example.com/acme/analyse?lifecycle=planned"
+      },
+      "label": "Open in the portfolio",
+      "primary": true
+    },
+    {
+      "action": {
+        "text": "Find planned Agents",
+        "type": "send_message"
+      },
+      "label": "Refine filters",
+      "primary": false
+    }
+  ],
+  "body": [
+    {
+      "columns": [
+        "Agent · capability",
+        "AI Act"
+      ],
+      "rows": [
+        {
+          "action": {
+            "text": "Show Agent 3",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 3 · Requirements: Monitor · Head of IT Operations",
+            "Minimal"
+          ]
+        },
+        {
+          "action": {
+            "text": "Show Agent 8",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 8 · Design: Schedule · Data Protection Officer",
+            "High"
+          ]
+        },
+        {
+          "action": {
+            "text": "Show Agent 12",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 12 · Design: Forecast · no owner",
+            "High"
+          ]
+        },
+        {
+          "action": {
+            "text": "Show Agent 17",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 17 · Validation: Forecast · Head of Quality Assurance",
+            "Limited"
+          ]
+        },
+        {
+          "action": {
+            "text": "Show Agent 21",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 21 · Planning: Schedule · Head of Production Planning",
+            "Minimal"
+          ]
+        },
+        {
+          "action": {
+            "text": "Show Agent 28",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 28 · Sales: Forecast · Data Protection Officer",
+            "Minimal"
+          ]
+        }
+      ],
+      "title": "Agents · lifecycle: planned · 6",
+      "type": "table"
+    },
+    {
+      "chips": [
+        {
+          "action": {
+            "text": "Which agents are planned? Show their AI Act class.",
+            "type": "send_message"
+          },
+          "label": "+ AI Act class"
+        },
+        {
+          "action": {
+            "text": "Which agents are planned? Show their owner.",
+            "type": "send_message"
+          },
+          "label": "+ Owner"
+        },
+        {
+          "action": {
+            "text": "Which agents are planned? Show their capability.",
+            "type": "send_message"
+          },
+          "label": "+ Capability"
+        }
+      ],
+      "type": "chips"
+    }
+  ],
+  "version": 1
+}

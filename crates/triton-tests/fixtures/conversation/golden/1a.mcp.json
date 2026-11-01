@@ -1,0 +1,69 @@
+{
+  "actions": [
+    {
+      "action": {
+        "type": "open_url",
+        "url": "https://app.example.com/acme/analyse?lifecycle=planned"
+      },
+      "label": "Open in the portfolio",
+      "primary": true
+    }
+  ],
+  "body": [
+    {
+      "items": [
+        {
+          "action": {
+            "type": "open_url",
+            "url": "https://app.example.com/acme/open?object=agent%3Aagent-3"
+          },
+          "detail": "Requirements: Monitor · Head of IT Operations",
+          "label": "Agent 3"
+        },
+        {
+          "action": {
+            "type": "open_url",
+            "url": "https://app.example.com/acme/open?object=agent%3Aagent-8"
+          },
+          "detail": "Design: Schedule · Data Protection Officer",
+          "label": "Agent 8"
+        },
+        {
+          "action": {
+            "type": "open_url",
+            "url": "https://app.example.com/acme/open?object=agent%3Aagent-12"
+          },
+          "detail": "Design: Forecast · no owner",
+          "label": "Agent 12"
+        },
+        {
+          "action": {
+            "type": "open_url",
+            "url": "https://app.example.com/acme/open?object=agent%3Aagent-17"
+          },
+          "detail": "Validation: Forecast · Head of Quality Assurance",
+          "label": "Agent 17"
+        },
+        {
+          "action": {
+            "type": "open_url",
+            "url": "https://app.example.com/acme/open?object=agent%3Aagent-21"
+          },
+          "detail": "Planning: Schedule · Head of Production Planning",
+          "label": "Agent 21"
+        },
+        {
+          "action": {
+            "type": "open_url",
+            "url": "https://app.example.com/acme/open?object=agent%3Aagent-28"
+          },
+          "detail": "Sales: Forecast · Data Protection Officer",
+          "label": "Agent 28"
+        }
+      ],
+      "title": "Agent · capability · owner",
+      "type": "list"
+    }
+  ],
+  "version": 1
+}

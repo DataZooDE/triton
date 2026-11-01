@@ -102,6 +102,8 @@ mod manifest;
 mod manifest_endpoint;
 #[path = "../mcp.rs"]
 mod mcp;
+#[path = "../mcp_app_widget.rs"]
+mod mcp_app_widget;
 #[path = "../mcp_apps_acceptance.rs"]
 mod mcp_apps_acceptance;
 #[path = "../mcp_era.rs"]
