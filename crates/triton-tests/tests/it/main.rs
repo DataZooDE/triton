@@ -56,6 +56,8 @@ mod chat_identity;
 #[path = "../principal_denylist.rs"]
 mod principal_denylist;
 
+#[path = "../card_cors.rs"]
+mod card_cors;
 #[path = "../correlation_rotation.rs"]
 mod correlation_rotation;
 #[path = "../cors.rs"]

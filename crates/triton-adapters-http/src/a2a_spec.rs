@@ -127,6 +127,63 @@ pub fn card_router(state: CardState) -> Router {
         r = r.route(&format!("/.well-known/{name}"), card_route(name));
     }
     r.with_state(state)
+        .layer(axum::middleware::from_fn(public_card_cors))
+}
+
+/// CORS for the public cards. Discovery clients such as Copilot Studio's
+/// maker portal fetch the card from the user's browser, cross-origin; a
+/// card is public metadata, so any origin may read it, without
+/// credentials. Answers the `OPTIONS` preflight itself (`204`), including
+/// Chrome's Private Network Access preflight, which a public page sends
+/// before reaching a private address (e.g. a tailnet IP behind a funnel).
+/// Only the card routes carry this layer; the authenticated endpoints get
+/// no CORS grant from it.
+async fn public_card_cors(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{HeaderValue, Method, StatusCode, header};
+    use axum::response::IntoResponse;
+
+    if request.method() == Method::OPTIONS {
+        let headers = request.headers();
+        let requested_headers = headers
+            .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+            .cloned()
+            .unwrap_or_else(|| HeaderValue::from_static("*"));
+        let private_network = headers
+            .get("access-control-request-private-network")
+            .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"true"));
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        let out = response.headers_mut();
+        out.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+        out.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, OPTIONS"),
+        );
+        out.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, requested_headers);
+        out.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("600"),
+        );
+        out.insert(header::ALLOW, HeaderValue::from_static("GET, OPTIONS"));
+        if private_network {
+            out.insert(
+                "access-control-allow-private-network",
+                HeaderValue::from_static("true"),
+            );
+        }
+        return response;
+    }
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response
 }
 
 /// `agent-card.json` is the 1.0 card (`?version=0.3` selects 0.3);
