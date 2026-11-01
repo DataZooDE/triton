@@ -162,6 +162,22 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
     let principal = match verified {
         Ok(p) => p,
         Err(e) => {
+            // The audit line names only the method; the client and the uri
+            // tell a refused host fetch (a widget template) from a probe.
+            let uri = parsed
+                .as_ref()
+                .ok()
+                .and_then(|v| v.pointer("/params/uri"))
+                .and_then(|u| u.as_str())
+                .unwrap_or("");
+            tracing::info!(
+                method = %method_hint,
+                uri,
+                slug = state.route.as_ref().map(|r| r.slug.as_str()).unwrap_or(""),
+                client = user_agent(&parts),
+                error = %e,
+                "mcp request refused"
+            );
             state.dispatcher.record_rejection(
                 &method_hint,
                 "mcp",
@@ -273,7 +289,17 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
         return StatusCode::ACCEPTED.into_response();
     }
 
-    // Step 8: method dispatch.
+    // Step 8: method dispatch. Calls are audited by the dispatcher; the
+    // rest (lists, resource reads, discovery) is not a dispatch, and hosts
+    // send those out of band (ChatGPT fetches a widget at "Refresh tools"),
+    // so each is logged: whether a host ever asked is the first question
+    // when a widget does not open.
+    if method != "tools/call" {
+        let uri = params.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+        let slug = state.route.as_ref().map(|r| r.slug.as_str()).unwrap_or("");
+        let client = user_agent(&parts);
+        tracing::info!(method = %method, uri, slug, client, "mcp request");
+    }
     let response = match method.as_str() {
         "server/discover" => maybe_respond(id_present, id, discover_response),
         "initialize" => maybe_respond(id_present, id, |id| {
@@ -328,6 +354,14 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
     } else {
         response
     }
+}
+
+fn user_agent(parts: &Parts) -> &str {
+    parts
+        .headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
 }
 
 /// If `id` was present, return the response. Otherwise (notification)
@@ -529,7 +563,7 @@ async fn tools_list_response(id: Value, state: &McpState) -> Response {
         .map(|d| {
             let mut tool = json!({
                 "name": d.name,
-                "inputSchema": d.input_schema,
+                "inputSchema": object_schema(d.input_schema),
                 "x-triton": { "returns_a2ui": d.returns_a2ui, "upstream": d.upstream },
             });
             // The upstream's own description and annotations, verbatim;
@@ -837,14 +871,27 @@ fn resources_list(id: Value, state: &McpState) -> Response {
 const WIDGET_DESCRIPTION: &str = "Shows the answer as a card: a table, facts, a map or a form, \
      with buttons that send a complete follow-up request or open a link.";
 
+/// MCP requires a tool's `inputSchema` to be an object schema
+/// (`"type": "object"`); strict clients (the MCP Apps reference host's SDK)
+/// refuse the whole tool list otherwise. An upstream that published none,
+/// or one without `type`, gets it filled in.
+fn object_schema(schema: Value) -> Value {
+    match schema {
+        Value::Object(mut m) => {
+            m.entry("type").or_insert_with(|| json!("object"));
+            Value::Object(m)
+        }
+        _ => json!({ "type": "object" }),
+    }
+}
+
 /// The tool descriptor `_meta` that points an MCP Apps host at the widget:
-/// the MCP Apps key (`ui.resourceUri`), its deprecated flat form, and the
-/// ChatGPT Apps SDK alias (`openai/outputTemplate`).
+/// the MCP Apps key (`ui.resourceUri`) and the ChatGPT Apps SDK alias
+/// (`openai/outputTemplate`). The flat `ui/resourceUri` is deprecated.
 fn widget_tool_meta() -> Value {
     let uri = mcp_app::resource_uri();
     json!({
         "ui": { "resourceUri": uri },
-        "ui/resourceUri": uri,
         "openai/outputTemplate": uri,
     })
 }
@@ -857,6 +904,8 @@ fn widget_resource_meta() -> Value {
             "csp": { "connectDomains": [], "resourceDomains": [] },
             "prefersBorder": false,
         },
+        // ChatGPT's own spelling of the same (empty) policy.
+        "openai/widgetCSP": { "connect_domains": [], "resource_domains": [] },
         "openai/widgetDescription": WIDGET_DESCRIPTION,
         "openai/widgetPrefersBorder": false,
     })

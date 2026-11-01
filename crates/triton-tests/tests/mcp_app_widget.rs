@@ -276,8 +276,13 @@ async fn a_customer_mcp_path_serves_the_answer_card_widget() {
         .to_string();
     assert!(uri.starts_with("ui://"), "{uri}");
     for t in tools {
+        // MCP requires an object schema; strict clients (the MCP Apps
+        // reference host's SDK) refuse the whole list otherwise.
+        assert_eq!(t["inputSchema"]["type"], "object", "{t}");
         assert_eq!(t["_meta"]["ui"]["resourceUri"], uri, "{t}");
         assert_eq!(t["_meta"]["openai/outputTemplate"], uri, "{t}");
+        // The flat `ui/resourceUri` is deprecated (removed before GA).
+        assert!(t["_meta"].get("ui/resourceUri").is_none(), "{t}");
     }
 
     // resources/list names it with the MCP Apps mime type.
@@ -290,12 +295,28 @@ async fn a_customer_mcp_path_serves_the_answer_card_widget() {
         .unwrap_or_else(|| panic!("{uri} not listed: {resources}"))
         .clone();
     assert_eq!(entry["mimeType"], mcp_app::MIME_TYPE);
+    // Both CSP spellings: the MCP Apps one and ChatGPT's own, empty (the
+    // page loads nothing), on the list entry and on the read content.
+    let csp = |m: &Value| {
+        assert_eq!(
+            m["ui"]["csp"],
+            json!({ "connectDomains": [], "resourceDomains": [] }),
+            "{m}"
+        );
+        assert_eq!(
+            m["openai/widgetCSP"],
+            json!({ "connect_domains": [], "resource_domains": [] }),
+            "{m}"
+        );
+    };
+    csp(&entry["_meta"]);
 
     // resources/read returns the self-contained HTML.
     let read = rpc(&r, "resources/read", json!({ "uri": uri })).await;
     let content = &read["contents"][0];
     assert_eq!(content["uri"], uri);
     assert_eq!(content["mimeType"], mcp_app::MIME_TYPE);
+    csp(&content["_meta"]);
     let html = content["text"].as_str().expect("html text");
     assert!(
         html.starts_with("<!doctype html>"),
@@ -384,4 +405,66 @@ fn only_https_links_become_widget_controls() {
     assert!(!mcp_app::is_widget_action(
         &json!({ "type": "open_url", "url": "http://127.0.0.1/x" })
     ));
+}
+
+/// Hosts fetch the widget out of band (ChatGPT at "Refresh tools", Claude
+/// when it first renders), and none of these reads is a dispatch, so none
+/// is audited. Each one is logged — method, uri, client — so a widget that
+/// does not open can be traced to whether the host ever asked for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn resource_reads_and_lists_are_logged_with_the_client() {
+    let r = rig().await;
+    let uri = mcp_app::resource_uri();
+    let resp = reqwest::Client::new()
+        .post(r.triton.rest_url("/mcp/acme"))
+        .header("accept", "application/json, text/event-stream")
+        .header("user-agent", "openai-mcp/1.0.0")
+        .bearer_auth(token(&r.entra))
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/read", "params": { "uri": uri } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    rpc(&r, "resources/list", json!({})).await;
+    rpc(&r, "tools/list", json!({})).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let lines = r.triton.stdout_snapshot();
+    let find = |method: &str| {
+        lines
+            .iter()
+            .find(|l| {
+                l.contains("\"mcp request\"") && l.contains(&format!("\"method\":\"{method}\""))
+            })
+            .cloned()
+            .unwrap_or_else(|| panic!("no log line for {method}:\n{}", lines.join("\n")))
+    };
+    let read = find("resources/read");
+    assert!(read.contains(uri), "{read}");
+    assert!(read.contains("openai-mcp/1.0.0"), "{read}");
+    assert!(read.contains("\"slug\":\"acme\""), "{read}");
+    find("resources/list");
+    find("tools/list");
+
+    // A host fetching the widget without a usable bearer is refused, and
+    // that is logged with the client too, or a failed template fetch would
+    // leave no trace beyond an anonymous `rpc` audit line.
+    let resp = reqwest::Client::new()
+        .post(r.triton.rest_url("/mcp/acme"))
+        .header("user-agent", "openai-mcp/1.0.0 (widget)")
+        .json(&json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": { "uri": uri } }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let lines = r.triton.stdout_snapshot();
+    let refused = lines
+        .iter()
+        .find(|l| l.contains("\"mcp request refused\"") && l.contains("openai-mcp/1.0.0 (widget)"))
+        .unwrap_or_else(|| panic!("no refusal line:\n{}", lines.join("\n")));
+    assert!(
+        refused.contains("\"method\":\"resources/read\""),
+        "{refused}"
+    );
+    assert!(refused.contains(uri), "{refused}");
 }

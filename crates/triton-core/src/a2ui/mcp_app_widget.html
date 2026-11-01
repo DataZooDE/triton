@@ -37,7 +37,7 @@
   --ok: #7fd49a;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; padding: 0; background: transparent; }
+html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
 body { font: 14px/1.45 var(--font); color: var(--fg); }
 #card { padding: 14px 16px 16px; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; }
 #card:empty { display: none; }
@@ -479,15 +479,25 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
   }
 
   // ── size: tell the host the height we need ────────────────────────────
+  // Measured like the ext-apps SDK: the root at max-content, so a frame
+  // the host already sized does not stretch the measurement.
   let lastH = -1;
   function resize() {
-    const h = Math.ceil(document.documentElement.getBoundingClientRect().height);
+    const root = document.documentElement;
+    const was = root.style.height;
+    root.style.height = "max-content";
+    const h = Math.ceil(root.getBoundingClientRect().height);
+    root.style.height = was;
     if (h === lastH) return;
     lastH = h;
-    if (bridge) notify("ui/notifications/size-changed", { height: h });
+    if (bridge) notify("ui/notifications/size-changed", { width: Math.ceil(window.innerWidth), height: h });
     if (window.openai && window.openai.notifyIntrinsicHeight) window.openai.notifyIntrinsicHeight(h);
   }
-  if (window.ResizeObserver) new ResizeObserver(resize).observe(document.body);
+  if (window.ResizeObserver) {
+    const ro = new ResizeObserver(() => requestAnimationFrame(resize));
+    ro.observe(document.documentElement);
+    ro.observe(document.body);
+  }
 
   // ── start: handshake first; the host sends nothing before `initialized` ─
   const mq = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
