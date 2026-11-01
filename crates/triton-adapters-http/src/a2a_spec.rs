@@ -2125,3 +2125,80 @@ mod client_file_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod client_file_limit_tests {
+    use super::*;
+
+    /// Entries are bounded however many file parts a body holds.
+    #[test]
+    fn ten_thousand_empty_file_parts_make_eleven_entries() {
+        let parts: Vec<Value> = (0..10_000)
+            .map(|_| json!({ "kind": "file", "file": {} }))
+            .collect();
+        let client = client_input(&parts, false);
+        assert_eq!(client.files.len(), MAX_CLIENT_FILES + 1);
+        assert_eq!(client.files[0]["error"], "invalid");
+        assert_eq!(
+            client.files[MAX_CLIENT_FILES]["count"],
+            10_000 - MAX_CLIENT_FILES
+        );
+        assert!(client.fallback.unwrap().len() < 200);
+    }
+
+    /// A non-string `inlineData` is an invalid file, still linked by index.
+    #[test]
+    fn a_malformed_upload_is_an_invalid_entry() {
+        let event = json!({ "version": "v0.9", "action": { "name": "upload_complete",
+            "context": { "files": [ { "fileId": "a", "inlineData": 42 } ] } } });
+        let client = client_input(&[json!({ "kind": "data", "data": event })], true);
+        assert_eq!(client.files[0]["error"], "invalid");
+        assert_eq!(client.events[0]["action"]["context"]["files"][0]["file"], 0);
+    }
+
+    /// The bytes stay out of the per-turn `_triton` metadata, which a task
+    /// stores; they travel in the overrides' non-persisted `client_files`.
+    #[test]
+    fn files_are_not_in_the_stored_metadata() {
+        let client = client_input(
+            &[json!({ "kind": "file", "file": { "bytes": "eA==", "name": "x.txt" } })],
+            false,
+        );
+        let config = SpecA2aConfig {
+            name: "A".into(),
+            description: "D".into(),
+            version: "1".into(),
+            public_url: "https://a.example".into(),
+            a2a_path: "/a2a".into(),
+            default_tool: "t".into(),
+            skills: None,
+        };
+        let o = turn_context(
+            &config,
+            &triton_core::SurfaceRegistry::with_trio_defaults(),
+            "ctx",
+            false,
+            client,
+        );
+        assert!(
+            !serde_json::to_string(&o.triton_meta)
+                .unwrap()
+                .contains("eA==")
+        );
+        assert_eq!(o.client_files.as_deref().map(Vec::len), Some(1));
+    }
+
+    /// The debug action log never contains a FileUpload data URI.
+    #[test]
+    fn the_debug_log_redacts_upload_data() {
+        let parts = vec![
+            json!({ "raw": "eA==", "filename": "a.txt" }),
+            json!({ "kind": "data", "data": { "version": "v0.9", "action": { "name": "upload_complete",
+                "context": { "files": [ { "fileId": "a", "inlineData": "data:text/plain;base64,c2VjcmV0" } ] } } } }),
+        ];
+        let text = describe_a2ui_actions(&parts).to_string();
+        assert!(!text.contains("base64,"), "{text}");
+        assert!(text.contains("<data uri 31 chars>"), "{text}");
+        assert!(text.contains("\"file\""), "file parts are labelled: {text}");
+    }
+}
