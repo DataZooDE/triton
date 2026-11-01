@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
+use axum::body::Body;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::http::request::Parts;
@@ -297,6 +297,19 @@ fn rpc_error(id: &Value, code: i32, message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// 413 for a body over [`MAX_A2A_BODY_BYTES`] (either binding).
+pub(crate) fn body_too_large() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        Json(json!({
+            "jsonrpc": "2.0", "id": Value::Null,
+            "error": { "code": INVALID_REQUEST,
+                       "message": format!("request body over {} MiB", MAX_A2A_BODY_BYTES / (1024 * 1024)) },
+        })),
+    )
+        .into_response()
+}
+
 fn rpc_ok(id: &Value, result: Value) -> Response {
     (
         StatusCode::OK,
@@ -305,7 +318,7 @@ fn rpc_ok(id: &Value, result: Value) -> Response {
         .into_response()
 }
 
-async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> Response {
+async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Body) -> Response {
     // Auth first, exactly as the Triton-shaped route does: a malformed
     // body must not earn a different answer than a missing credential.
     let principal = match state.a2a.identity.verify(&parts).await {
@@ -353,6 +366,11 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
     tracing::info!(x_a2a_extensions = ?inbound_ext, "a2a inbound extension activation");
     let echo_a2ui = activates_a2ui(inbound_ext.as_deref());
 
+    // Read only now, after authentication, so an anonymous caller cannot make
+    // the gateway buffer a large body.
+    let Ok(body) = axum::body::to_bytes(body, MAX_A2A_BODY_BYTES).await else {
+        return body_too_large();
+    };
     let req: RpcRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return rpc_error(&Value::Null, PARSE_ERROR, format!("invalid JSON: {e}")),
@@ -465,14 +483,14 @@ pub(crate) fn turn_context_for(
     state: &SpecState,
     context_id: &str,
     a2ui: bool,
-    events: Vec<Value>,
+    client: ClientInput,
 ) -> triton_core::ContextOverrides {
     turn_context(
         &state.config,
         state.a2a.dispatcher.surfaces(),
         context_id,
         a2ui,
-        events,
+        client,
     )
 }
 
@@ -485,7 +503,7 @@ fn turn_context(
     surfaces: &triton_core::SurfaceRegistry,
     context_id: &str,
     a2ui: bool,
-    events: Vec<Value>,
+    client: ClientInput,
 ) -> triton_core::ContextOverrides {
     let mut meta = serde_json::Map::new();
     meta.insert("protocol".into(), json!("a2a"));
@@ -496,11 +514,14 @@ fn turn_context(
     // The client's A2UI messages of this turn (clicks with their resolved
     // bindings, render errors), under `client`: client-asserted data, never
     // mistaken for Triton-authored keys (doc/upstream-agent-contract.md §2b).
-    if !events.is_empty() {
-        meta.insert("client".into(), json!({ "a2ui_events": events }));
+    // Its files join them at dispatch from `client_files`, which a task never
+    // stores.
+    if !client.events.is_empty() {
+        meta.insert("client".into(), json!({ "a2ui_events": client.events }));
     }
     triton_core::ContextOverrides {
         triton_meta: meta,
+        client_files: (!client.files.is_empty()).then(|| Arc::new(client.files)),
         // The registry's A2UI variant carries the operator's guidance; a host
         // that replaced the registry without one still gets the profile.
         surface: a2ui.then(|| {
@@ -537,7 +558,7 @@ fn wants_immediate_task(params: &Value) -> bool {
 /// meant to read. Non-text parts (files, structured data) are ignored
 /// rather than rejected: a client that also sends a file should still
 /// get an answer to its words.
-fn text_from_params(params: &Value, client: &A2uiClient) -> Option<Inbound> {
+fn text_from_params(params: &Value, client: &ClientInput) -> Option<Inbound> {
     let parts = params.get("message")?.get("parts")?.as_array()?;
     // A2UI button click: Gemini Enterprise posts back the action as a
     // `application/json+a2ui` DataPart. Its signed action id names the
@@ -613,18 +634,29 @@ fn text_from_params(params: &Value, client: &A2uiClient) -> Option<Inbound> {
     })
 }
 
-/// One turn's A2UI client messages, normalised once for both bindings.
+/// One turn's client input beyond its text, normalised once for both
+/// bindings: the A2UI client messages and the attached files.
 ///
 /// A data part qualifies when the request activated the A2UI extension or the
 /// part itself is typed `application/json+a2ui` (0.3: `metadata.mimeType`;
 /// 1.0: `mediaType`). Its `data` is one client message or an array of them,
 /// each with an object `action` or `error`. At most [`MAX_A2UI_EVENTS`] are
 /// kept, projected onto the v0.9 fields with string types and a byte budget.
+///
+/// Files come from file parts (0.3 `{kind: "file", file: {bytes|uri,
+/// mimeType, name}}`, 1.0 `{raw|url, mediaType, filename}`) and from the
+/// data URIs an A2UI `FileUpload` puts in its action context
+/// (`context.files[].inlineData`). Each becomes one entry: `source`
+/// (`part` | `file_upload`), `name`, `media_type`, and either `size` plus the
+/// base64 `bytes`, or an `error` (`link` | `invalid` | `too_large`); past
+/// [`MAX_CLIENT_FILES`] entries one `{error: "too_many", count}` marker.
+/// Links are never fetched.
 #[derive(Default)]
-pub(crate) struct A2uiClient {
+pub(crate) struct ClientInput {
     pub(crate) events: Vec<Value>,
-    /// Turn text when the message has no text part: `A2UI action: <name>` or
-    /// `A2UI error`.
+    pub(crate) files: Vec<Value>,
+    /// Turn text when the message has no text part: `A2UI action: <name>`,
+    /// `A2UI error` or `Attached file: <name>`.
     pub(crate) fallback: Option<String>,
 }
 
@@ -634,8 +666,18 @@ const MAX_A2UI_EVENTS: usize = 8;
 const MAX_A2UI_EVENT_OBJECT_BYTES: usize = 8 * 1024;
 /// Longest action name echoed into the fallback text.
 const MAX_A2UI_ACTION_NAME_CHARS: usize = 64;
+/// Upper bound on file entries per turn; the rest are counted in one marker.
+const MAX_CLIENT_FILES: usize = 10;
+/// Largest decoded file forwarded.
+const MAX_CLIENT_FILE_BYTES: usize = 10 * 1024 * 1024;
+/// Largest decoded total of one turn's files.
+const MAX_CLIENT_FILES_TOTAL_BYTES: usize = 25 * 1024 * 1024;
+/// Request-body limit of the A2A routes: the files' base64 plus the message.
+pub(crate) const MAX_A2A_BODY_BYTES: usize = 40 * 1024 * 1024;
+/// Longest file name or media type forwarded.
+const MAX_FILE_LABEL_CHARS: usize = 255;
 
-pub(crate) fn a2ui_client(parts: &[Value], a2ui: bool) -> A2uiClient {
+pub(crate) fn client_input(parts: &[Value], a2ui: bool) -> ClientInput {
     let typed = |p: &Value| {
         let mime = p
             .get("metadata")
@@ -648,58 +690,286 @@ pub(crate) fn a2ui_client(parts: &[Value], a2ui: bool) -> A2uiClient {
         Some(kind) => kind == "data",
         None => p.get("data").is_some(),
     };
-    let messages = parts
-        .iter()
-        .filter(|p| is_data(p) && (a2ui || typed(p)))
-        .filter_map(|p| p.get("data"))
-        .flat_map(|d| match d {
-            Value::Array(a) => a.iter().collect::<Vec<_>>(),
-            other => vec![other],
-        })
-        .filter(|m| {
-            m.get("action").is_some_and(Value::is_object)
-                || m.get("error").is_some_and(Value::is_object)
-        })
-        .take(MAX_A2UI_EVENTS);
+    let is_event = |m: &&Value| {
+        m.get("action").is_some_and(Value::is_object)
+            || m.get("error").is_some_and(Value::is_object)
+    };
 
-    let mut client = A2uiClient::default();
-    for m in messages {
-        let mut event = serde_json::Map::new();
-        if let Some(v) = m.get("version").filter(|v| v.is_string()) {
-            event.insert("version".into(), v.clone());
+    // One pass in arrival order, so files are admitted in the order their
+    // parts came, whether a file part or a FileUpload event carried them.
+    let mut client = ClientInput::default();
+    let mut intake = FileIntake::default();
+    for p in parts {
+        if !(is_data(p) && (a2ui || typed(p))) {
+            file_part(p, &mut intake);
+            continue;
         }
-        if let Some(action) = m.get("action").and_then(Value::as_object) {
-            let mut projected = serde_json::Map::new();
-            for key in ["name", "surfaceId", "sourceComponentId", "timestamp"] {
-                if let Some(v) = action.get(key).filter(|v| v.is_string()) {
-                    projected.insert(key.into(), v.clone());
-                }
+        let messages = match p.get("data") {
+            Some(Value::Array(a)) => a.iter().collect::<Vec<_>>(),
+            Some(other) => vec![other],
+            None => Vec::new(),
+        };
+        for m in messages.into_iter().filter(is_event) {
+            if client.events.len() == MAX_A2UI_EVENTS {
+                break;
             }
-            if let Some(ctx) = action.get("context").filter(|c| within_budget(c)) {
-                projected.insert("context".into(), ctx.clone());
-            }
-            if client.fallback.is_none() {
-                let name: String = projected
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("action")
-                    .chars()
-                    .filter(|c| !c.is_control())
-                    .take(MAX_A2UI_ACTION_NAME_CHARS)
-                    .collect();
-                client.fallback = Some(format!("A2UI action: {name}"));
-            }
-            event.insert("action".into(), Value::Object(projected));
+            let event = project_event(m, &mut intake, &mut client.fallback);
+            client.events.push(event);
         }
-        if let Some(error) = m.get("error").filter(|e| e.is_object() && within_budget(e)) {
-            event.insert("error".into(), error.clone());
-            client
-                .fallback
-                .get_or_insert_with(|| "A2UI error".to_string());
-        }
-        client.events.push(Value::Object(event));
+    }
+    client.files = intake.finish();
+    if client.fallback.is_none() && !client.files.is_empty() {
+        // At most MAX_CLIENT_FILES names: the overflow marker has none.
+        let names: Vec<&str> = client
+            .files
+            .iter()
+            .filter_map(|f| f.get("name").and_then(Value::as_str))
+            .collect();
+        client.fallback = Some(match (client.files.len(), names.as_slice()) {
+            (1, [name]) => format!("Attached file: {name}"),
+            (1, _) => "Attached file".to_string(),
+            (_, []) => "Attached files".to_string(),
+            (_, names) => format!("Attached files: {}", names.join(", ")),
+        });
     }
     client
+}
+
+/// One A2UI client message projected onto the v0.9 fields; its FileUpload
+/// data URIs go to `intake`, and the turn's fallback text is set once.
+fn project_event(m: &Value, intake: &mut FileIntake, fallback: &mut Option<String>) -> Value {
+    let mut event = serde_json::Map::new();
+    if let Some(v) = m.get("version").filter(|v| v.is_string()) {
+        event.insert("version".into(), v.clone());
+    }
+    if let Some(action) = m.get("action").and_then(Value::as_object) {
+        let mut projected = serde_json::Map::new();
+        for key in ["name", "surfaceId", "sourceComponentId", "timestamp"] {
+            if let Some(v) = action.get(key).filter(|v| v.is_string()) {
+                projected.insert(key.into(), v.clone());
+            }
+        }
+        if let Some(mut ctx) = action.get("context").cloned() {
+            take_uploads(&mut ctx, intake);
+            if within_budget(&ctx) {
+                projected.insert("context".into(), ctx);
+            } else if let Some(links) = upload_links(&ctx) {
+                // Too big as a whole: keep at least which file is which.
+                projected.insert("context".into(), links);
+            }
+        }
+        if fallback.is_none() {
+            let name: String = projected
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("action")
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_A2UI_ACTION_NAME_CHARS)
+                .collect();
+            *fallback = Some(format!("A2UI action: {name}"));
+        }
+        event.insert("action".into(), Value::Object(projected));
+    }
+    if let Some(error) = m.get("error").filter(|e| e.is_object() && within_budget(e)) {
+        event.insert("error".into(), error.clone());
+        fallback.get_or_insert_with(|| "A2UI error".to_string());
+    }
+    Value::Object(event)
+}
+
+/// A turn's files, collected in arrival order under the limits: at most
+/// [`MAX_CLIENT_FILES`] entries (errors included), then one `too_many`
+/// marker with the number left out; content is decoded only for an admitted
+/// file and only while the turn total allows it.
+#[derive(Default)]
+struct FileIntake {
+    files: Vec<Value>,
+    total: usize,
+    overflow: usize,
+}
+
+impl FileIntake {
+    /// Admit one file whose content is `payload` (base64), or `Err(error)`
+    /// when it has none usable. The entry's index, or `None` past the limit.
+    fn admit(
+        &mut self,
+        source: &str,
+        name: Option<&Value>,
+        media_type: Option<&Value>,
+        payload: Result<&str, &'static str>,
+    ) -> Option<usize> {
+        if self.files.len() >= MAX_CLIENT_FILES {
+            self.overflow += 1;
+            return None;
+        }
+        let mut entry = file_entry(source, name, media_type);
+        match payload.and_then(|b64| self.decode(b64)) {
+            Ok((size, b64)) => {
+                entry.insert("size".into(), json!(size));
+                entry.insert("bytes".into(), json!(b64));
+            }
+            Err(error) => {
+                entry.insert("error".into(), json!(error));
+            }
+        }
+        self.files.push(Value::Object(entry));
+        Some(self.files.len() - 1)
+    }
+
+    /// Standard padded base64 only. The decoded size counts toward the turn.
+    fn decode<'a>(&mut self, b64: &'a str) -> Result<(usize, &'a str), &'static str> {
+        use base64::Engine as _;
+        let b64 = b64.trim();
+        let room = MAX_CLIENT_FILE_BYTES.min(MAX_CLIENT_FILES_TOTAL_BYTES - self.total);
+        // Decided from the encoded length first: an oversized file is not decoded.
+        if b64.len() / 4 * 3 > room + 3 {
+            return Err("too_large");
+        }
+        let size = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|_| "invalid")?
+            .len();
+        if size > room {
+            return Err("too_large");
+        }
+        self.total += size;
+        Ok((size, b64))
+    }
+
+    fn finish(mut self) -> Vec<Value> {
+        if self.overflow > 0 {
+            self.files
+                .push(json!({ "error": "too_many", "count": self.overflow }));
+        }
+        self.files
+    }
+}
+
+/// Admit a file part (0.3 `{kind: "file", file}`, 1.0 `{raw|url, ...}`);
+/// other parts are ignored.
+fn file_part(p: &Value, intake: &mut FileIntake) {
+    let (file, bytes, link, media_type, name) =
+        if p.get("kind").and_then(Value::as_str) == Some("file") {
+            let f = p.get("file");
+            let field = |k: &str| f.and_then(|f| f.get(k));
+            (
+                f,
+                field("bytes"),
+                field("uri"),
+                field("mimeType"),
+                field("name"),
+            )
+        } else if p.get("kind").is_none() && (p.get("raw").is_some() || p.get("url").is_some()) {
+            (
+                Some(p),
+                p.get("raw"),
+                p.get("url"),
+                p.get("mediaType"),
+                p.get("filename"),
+            )
+        } else {
+            return;
+        };
+    let payload = match (file, bytes.and_then(Value::as_str)) {
+        (Some(_), Some(b64)) => Ok(b64),
+        (Some(_), None) if link.is_some() => Err("link"),
+        _ => Err("invalid"),
+    };
+    intake.admit("part", name, media_type, payload);
+}
+
+/// Move the data URIs of an A2UI `FileUpload` action context
+/// (`files[].inlineData`) into the intake; each context file then points at
+/// its entry by index (`file`), so the event stays small. A file past the
+/// limit gets no index.
+fn take_uploads(ctx: &mut Value, intake: &mut FileIntake) {
+    let Some(picked) = ctx.get_mut("files").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for f in picked.iter_mut().filter_map(Value::as_object_mut) {
+        let Some(inline) = f.remove("inlineData") else {
+            continue;
+        };
+        let (uri_type, payload) = match inline
+            .as_str()
+            .and_then(|uri| uri.strip_prefix("data:"))
+            .and_then(|rest| rest.split_once(','))
+        {
+            Some((head, data)) if head.ends_with(";base64") => {
+                (json!(head.trim_end_matches(";base64")), Ok(data))
+            }
+            _ => (Value::Null, Err("invalid")),
+        };
+        let meta = f.get("metadata");
+        let media_type = meta
+            .and_then(|m| m.get("mimeType"))
+            .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
+            .unwrap_or(&uri_type);
+        let index = intake.admit(
+            "file_upload",
+            meta.and_then(|m| m.get("fileName")),
+            Some(media_type),
+            payload,
+        );
+        if let Some(index) = index {
+            f.insert("file".into(), json!(index));
+        }
+    }
+}
+
+/// The bounded part of a FileUpload context: each file's `fileId` (capped)
+/// and its entry index. `None` when the context has no files.
+fn upload_links(ctx: &Value) -> Option<Value> {
+    let files = ctx.get("files")?.as_array()?;
+    let links: Vec<Value> = files
+        .iter()
+        .take(MAX_CLIENT_FILES + 1)
+        .map(|f| {
+            let id: String = f
+                .get("fileId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .chars()
+                .take(MAX_FILE_LABEL_CHARS)
+                .collect();
+            json!({ "fileId": id, "file": f.get("file") })
+        })
+        .collect();
+    Some(json!({ "files": links }))
+}
+
+/// Characters that change how a name displays without being visible:
+/// zero-width marks, bidi controls, word joiners, the BOM, the soft hyphen.
+fn is_format_char(c: char) -> bool {
+    matches!(c, '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
+fn file_entry(
+    source: &str,
+    name: Option<&Value>,
+    media_type: Option<&Value>,
+) -> serde_json::Map<String, Value> {
+    let label = |v: Option<&Value>| {
+        v.and_then(Value::as_str)
+            .map(|s| {
+                s.chars()
+                    .filter(|c| !c.is_control() && !is_format_char(*c))
+                    .take(MAX_FILE_LABEL_CHARS)
+                    .collect::<String>()
+            })
+            .filter(|s| !s.trim().is_empty())
+    };
+    let mut entry = serde_json::Map::new();
+    entry.insert("source".into(), json!(source));
+    if let Some(name) = label(name) {
+        entry.insert("name".into(), json!(name));
+    }
+    if let Some(media_type) = label(media_type) {
+        entry.insert("media_type".into(), json!(media_type));
+    }
+    entry
 }
 
 fn within_budget(v: &Value) -> bool {
@@ -714,7 +984,7 @@ fn within_budget(v: &Value) -> bool {
     ok
 }
 
-/// The message's parts, for [`a2ui_client`].
+/// The message's parts, for [`client_input`].
 fn message_parts(params: &Value) -> &[Value] {
     params
         .get("message")
@@ -755,6 +1025,20 @@ impl OpenDoc {
 /// `TRITON_DEBUG_A2UI_ACTIONS=1` log: part kinds, each action's name,
 /// surface, keys and resolved context — the signed token in a component id
 /// is replaced by its length.
+/// An action context with every `files[].inlineData` replaced by its length.
+fn redact_uploads(ctx: &Value) -> Value {
+    let mut ctx = ctx.clone();
+    if let Some(files) = ctx.get_mut("files").and_then(Value::as_array_mut) {
+        for f in files.iter_mut().filter_map(Value::as_object_mut) {
+            if let Some(inline) = f.get_mut("inlineData") {
+                let n = inline.as_str().map_or(0, str::len);
+                *inline = json!(format!("<data uri {n} chars>"));
+            }
+        }
+    }
+    ctx
+}
+
 fn describe_a2ui_actions(parts: &[Value]) -> Value {
     let mut kinds = Vec::new();
     let mut actions = Vec::new();
@@ -765,7 +1049,12 @@ fn describe_a2ui_actions(parts: &[Value]) -> Value {
             _ => None,
         };
         let Some(data) = data else {
-            let k = p.get("kind").and_then(Value::as_str).unwrap_or("text");
+            let kind = p.get("kind").and_then(Value::as_str);
+            if kind == Some("file") || p.get("raw").is_some() || p.get("url").is_some() {
+                kinds.push(json!("file"));
+                continue;
+            }
+            let k = kind.unwrap_or("text");
             let n = p.get("text").and_then(Value::as_str).map_or(0, str::len);
             kinds.push(json!(format!("{k}({n})")));
             continue;
@@ -791,7 +1080,7 @@ fn describe_a2ui_actions(parts: &[Value]) -> Value {
                 "surfaceId": a.get("surfaceId"),
                 "sourceComponentId": cid,
                 "keys": keys,
-                "context": a.get("context"),
+                "context": a.get("context").map(redact_uploads),
             }));
         }
     }
@@ -868,7 +1157,7 @@ async fn message_send(
     req: RpcRequest,
     a2ui: bool,
 ) -> Response {
-    let client = a2ui_client(message_parts(&req.params), a2ui);
+    let client = client_input(message_parts(&req.params), a2ui);
     let Some(inbound) = text_from_params(&req.params, &client) else {
         return rpc_error(
             &req.id,
@@ -906,7 +1195,7 @@ async fn message_send(
         state.a2a.dispatcher.surfaces(),
         &context_id,
         a2ui,
-        client.events,
+        client,
     );
 
     // A GE source button click resolves to an open-doc sentinel (not a real
@@ -1017,7 +1306,7 @@ async fn message_stream(
 ) -> Response {
     use futures::StreamExt as _;
 
-    let client = a2ui_client(message_parts(&req.params), a2ui);
+    let client = client_input(message_parts(&req.params), a2ui);
     let Some(inbound) = text_from_params(&req.params, &client) else {
         return rpc_error(
             &req.id,
@@ -1060,7 +1349,7 @@ async fn message_stream(
         state.a2a.dispatcher.surfaces(),
         &context_id,
         a2ui,
-        client.events,
+        client,
     );
 
     // A GE source button click (open-doc sentinel): emit a one-shot SSE — a
@@ -1848,5 +2137,223 @@ mod action_debug_tests {
             ])
         );
         assert_eq!(s["parts"], json!(["text(22)", "data"]));
+    }
+}
+
+#[cfg(test)]
+mod client_file_tests {
+    use super::*;
+
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    fn files(parts: &[Value]) -> Vec<Value> {
+        client_input(parts, false).files
+    }
+
+    #[test]
+    fn other_parts_are_not_files() {
+        assert!(
+            files(&[
+                json!({ "kind": "text", "text": "hi" }),
+                json!({ "text": "hi" }),
+                json!({ "data": {}, "mediaType": "application/json" }),
+            ])
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn labels_are_cleaned_and_capped() {
+        let long = "a".repeat(300);
+        let entry = &files(&[json!({ "kind": "file", "file": {
+            "bytes": b64(b"x"), "name": format!("evil\u{7}{long}"), "mimeType": " "
+        }})])[0];
+        let name = entry["name"].as_str().unwrap();
+        assert!(name.starts_with("evila") && name.chars().count() == MAX_FILE_LABEL_CHARS);
+        assert!(entry.get("media_type").is_none(), "blank type dropped");
+    }
+
+    /// Only standard padded base64 is accepted (what GE sends).
+    #[test]
+    fn base64_must_be_standard_and_padded() {
+        let got = files(&[
+            json!({ "raw": "eA", "filename": "unpadded" }),
+            json!({ "raw": "-_8=", "filename": "url-safe" }),
+            json!({ "raw": " eA== ", "filename": "trimmed" }),
+        ]);
+        assert_eq!(got[0]["error"], "invalid");
+        assert_eq!(got[1]["error"], "invalid");
+        assert_eq!(got[2]["size"], 1);
+    }
+
+    #[test]
+    fn a_file_upload_without_a_base64_data_uri_is_invalid() {
+        let mut intake = FileIntake::default();
+        let mut ctx = json!({ "files": [
+            { "fileId": "a", "inlineData": "data:text/plain,hello", "metadata": { "fileName": "a.txt" } },
+            { "fileId": "b", "inlineData": format!("data:text/plain;base64,{}", b64(b"hello")) }
+        ]});
+        take_uploads(&mut ctx, &mut intake);
+        let got = intake.finish();
+        assert_eq!(got[0]["error"], "invalid");
+        assert_eq!(got[0]["name"], "a.txt");
+        assert_eq!(got[1]["media_type"], "text/plain", "type from the data URI");
+        assert_eq!(got[1]["size"], 5);
+        assert_eq!(ctx["files"][1]["file"], 1);
+    }
+
+    /// Ten links fill the entries: an eleventh file is counted in the marker.
+    #[test]
+    fn error_entries_count_toward_the_limit() {
+        let mut parts: Vec<Value> = (0..MAX_CLIENT_FILES)
+            .map(|_| json!({ "kind": "file", "file": { "uri": "https://x" } }))
+            .collect();
+        parts.push(json!({ "raw": b64(b"x"), "filename": "late.txt" }));
+        let got = files(&parts);
+        assert_eq!(
+            got[MAX_CLIENT_FILES],
+            json!({ "error": "too_many", "count": 1 })
+        );
+    }
+
+    #[test]
+    fn several_files_are_named_in_the_fallback() {
+        let client = client_input(
+            &[
+                json!({ "kind": "file", "file": { "bytes": b64(b"1"), "name": "a.csv" } }),
+                json!({ "raw": b64(b"2"), "filename": "b.pdf" }),
+            ],
+            false,
+        );
+        assert_eq!(
+            client.fallback.as_deref(),
+            Some("Attached files: a.csv, b.pdf")
+        );
+    }
+}
+
+#[cfg(test)]
+mod client_file_limit_tests {
+    use super::*;
+
+    /// Entries are bounded however many file parts a body holds.
+    #[test]
+    fn ten_thousand_empty_file_parts_make_eleven_entries() {
+        let parts: Vec<Value> = (0..10_000)
+            .map(|_| json!({ "kind": "file", "file": {} }))
+            .collect();
+        let client = client_input(&parts, false);
+        assert_eq!(client.files.len(), MAX_CLIENT_FILES + 1);
+        assert_eq!(client.files[0]["error"], "invalid");
+        assert_eq!(
+            client.files[MAX_CLIENT_FILES]["count"],
+            10_000 - MAX_CLIENT_FILES
+        );
+        assert!(client.fallback.unwrap().len() < 200);
+    }
+
+    /// A non-string `inlineData` is an invalid file, still linked by index.
+    #[test]
+    fn a_malformed_upload_is_an_invalid_entry() {
+        let event = json!({ "version": "v0.9", "action": { "name": "upload_complete",
+            "context": { "files": [ { "fileId": "a", "inlineData": 42 } ] } } });
+        let client = client_input(&[json!({ "kind": "data", "data": event })], true);
+        assert_eq!(client.files[0]["error"], "invalid");
+        assert_eq!(client.events[0]["action"]["context"]["files"][0]["file"], 0);
+    }
+
+    /// The bytes stay out of the per-turn `_triton` metadata, which a task
+    /// stores; they travel in the overrides' non-persisted `client_files`.
+    #[test]
+    fn files_are_not_in_the_stored_metadata() {
+        let client = client_input(
+            &[json!({ "kind": "file", "file": { "bytes": "eA==", "name": "x.txt" } })],
+            false,
+        );
+        let config = SpecA2aConfig {
+            name: "A".into(),
+            description: "D".into(),
+            version: "1".into(),
+            public_url: "https://a.example".into(),
+            a2a_path: "/a2a".into(),
+            default_tool: "t".into(),
+            skills: None,
+        };
+        let o = turn_context(
+            &config,
+            &triton_core::SurfaceRegistry::with_trio_defaults(),
+            "ctx",
+            false,
+            client,
+        );
+        assert!(
+            !serde_json::to_string(&o.triton_meta)
+                .unwrap()
+                .contains("eA==")
+        );
+        assert_eq!(o.client_files.as_deref().map(Vec::len), Some(1));
+    }
+
+    /// The debug action log never contains a FileUpload data URI.
+    #[test]
+    fn the_debug_log_redacts_upload_data() {
+        let parts = vec![
+            json!({ "raw": "eA==", "filename": "a.txt" }),
+            json!({ "kind": "data", "data": { "version": "v0.9", "action": { "name": "upload_complete",
+                "context": { "files": [ { "fileId": "a", "inlineData": "data:text/plain;base64,c2VjcmV0" } ] } } } }),
+        ];
+        let text = describe_a2ui_actions(&parts).to_string();
+        assert!(!text.contains("base64,"), "{text}");
+        assert!(text.contains("<data uri 31 chars>"), "{text}");
+        assert!(text.contains("\"file\""), "file parts are labelled: {text}");
+    }
+}
+
+#[cfg(test)]
+mod client_file_order_tests {
+    use super::*;
+
+    /// Files are admitted in the order their parts arrive, whatever the source.
+    #[test]
+    fn an_upload_before_ten_file_parts_keeps_its_place() {
+        let upload = json!({ "kind": "data", "data": { "version": "v0.9", "action": {
+            "name": "upload_complete",
+            "context": { "files": [ { "fileId": "u", "inlineData": "data:text/plain;base64,eA==" } ] } } } });
+        let mut parts = vec![upload];
+        parts.extend((0..MAX_CLIENT_FILES).map(|_| json!({ "raw": "eA==" })));
+        let client = client_input(&parts, true);
+        assert_eq!(client.files[0]["source"], "file_upload");
+        assert_eq!(client.files[MAX_CLIENT_FILES]["count"], 1);
+    }
+
+    /// An upload context over the event budget keeps the file links.
+    #[test]
+    fn an_oversized_upload_context_keeps_its_file_links() {
+        let name = "名".repeat(255);
+        let files: Vec<Value> = (0..MAX_CLIENT_FILES)
+            .map(|i| {
+                json!({ "fileId": format!("u{i}"), "inlineData": "data:text/plain;base64,eA==",
+                              "metadata": { "fileName": name, "note": "x".repeat(900) } })
+            })
+            .collect();
+        let event = json!({ "version": "v0.9", "action": { "name": "upload_complete",
+            "context": { "files": files } } });
+        let client = client_input(&[json!({ "kind": "data", "data": event })], true);
+        let ctx = &client.events[0]["action"]["context"];
+        assert_eq!(ctx["files"][3]["file"], 3, "{ctx}");
+        assert_eq!(ctx["files"][3]["fileId"], "u3");
+    }
+
+    /// Bidi overrides and zero-width characters are removed from names.
+    #[test]
+    fn names_lose_format_characters() {
+        let client = client_input(
+            &[json!({ "raw": "eA==", "filename": "invoice\u{202E}fdp.exe\u{200B}" })],
+            false,
+        );
+        assert_eq!(client.files[0]["name"], "invoicefdp.exe");
     }
 }

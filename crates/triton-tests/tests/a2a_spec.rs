@@ -1529,3 +1529,262 @@ async fn a_v1_click_reaches_the_agent() {
         "seat_track"
     );
 }
+
+/// A user message with the given parts, sent over A2A 0.3 `message/send`.
+fn with_parts(parts: Value) -> Value {
+    json!({ "jsonrpc": "2.0", "id": 1, "method": "message/send", "params": { "message": {
+        "role": "user", "messageId": "m-file", "contextId": "session-4", "parts": parts
+    }}})
+}
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// A chat attachment (Gemini Enterprise sends its text rendition of a Word
+/// file as an unnamed `text/plain` file part with inline bytes) reaches the
+/// agent under `_triton.client.files` with its bytes, type and size; the
+/// turn's text is unchanged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_attached_file_reaches_the_agent() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let content = "# Seat system specification\n\nr01 Foam pad hardness 260 N.";
+    post_rpc(
+        &base,
+        &iss,
+        &with_parts(json!([
+            { "kind": "text", "text": "Check this spec" },
+            { "kind": "file", "file": { "bytes": b64(content.as_bytes()), "mimeType": "text/plain" } }
+        ])),
+        true,
+    )
+    .await;
+    let body = agent.bodies_seen().remove(0);
+    assert_eq!(body["message"], "Check this spec", "{body}");
+    let file = &body["_triton"]["client"]["files"][0];
+    assert_eq!(file["source"], "part", "{body}");
+    assert_eq!(file["media_type"], "text/plain");
+    assert_eq!(file["size"], content.len());
+    assert_eq!(file["bytes"], b64(content.as_bytes()));
+    assert!(file.get("name").is_none(), "GE sends no name: {file}");
+}
+
+/// A message that is only a file still reaches the agent, with a synthetic
+/// message naming it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_only_message_reaches_the_agent() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let reply = post_rpc(
+        &base,
+        &iss,
+        &with_parts(json!([
+            { "kind": "file", "file": { "bytes": b64(b"a,b\n1,2\n"), "mimeType": "text/csv", "name": "t4.csv" } }
+        ])),
+        false,
+    )
+    .await;
+    assert!(reply.get("error").is_none(), "{reply}");
+    let body = agent.bodies_seen().remove(0);
+    assert_eq!(body["message"], "Attached file: t4.csv", "{body}");
+    assert_eq!(body["_triton"]["client"]["files"][0]["name"], "t4.csv");
+}
+
+/// Gemini Enterprise's A2UI `FileUpload` sends the ORIGINAL file inside the
+/// `upload_complete` action as a data URI, far over the per-event budget. The
+/// bytes move to `_triton.client.files` (source `file_upload`, name and type
+/// from the metadata), and the event itself still arrives, pointing at the
+/// file by index instead of carrying the data URI.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_upload_pick_reaches_the_agent_with_the_original_bytes() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    // 3 MB: also over axum's default 2 MB request-body limit.
+    let original: Vec<u8> = b"PK\x03\x04"
+        .iter()
+        .copied()
+        .chain((0..3_000_000u32).map(|i| (i % 251) as u8))
+        .collect();
+    let mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    let event = json!({ "version": "v0.9", "action": {
+        "name": "upload_complete", "surfaceId": "triton-a2ui-up", "sourceComponentId": "picker",
+        "timestamp": "2026-11-01T09:00:00Z",
+        "context": { "files": [ {
+            "fileId": "inline://abc",
+            "inlineData": format!("data:{mime};base64,{}", b64(&original)),
+            "metadata": { "fileName": "FKM-R37.docx", "fileSize": original.len(), "mimeType": mime }
+        } ] }
+    }});
+    post_rpc(&base, &iss, &click(event, true), true).await;
+    let body = agent.bodies_seen().remove(0);
+    let file = &body["_triton"]["client"]["files"][0];
+    assert_eq!(
+        file["source"], "file_upload",
+        "{}",
+        body["_triton"]["client"]["files"]
+    );
+    assert_eq!(file["name"], "FKM-R37.docx");
+    assert_eq!(file["media_type"], mime);
+    assert_eq!(file["size"], original.len());
+    assert!(
+        file["bytes"] == b64(&original),
+        "the original, byte for byte"
+    );
+    let ctx = &body["_triton"]["client"]["a2ui_events"][0]["action"]["context"];
+    assert_eq!(ctx["files"][0]["file"], 0, "{ctx}");
+    assert_eq!(ctx["files"][0]["fileId"], "inline://abc");
+    assert!(ctx["files"][0].get("inlineData").is_none(), "{ctx}");
+}
+
+/// Links are not fetched and invalid or oversized bytes are not forwarded:
+/// each such file arrives as an entry with an `error` and no bytes, so the
+/// agent can tell the person why.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn links_bad_and_oversized_files_arrive_as_errors() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let big = vec![b'x'; 11 * 1024 * 1024];
+    post_rpc(
+        &base,
+        &iss,
+        &with_parts(json!([
+            { "kind": "text", "text": "files" },
+            { "kind": "file", "file": { "uri": "https://example.com/a.pdf", "mimeType": "application/pdf", "name": "a.pdf" } },
+            { "kind": "file", "file": { "bytes": "not base64!", "mimeType": "text/plain", "name": "b.txt" } },
+            { "kind": "file", "file": { "bytes": b64(&big), "mimeType": "text/plain", "name": "c.txt" } }
+        ])),
+        false,
+    )
+    .await;
+    let body = agent.bodies_seen().remove(0);
+    let files = body["_triton"]["client"]["files"]
+        .as_array()
+        .expect("files");
+    assert_eq!(files.len(), 3, "{files:?}");
+    for (file, name, error) in [
+        (&files[0], "a.pdf", "link"),
+        (&files[1], "b.txt", "invalid"),
+        (&files[2], "c.txt", "too_large"),
+    ] {
+        assert_eq!(file["name"], name);
+        assert_eq!(file["error"], error, "{file}");
+        assert!(file.get("bytes").is_none(), "{file}");
+    }
+}
+
+/// The A2A 1.0 binding forwards a file part (`{raw, mediaType, filename}`)
+/// the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_v1_file_part_reaches_the_agent() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .header("A2A-Version", "1.0")
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "SendMessage", "params": {
+            "message": { "role": "ROLE_USER", "messageId": "m-v1f", "parts": [
+                { "text": "Check this" },
+                { "raw": b64(b"%PDF-1.7"), "mediaType": "application/pdf", "filename": "spec.pdf" }
+            ] }
+        }}))
+        .send()
+        .await
+        .expect("POST");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let body = agent.bodies_seen().remove(0);
+    let file = &body["_triton"]["client"]["files"][0];
+    assert_eq!(file["name"], "spec.pdf", "{body}");
+    assert_eq!(file["media_type"], "application/pdf");
+    assert_eq!(file["size"], 8);
+}
+
+/// More than ten files: the first ten are entries, the rest one `too_many`
+/// marker with their count; the synthetic message names at most ten.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn files_past_the_limit_leave_one_marker() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let parts: Vec<Value> = (0..12)
+        .map(|i| json!({ "kind": "file", "file": { "bytes": b64(b"x"), "name": format!("f{i}.txt") } }))
+        .collect();
+    post_rpc(&base, &iss, &with_parts(json!(parts)), false).await;
+    let body = agent.bodies_seen().remove(0);
+    let files = body["_triton"]["client"]["files"]
+        .as_array()
+        .expect("files");
+    assert_eq!(files.len(), 11, "{files:?}");
+    assert_eq!(files[9]["name"], "f9.txt");
+    assert_eq!(files[10]["error"], "too_many");
+    assert_eq!(files[10]["count"], 2);
+    let message = body["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Attached files: f0.txt") && !message.contains("f10"),
+        "{message}"
+    );
+}
+
+/// The per-turn total: files that fit come through, the one that would push
+/// the turn over 25 MiB arrives as `too_large`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_turn_total_is_enforced() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let nine = b64(&vec![b'n'; 9 * 1024 * 1024]);
+    let parts: Vec<Value> = (0..3)
+        .map(|i| json!({ "kind": "file", "file": { "bytes": nine, "name": format!("p{i}.txt") } }))
+        .collect();
+    post_rpc(&base, &iss, &with_parts(json!(parts)), false).await;
+    let body = agent.bodies_seen().remove(0);
+    let files = &body["_triton"]["client"]["files"];
+    assert_eq!(files[0]["size"], 9 * 1024 * 1024);
+    assert_eq!(files[1]["size"], 9 * 1024 * 1024);
+    assert_eq!(files[2]["error"], "too_large", "{}", files[2]);
+}
+
+/// `message/stream` forwards files exactly like `message/send`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_streamed_turn_forwards_files() {
+    use triton_tests::upstream_fixture::FakeAgent;
+    let agent = FakeAgent::start_returning(json!({ "surface": { "text": "ok" } })).await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let mut request = with_parts(json!([
+        { "kind": "text", "text": "Check" },
+        { "kind": "file", "file": { "bytes": b64(b"%PDF-1.7"), "mimeType": "application/pdf", "name": "s.pdf" } }
+    ]));
+    request["method"] = json!("message/stream");
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let resp = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .json(&request)
+        .send()
+        .await
+        .expect("POST");
+    assert!(resp.status().is_success());
+    let _ = resp.text().await;
+    let body = agent.bodies_seen().remove(0);
+    assert_eq!(
+        body["_triton"]["client"]["files"][0]["name"], "s.pdf",
+        "{body}"
+    );
+    assert_eq!(body["_triton"]["client"]["files"][0]["size"], 8);
+}

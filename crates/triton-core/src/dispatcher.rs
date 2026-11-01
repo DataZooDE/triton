@@ -1602,13 +1602,21 @@ fn strip_reserved(mut args: Value) -> Value {
 /// adapter's metadata (if any) written under it.
 fn prepare_args(args: Value, overrides: &ContextOverrides) -> Value {
     let mut args = strip_reserved(args);
-    if !overrides.triton_meta.is_empty()
-        && let Some(map) = args.as_object_mut()
-    {
-        map.insert(
-            RESERVED_ARGS_KEY.to_string(),
-            Value::Object(overrides.triton_meta.clone()),
-        );
+    let files = overrides.client_files.as_deref().filter(|f| !f.is_empty());
+    if (overrides.triton_meta.is_empty() && files.is_none()) || !args.is_object() {
+        return args;
+    }
+    let mut meta = overrides.triton_meta.clone();
+    if let Some(files) = files {
+        let client = meta
+            .entry("client")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Some(client) = client.as_object_mut() {
+            client.insert("files".into(), Value::Array(files.clone()));
+        }
+    }
+    if let Some(map) = args.as_object_mut() {
+        map.insert(RESERVED_ARGS_KEY.to_string(), Value::Object(meta));
     }
     args
 }
@@ -1616,6 +1624,23 @@ fn prepare_args(args: Value, overrides: &ContextOverrides) -> Value {
 #[cfg(test)]
 mod tests {
     use super::{DispatchControls, parse_denied_principals};
+
+    /// Client files join the client's events under `_triton.client`.
+    #[test]
+    fn client_files_are_merged_beside_the_events() {
+        use serde_json::json;
+        let mut meta = serde_json::Map::new();
+        meta.insert("client".into(), json!({ "a2ui_events": [1] }));
+        let overrides = super::ContextOverrides {
+            triton_meta: meta,
+            surface: None,
+            client_files: Some(std::sync::Arc::new(vec![json!({ "name": "a" })])),
+        };
+        let args = super::prepare_args(json!({ "message": "m" }), &overrides);
+        assert_eq!(args["_triton"]["client"]["a2ui_events"], json!([1]));
+        assert_eq!(args["_triton"]["client"]["files"][0]["name"], "a");
+        assert!(overrides.triton_meta["client"].get("files").is_none());
+    }
 
     #[test]
     fn denied_principals_require_a_tenant_qualifier() {

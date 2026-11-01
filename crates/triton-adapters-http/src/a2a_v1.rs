@@ -26,7 +26,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -624,8 +624,8 @@ fn valid_context_id(id: &str) -> bool {
 
 struct Incoming {
     text: String,
-    /// The turn's A2UI client messages (`_triton.client.a2ui_events`).
-    events: Vec<Value>,
+    /// The turn's A2UI client messages and files (`_triton.client`).
+    client: crate::a2a_spec::ClientInput,
     context_id: Option<String>,
     task_id: Option<String>,
     return_immediately: bool,
@@ -665,7 +665,7 @@ fn parse_send(params: &Value, a2ui: bool) -> Result<Incoming, A2aError> {
     // never sees the host's "User action triggered." placeholder. A source
     // button (open a document) has no 1.0 document reply; its label is
     // dispatched as the turn.
-    let client = crate::a2a_spec::a2ui_client(parts, a2ui);
+    let client = crate::a2a_spec::client_input(parts, a2ui);
     let action = match crate::a2a_spec::a2ui_action(parts) {
         Some(triton_core::a2ui::ge::GeAction::Message(text)) => Some(text),
         Some(triton_core::a2ui::ge::GeAction::OpenDoc { label, .. }) => Some(label),
@@ -702,7 +702,7 @@ fn parse_send(params: &Value, a2ui: bool) -> Result<Incoming, A2aError> {
         .unwrap_or(false);
     Ok(Incoming {
         text,
-        events: client.events,
+        client,
         context_id,
         task_id: opt_str(msg, "taskId", "task_id"),
         return_immediately,
@@ -764,7 +764,7 @@ async fn op_send(
     params: &Value,
     a2ui: bool,
 ) -> Result<Value, A2aError> {
-    let incoming = parse_send(params, a2ui)?;
+    let mut incoming = parse_send(params, a2ui)?;
     if let Some(task_id) = &incoming.task_id {
         return Err(refuse_continuation(&state.a2a, &principal, task_id));
     }
@@ -772,8 +772,12 @@ async fn op_send(
         .context_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let overrides =
-        crate::a2a_spec::turn_context_for(state, &context_id, a2ui, incoming.events.clone());
+    let overrides = crate::a2a_spec::turn_context_for(
+        state,
+        &context_id,
+        a2ui,
+        std::mem::take(&mut incoming.client),
+    );
     let (rec, mut rx) = start_task(state, &principal, &incoming.text, &context_id, overrides)?;
     if !incoming.return_immediately {
         // Blocking is the default; capped so a platform's HTTP timeout is
@@ -1103,7 +1107,7 @@ async fn op_stream(
     framing: Framing,
     a2ui: bool,
 ) -> Result<Response, A2aError> {
-    let incoming = parse_send(params, a2ui)?;
+    let mut incoming = parse_send(params, a2ui)?;
     if let Some(task_id) = &incoming.task_id {
         return Err(refuse_continuation(&state.a2a, &principal, task_id));
     }
@@ -1111,8 +1115,12 @@ async fn op_stream(
         .context_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let overrides =
-        crate::a2a_spec::turn_context_for(state, &context_id, a2ui, incoming.events.clone());
+    let overrides = crate::a2a_spec::turn_context_for(
+        state,
+        &context_id,
+        a2ui,
+        std::mem::take(&mut incoming.client),
+    );
     let (rec, rx) = start_task(state, &principal, &incoming.text, &context_id, overrides)?;
     Ok(task_stream(&state.a2a, framing, rec, Some(rx), a2ui))
 }
@@ -1299,12 +1307,16 @@ fn query_params(parts: &Parts) -> Value {
     Value::Object(m)
 }
 
-async fn rest_send(State(state): State<SpecState>, parts: Parts, body: Bytes) -> Response {
+async fn rest_send(State(state): State<SpecState>, parts: Parts, body: Body) -> Response {
     let principal = match rest_session(&state, &parts, "SendMessage").await {
         Ok(p) => p,
         Err(r) => return r,
     };
     let a2ui = crate::a2a_spec::activates_a2ui_headers(&parts.headers);
+    // Read only after authentication (see the JSON-RPC handler).
+    let Ok(body) = axum::body::to_bytes(body, crate::a2a_spec::MAX_A2A_BODY_BYTES).await else {
+        return crate::a2a_spec::body_too_large();
+    };
     match rest_body(&body) {
         Ok(params) => match op_send(&state, principal, &params, a2ui).await {
             Ok(v) => rest_ok(v),
@@ -1314,12 +1326,15 @@ async fn rest_send(State(state): State<SpecState>, parts: Parts, body: Bytes) ->
     }
 }
 
-async fn rest_stream(State(state): State<SpecState>, parts: Parts, body: Bytes) -> Response {
+async fn rest_stream(State(state): State<SpecState>, parts: Parts, body: Body) -> Response {
     let principal = match rest_session(&state, &parts, "SendStreamingMessage").await {
         Ok(p) => p,
         Err(r) => return r,
     };
     let a2ui = crate::a2a_spec::activates_a2ui_headers(&parts.headers);
+    let Ok(body) = axum::body::to_bytes(body, crate::a2a_spec::MAX_A2A_BODY_BYTES).await else {
+        return crate::a2a_spec::body_too_large();
+    };
     match rest_body(&body) {
         Ok(params) => match op_stream(&state, principal, &params, Framing::Rest, a2ui).await {
             Ok(r) => r,

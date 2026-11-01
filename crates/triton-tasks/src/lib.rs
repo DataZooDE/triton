@@ -908,6 +908,8 @@ impl Runner {
         let overrides = ContextOverrides {
             triton_meta: rec.triton_meta.clone().unwrap_or_default(),
             surface: None,
+            // Files are never stored with a task.
+            client_files: None,
         };
         self.spawn(rec, Start::Resume(upstream), p, overrides, tx, Persist::Now);
         Some(rx)
@@ -927,7 +929,7 @@ impl Runner {
         rec: TaskRecord,
         mut start: Start,
         principal: Principal,
-        overrides: ContextOverrides,
+        mut overrides: ContextOverrides,
         tx: broadcast::Sender<TaskEvent>,
         persist: Persist,
     ) {
@@ -977,6 +979,9 @@ impl Runner {
                 Ok(o) => o,
                 Err(_) => break 'run Err((CLASS_EXPIRED.into(), EXPIRED.into())),
             };
+            // The client's files go with the first dispatch only: a resume
+            // never sends them again, and the task does not hold them.
+            overrides.client_files = None;
             // Why the stream ended without a terminal event, if it did.
             let mut broken_class = "tool";
             let broken: String = match opened {

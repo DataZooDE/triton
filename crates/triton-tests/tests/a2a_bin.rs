@@ -731,3 +731,90 @@ async fn with_oidc_the_cards_name_the_credential_and_tasks_stay_with_their_owner
     let (_, listed) = rpc(&url, Some(&mallory), Some("1.0"), "ListTasks", json!({})).await;
     assert_eq!(listed["result"]["tasks"], json!([]), "{listed}");
 }
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// The spawned binary forwards a 3 MB attachment (over axum's 2 MB default)
+/// to the agent in both versions: 0.3 `message/send` and 1.0 `SendMessage`,
+/// which runs through the task runner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_large_file_reaches_the_agent_through_the_binary() {
+    let agent = agent().await;
+    let triton =
+        TritonProcess::spawn_with_env(Duration::from_secs(10), a2a_env(&agent, true)).await;
+    let url = triton.rest_url("/a2a");
+    let content = vec![b'r'; 3 * 1024 * 1024];
+    let (status, sent) = rpc(
+        &url,
+        DEV,
+        None,
+        "message/send",
+        json!({ "message": { "kind": "message", "role": "user", "messageId": "m-f03", "parts": [
+            { "kind": "text", "text": "Check this" },
+            { "kind": "file", "file": { "bytes": b64(&content), "mimeType": "text/plain" } }
+        ] } }),
+    )
+    .await;
+    assert_eq!(status, 200, "{sent}");
+    let (status, sent) = rpc(
+        &url,
+        DEV,
+        Some("1.0"),
+        "SendMessage",
+        json!({ "message": { "role": "ROLE_USER", "messageId": "m-f10", "parts": [
+            { "text": "Check this" },
+            { "raw": b64(&content), "mediaType": "text/plain", "filename": "spec.md" }
+        ] } }),
+    )
+    .await;
+    assert_eq!(status, 200, "{sent}");
+    // The task store never holds the content: neither GetTask nor ListTasks
+    // shows it.
+    let task_id = sent["result"]["task"]["id"].as_str().expect("task id");
+    let marker = &b64(&content)[..64];
+    let (_, got) = rpc(&url, DEV, Some("1.0"), "GetTask", json!({ "id": task_id })).await;
+    assert!(!got.to_string().contains(marker), "GetTask");
+    let (_, listed) = rpc(&url, DEV, Some("1.0"), "ListTasks", json!({})).await;
+    assert!(listed["result"]["tasks"].is_array(), "{listed}");
+    assert!(!listed.to_string().contains(marker), "ListTasks");
+    let bodies = agent.bodies_seen();
+    assert_eq!(bodies.len(), 2);
+    for body in &bodies {
+        let file = &body["_triton"]["client"]["files"][0];
+        assert_eq!(file["size"], content.len(), "{}", body["_triton"]["client"]);
+    }
+    assert_eq!(
+        bodies[1]["_triton"]["client"]["files"][0]["name"],
+        "spec.md"
+    );
+}
+
+/// A large body is read only after the caller is authenticated: without a
+/// token the answer is 401 whatever the size; with one, over the limit is 413.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_large_body_is_read_only_after_authentication() {
+    let h = host().await;
+    let big = json!({ "jsonrpc": "2.0", "id": 1, "method": "message/send", "params": { "message": {
+        "kind": "message", "role": "user", "messageId": "m-big",
+        "parts": [ { "kind": "text", "text": "x".repeat(41 * 1024 * 1024) } ]
+    } } })
+    .to_string();
+    for (token, expected) in [(None, 401), (DEV, 413)] {
+        let mut req = reqwest::Client::new()
+            .post(h.rpc_url())
+            .header("content-type", "application/json")
+            .body(big.clone());
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        match req.send().await {
+            Ok(resp) => assert_eq!(resp.status(), expected, "token: {token:?}"),
+            // The server may answer and close before the client finished
+            // writing; for the anonymous caller that is the point.
+            Err(e) => assert!(token.is_none(), "token: {token:?}: {e}"),
+        }
+    }
+}
