@@ -26,7 +26,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -764,7 +764,7 @@ async fn op_send(
     params: &Value,
     a2ui: bool,
 ) -> Result<Value, A2aError> {
-    let incoming = parse_send(params, a2ui)?;
+    let mut incoming = parse_send(params, a2ui)?;
     if let Some(task_id) = &incoming.task_id {
         return Err(refuse_continuation(&state.a2a, &principal, task_id));
     }
@@ -772,7 +772,12 @@ async fn op_send(
         .context_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let overrides = crate::a2a_spec::turn_context_for(state, &context_id, a2ui, &incoming.client);
+    let overrides = crate::a2a_spec::turn_context_for(
+        state,
+        &context_id,
+        a2ui,
+        std::mem::take(&mut incoming.client),
+    );
     let (rec, mut rx) = start_task(state, &principal, &incoming.text, &context_id, overrides)?;
     if !incoming.return_immediately {
         // Blocking is the default; capped so a platform's HTTP timeout is
@@ -1102,7 +1107,7 @@ async fn op_stream(
     framing: Framing,
     a2ui: bool,
 ) -> Result<Response, A2aError> {
-    let incoming = parse_send(params, a2ui)?;
+    let mut incoming = parse_send(params, a2ui)?;
     if let Some(task_id) = &incoming.task_id {
         return Err(refuse_continuation(&state.a2a, &principal, task_id));
     }
@@ -1110,7 +1115,12 @@ async fn op_stream(
         .context_id
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let overrides = crate::a2a_spec::turn_context_for(state, &context_id, a2ui, &incoming.client);
+    let overrides = crate::a2a_spec::turn_context_for(
+        state,
+        &context_id,
+        a2ui,
+        std::mem::take(&mut incoming.client),
+    );
     let (rec, rx) = start_task(state, &principal, &incoming.text, &context_id, overrides)?;
     Ok(task_stream(&state.a2a, framing, rec, Some(rx), a2ui))
 }
@@ -1236,9 +1246,6 @@ pub fn rest_router(state: A2aState, config: Arc<SpecA2aConfig>) -> Router {
         )
         .route("/v1/extendedAgentCard", get(rest_extended_card))
         .with_state(SpecState { a2a: state, config })
-        .layer(axum::extract::DefaultBodyLimit::max(
-            crate::a2a_spec::MAX_A2A_BODY_BYTES,
-        ))
         .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
 }
 
@@ -1300,12 +1307,16 @@ fn query_params(parts: &Parts) -> Value {
     Value::Object(m)
 }
 
-async fn rest_send(State(state): State<SpecState>, parts: Parts, body: Bytes) -> Response {
+async fn rest_send(State(state): State<SpecState>, parts: Parts, body: Body) -> Response {
     let principal = match rest_session(&state, &parts, "SendMessage").await {
         Ok(p) => p,
         Err(r) => return r,
     };
     let a2ui = crate::a2a_spec::activates_a2ui_headers(&parts.headers);
+    // Read only after authentication (see the JSON-RPC handler).
+    let Ok(body) = axum::body::to_bytes(body, crate::a2a_spec::MAX_A2A_BODY_BYTES).await else {
+        return crate::a2a_spec::body_too_large();
+    };
     match rest_body(&body) {
         Ok(params) => match op_send(&state, principal, &params, a2ui).await {
             Ok(v) => rest_ok(v),
@@ -1315,12 +1326,15 @@ async fn rest_send(State(state): State<SpecState>, parts: Parts, body: Bytes) ->
     }
 }
 
-async fn rest_stream(State(state): State<SpecState>, parts: Parts, body: Bytes) -> Response {
+async fn rest_stream(State(state): State<SpecState>, parts: Parts, body: Body) -> Response {
     let principal = match rest_session(&state, &parts, "SendStreamingMessage").await {
         Ok(p) => p,
         Err(r) => return r,
     };
     let a2ui = crate::a2a_spec::activates_a2ui_headers(&parts.headers);
+    let Ok(body) = axum::body::to_bytes(body, crate::a2a_spec::MAX_A2A_BODY_BYTES).await else {
+        return crate::a2a_spec::body_too_large();
+    };
     match rest_body(&body) {
         Ok(params) => match op_stream(&state, principal, &params, Framing::Rest, a2ui).await {
             Ok(r) => r,

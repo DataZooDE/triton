@@ -908,6 +908,8 @@ impl Runner {
         let overrides = ContextOverrides {
             triton_meta: rec.triton_meta.clone().unwrap_or_default(),
             surface: None,
+            // Files are never stored with a task.
+            client_files: None,
         };
         self.spawn(rec, Start::Resume(upstream), p, overrides, tx, Persist::Now);
         Some(rx)

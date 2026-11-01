@@ -1595,6 +1595,21 @@ a trap the next developer should not have to step in.
 
 ---
 
+### 7.x A body extractor buffers before the handler authenticates (2026-11-01)
+
+axum's `Bytes`/`Json` extractors read the whole body (up to
+`DefaultBodyLimit`) before the handler body runs, so "auth first" inside
+the handler does not hold for memory. Raising the A2A body limit to 40 MiB
+for client files therefore takes `Body` and calls
+`axum::body::to_bytes(body, MAX_A2A_BODY_BYTES)` only after
+`identity.verify` (pinned by `a2a_bin::a_large_body_is_read_only_after_authentication`:
+anonymous 41 MiB → 401, authenticated → 413). Two related traps: the dev
+`capture` layer buffers every body itself (its cap now matches the A2A
+limit), and per-turn metadata in `ContextOverrides::triton_meta` is stored
+with an A2A task, so file bytes travel in the non-persisted
+`client_files` and are merged into `_triton.client` only in
+`prepare_args`.
+
 ## 8. CI/CD build-time traps (2026-08-30)
 
 - **`flutter test` is a compile step, not a test step.** The

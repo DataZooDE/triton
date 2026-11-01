@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
+use axum::body::Body;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::http::request::Parts;
@@ -169,7 +169,6 @@ pub fn jsonrpc_router(state: A2aState, config: Arc<SpecA2aConfig>) -> Router {
     Router::new()
         .route("/", post(jsonrpc))
         .with_state(SpecState { a2a: state, config })
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_A2A_BODY_BYTES))
         .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
 }
 
@@ -248,7 +247,6 @@ pub fn agent_router(
     let config = card.config.clone();
     Ok(Router::new()
         .route(&format!("/{slug}"), post(jsonrpc))
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_A2A_BODY_BYTES))
         .with_state(SpecState {
             a2a: state.clone(),
             config: config.clone(),
@@ -299,6 +297,19 @@ fn rpc_error(id: &Value, code: i32, message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// 413 for a body over [`MAX_A2A_BODY_BYTES`] (either binding).
+pub(crate) fn body_too_large() -> Response {
+    (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        Json(json!({
+            "jsonrpc": "2.0", "id": Value::Null,
+            "error": { "code": INVALID_REQUEST,
+                       "message": format!("request body over {} MiB", MAX_A2A_BODY_BYTES / (1024 * 1024)) },
+        })),
+    )
+        .into_response()
+}
+
 fn rpc_ok(id: &Value, result: Value) -> Response {
     (
         StatusCode::OK,
@@ -307,7 +318,7 @@ fn rpc_ok(id: &Value, result: Value) -> Response {
         .into_response()
 }
 
-async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> Response {
+async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Body) -> Response {
     // Auth first, exactly as the Triton-shaped route does: a malformed
     // body must not earn a different answer than a missing credential.
     let principal = match state.a2a.identity.verify(&parts).await {
@@ -355,6 +366,11 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
     tracing::info!(x_a2a_extensions = ?inbound_ext, "a2a inbound extension activation");
     let echo_a2ui = activates_a2ui(inbound_ext.as_deref());
 
+    // Read only now, after authentication, so an anonymous caller cannot make
+    // the gateway buffer a large body.
+    let Ok(body) = axum::body::to_bytes(body, MAX_A2A_BODY_BYTES).await else {
+        return body_too_large();
+    };
     let req: RpcRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => return rpc_error(&Value::Null, PARSE_ERROR, format!("invalid JSON: {e}")),
@@ -467,7 +483,7 @@ pub(crate) fn turn_context_for(
     state: &SpecState,
     context_id: &str,
     a2ui: bool,
-    client: &ClientInput,
+    client: ClientInput,
 ) -> triton_core::ContextOverrides {
     turn_context(
         &state.config,
@@ -487,7 +503,7 @@ fn turn_context(
     surfaces: &triton_core::SurfaceRegistry,
     context_id: &str,
     a2ui: bool,
-    client: &ClientInput,
+    client: ClientInput,
 ) -> triton_core::ContextOverrides {
     let mut meta = serde_json::Map::new();
     meta.insert("protocol".into(), json!("a2a"));
@@ -496,21 +512,16 @@ fn turn_context(
         meta.insert("agent".into(), json!(slug));
     }
     // The client's A2UI messages of this turn (clicks with their resolved
-    // bindings, render errors) and its files, under `client`: client-asserted
-    // data, never mistaken for Triton-authored keys
-    // (doc/upstream-agent-contract.md §2b).
-    let mut asserted = serde_json::Map::new();
+    // bindings, render errors), under `client`: client-asserted data, never
+    // mistaken for Triton-authored keys (doc/upstream-agent-contract.md §2b).
+    // Its files join them at dispatch from `client_files`, which a task never
+    // stores.
     if !client.events.is_empty() {
-        asserted.insert("a2ui_events".into(), json!(client.events));
-    }
-    if !client.files.is_empty() {
-        asserted.insert("files".into(), json!(client.files));
-    }
-    if !asserted.is_empty() {
-        meta.insert("client".into(), Value::Object(asserted));
+        meta.insert("client".into(), json!({ "a2ui_events": client.events }));
     }
     triton_core::ContextOverrides {
         triton_meta: meta,
+        client_files: (!client.files.is_empty()).then(|| Arc::new(client.files)),
         // The registry's A2UI variant carries the operator's guidance; a host
         // that replaced the registry without one still gets the profile.
         surface: a2ui.then(|| {
@@ -637,9 +648,10 @@ fn text_from_params(params: &Value, client: &ClientInput) -> Option<Inbound> {
 /// data URIs an A2UI `FileUpload` puts in its action context
 /// (`context.files[].inlineData`). Each becomes one entry: `source`
 /// (`part` | `file_upload`), `name`, `media_type`, and either `size` plus the
-/// base64 `bytes`, or an `error` (`link` | `invalid` | `too_large` |
-/// `too_many`). Links are never fetched.
-#[derive(Default, Clone)]
+/// base64 `bytes`, or an `error` (`link` | `invalid` | `too_large`); past
+/// [`MAX_CLIENT_FILES`] entries one `{error: "too_many", count}` marker.
+/// Links are never fetched.
+#[derive(Default)]
 pub(crate) struct ClientInput {
     pub(crate) events: Vec<Value>,
     pub(crate) files: Vec<Value>,
@@ -654,7 +666,7 @@ const MAX_A2UI_EVENTS: usize = 8;
 const MAX_A2UI_EVENT_OBJECT_BYTES: usize = 8 * 1024;
 /// Longest action name echoed into the fallback text.
 const MAX_A2UI_ACTION_NAME_CHARS: usize = 64;
-/// Upper bound on forwarded files per turn; later ones get `too_many`.
+/// Upper bound on file entries per turn; the rest are counted in one marker.
 const MAX_CLIENT_FILES: usize = 10;
 /// Largest decoded file forwarded.
 const MAX_CLIENT_FILE_BYTES: usize = 10 * 1024 * 1024;
@@ -692,10 +704,11 @@ pub(crate) fn client_input(parts: &[Value], a2ui: bool) -> ClientInput {
         })
         .take(MAX_A2UI_EVENTS);
 
-    let mut client = ClientInput {
-        files: parts.iter().filter_map(file_part).collect(),
-        ..ClientInput::default()
-    };
+    let mut intake = FileIntake::default();
+    for p in parts {
+        file_part(p, &mut intake);
+    }
+    let mut client = ClientInput::default();
     for m in messages {
         let mut event = serde_json::Map::new();
         if let Some(v) = m.get("version").filter(|v| v.is_string()) {
@@ -709,7 +722,7 @@ pub(crate) fn client_input(parts: &[Value], a2ui: bool) -> ClientInput {
                 }
             }
             if let Some(mut ctx) = action.get("context").cloned() {
-                take_uploads(&mut ctx, &mut client.files);
+                take_uploads(&mut ctx, &mut intake);
                 if within_budget(&ctx) {
                     projected.insert("context".into(), ctx);
                 }
@@ -735,8 +748,9 @@ pub(crate) fn client_input(parts: &[Value], a2ui: bool) -> ClientInput {
         }
         client.events.push(Value::Object(event));
     }
-    enforce_file_limits(&mut client.files);
+    client.files = intake.finish();
     if client.fallback.is_none() && !client.files.is_empty() {
+        // At most MAX_CLIENT_FILES names: the overflow marker has none.
         let names: Vec<&str> = client
             .files
             .iter()
@@ -752,76 +766,143 @@ pub(crate) fn client_input(parts: &[Value], a2ui: bool) -> ClientInput {
     client
 }
 
-/// One file part as a [`ClientInput`] file entry; `None` for other parts.
-fn file_part(p: &Value) -> Option<Value> {
-    let (bytes, link, media_type, name) = if p.get("kind").and_then(Value::as_str) == Some("file") {
-        let f = p.get("file")?;
-        (
-            f.get("bytes"),
-            f.get("uri"),
-            f.get("mimeType"),
-            f.get("name"),
-        )
-    } else if p.get("kind").is_none() && (p.get("raw").is_some() || p.get("url").is_some()) {
-        (
-            p.get("raw"),
-            p.get("url"),
-            p.get("mediaType"),
-            p.get("filename"),
-        )
-    } else {
-        return None;
-    };
-    let mut entry = file_entry("part", name, media_type);
-    match bytes.and_then(Value::as_str) {
-        Some(b64) => attach_bytes(&mut entry, b64),
-        None => {
-            let error = if link.is_some() { "link" } else { "invalid" };
-            entry.insert("error".into(), json!(error));
+/// A turn's files, collected in arrival order under the limits: at most
+/// [`MAX_CLIENT_FILES`] entries (errors included), then one `too_many`
+/// marker with the number left out; content is decoded only for an admitted
+/// file and only while the turn total allows it.
+#[derive(Default)]
+struct FileIntake {
+    files: Vec<Value>,
+    total: usize,
+    overflow: usize,
+}
+
+impl FileIntake {
+    /// Admit one file whose content is `payload` (base64), or `Err(error)`
+    /// when it has none usable. The entry's index, or `None` past the limit.
+    fn admit(
+        &mut self,
+        source: &str,
+        name: Option<&Value>,
+        media_type: Option<&Value>,
+        payload: Result<&str, &'static str>,
+    ) -> Option<usize> {
+        if self.files.len() >= MAX_CLIENT_FILES {
+            self.overflow += 1;
+            return None;
         }
+        let mut entry = file_entry(source, name, media_type);
+        match payload.and_then(|b64| self.decode(b64)) {
+            Ok((size, b64)) => {
+                entry.insert("size".into(), json!(size));
+                entry.insert("bytes".into(), json!(b64));
+            }
+            Err(error) => {
+                entry.insert("error".into(), json!(error));
+            }
+        }
+        self.files.push(Value::Object(entry));
+        Some(self.files.len() - 1)
     }
-    Some(Value::Object(entry))
+
+    /// Standard padded base64 only. The decoded size counts toward the turn.
+    fn decode<'a>(&mut self, b64: &'a str) -> Result<(usize, &'a str), &'static str> {
+        use base64::Engine as _;
+        let b64 = b64.trim();
+        let room = MAX_CLIENT_FILE_BYTES.min(MAX_CLIENT_FILES_TOTAL_BYTES - self.total);
+        // Decided from the encoded length first: an oversized file is not decoded.
+        if b64.len() / 4 * 3 > room + 3 {
+            return Err("too_large");
+        }
+        let size = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .map_err(|_| "invalid")?
+            .len();
+        if size > room {
+            return Err("too_large");
+        }
+        self.total += size;
+        Ok((size, b64))
+    }
+
+    fn finish(mut self) -> Vec<Value> {
+        if self.overflow > 0 {
+            self.files
+                .push(json!({ "error": "too_many", "count": self.overflow }));
+        }
+        self.files
+    }
+}
+
+/// Admit a file part (0.3 `{kind: "file", file}`, 1.0 `{raw|url, ...}`);
+/// other parts are ignored.
+fn file_part(p: &Value, intake: &mut FileIntake) {
+    let (file, bytes, link, media_type, name) =
+        if p.get("kind").and_then(Value::as_str) == Some("file") {
+            let f = p.get("file");
+            let field = |k: &str| f.and_then(|f| f.get(k));
+            (
+                f,
+                field("bytes"),
+                field("uri"),
+                field("mimeType"),
+                field("name"),
+            )
+        } else if p.get("kind").is_none() && (p.get("raw").is_some() || p.get("url").is_some()) {
+            (
+                Some(p),
+                p.get("raw"),
+                p.get("url"),
+                p.get("mediaType"),
+                p.get("filename"),
+            )
+        } else {
+            return;
+        };
+    let payload = match (file, bytes.and_then(Value::as_str)) {
+        (Some(_), Some(b64)) => Ok(b64),
+        (Some(_), None) if link.is_some() => Err("link"),
+        _ => Err("invalid"),
+    };
+    intake.admit("part", name, media_type, payload);
 }
 
 /// Move the data URIs of an A2UI `FileUpload` action context
-/// (`files[].inlineData`) into file entries; each context file then points
-/// at its entry by index (`file`), so the event stays small.
-fn take_uploads(ctx: &mut Value, files: &mut Vec<Value>) {
+/// (`files[].inlineData`) into the intake; each context file then points at
+/// its entry by index (`file`), so the event stays small. A file past the
+/// limit gets no index.
+fn take_uploads(ctx: &mut Value, intake: &mut FileIntake) {
     let Some(picked) = ctx.get_mut("files").and_then(Value::as_array_mut) else {
         return;
     };
     for f in picked.iter_mut().filter_map(Value::as_object_mut) {
-        let Some(Value::String(uri)) = f.remove("inlineData") else {
+        let Some(inline) = f.remove("inlineData") else {
             continue;
         };
-        let meta = f.get("metadata");
-        let (uri_type, data) = match uri
-            .strip_prefix("data:")
+        let (uri_type, payload) = match inline
+            .as_str()
+            .and_then(|uri| uri.strip_prefix("data:"))
             .and_then(|rest| rest.split_once(','))
         {
             Some((head, data)) if head.ends_with(";base64") => {
-                (head.trim_end_matches(";base64").to_string(), Some(data))
+                (json!(head.trim_end_matches(";base64")), Ok(data))
             }
-            _ => (String::new(), None),
+            _ => (Value::Null, Err("invalid")),
         };
-        let uri_type = json!(uri_type);
+        let meta = f.get("metadata");
         let media_type = meta
             .and_then(|m| m.get("mimeType"))
             .filter(|v| v.as_str().is_some_and(|s| !s.is_empty()))
             .unwrap_or(&uri_type);
-        let mut entry = file_entry(
+        let index = intake.admit(
             "file_upload",
             meta.and_then(|m| m.get("fileName")),
             Some(media_type),
+            payload,
         );
-        match data {
-            Some(b64) => attach_bytes(&mut entry, b64),
-            None => {
-                entry.insert("error".into(), json!("invalid"));
-            }
+        if let Some(index) = index {
+            f.insert("file".into(), json!(index));
         }
-        f.insert("file".into(), json!(files.len()));
-        files.push(Value::Object(entry));
     }
 }
 
@@ -849,54 +930,6 @@ fn file_entry(
         entry.insert("media_type".into(), json!(media_type));
     }
     entry
-}
-
-/// Validate base64 file content and add `size` and `bytes`, or an `error`.
-fn attach_bytes(entry: &mut serde_json::Map<String, Value>, b64: &str) {
-    use base64::Engine as _;
-    let b64 = b64.trim();
-    // Decided from the encoded length first: an oversized file is not decoded.
-    if b64.len() / 4 * 3 > MAX_CLIENT_FILE_BYTES + 3 {
-        entry.insert("error".into(), json!("too_large"));
-        return;
-    }
-    match base64::engine::general_purpose::STANDARD.decode(b64) {
-        Ok(data) if data.len() > MAX_CLIENT_FILE_BYTES => {
-            entry.insert("error".into(), json!("too_large"));
-        }
-        Ok(data) => {
-            entry.insert("size".into(), json!(data.len()));
-            entry.insert("bytes".into(), json!(b64));
-        }
-        Err(_) => {
-            entry.insert("error".into(), json!("invalid"));
-        }
-    }
-}
-
-/// The per-turn count and total-size limits: files past them keep their
-/// name but lose their bytes.
-fn enforce_file_limits(files: &mut [Value]) {
-    let mut total = 0usize;
-    for (i, file) in files.iter_mut().enumerate() {
-        let Some(entry) = file.as_object_mut() else {
-            continue;
-        };
-        let Some(size) = entry.get("size").and_then(Value::as_u64) else {
-            continue;
-        };
-        let error = if i >= MAX_CLIENT_FILES {
-            "too_many"
-        } else if total + size as usize > MAX_CLIENT_FILES_TOTAL_BYTES {
-            "too_large"
-        } else {
-            total += size as usize;
-            continue;
-        };
-        entry.remove("size");
-        entry.remove("bytes");
-        entry.insert("error".into(), json!(error));
-    }
 }
 
 fn within_budget(v: &Value) -> bool {
@@ -952,6 +985,20 @@ impl OpenDoc {
 /// `TRITON_DEBUG_A2UI_ACTIONS=1` log: part kinds, each action's name,
 /// surface, keys and resolved context — the signed token in a component id
 /// is replaced by its length.
+/// An action context with every `files[].inlineData` replaced by its length.
+fn redact_uploads(ctx: &Value) -> Value {
+    let mut ctx = ctx.clone();
+    if let Some(files) = ctx.get_mut("files").and_then(Value::as_array_mut) {
+        for f in files.iter_mut().filter_map(Value::as_object_mut) {
+            if let Some(inline) = f.get_mut("inlineData") {
+                let n = inline.as_str().map_or(0, str::len);
+                *inline = json!(format!("<data uri {n} chars>"));
+            }
+        }
+    }
+    ctx
+}
+
 fn describe_a2ui_actions(parts: &[Value]) -> Value {
     let mut kinds = Vec::new();
     let mut actions = Vec::new();
@@ -962,7 +1009,12 @@ fn describe_a2ui_actions(parts: &[Value]) -> Value {
             _ => None,
         };
         let Some(data) = data else {
-            let k = p.get("kind").and_then(Value::as_str).unwrap_or("text");
+            let kind = p.get("kind").and_then(Value::as_str);
+            if kind == Some("file") || p.get("raw").is_some() || p.get("url").is_some() {
+                kinds.push(json!("file"));
+                continue;
+            }
+            let k = kind.unwrap_or("text");
             let n = p.get("text").and_then(Value::as_str).map_or(0, str::len);
             kinds.push(json!(format!("{k}({n})")));
             continue;
@@ -988,7 +1040,7 @@ fn describe_a2ui_actions(parts: &[Value]) -> Value {
                 "surfaceId": a.get("surfaceId"),
                 "sourceComponentId": cid,
                 "keys": keys,
-                "context": a.get("context"),
+                "context": a.get("context").map(redact_uploads),
             }));
         }
     }
@@ -1103,7 +1155,7 @@ async fn message_send(
         state.a2a.dispatcher.surfaces(),
         &context_id,
         a2ui,
-        &client,
+        client,
     );
 
     // A GE source button click resolves to an open-doc sentinel (not a real
@@ -1257,7 +1309,7 @@ async fn message_stream(
         state.a2a.dispatcher.surfaces(),
         &context_id,
         a2ui,
-        &client,
+        client,
     );
 
     // A GE source button click (open-doc sentinel): emit a one-shot SSE — a
@@ -2057,57 +2109,74 @@ mod client_file_tests {
         base64::engine::general_purpose::STANDARD.encode(bytes)
     }
 
+    fn files(parts: &[Value]) -> Vec<Value> {
+        client_input(parts, false).files
+    }
+
     #[test]
     fn other_parts_are_not_files() {
-        assert!(file_part(&json!({ "kind": "text", "text": "hi" })).is_none());
-        assert!(file_part(&json!({ "text": "hi" })).is_none());
-        assert!(file_part(&json!({ "data": {}, "mediaType": "application/json" })).is_none());
+        assert!(
+            files(&[
+                json!({ "kind": "text", "text": "hi" }),
+                json!({ "text": "hi" }),
+                json!({ "data": {}, "mediaType": "application/json" }),
+            ])
+            .is_empty()
+        );
     }
 
     #[test]
     fn labels_are_cleaned_and_capped() {
         let long = "a".repeat(300);
-        let entry = file_part(&json!({ "kind": "file", "file": {
+        let entry = &files(&[json!({ "kind": "file", "file": {
             "bytes": b64(b"x"), "name": format!("evil\u{7}{long}"), "mimeType": " "
-        }}))
-        .unwrap();
+        }})])[0];
         let name = entry["name"].as_str().unwrap();
         assert!(name.starts_with("evila") && name.chars().count() == MAX_FILE_LABEL_CHARS);
         assert!(entry.get("media_type").is_none(), "blank type dropped");
     }
 
+    /// Only standard padded base64 is accepted (what GE sends).
+    #[test]
+    fn base64_must_be_standard_and_padded() {
+        let got = files(&[
+            json!({ "raw": "eA", "filename": "unpadded" }),
+            json!({ "raw": "-_8=", "filename": "url-safe" }),
+            json!({ "raw": " eA== ", "filename": "trimmed" }),
+        ]);
+        assert_eq!(got[0]["error"], "invalid");
+        assert_eq!(got[1]["error"], "invalid");
+        assert_eq!(got[2]["size"], 1);
+    }
+
     #[test]
     fn a_file_upload_without_a_base64_data_uri_is_invalid() {
-        let mut files = Vec::new();
+        let mut intake = FileIntake::default();
         let mut ctx = json!({ "files": [
             { "fileId": "a", "inlineData": "data:text/plain,hello", "metadata": { "fileName": "a.txt" } },
             { "fileId": "b", "inlineData": format!("data:text/plain;base64,{}", b64(b"hello")) }
         ]});
-        take_uploads(&mut ctx, &mut files);
-        assert_eq!(files[0]["error"], "invalid");
-        assert_eq!(files[0]["name"], "a.txt");
-        assert_eq!(
-            files[1]["media_type"], "text/plain",
-            "type from the data URI"
-        );
-        assert_eq!(files[1]["size"], 5);
+        take_uploads(&mut ctx, &mut intake);
+        let got = intake.finish();
+        assert_eq!(got[0]["error"], "invalid");
+        assert_eq!(got[0]["name"], "a.txt");
+        assert_eq!(got[1]["media_type"], "text/plain", "type from the data URI");
+        assert_eq!(got[1]["size"], 5);
         assert_eq!(ctx["files"][1]["file"], 1);
     }
 
+    /// Ten links fill the entries: an eleventh file is counted in the marker.
     #[test]
-    fn limits_drop_bytes_but_keep_the_entry() {
-        let ok = |n: usize| json!({ "source": "part", "size": n, "bytes": "x" });
-        let mut files: Vec<Value> = (0..MAX_CLIENT_FILES + 1).map(|_| ok(1)).collect();
-        files[1] = ok(MAX_CLIENT_FILES_TOTAL_BYTES);
-        enforce_file_limits(&mut files);
-        assert!(files[0].get("bytes").is_some());
-        assert_eq!(files[1]["error"], "too_large", "over the total");
-        assert!(
-            files[2].get("bytes").is_some(),
-            "later small files still fit"
+    fn error_entries_count_toward_the_limit() {
+        let mut parts: Vec<Value> = (0..MAX_CLIENT_FILES)
+            .map(|_| json!({ "kind": "file", "file": { "uri": "https://x" } }))
+            .collect();
+        parts.push(json!({ "raw": b64(b"x"), "filename": "late.txt" }));
+        let got = files(&parts);
+        assert_eq!(
+            got[MAX_CLIENT_FILES],
+            json!({ "error": "too_many", "count": 1 })
         );
-        assert_eq!(files[MAX_CLIENT_FILES]["error"], "too_many");
-        assert!(files[MAX_CLIENT_FILES].get("size").is_none());
     }
 
     #[test]

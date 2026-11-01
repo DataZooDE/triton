@@ -15,9 +15,10 @@ use axum::middleware::Next;
 use axum::response::Response;
 use serde_json::Value;
 
-/// Cap buffered body size (dev convenience; large payloads are truncated
-/// to "not captured" rather than buffered unbounded).
-const MAX_BODY: usize = 4 * 1024 * 1024;
+/// Cap buffered body size (dev convenience; a larger body arrives empty).
+/// The A2A routes accept client files up to their own body limit, so the
+/// cap matches it.
+const MAX_BODY: usize = crate::a2a_spec::MAX_A2A_BODY_BYTES;
 
 /// Wrap `router` so every call's request + response JSON is captured per
 /// `trace_id`. Apply once to the composed (REST + /mcp + /a2a) router.
