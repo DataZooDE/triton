@@ -245,9 +245,29 @@ pub fn jsonrpc_router(state: A2aState, config: Arc<SpecA2aConfig>) -> Router {
 /// slug (see [`validate_agent_slug`]).
 pub const V03_BASE: &str = "/v0.3";
 
+/// The card at [`V03_BASE`]: the 0.3 card as a plain-text agent, with
+/// neither `streaming` nor the A2UI extension advertised. A client
+/// limited to plain-text 0.3 messages is given nothing it might reject
+/// (Copilot Studio's orchestrator failed with a bare `SystemError`,
+/// before any request reached Triton, on the full card; 2026-11-01).
+/// `message/stream` stays callable at the base, just not advertised.
+fn plain_v03_card(state: &CardState) -> Response {
+    let mut card = crate::a2a_v1::card_v03(state);
+    card["capabilities"] = json!({ "streaming": false, "pushNotifications": false });
+    card["defaultInputModes"] = json!(["text/plain"]);
+    card["defaultOutputModes"] = json!(["text/plain"]);
+    let mut resp = (StatusCode::OK, Json(card)).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("public, max-age=300"),
+    );
+    resp
+}
+
 /// The 0.3-only face at [`V03_BASE`], to be merged into the router nested
 /// at the endpoint: every [`CARD_FILENAMES`] spelling under
-/// `<base>/.well-known/` is the 0.3 card whose `url` is the base, and
+/// `<base>/.well-known/` is the plain-text 0.3 card ([`plain_v03_card`])
+/// whose `url` is the base, and
 /// `POST <base>` is the 0.3 JSON-RPC binding — the same handler, identity
 /// provider and task store as the endpoint itself, pinned to 0.3 (a 1.0
 /// request is VersionNotSupported in the 0.3 form).
@@ -262,9 +282,7 @@ pub fn v03_router(state: A2aState, config: Arc<SpecA2aConfig>, card: CardState) 
     for name in CARD_FILENAMES {
         cards = cards.route(
             &format!("{V03_BASE}/.well-known/{name}"),
-            get(|State(state): State<CardState>| async move {
-                crate::a2a_v1::card_response(&state, None, crate::a2a_v1::Version::V03)
-            }),
+            get(|State(state): State<CardState>| async move { plain_v03_card(&state) }),
         );
     }
     Router::new()
