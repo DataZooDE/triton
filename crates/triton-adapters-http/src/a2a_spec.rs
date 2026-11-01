@@ -2271,3 +2271,49 @@ mod client_file_limit_tests {
         assert!(text.contains("\"file\""), "file parts are labelled: {text}");
     }
 }
+
+#[cfg(test)]
+mod client_file_order_tests {
+    use super::*;
+
+    /// Files are admitted in the order their parts arrive, whatever the source.
+    #[test]
+    fn an_upload_before_ten_file_parts_keeps_its_place() {
+        let upload = json!({ "kind": "data", "data": { "version": "v0.9", "action": {
+            "name": "upload_complete",
+            "context": { "files": [ { "fileId": "u", "inlineData": "data:text/plain;base64,eA==" } ] } } } });
+        let mut parts = vec![upload];
+        parts.extend((0..MAX_CLIENT_FILES).map(|_| json!({ "raw": "eA==" })));
+        let client = client_input(&parts, true);
+        assert_eq!(client.files[0]["source"], "file_upload");
+        assert_eq!(client.files[MAX_CLIENT_FILES]["count"], 1);
+    }
+
+    /// An upload context over the event budget keeps the file links.
+    #[test]
+    fn an_oversized_upload_context_keeps_its_file_links() {
+        let name = "名".repeat(255);
+        let files: Vec<Value> = (0..MAX_CLIENT_FILES)
+            .map(|i| {
+                json!({ "fileId": format!("u{i}"), "inlineData": "data:text/plain;base64,eA==",
+                              "metadata": { "fileName": name, "note": "x".repeat(900) } })
+            })
+            .collect();
+        let event = json!({ "version": "v0.9", "action": { "name": "upload_complete",
+            "context": { "files": files } } });
+        let client = client_input(&[json!({ "kind": "data", "data": event })], true);
+        let ctx = &client.events[0]["action"]["context"];
+        assert_eq!(ctx["files"][3]["file"], 3, "{ctx}");
+        assert_eq!(ctx["files"][3]["fileId"], "u3");
+    }
+
+    /// Bidi overrides and zero-width characters are removed from names.
+    #[test]
+    fn names_lose_format_characters() {
+        let client = client_input(
+            &[json!({ "raw": "eA==", "filename": "invoice\u{202E}fdp.exe\u{200B}" })],
+            false,
+        );
+        assert_eq!(client.files[0]["name"], "invoicefdp.exe");
+    }
+}

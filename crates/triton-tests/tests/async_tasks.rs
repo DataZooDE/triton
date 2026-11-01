@@ -454,3 +454,50 @@ fn rand_suffix() -> u64 {
         .unwrap()
         .as_nanos() as u64
 }
+
+/// Files go with the first dispatch only: when the upstream stream breaks and
+/// the task is resumed, the resume carries the turn's context but no files.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resumed_task_does_not_send_the_files_again() {
+    let agent = FakeAsyncAgent::start(AsyncPlan {
+        drop_after: Some(2),
+        ..AsyncPlan::default()
+    })
+    .await;
+    let t = spawn(env(&agent, &[])).await;
+    let sent = rpc(
+        &t,
+        Some("1.0"),
+        "SendMessage",
+        json!({ "message": { "role": "ROLE_USER", "messageId": "m-files", "parts": [
+            { "text": "Propose owners" },
+            { "raw": "c3BlYw==", "mediaType": "text/plain", "filename": "spec.md" }
+        ] }, "configuration": { "returnImmediately": true } }),
+    )
+    .await;
+    let id = sent["result"]["task"]["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    let done = poll_completed(&t, &id, Duration::from_secs(15)).await;
+    assert_eq!(done["status"]["state"], "TASK_STATE_COMPLETED", "{done}");
+    let requests = agent.requests();
+    let first = requests.iter().find(|r| r.resume.is_none()).expect("filed");
+    assert_eq!(
+        first.body["_triton"]["client"]["files"][0]["name"],
+        "spec.md"
+    );
+    let resumes: Vec<_> = requests.iter().filter(|r| r.resume.is_some()).collect();
+    assert!(!resumes.is_empty(), "the stream was resumed");
+    for r in resumes {
+        assert!(
+            r.body["_triton"]["client"].get("files").is_none(),
+            "a resume carries no files: {}",
+            r.body["_triton"]
+        );
+        assert_eq!(
+            r.body["_triton"]["protocol"], "a2a",
+            "the context still does"
+        );
+    }
+}
