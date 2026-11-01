@@ -161,12 +161,15 @@ Object args carry Triton's reserved `_triton` key:
   `inlineData` replaced by `file`, the index of its entry). `error` is
   `link` (a `uri`/`url` part: Triton never fetches links), `invalid` (not
   standard base64, or no content) or `too_large` (over 10 MiB, or over the
-  turn's 25 MiB). At most 10 entries, errors included; the rest are counted
-  in one last entry `{error: "too_many", count}` (an upload past the limit
-  has no `file` index). Uploads in events past the 8-event cap are not
+  turn's 25 MiB). Files are admitted in the order their parts arrive; at
+  most 10 entries, errors included, and the rest are counted in one last
+  entry `{error: "too_many", count}` (an upload past the limit has no `file`
+  index; an upload event whose context is still over 8 KiB keeps only
+  `files: [{fileId, file}]`). Uploads in events past the 8-event cap are not
   seen. A turn with only files reaches you with `message` = `Attached
-  file: <name>` (or `Attached files: <names>`). Files are never stored with
-  an A2A task: a task resumed after a gateway restart runs without them.
+  file: <name>` (or `Attached files: <names>`). Files go with the first
+  dispatch only and are never stored with an A2A task: a resumed task (a
+  broken stream, or a gateway restart) runs without them.
   Gemini Enterprise converts chat attachments before any agent sees them:
   Word and PowerPoint arrive as unnamed `text/plain` (markdown) parts,
   Excel as one named CSV per sheet, PDF/CSV/TXT/images unchanged. The

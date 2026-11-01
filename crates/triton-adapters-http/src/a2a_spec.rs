@@ -690,63 +690,32 @@ pub(crate) fn client_input(parts: &[Value], a2ui: bool) -> ClientInput {
         Some(kind) => kind == "data",
         None => p.get("data").is_some(),
     };
-    let messages = parts
-        .iter()
-        .filter(|p| is_data(p) && (a2ui || typed(p)))
-        .filter_map(|p| p.get("data"))
-        .flat_map(|d| match d {
-            Value::Array(a) => a.iter().collect::<Vec<_>>(),
-            other => vec![other],
-        })
-        .filter(|m| {
-            m.get("action").is_some_and(Value::is_object)
-                || m.get("error").is_some_and(Value::is_object)
-        })
-        .take(MAX_A2UI_EVENTS);
+    let is_event = |m: &&Value| {
+        m.get("action").is_some_and(Value::is_object)
+            || m.get("error").is_some_and(Value::is_object)
+    };
 
+    // One pass in arrival order, so files are admitted in the order their
+    // parts came, whether a file part or a FileUpload event carried them.
+    let mut client = ClientInput::default();
     let mut intake = FileIntake::default();
     for p in parts {
-        file_part(p, &mut intake);
-    }
-    let mut client = ClientInput::default();
-    for m in messages {
-        let mut event = serde_json::Map::new();
-        if let Some(v) = m.get("version").filter(|v| v.is_string()) {
-            event.insert("version".into(), v.clone());
+        if !(is_data(p) && (a2ui || typed(p))) {
+            file_part(p, &mut intake);
+            continue;
         }
-        if let Some(action) = m.get("action").and_then(Value::as_object) {
-            let mut projected = serde_json::Map::new();
-            for key in ["name", "surfaceId", "sourceComponentId", "timestamp"] {
-                if let Some(v) = action.get(key).filter(|v| v.is_string()) {
-                    projected.insert(key.into(), v.clone());
-                }
+        let messages = match p.get("data") {
+            Some(Value::Array(a)) => a.iter().collect::<Vec<_>>(),
+            Some(other) => vec![other],
+            None => Vec::new(),
+        };
+        for m in messages.into_iter().filter(is_event) {
+            if client.events.len() == MAX_A2UI_EVENTS {
+                break;
             }
-            if let Some(mut ctx) = action.get("context").cloned() {
-                take_uploads(&mut ctx, &mut intake);
-                if within_budget(&ctx) {
-                    projected.insert("context".into(), ctx);
-                }
-            }
-            if client.fallback.is_none() {
-                let name: String = projected
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .unwrap_or("action")
-                    .chars()
-                    .filter(|c| !c.is_control())
-                    .take(MAX_A2UI_ACTION_NAME_CHARS)
-                    .collect();
-                client.fallback = Some(format!("A2UI action: {name}"));
-            }
-            event.insert("action".into(), Value::Object(projected));
+            let event = project_event(m, &mut intake, &mut client.fallback);
+            client.events.push(event);
         }
-        if let Some(error) = m.get("error").filter(|e| e.is_object() && within_budget(e)) {
-            event.insert("error".into(), error.clone());
-            client
-                .fallback
-                .get_or_insert_with(|| "A2UI error".to_string());
-        }
-        client.events.push(Value::Object(event));
     }
     client.files = intake.finish();
     if client.fallback.is_none() && !client.files.is_empty() {
@@ -764,6 +733,49 @@ pub(crate) fn client_input(parts: &[Value], a2ui: bool) -> ClientInput {
         });
     }
     client
+}
+
+/// One A2UI client message projected onto the v0.9 fields; its FileUpload
+/// data URIs go to `intake`, and the turn's fallback text is set once.
+fn project_event(m: &Value, intake: &mut FileIntake, fallback: &mut Option<String>) -> Value {
+    let mut event = serde_json::Map::new();
+    if let Some(v) = m.get("version").filter(|v| v.is_string()) {
+        event.insert("version".into(), v.clone());
+    }
+    if let Some(action) = m.get("action").and_then(Value::as_object) {
+        let mut projected = serde_json::Map::new();
+        for key in ["name", "surfaceId", "sourceComponentId", "timestamp"] {
+            if let Some(v) = action.get(key).filter(|v| v.is_string()) {
+                projected.insert(key.into(), v.clone());
+            }
+        }
+        if let Some(mut ctx) = action.get("context").cloned() {
+            take_uploads(&mut ctx, intake);
+            if within_budget(&ctx) {
+                projected.insert("context".into(), ctx);
+            } else if let Some(links) = upload_links(&ctx) {
+                // Too big as a whole: keep at least which file is which.
+                projected.insert("context".into(), links);
+            }
+        }
+        if fallback.is_none() {
+            let name: String = projected
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("action")
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(MAX_A2UI_ACTION_NAME_CHARS)
+                .collect();
+            *fallback = Some(format!("A2UI action: {name}"));
+        }
+        event.insert("action".into(), Value::Object(projected));
+    }
+    if let Some(error) = m.get("error").filter(|e| e.is_object() && within_budget(e)) {
+        event.insert("error".into(), error.clone());
+        fallback.get_or_insert_with(|| "A2UI error".to_string());
+    }
+    Value::Object(event)
 }
 
 /// A turn's files, collected in arrival order under the limits: at most
@@ -906,6 +918,34 @@ fn take_uploads(ctx: &mut Value, intake: &mut FileIntake) {
     }
 }
 
+/// The bounded part of a FileUpload context: each file's `fileId` (capped)
+/// and its entry index. `None` when the context has no files.
+fn upload_links(ctx: &Value) -> Option<Value> {
+    let files = ctx.get("files")?.as_array()?;
+    let links: Vec<Value> = files
+        .iter()
+        .take(MAX_CLIENT_FILES + 1)
+        .map(|f| {
+            let id: String = f
+                .get("fileId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .chars()
+                .take(MAX_FILE_LABEL_CHARS)
+                .collect();
+            json!({ "fileId": id, "file": f.get("file") })
+        })
+        .collect();
+    Some(json!({ "files": links }))
+}
+
+/// Characters that change how a name displays without being visible:
+/// zero-width marks, bidi controls, word joiners, the BOM, the soft hyphen.
+fn is_format_char(c: char) -> bool {
+    matches!(c, '\u{00AD}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}'
+        | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
 fn file_entry(
     source: &str,
     name: Option<&Value>,
@@ -915,7 +955,7 @@ fn file_entry(
         v.and_then(Value::as_str)
             .map(|s| {
                 s.chars()
-                    .filter(|c| !c.is_control())
+                    .filter(|c| !c.is_control() && !is_format_char(*c))
                     .take(MAX_FILE_LABEL_CHARS)
                     .collect::<String>()
             })

@@ -771,6 +771,15 @@ async fn a_large_file_reaches_the_agent_through_the_binary() {
     )
     .await;
     assert_eq!(status, 200, "{sent}");
+    // The task store never holds the content: neither GetTask nor ListTasks
+    // shows it.
+    let task_id = sent["result"]["task"]["id"].as_str().expect("task id");
+    let marker = &b64(&content)[..64];
+    let (_, got) = rpc(&url, DEV, Some("1.0"), "GetTask", json!({ "id": task_id })).await;
+    assert!(!got.to_string().contains(marker), "GetTask");
+    let (_, listed) = rpc(&url, DEV, Some("1.0"), "ListTasks", json!({})).await;
+    assert!(listed["result"]["tasks"].is_array(), "{listed}");
+    assert!(!listed.to_string().contains(marker), "ListTasks");
     let bodies = agent.bodies_seen();
     assert_eq!(bodies.len(), 2);
     for body in &bodies {
@@ -801,7 +810,11 @@ async fn a_large_body_is_read_only_after_authentication() {
         if let Some(t) = token {
             req = req.bearer_auth(t);
         }
-        let status = req.send().await.expect("POST").status();
-        assert_eq!(status, expected, "token: {token:?}");
+        match req.send().await {
+            Ok(resp) => assert_eq!(resp.status(), expected, "token: {token:?}"),
+            // The server may answer and close before the client finished
+            // writing; for the anonymous caller that is the point.
+            Err(e) => assert!(token.is_none(), "token: {token:?}: {e}"),
+        }
     }
 }

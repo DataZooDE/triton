@@ -1608,7 +1608,10 @@ anonymous 41 MiB → 401, authenticated → 413). Two related traps: the dev
 limit), and per-turn metadata in `ContextOverrides::triton_meta` is stored
 with an A2A task, so file bytes travel in the non-persisted
 `client_files` and are merged into `_triton.client` only in
-`prepare_args`.
+`prepare_args`. The task runner owns its overrides for the task's whole
+life and re-sends them on every resume, so it drops `client_files` once
+the first dispatch is open (pinned by
+`async_tasks::a_resumed_task_does_not_send_the_files_again`).
 
 ## 8. CI/CD build-time traps (2026-08-30)
 
