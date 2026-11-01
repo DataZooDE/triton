@@ -120,8 +120,25 @@ fn opt(v: &mut Value, key: &str, s: Option<&str>) {
     }
 }
 
-fn action(a: &Action) -> Value {
-    json!(a)
+/// The widget's own link rule: it opens `https` links only (through the
+/// host), so any other link — even one the core link rule admits, such as
+/// an `http://` link to a configured local host — would be a dead button.
+pub fn is_widget_action(a: &Value) -> bool {
+    match a.get("type").and_then(Value::as_str) {
+        Some("send_message") => a
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|t| !t.trim().is_empty()),
+        Some("open_url") => a
+            .get("url")
+            .and_then(Value::as_str)
+            .is_some_and(|u| u.starts_with("https://")),
+        _ => false,
+    }
+}
+
+fn action(a: &Action) -> Option<Value> {
+    Some(json!(a)).filter(is_widget_action)
 }
 
 fn send(text: &str) -> Value {
@@ -156,8 +173,8 @@ impl Card {
                             .map(|c| r.cells.get(&c.key).cloned().unwrap_or_default())
                             .collect();
                         let mut row = json!({ "cells": cells });
-                        if let Some(a) = &r.action {
-                            row["action"] = action(a);
+                        if let Some(a) = r.action.as_ref().and_then(action) {
+                            row["action"] = a;
                         }
                         row
                     })
@@ -307,11 +324,15 @@ impl Card {
                 action: Some(a),
                 primary,
                 ..
-            } => self.actions.push(json!({
-                "label": label,
-                "primary": primary,
-                "action": action(a),
-            })),
+            } => {
+                if let Some(a) = action(a) {
+                    self.actions.push(json!({
+                        "label": label,
+                        "primary": primary,
+                        "action": a,
+                    }));
+                }
+            }
             // The widget does not frame a page (a host would need the page's
             // origin in its frame CSP, which Claude restricts): the fallback
             // inline, and the page as a link in the action bar.
@@ -322,12 +343,11 @@ impl Card {
                 ..
             } => {
                 self.component(fallback);
-                let a = Action::OpenUrl { url: url.clone() };
-                if a.is_safe() {
+                if let Some(a) = action(&Action::OpenUrl { url: url.clone() }) {
                     self.actions.push(json!({
                         "label": title,
                         "primary": false,
-                        "action": action(&a),
+                        "action": a,
                     }));
                 }
             }
@@ -341,8 +361,8 @@ impl Card {
 fn list_item(it: &ListItem) -> Value {
     let mut v = json!({ "label": it.label });
     opt(&mut v, "detail", it.detail.as_deref());
-    if let Some(a) = &it.action {
-        v["action"] = action(a);
+    if let Some(a) = it.action.as_ref().and_then(action) {
+        v["action"] = a;
         opt(&mut v, "action_label", it.action_label.as_deref());
     }
     v
@@ -378,8 +398,8 @@ fn tree_node(n: &TreeNode) -> Value {
             .collect();
         v["chips"] = json!(chips);
     }
-    if let Some(a) = &n.action {
-        v["action"] = action(a);
+    if let Some(a) = n.action.as_ref().and_then(action) {
+        v["action"] = a;
         v["action_label"] = json!(n.action_caption());
     }
     if !n.children.is_empty() {

@@ -193,6 +193,10 @@ async fn rig() -> Rig {
         upstreams.push(format!("{tool}={}", agent.host_port()));
         agents.push(agent);
     }
+    // A prose-only answer: no card, so no widget data.
+    let prose = FakeAgent::start_returning(json!({ "text": "just prose" })).await;
+    upstreams.push(format!("prose={}", prose.host_port()));
+    agents.push(prose);
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_ENTRA_AUDIENCE".to_string(), ENTRA_AUD.to_string()),
@@ -320,4 +324,64 @@ async fn a_customer_mcp_path_serves_the_answer_card_widget() {
             "{tool}: envelope unchanged"
         );
     }
+    let res = rpc(
+        &r,
+        "tools/call",
+        json!({ "name": "prose", "arguments": {} }),
+    )
+    .await;
+    assert_eq!(res["content"][0]["text"], "just prose");
+    assert!(res["structuredContent"].get("widget").is_none(), "{res}");
+}
+
+/// The widget composes a form's request on the client. These vectors pin
+/// what every channel sends for a template and the user's inputs (the
+/// server-side `resolve`, which Teams and Gemini use); the widget harness
+/// runs the same file through the widget's own fill.
+#[test]
+fn fill_vectors_match_the_server_side_resolve() {
+    use triton_correlation::message::{MessageError, resolve, template_args};
+    let vectors = read_json(&dir("fixtures/conversation/fill_vectors.json"));
+    let mut with_parts = Vec::new();
+    for v in vectors.as_array().unwrap() {
+        let tpl = v["template"].as_str().unwrap();
+        let values = v["values"].as_object().unwrap();
+        let got = resolve(&template_args(tpl), |k| {
+            values.get(k).and_then(Value::as_str).map(str::to_string)
+        });
+        match (v.get("text"), v.get("missing")) {
+            (Some(t), _) => assert_eq!(got.as_deref().ok(), t.as_str(), "{tpl}"),
+            (_, Some(m)) => {
+                let want: Vec<String> = serde_json::from_value(m.clone()).unwrap();
+                assert_eq!(got, Err(MessageError::Missing(want)), "{tpl}");
+            }
+            _ => panic!("vector needs text or missing"),
+        }
+        let mut v = v.clone();
+        v["parts"] = triton_correlation::message::template_parts(tpl);
+        with_parts.push(v);
+    }
+    // The browser harness runs the same vectors, with the parts the widget
+    // would receive, through the widget's own fill.
+    if let Ok(out) = std::env::var("WIDGET_FILL_VECTORS_OUT") {
+        std::fs::write(out, serde_json::to_string(&with_parts).unwrap()).unwrap();
+    }
+}
+
+/// A deep link the widget cannot open (anything but https) is no control.
+#[test]
+fn only_https_links_become_widget_controls() {
+    let d = mcp_app::widget_data(&json!({ "surface": { "components": [
+        { "kind": "header", "title": "T" },
+        { "kind": "list", "items": [ { "label": "local",
+          "action": { "type": "open_url", "url": "http://127.0.0.1:8080/x" } } ] }
+    ] } }))
+    .unwrap();
+    assert!(d["body"][0]["items"][0].get("action").is_none(), "{d}");
+    assert!(mcp_app::is_widget_action(
+        &json!({ "type": "open_url", "url": "https://a.example/x" })
+    ));
+    assert!(!mcp_app::is_widget_action(
+        &json!({ "type": "open_url", "url": "http://127.0.0.1/x" })
+    ));
 }

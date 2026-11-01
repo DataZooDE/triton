@@ -39,7 +39,7 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: transparent; }
 body { font: 14px/1.45 var(--font); color: var(--fg); }
-#card { padding: 14px 16px 16px; background: var(--bg); }
+#card { padding: 14px 16px 16px; background: var(--bg); border: 1px solid var(--line); border-radius: 12px; }
 #card:empty { display: none; }
 .head { display: flex; align-items: baseline; gap: 12px; }
 .title { font-size: 16px; font-weight: 600; margin: 0; flex: 1; }
@@ -119,7 +119,7 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
 </style>
 </head>
 <body>
-<main id="card" aria-live="polite"></main>
+<main id="card"></main>
 <div class="sr" id="status" role="status"></div>
 <script>
 (() => {
@@ -135,11 +135,14 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
   // ── host bridge (MCP Apps JSON-RPC over postMessage) ─────────────────
   const post = (msg) => window.parent.postMessage(msg, "*");
   const notify = (method, params) => post({ jsonrpc: "2.0", method, params: params || {} });
-  const request = (method, params) => new Promise((resolve, reject) => {
+  // `timeoutMs` only for the handshake: a message or link request may wait
+  // on the user (a host confirmation), and giving up on it would invite a
+  // second send.
+  const request = (method, params, timeoutMs) => new Promise((resolve, reject) => {
     const id = nextId++;
     pending.set(id, { resolve, reject });
     post({ jsonrpc: "2.0", id, method, params: params || {} });
-    setTimeout(() => { if (pending.delete(id)) reject(new Error("timeout")); }, 8000);
+    if (timeoutMs) setTimeout(() => { if (pending.delete(id)) reject(new Error("timeout")); }, timeoutMs);
   });
 
   window.addEventListener("message", (e) => {
@@ -159,9 +162,10 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
     }
   });
 
+  let hostTheme = false;
   function applyContext(ctx) {
     if (!ctx) return;
-    if (ctx.theme === "dark" || ctx.theme === "light") document.documentElement.dataset.theme = ctx.theme;
+    if (ctx.theme === "dark" || ctx.theme === "light") { hostTheme = true; document.documentElement.dataset.theme = ctx.theme; }
     const vars = ctx.styles && ctx.styles.variables;
     if (vars && typeof vars === "object") {
       for (const [k, v] of Object.entries(vars)) {
@@ -171,10 +175,13 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
     if (ctx.locale) document.documentElement.lang = String(ctx.locale).split(/[-_]/)[0];
   }
 
+  // The card's data: result `_meta` (hidden from the model) or
+  // `structuredContent.widget`. A result without it clears the card.
+  const META_KEY = "triton/widget";
+  const pick = (meta, structured) =>
+    (meta && meta[META_KEY]) || (structured && structured.widget) || null;
   function fromResult(r) {
-    if (!r) return;
-    const w = r.structuredContent && r.structuredContent.widget;
-    render(w);
+    render(r ? pick(r._meta, r.structuredContent) : null);
   }
 
   // ChatGPT also hydrates window.openai; theme from there when present.
@@ -182,18 +189,23 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
     const o = window.openai;
     if (!o) return;
     if (o.theme) applyContext({ theme: o.theme, locale: o.locale });
-    const w = o.toolOutput && o.toolOutput.widget;
-    if (w) render(w);
+    if (bridge) return; // the MCP Apps bridge delivers the result
+    const m = o.toolResponseMetadata;
+    const meta = m && (m._meta || (m.call_tool_result && m.call_tool_result._meta) || m);
+    if (o.toolOutput !== undefined || m !== undefined) render(pick(meta, o.toolOutput));
   }
   window.addEventListener("openai:set_globals", fromOpenAI);
 
   // ── actions: one complete new message, or a deep link ────────────────
+  // ONE transport per click: the bridge when the host answered the
+  // handshake, else ChatGPT's window.openai. Never both — an unanswered
+  // ui/message may still have been delivered.
   async function sendMessage(text) {
     if (bridge) {
       try {
         const r = await request("ui/message", { role: "user", content: [{ type: "text", text }] });
-        if (!r || !r.isError) return true;
-      } catch (_) { /* fall through */ }
+        return !(r && r.isError);
+      } catch (_) { return false; }
     }
     if (window.openai && window.openai.sendFollowUpMessage) {
       await window.openai.sendFollowUpMessage({ prompt: text });
@@ -206,8 +218,8 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
     if (bridge && canOpenLinks) {
       try {
         const r = await request("ui/open-link", { url });
-        if (!r || !r.isError) return true;
-      } catch (_) { /* fall through */ }
+        return !(r && r.isError);
+      } catch (_) { return false; }
     }
     if (window.openai && window.openai.openExternal) { window.openai.openExternal({ href: url }); return true; }
     window.open(url, "_blank", "noopener");
@@ -231,11 +243,13 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
   // only when all its fields are non-blank; a blank required field blocks.
   function fill(parts, values) {
     const missing = [];
+    const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
     const one = (list, out, miss) => {
       for (const p of list) {
-        if ("text" in p) out.push(p.text);
-        else if ("field" in p) {
-          const v = (values[p.field] == null ? "" : String(values[p.field])).trim();
+        if (has(p, "text")) out.push(p.text);
+        else if (has(p, "field")) {
+          const raw = has(values, p.field) ? values[p.field] : null;
+          const v = (raw == null ? "" : String(raw)).trim();
           if (v) out.push(v); else if (!miss.includes(p.field)) miss.push(p.field);
         }
       }
@@ -248,8 +262,11 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
         if (!m.length) out.push(...o);
       } else one([p], out, missing);
     }
+    // Trimmed like the server-side `resolve` every other channel uses.
     return { text: out.join("").trim(), missing };
   }
+  // Pure; exposed so a harness can run the shared fill vectors.
+  window.tritonWidgetFill = fill;
 
   // ── rendering ─────────────────────────────────────────────────────────
   function el(tag, attrs, ...kids) {
@@ -392,7 +409,7 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
 
   function formPanel(b, g, key) {
     const form = el("form", { novalidate: true });
-    const getters = {};
+    const getters = Object.create(null);
     g.fields.forEach((f, fi) => {
       const id = "f-" + key + "-" + fi;
       const label = [f.label, f.required ? el("span", { class: "req", "aria-hidden": "true" }, "*") : null];
@@ -411,7 +428,7 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
         } else if (f.kind === "text") {
           ctl = el("textarea", { id, placeholder: f.placeholder, required: f.required }, f.default != null ? String(f.default) : "");
         } else if (f.kind === "boolean") {
-          ctl = el("select", { id, required: f.required }, el("option", { value: "" }, ""), el("option", { value: "yes", selected: f.default === true }, "Yes"), el("option", { value: "no", selected: f.default === false }, "No"));
+          ctl = el("select", { id, required: f.required }, el("option", { value: "" }, ""), el("option", { value: "true", selected: f.default === true }, "Yes"), el("option", { value: "false", selected: f.default === false }, "No"));
         } else {
           ctl = el("input", { id, type: f.kind === "integer" ? "number" : "text", placeholder: f.placeholder, required: f.required, value: f.default != null ? String(f.default) : null });
         }
@@ -420,7 +437,11 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
       }
       form.append(box);
     });
-    const values = () => Object.fromEntries(Object.entries(getters).map(([k, fn]) => [k, fn()]));
+    const values = () => {
+      const v = Object.create(null);
+      for (const k of Object.keys(getters)) v[k] = getters[k]();
+      return v;
+    };
     const submit = el("button", { type: "submit", class: "b primary" }, b.submit_label || "Send");
     const sync = () => { submit.disabled = fill(g.template, values()).missing.length > 0; };
     form.addEventListener("input", sync);
@@ -439,8 +460,8 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
   }
 
   function render(w) {
-    if (!w || typeof w !== "object" || w.version !== DATA_VERSION) return;
     card.replaceChildren();
+    if (!w || typeof w !== "object" || w.version !== DATA_VERSION) { resize(); return; }
     if (w.header) {
       card.append(el("div", { class: "head" }, el("h1", { class: "title" }, w.header.title), w.header.stamp ? el("span", { class: "stamp" }, w.header.stamp) : null));
       if (w.header.context) card.append(el("p", { class: "context" }, w.header.context));
@@ -469,14 +490,16 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
   if (window.ResizeObserver) new ResizeObserver(resize).observe(document.body);
 
   // ── start: handshake first; the host sends nothing before `initialized` ─
-  if (!window.matchMedia || !window.matchMedia("(prefers-color-scheme: dark)").matches) document.documentElement.dataset.theme = "light";
-  else document.documentElement.dataset.theme = "dark";
+  const mq = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)");
+  const systemTheme = () => { if (!hostTheme) document.documentElement.dataset.theme = mq && mq.matches ? "dark" : "light"; };
+  systemTheme();
+  if (mq && mq.addEventListener) mq.addEventListener("change", systemTheme);
   fromOpenAI();
   request("ui/initialize", {
     protocolVersion: "2026-01-26",
     appInfo: { name: "triton-answer-card", version: "1" },
     appCapabilities: { availableDisplayModes: ["inline"] },
-  }).then((r) => {
+  }, 5000).then((r) => {
     bridge = true;
     r = r || {};
     canOpenLinks = !r.hostCapabilities || !!r.hostCapabilities.openLinks;

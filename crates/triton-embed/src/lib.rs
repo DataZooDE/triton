@@ -431,6 +431,7 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         identity: identity.clone(),
         tasks: None,
         route: None,
+        widget: true,
     };
     let dispatcher_for_card = dispatcher.clone();
     let a2a_state = A2aState {

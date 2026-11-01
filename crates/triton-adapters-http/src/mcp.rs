@@ -105,6 +105,11 @@ pub struct McpState {
     /// Set on a customer path (`/mcp/<slug>`, [`crate::mcp_tenants`]): the
     /// verified principal must also pass the route's tenant binding.
     pub route: Option<Arc<crate::mcp_tenants::McpRoute>>,
+    /// Serve the answer-card MCP Apps widget ([`mcp_app`]): its resource,
+    /// the tool `_meta` that names it, and its data on each result. A host
+    /// without MCP Apps ignores all three; `TRITON_MCP_APP_WIDGET=off`
+    /// switches it off for a host that renders it badly.
+    pub widget: bool,
 }
 
 pub fn router(state: McpState) -> Router {
@@ -282,7 +287,7 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
             let response = tools_call(id.clone(), params, principal, &state).await;
             maybe_respond(id_present, id, |_| response)
         }
-        "resources/list" => maybe_respond(id_present, id, resources_list),
+        "resources/list" => maybe_respond(id_present, id, |id| resources_list(id, &state)),
         "resources/read" => {
             let response = resources_read(id.clone(), &params, principal, &state).await;
             maybe_respond(id_present, id, |_| response)
@@ -537,7 +542,7 @@ async fn tools_list_response(id: Value, state: &McpState) -> Response {
             }
             // A tool that answers with a surface names the answer-card
             // widget, so an MCP Apps host (Claude, ChatGPT) renders it.
-            if widget_enabled() && d.upstream && d.returns_a2ui {
+            if state.widget && d.upstream && d.returns_a2ui {
                 tool["_meta"] = widget_tool_meta();
             }
             tool
@@ -636,7 +641,7 @@ async fn tools_call(
             // The answer-card widget's data, from the canonical surface (and
             // before the A2UI wrap). A result that brings its own MCP App
             // (`_meta.ui`) keeps it; there is no card to draw then.
-            let widget = (widget_enabled() && ui_meta.is_none())
+            let widget = (state.widget && ui_meta.is_none())
                 .then(|| mcp_app::widget_data(&d.result))
                 .flatten();
             if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
@@ -810,13 +815,13 @@ async fn run_as_task(
 /// Only the local runtime stub is enumerable; upstream-owned `ui://`
 /// resources are loaded on demand via `resources/read` (#143 B), not
 /// listed here (upstream enumeration is optional in v1).
-fn resources_list(id: Value) -> Response {
+fn resources_list(id: Value, state: &McpState) -> Response {
     let mut resources = vec![json!({
         "uri": "ui://triton/runtime.html",
         "name": "triton-runtime",
         "mimeType": "text/html"
     })];
-    if widget_enabled() {
+    if state.widget {
         resources.push(json!({
             "uri": mcp_app::resource_uri(),
             "name": "answer-card",
@@ -827,19 +832,6 @@ fn resources_list(id: Value) -> Response {
         }));
     }
     rpc_ok(id, json!({ "resources": resources }))
-}
-
-/// `TRITON_MCP_APP_WIDGET=off` keeps the answer-card widget out of
-/// `tools/list`, `resources/*` and the results (on by default): a host
-/// without MCP Apps ignores it anyway, so the switch is for a host that
-/// renders it badly.
-fn widget_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        !std::env::var("TRITON_MCP_APP_WIDGET")
-            .map(|v| matches!(v.trim(), "0" | "false" | "off" | "no"))
-            .unwrap_or(false)
-    })
 }
 
 const WIDGET_DESCRIPTION: &str = "Shows the answer as a card: a table, facts, a map or a form, \
@@ -857,16 +849,16 @@ fn widget_tool_meta() -> Value {
     })
 }
 
-/// The resource `_meta`: no network at all (inline CSS and JS), drawn in
-/// the host's border.
+/// The resource `_meta`: no network at all (inline CSS and JS). The card
+/// draws its own border, so an answer without a card leaves no empty frame.
 fn widget_resource_meta() -> Value {
     json!({
         "ui": {
             "csp": { "connectDomains": [], "resourceDomains": [] },
-            "prefersBorder": true,
+            "prefersBorder": false,
         },
         "openai/widgetDescription": WIDGET_DESCRIPTION,
-        "openai/widgetPrefersBorder": true,
+        "openai/widgetPrefersBorder": false,
     })
 }
 
@@ -901,7 +893,7 @@ async fn resources_read(
     }
     // The answer-card widget, any revision of its URI (a host may have
     // listed the tools before an upgrade): always the current page.
-    if widget_enabled() && mcp_app::is_widget_uri(&uri) {
+    if state.widget && mcp_app::is_widget_uri(&uri) {
         return rpc_ok(
             id,
             json!({
