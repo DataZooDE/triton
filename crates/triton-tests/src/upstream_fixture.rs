@@ -197,6 +197,9 @@ impl FakeAgent {
         let router = Router::new()
             .route("/", any(handler))
             .route("/{*rest}", any(handler))
+            // Forwarded client files make dispatch bodies larger than axum's
+            // 2 MB default.
+            .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
             .with_state(state.clone());
 
         tokio::spawn(async move {

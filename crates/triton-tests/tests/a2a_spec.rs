@@ -1626,11 +1626,18 @@ async fn a_file_upload_pick_reaches_the_agent_with_the_original_bytes() {
     post_rpc(&base, &iss, &click(event, true), true).await;
     let body = agent.bodies_seen().remove(0);
     let file = &body["_triton"]["client"]["files"][0];
-    assert_eq!(file["source"], "file_upload", "{}", body["_triton"]["client"]["files"]);
+    assert_eq!(
+        file["source"], "file_upload",
+        "{}",
+        body["_triton"]["client"]["files"]
+    );
     assert_eq!(file["name"], "FKM-R37.docx");
     assert_eq!(file["media_type"], mime);
     assert_eq!(file["size"], original.len());
-    assert!(file["bytes"] == b64(&original), "the original, byte for byte");
+    assert!(
+        file["bytes"] == b64(&original),
+        "the original, byte for byte"
+    );
     let ctx = &body["_triton"]["client"]["a2ui_events"][0]["action"]["context"];
     assert_eq!(ctx["files"][0]["file"], 0, "{ctx}");
     assert_eq!(ctx["files"][0]["fileId"], "inline://abc");
@@ -1660,7 +1667,9 @@ async fn links_bad_and_oversized_files_arrive_as_errors() {
     )
     .await;
     let body = agent.bodies_seen().remove(0);
-    let files = body["_triton"]["client"]["files"].as_array().expect("files");
+    let files = body["_triton"]["client"]["files"]
+        .as_array()
+        .expect("files");
     assert_eq!(files.len(), 3, "{files:?}");
     for (file, name, error) in [
         (&files[0], "a.pdf", "link"),

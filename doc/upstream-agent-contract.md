@@ -151,6 +151,23 @@ Object args carry Triton's reserved `_triton` key:
   click's context) becomes `message`, and a submit missing a required choice
   is answered without a turn. Such a click is still listed in
   `a2ui_events`; only producer surfaces (§4) rely on events.
+- **Client files** (spec A2A 0.3 or 1.0) arrive as `_triton.client.files`,
+  one entry per file: `{source, name?, media_type?, size, bytes}` with the
+  content as standard base64, or `{source, name?, media_type?, error}`.
+  `source` is `part` (a file part: 0.3 `{kind: "file", file: {bytes,
+  mimeType, name}}`, 1.0 `{raw, mediaType, filename}`) or `file_upload` (the
+  data URIs of an A2UI `FileUpload` action, `context.files[].inlineData`;
+  the event stays in `a2ui_events` with each `inlineData` replaced by
+  `file`, the index of its entry). `error` is `link` (a `uri`/`url` part:
+  Triton never fetches links), `invalid` (not base64), `too_large` (over
+  10 MiB, or over 25 MiB for the turn) or `too_many` (more than 10). A turn
+  with only files reaches you with `message` = `Attached file: <name>`.
+  Gemini Enterprise converts chat attachments before any agent sees them:
+  Word and PowerPoint arrive as unnamed `text/plain` (markdown) parts,
+  Excel as one named CSV per sheet, PDF/CSV/TXT/images unchanged. The
+  original Office file only arrives through a `FileUpload` you render.
+  Names and types are client-asserted; check the bytes yourself. An
+  upstream agent must accept dispatch bodies up to about 40 MB.
 
 ### 2a. Optional: argument-schema discovery (`X-Triton-MCP: tools/list`)
 
