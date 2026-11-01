@@ -1237,7 +1237,11 @@ pub fn rest_router(state: A2aState, config: Arc<SpecA2aConfig>) -> Router {
             get(rest_push).delete(rest_push),
         )
         .route("/v1/extendedAgentCard", get(rest_extended_card))
-        .with_state(SpecState { a2a: state, config })
+        .with_state(SpecState {
+            a2a: state,
+            config,
+            only_v03: false,
+        })
         .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
 }
 

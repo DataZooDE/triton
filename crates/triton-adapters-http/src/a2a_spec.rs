@@ -209,6 +209,7 @@ fn card_route(name: &str) -> axum::routing::MethodRouter<CardState> {
 pub fn spec_routes(state: A2aState, config: SpecA2aConfig, card: CardState) -> Router {
     let config = Arc::new(config);
     jsonrpc_router(state.clone(), config.clone())
+        .merge(v03_router(state.clone(), config.clone(), card.clone()))
         .merge(crate::a2a_v1::rest_router(state, config))
         .merge(card_router_nested(card))
 }
@@ -225,8 +226,60 @@ pub fn card_router_nested(state: CardState) -> Router {
 pub fn jsonrpc_router(state: A2aState, config: Arc<SpecA2aConfig>) -> Router {
     Router::new()
         .route("/", post(jsonrpc))
-        .with_state(SpecState { a2a: state, config })
+        .with_state(SpecState {
+            a2a: state,
+            config,
+            only_v03: false,
+        })
         .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
+}
+
+/// The dedicated 0.3 base, relative to the A2A endpoint.
+///
+/// Some discovery clients accept only a 0.3 card and read the spec's
+/// `agent-card.json` spelling first, refusing the 1.0 card served there
+/// instead of falling back to `agent.json` (Microsoft Copilot Studio,
+/// 2026-11-01: "This agent card uses A2A protocol v1, which is not
+/// supported yet"). Such a client is registered with `<endpoint>/v0.3`.
+/// The segment contains `.`, so it can never collide with a per-agent
+/// slug (see [`validate_agent_slug`]).
+pub const V03_BASE: &str = "/v0.3";
+
+/// The 0.3-only face at [`V03_BASE`], to be merged into the router nested
+/// at the endpoint: every [`CARD_FILENAMES`] spelling under
+/// `<base>/.well-known/` is the 0.3 card whose `url` is the base, and
+/// `POST <base>` is the 0.3 JSON-RPC binding — the same handler, identity
+/// provider and task store as the endpoint itself, pinned to 0.3 (a 1.0
+/// request is VersionNotSupported in the 0.3 form).
+pub fn v03_router(state: A2aState, config: Arc<SpecA2aConfig>, card: CardState) -> Router {
+    let mut card_config = (*card.config).clone();
+    card_config.a2a_path = format!("{}{V03_BASE}", card_config.a2a_path.trim_end_matches('/'));
+    let card = CardState {
+        config: Arc::new(card_config),
+        ..card
+    };
+    let mut cards = Router::new();
+    for name in CARD_FILENAMES {
+        cards = cards.route(
+            &format!("{V03_BASE}/.well-known/{name}"),
+            get(|State(state): State<CardState>| async move {
+                crate::a2a_v1::card_response(&state, None, crate::a2a_v1::Version::V03)
+            }),
+        );
+    }
+    Router::new()
+        .route(V03_BASE, post(jsonrpc))
+        .with_state(SpecState {
+            a2a: state,
+            config,
+            only_v03: true,
+        })
+        .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
+        .merge(
+            cards
+                .with_state(card)
+                .layer(axum::middleware::from_fn(public_card_cors)),
+        )
 }
 
 /// Why a per-agent slug was refused. See [`validate_agent_slug`].
@@ -307,6 +360,7 @@ pub fn agent_router(
         .with_state(SpecState {
             a2a: state.clone(),
             config: config.clone(),
+            only_v03: false,
         })
         .nest(
             &format!("/{slug}"),
@@ -320,6 +374,8 @@ pub fn agent_router(
 pub(crate) struct SpecState {
     pub(crate) a2a: A2aState,
     pub(crate) config: Arc<SpecA2aConfig>,
+    /// The dedicated 0.3 base ([`V03_BASE`]): a 1.0 request is refused.
+    pub(crate) only_v03: bool,
 }
 
 // The Agent Card is built in `a2a_v1` (`card_v10`, `card_v03`). It is
@@ -423,10 +479,15 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Bytes) -> R
     // belongs to (`message/send` is 0.3, `SendMessage` is 1.0).
     use crate::a2a_v1::{self as v1, A2aError, Version};
     let version = match v1::requested_version(&parts.headers, parts.uri.query()) {
+        Ok(Version::V10) if state.only_v03 => {
+            let e = A2aError::VersionNotSupported("1.0".into());
+            return v1::rpc_error_v03(&req.id, &e);
+        }
         Ok(v) => v,
         Err(raw) => {
             let e = A2aError::VersionNotSupported(raw);
-            return if req.method.contains('/') || !v1::is_v10_method(&req.method) {
+            return if state.only_v03 || req.method.contains('/') || !v1::is_v10_method(&req.method)
+            {
                 v1::rpc_error_v03(&req.id, &e)
             } else {
                 v1::rpc_error_v10(&req.id, &e)

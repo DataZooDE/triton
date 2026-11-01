@@ -23,17 +23,17 @@ use triton_tests::{TestIssuer, TritonProcess};
 
 use crate::a2a_schema::{check03, check10};
 
-const PUBLIC: &str = "https://agents.example.test/a2a";
-const ANSWER: &str = "Three agents are planned.";
+pub(crate) const PUBLIC: &str = "https://agents.example.test/a2a";
+pub(crate) const ANSWER: &str = "Three agents are planned.";
 
-async fn agent() -> FakeAgent {
+pub(crate) async fn agent() -> FakeAgent {
     FakeAgent::start_returning(json!({ "surface": { "components": [
         { "kind": "text", "value": ANSWER }
     ] } }))
     .await
 }
 
-fn a2a_env(agent: &FakeAgent, single_port: bool) -> HashMap<String, String> {
+pub(crate) fn a2a_env(agent: &FakeAgent, single_port: bool) -> HashMap<String, String> {
     HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_SINGLE_PORT".to_string(), single_port.to_string()),
@@ -642,7 +642,7 @@ async fn streams_validate_in_both_versions_and_both_bindings() {
     );
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
