@@ -117,7 +117,12 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .sent { color: var(--muted); font-size: 13px; padding: 6px 4px 0; }
 .sent:empty { display: none; }
-.msg { display: block; color: var(--muted); font-size: 12px; font-weight: 400; overflow-wrap: anywhere; }
+.sent.bad { color: var(--bad); }
+.msg, .preview { white-space: pre-wrap; unicode-bidi: plaintext; }
+.msg { display: block; color: var(--muted); font-size: 12px; font-weight: 400; overflow-wrap: break-word; }
+/* A long unbroken string (an id, a URL-like value) wraps instead of
+   widening the card or squeezing its neighbours. */
+.title, .context, td, .row .main, .lbl, dd, .notice, .preview, .more { overflow-wrap: anywhere; min-width: 0; }
 button.b.primary .msg { color: inherit; opacity: .8; }
 .more { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; margin-top: 6px; }
 </style>
@@ -140,11 +145,13 @@ button.b.primary .msg { color: inherit; opacity: .8; }
   const WORDS = {
     en: { yes: "Yes", no: "No", send: "Send", gap: "gap", changesTo: "changes to",
           sent: "Sent", opened: "Opened", notSent: "Not sent — try again", notOpened: "Not opened — try again",
-          willSend: "Will be sent", opens: "Opens ", more: (n) => "… " + n + " more" },
+          willSend: "Will be sent", opens: "Opens ", more: (n) => "… " + n + " more",
+          moreSections: (n) => "… " + n + " more sections", sending: "Sending…", opening: "Opening…" },
     de: { yes: "Ja", no: "Nein", send: "Senden", gap: "Lücke", changesTo: "ändert sich zu",
           sent: "Gesendet", opened: "Geöffnet", notSent: "Nicht gesendet – bitte erneut versuchen",
           notOpened: "Nicht geöffnet – bitte erneut versuchen",
-          willSend: "Wird gesendet", opens: "Öffnet ", more: (n) => "… " + n + " weitere" },
+          willSend: "Wird gesendet", opens: "Öffnet ", more: (n) => "… " + n + " weitere",
+          moreSections: (n) => "… " + n + " weitere Abschnitte", sending: "Wird gesendet…", opening: "Wird geöffnet…" },
   };
   const t = (k) => (WORDS[document.documentElement.lang] || WORDS.en)[k];
 
@@ -178,6 +185,7 @@ button.b.primary .msg { color: inherit; opacity: .8; }
   });
 
   let hostTheme = false;
+  let shown = null; // the widget data on screen, for a re-render
   function applyContext(ctx) {
     if (!ctx) return;
     if (ctx.theme === "dark" || ctx.theme === "light") { hostTheme = true; document.documentElement.dataset.theme = ctx.theme; }
@@ -187,7 +195,14 @@ button.b.primary .msg { color: inherit; opacity: .8; }
         if (/^--[a-z0-9-]+$/i.test(k) && typeof v === "string") document.documentElement.style.setProperty(k, v);
       }
     }
-    if (ctx.locale) document.documentElement.lang = String(ctx.locale).split(/[-_]/)[0];
+    if (ctx.locale) {
+      const lang = String(ctx.locale).split(/[-_]/)[0];
+      // The widget's own words follow a changed locale (a form starts over).
+      if (lang !== document.documentElement.lang) {
+        document.documentElement.lang = lang;
+        if (shown) render(shown);
+      }
+    }
   }
 
   // The card's data: result `_meta` (hidden from the model) or
@@ -230,6 +245,7 @@ button.b.primary .msg { color: inherit; opacity: .8; }
   // https with a host and no credentials (the server applies the same rule).
   const safeLink = (url) => {
     try {
+      if (!/^https:\/\/[^\/\\]/.test(url)) return false;
       const u = new URL(url);
       return u.protocol === "https:" && !!u.hostname && !u.username && !u.password;
     } catch (_) { return false; }
@@ -253,23 +269,33 @@ button.b.primary .msg { color: inherit; opacity: .8; }
   // host settles the request, plus a short cooldown, so a double click or
   // a held key cannot send the same complete request twice.
   const busy = new WeakSet();
+  // The status line reports the latest click on the card it was made on:
+  // a slower earlier click, or one from a card since replaced, stays quiet.
+  let generation = 0, clicks = 0;
+  const say = (text, bad) => { status.textContent = text; status.className = "sent" + (bad ? " bad" : ""); };
   async function run(action, ctl, idle) {
     if (!action || (ctl && busy.has(ctl))) return;
-    if (ctl) { busy.add(ctl); if ("disabled" in ctl) ctl.disabled = true; }
+    const send = action.type === "send_message";
+    const gen = generation, click = ++clicks;
+    const focused = ctl && document.activeElement === ctl;
+    if (ctl) { busy.add(ctl); ctl.setAttribute("aria-busy", "true"); if ("disabled" in ctl) ctl.disabled = true; }
+    say(send ? t("sending") : t("opening"), false);
     let ok = false;
     try {
-      if (action.type === "send_message") ok = await sendMessage(action.text);
+      if (send) ok = await sendMessage(action.text);
       else if (action.type === "open_url") ok = await openLink(action.url);
     } finally {
       if (ctl) setTimeout(() => {
         busy.delete(ctl);
+        ctl.removeAttribute("aria-busy");
         if ("disabled" in ctl) ctl.disabled = false;
         if (idle) idle();
+        // Disabling moved the focus to the page; give it back.
+        if (focused && ctl.isConnected && (!document.activeElement || document.activeElement === document.body)) ctl.focus();
       }, 1200);
     }
-    // Visible under the card: the person sees whether the click went out.
-    const send = action.type === "send_message";
-    status.textContent = ok ? (send ? t("sent") : t("opened")) : (send ? t("notSent") : t("notOpened"));
+    if (gen !== generation || click !== clicks) return;
+    say(ok ? (send ? t("sent") : t("opened")) : (send ? t("notSent") : t("notOpened")), !ok);
   }
 
   // ── template: the producer's request, filled on the client ───────────
@@ -280,7 +306,9 @@ button.b.primary .msg { color: inherit; opacity: .8; }
   const WS = "\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
   const TRIM = new RegExp("^[" + WS + "]+|[" + WS + "]+$", "g");
   const trim = (x) => x.replace(TRIM, "");
-  function fill(parts, values) {
+  // `ph`, when given, stands in for a missing required field (the
+  // preview); optional segments are decided by the real values alone.
+  function fill(parts, values, ph) {
     const missing = [];
     const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
     const one = (list, out, miss) => {
@@ -289,11 +317,15 @@ button.b.primary .msg { color: inherit; opacity: .8; }
         else if (has(p, "field")) {
           const raw = has(values, p.field) ? values[p.field] : null;
           const v = trim(raw == null ? "" : String(raw));
-          if (v) out.push(v); else if (!miss.includes(p.field)) miss.push(p.field);
+          if (v) out.push(v);
+          else {
+            if (!miss.includes(p.field)) miss.push(p.field);
+            if (ph && out === top) out.push(ph(p.field));
+          }
         }
       }
     };
-    const out = [];
+    const out = [], top = out;
     for (const p of parts) {
       if (p.optional) {
         const o = [], m = [];
@@ -312,11 +344,7 @@ button.b.primary .msg { color: inherit; opacity: .8; }
   // required field as ‹its label› (an optional segment shows only when
   // complete, as it would be sent).
   function previewText(parts, values, labels) {
-    const r = fill(parts, values);
-    if (!r.missing.length) return r.text;
-    const shown = Object.assign(Object.create(null), values);
-    for (const f of r.missing) shown[f] = "‹" + (labels[f] || f) + "›";
-    return fill(parts, shown).text;
+    return fill(parts, values, (f) => "‹" + (labels[f] || f) + "›").text;
   }
 
   // ── rendering ─────────────────────────────────────────────────────────
@@ -353,10 +381,14 @@ button.b.primary .msg { color: inherit; opacity: .8; }
     return b;
   };
   // "… N more" under a cut block, with the card's open link when it has one.
-  let openAction = null;
-  const more = (n) => typeof n === "number" && n > 0
-    ? el("div", { class: "more" }, el("span", { class: "n" }, t("more")(n)), openAction ? btn(openAction.label, openAction.action, "small") : null)
-    : null;
+  // The open link once per card, with the first cut.
+  let openAction = null, openShown = false;
+  const more = (n, words) => {
+    if (typeof n !== "number" || n <= 0) return null;
+    const link = openAction && !openShown ? btn(openAction.label, openAction.action, "small") : null;
+    if (link) openShown = true;
+    return el("div", { class: "more" }, el("span", { class: "n" }, t(words || "more")(n)), link);
+  };
   const activate = (node, action) => {
     describe(node, action);
     node.classList.add("act");
@@ -446,9 +478,15 @@ button.b.primary .msg { color: inherit; opacity: .8; }
           row.append(tw);
         } else row.append(el("span", { class: "bullet", "aria-hidden": "true" }, "•"));
         const lbl = el("span", { class: "lbl" }, n.label);
-        if (n.action) lbl.replaceChildren(describe(el("button", { type: "button", class: "linkish" }, n.label, msgLine(n.label, n.action)), n.action));
-        if (n.action) lbl.firstChild.addEventListener("click", () => run(n.action, lbl.firstChild));
+        // A caption of its own is its own control (as in a list); else the
+        // label is the control.
+        const caption = n.action && n.action_label && n.action_label !== n.label ? n.action_label : null;
+        if (n.action && !caption) {
+          lbl.replaceChildren(describe(el("button", { type: "button", class: "linkish" }, n.label, msgLine(n.label, n.action)), n.action));
+          lbl.firstChild.addEventListener("click", () => run(n.action, lbl.firstChild));
+        }
         row.append(lbl);
+        if (caption) row.append(btn(caption, n.action, "small"));
         if (n.gap) row.append(el("span", { class: "gap" }, t("gap")));
         if (n.count) row.append(el("span", { class: "cnt" }, n.count));
         li.append(row);
@@ -546,7 +584,7 @@ button.b.primary .msg { color: inherit; opacity: .8; }
     const submit = el("button", { type: "submit", class: "b primary" }, b.submit_label || t("send"));
     const labels = Object.create(null);
     for (const f of g.fields) labels[f.name] = f.label;
-    const preview = el("div", { class: "preview", "aria-live": "polite" });
+    const preview = el("div", { class: "preview" });
     // A request in flight keeps the submit disabled, whatever is edited.
     const sync = () => {
       const v = values();
@@ -570,8 +608,11 @@ button.b.primary .msg { color: inherit; opacity: .8; }
 
   function render(w) {
     card.replaceChildren();
-    status.textContent = "";
+    say("", false);
+    generation++;
+    shown = w;
     openAction = null;
+    openShown = false;
     if (!w || typeof w !== "object" || w.version !== DATA_VERSION) { resize(); return; }
     if (w.header) {
       card.append(el("div", { class: "head" }, el("h1", { class: "title" }, w.header.title), w.header.stamp ? el("span", { class: "stamp" }, w.header.stamp) : null));
@@ -585,7 +626,7 @@ button.b.primary .msg { color: inherit; opacity: .8; }
       try { sec.append(...[blocks[b.type](b, k)].flat().filter(Boolean)); } catch (_) { return; }
       card.append(sec);
     });
-    const cut = more(w.more);
+    const cut = more(w.more, "moreSections");
     if (cut) card.append(el("section", { class: "block" }, cut));
     if (acts.length) card.append(el("div", { class: "btns bar" }, acts.map((a) => btn(a.label, a.action, a.primary ? "primary" : ""))));
     resize();

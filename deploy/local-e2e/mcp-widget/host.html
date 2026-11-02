@@ -17,6 +17,7 @@ const f = document.getElementById("frame");
 const send = (m) => f.contentWindow.postMessage(m, "*");
 window.followups = [];
 f.addEventListener("load", () => { f.contentWindow.openai = { sendFollowUpMessage: (a) => { window.followups.push(a.prompt); return Promise.resolve(); } }; });
+window.sendContext = (c) => send({ jsonrpc: "2.0", method: "ui/notifications/host-context-changed", params: c });
 window.sendResult = (r) => send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: r });
 window.addEventListener("message", (e) => {
   const d = e.data; if (!d || d.jsonrpc !== "2.0") return;
@@ -39,6 +40,8 @@ window.addEventListener("message", (e) => {
     f.style.height = d.params.height + "px"; document.body.dataset.h = d.params.height;
   } else if (d.method === "ui/message" && q.get("mode") === "noreply") {
     /* a host that delivers the message but never answers */
+  } else if (d.method === "ui/message" && q.get("mode") === "delayreply") {
+    setTimeout(() => send({ jsonrpc: "2.0", id: d.id, result: {} }), 1000);
   } else if (d.id != null && d.method) {
     send({ jsonrpc: "2.0", id: d.id, result: {} });
   }

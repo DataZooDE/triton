@@ -59,7 +59,7 @@ res=$($R js "(()=>{const fill=$F.tritonWidgetFill; const bad=[]; for (const v of
 check "fill vectors" "$res" "all"
 
 load 3a
-$R js "window.sendResult({structuredContent:{widget:{version:1,body:[{type:'form',submit_label:'Go',groups:[{fields:[{name:'f',label:'Flag',kind:'boolean',required:true}],template:[{text:'Mark it '},{field:'f'}]}]}],actions:[]}}})" >/dev/null
+$R js "window.sendResult({_meta:{'triton/widget':{version:1,body:[{type:'form',submit_label:'Go',groups:[{fields:[{name:'f',label:'Flag',kind:'boolean',required:true}],template:[{text:'Mark it '},{field:'f'}]}]}],actions:[]}}})" >/dev/null
 $R sleep 0.3 >/dev/null
 $R js "(()=>{const d=$F.document;const s=d.querySelector('select');s.value=[...s.options].find(o=>o.textContent==='Yes').value;s.dispatchEvent(new Event('change',{bubbles:true}));d.querySelector('button[type=submit]').click();})()" >/dev/null
 $R sleep 0.3 >/dev/null
@@ -97,7 +97,7 @@ $R sleep 7 >/dev/null
 check "a late handshake answer still renders the card" "$($R js "!!$F.document.querySelector('#card .title')")" "true"
 $R open "http://127.0.0.1:$PORT/host.html?data=3a&mode=noinit" >/dev/null; $R waitload >/dev/null
 $R sleep 0.5 >/dev/null
-$R js "(()=>{window.unhandled=0;$F.addEventListener('unhandledrejection',()=>{window.unhandled++;});$F.openai={toolOutput:{widget:WIDGETS['3a']},sendFollowUpMessage:()=>Promise.reject(new Error('refused'))};const w=$F;w.dispatchEvent(new w.Event('openai:set_globals'));})()" >/dev/null
+$R js "(()=>{window.unhandled=0;$F.addEventListener('unhandledrejection',()=>{window.unhandled++;});$F.openai={toolOutput:{result:{}},toolResponseMetadata:{'triton/widget':WIDGETS['3a']},sendFollowUpMessage:()=>Promise.reject(new Error('refused'))};const w=$F;w.dispatchEvent(new w.Event('openai:set_globals'));})()" >/dev/null
 $R sleep 0.3 >/dev/null
 $R js "$F.document.querySelector('tbody tr').click()" >/dev/null; $R sleep 0.5 >/dev/null
 check "a refused follow-up is no unhandled rejection" "$($R js "window.unhandled")" "0"
@@ -109,7 +109,7 @@ load 3c
 $R js "(()=>{const t=$F.document.querySelector('[role=tab]');t.focus();t.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));})()" >/dev/null
 check "arrow keys move between form tabs" "$($R js "(()=>{const t=[...$F.document.querySelectorAll('[role=tab]')];return t[1].getAttribute('aria-selected')+','+(t[1]===$F.document.activeElement)+','+t.map(x=>x.tabIndex).join('/');})()")" "true,true,-1/0/-1/-1"
 load 3a ok light de-DE
-$R js "window.sendResult({structuredContent:{widget:{version:1,body:[{type:'form',groups:[{fields:[{name:'f',label:'Flag',kind:'boolean',required:true}],template:[{text:'Mark it '},{field:'f'}]}]}],actions:[]}}})" >/dev/null
+$R js "window.sendResult({_meta:{'triton/widget':{version:1,body:[{type:'form',groups:[{fields:[{name:'f',label:'Flag',kind:'boolean',required:true}],template:[{text:'Mark it '},{field:'f'}]}]}],actions:[]}}})" >/dev/null
 $R sleep 0.3 >/dev/null
 check "the widget's own words follow the host locale" "$($R js "[...$F.document.querySelectorAll('option')].map(o=>o.textContent).join('|')+'|'+$F.document.querySelector('button[type=submit]').textContent")" "|Ja|Nein|Senden"
 
@@ -150,6 +150,37 @@ check "the cut names the open link" "$(txt '.scroll + .more button')" "Open"
 check "a cut tree says how many nodes are left out" "$($R js "$F.document.querySelector('.tree').parentNode.querySelector('.more .n').textContent")" "… 224 more"
 load oversized ok light de-DE
 check "the cut follows the host locale" "$(txt '.more .n')" "… 70 weitere"
+
+# Crew review 2026-11-02 (W1-W4 diff).
+form1() { $R js "window.sendResult({_meta:{'triton/widget':{version:1,body:[{type:'form',groups:[{fields:[{name:'x',label:'Value',kind:'string',required:true}],template:[{text:'Set '},{field:'x'},{optional:[{text:' again '},{field:'x'}]}]}]}],actions:[]}}})" >/dev/null; $R sleep 0.3 >/dev/null; }
+load 3a
+form1
+check "a missing field does not complete an optional segment in the preview" "$(txt '.preview')" "Will be sent: Set ‹Value›"
+check "the preview is not a live region" "$($R js "$F.document.querySelector('.preview').getAttribute('aria-live')")" "null"
+$R js "window.sendResult({structuredContent:{result:{},widget:WIDGETS['3a']},_meta:{'triton/widget':WIDGETS['3e']}})" >/dev/null; $R sleep 0.3 >/dev/null
+check "result _meta wins over structured content" "$(txt '.title')" "Retire Agent 20: filed for review"
+form1
+$R js "window.sendContext({locale:'de-DE'})" >/dev/null; $R sleep 0.3 >/dev/null
+check "a locale change re-renders the widget's own words" "$(txt 'button[type=submit]')" "Senden"
+load 3a noreply
+$R js "$F.document.querySelector('tbody tr').click()" >/dev/null; $R sleep 0.3 >/dev/null
+check "a request in flight says so" "$(txt '#status')" "Sending…"
+load 3a delayreply
+$R js "$F.document.querySelector('tbody tr').click()" >/dev/null; $R sleep 0.1 >/dev/null
+$R js "window.sendResult({_meta:{'triton/widget':WIDGETS['3e']}})" >/dev/null; $R sleep 1.5 >/dev/null
+check "a request from the previous card does not report on the new one" "$(txt '#status')" ""
+load 3a nolinks
+$R js "$F.document.querySelector('.bar button.primary').click()" >/dev/null; $R sleep 0.3 >/dev/null
+check "a failure looks different from a success" "$($R js "$F.document.getElementById('status').className")" "sent bad"
+load 3a
+$R js "(()=>{const b=$F.document.querySelectorAll('.bar button')[1];b.focus();b.click();})()" >/dev/null; $R sleep 1.6 >/dev/null
+check "the clicked control keeps the focus" "$($R js "$F.document.activeElement===$F.document.querySelectorAll('.bar button')[1]")" "true"
+$R js "window.sendResult({_meta:{'triton/widget':{version:1,body:[{type:'tree',nodes:[{label:'Node',action_label:'Open it',action:{type:'send_message',text:'Show Node'}}]}],actions:[]}}})" >/dev/null; $R sleep 0.3 >/dev/null
+check "a tree node's action caption is its own control" "$($R js "[...$F.document.querySelectorAll('.tree button')].map(b=>b.firstChild.textContent).join('|')")" "Open it"
+$R js "window.sendResult({_meta:{'triton/widget':{version:1,header:{title:'T'},body:[],actions:[{label:'Open',primary:true,action:{type:'open_url',url:'https://app.example.com/x'}}],more:3}}})" >/dev/null; $R sleep 0.3 >/dev/null
+check "dropped blocks are counted as sections" "$(txt '.more .n')" "… 3 more sections"
+load oversized
+check "the open link appears once among the cuts" "$($R js "$F.document.querySelectorAll('.more button').length")" "1"
 
 for name in 3a 3b 3c 3d 3d-list 3e 3f 3g 2a-map 1l 1e oversized; do
   for theme in light dark; do
