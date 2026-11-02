@@ -33,7 +33,7 @@ use super::{
     Action, Chip, Component, FormField, FormFieldKind, KeyValuePair, ListItem, SelectionStyle,
     StepState, Tone, TreeNode,
 };
-use triton_correlation::message::template_parts;
+use triton_correlation::message::{placeholders, template_parts};
 
 /// The MCP Apps resource mime type (ext-apps spec, `RESOURCE_MIME_TYPE`).
 pub const MIME_TYPE: &str = "text/html;profile=mcp-app";
@@ -130,7 +130,7 @@ pub fn widget_data(result: &Value) -> Option<Value> {
 /// What a control sends (a message, a template, an option value) is never
 /// cut — a control whose payload is too long is no control (see
 /// [`is_widget_action`], [`group`]) — so this pass only meets shown text.
-/// Links and field names are not shown.
+/// Links and field names are not shown; a default is sent (see [`group`]).
 fn cap_texts(v: &mut Value) {
     match v {
         Value::String(s) if s.chars().count() > MAX_TEXT => {
@@ -140,7 +140,7 @@ fn cap_texts(v: &mut Value) {
         }
         Value::Object(m) => m
             .iter_mut()
-            .filter(|(k, _)| !matches!(k.as_str(), "url" | "name" | "field"))
+            .filter(|(k, _)| !matches!(k.as_str(), "url" | "name" | "field" | "default"))
             .for_each(|(_, x)| cap_texts(x)),
         Value::Array(a) => a.iter_mut().for_each(cap_texts),
         _ => {}
@@ -152,14 +152,51 @@ fn cap_texts(v: &mut Value) {
 /// is none (the host still shows the text).
 fn fit_bytes(mut out: Value) -> Option<Value> {
     let size = |v: &Value| serde_json::to_vec(v).map_or(usize::MAX, |b| b.len());
-    let mut dropped = 0u64;
-    while size(&out) > MAX_BYTES {
-        let body = out["body"].as_array_mut()?;
-        body.pop()?;
-        dropped += 1;
-        out["more"] = json!(dropped);
+    let total = size(&out);
+    if total <= MAX_BYTES {
+        return Some(out);
     }
+    // One pass: each block's size once (plus its comma), then keep the
+    // longest prefix that fits beside the rest of the card and the `more`
+    // field (at most 32 bytes).
+    let body = std::mem::take(out["body"].as_array_mut()?);
+    let base = size(&out) + 32;
+    let mut used = base;
+    let mut kept = 0;
+    for b in &body {
+        let s = size(b) + 1;
+        if used + s > MAX_BYTES {
+            break;
+        }
+        used += s;
+        kept += 1;
+    }
+    if base > MAX_BYTES {
+        return None;
+    }
+    let dropped = body.len() - kept;
+    out["body"] = json!(body.into_iter().take(kept).collect::<Vec<_>>());
+    out["more"] = json!(dropped);
     Some(out)
+}
+
+/// Bidi and direction marks: they can make a sent text read differently
+/// on screen from what it is.
+fn has_bidi(s: &str) -> bool {
+    s.chars().any(|c| {
+        matches!(c, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    })
+}
+
+/// What a control may send: non-blank, within [`MAX_TEXT`], no bidi marks.
+fn sendable(t: &str) -> bool {
+    !t.trim().is_empty() && t.chars().count() <= MAX_TEXT && !has_bidi(t)
+}
+
+/// What the widget opens: the core link rule's `https` branch (parsed,
+/// a host, no credentials), within [`MAX_URL`].
+fn openable(u: &str) -> bool {
+    u.len() <= MAX_URL && u.starts_with("https://") && crate::links::is_allowed_link(u)
 }
 
 /// The first [`MAX_ROWS`] of `items`; the count of the rest goes to the
@@ -193,14 +230,8 @@ fn opt(v: &mut Value, key: &str, s: Option<&str>) {
 /// send or open something the producer did not mean.
 pub fn is_widget_action(a: &Value) -> bool {
     match a.get("type").and_then(Value::as_str) {
-        Some("send_message") => a
-            .get("text")
-            .and_then(Value::as_str)
-            .is_some_and(|t| !t.trim().is_empty() && t.chars().count() <= MAX_TEXT),
-        Some("open_url") => a
-            .get("url")
-            .and_then(Value::as_str)
-            .is_some_and(|u| u.starts_with("https://") && u.len() <= MAX_URL),
+        Some("send_message") => a.get("text").and_then(Value::as_str).is_some_and(sendable),
+        Some("open_url") => a.get("url").and_then(Value::as_str).is_some_and(openable),
         _ => false,
     }
 }
@@ -586,7 +617,7 @@ fn field(f: &FormField) -> Value {
         let options: Vec<Value> = f
             .options
             .iter()
-            .filter(|o| o.value.chars().count() <= MAX_TEXT)
+            .filter(|o| o.value.chars().count() <= MAX_TEXT && !has_bidi(&o.value))
             .map(|o| json!({ "label": o.label, "value": o.value }))
             .collect();
         v["options"] = json!(options);
@@ -602,10 +633,37 @@ fn field(f: &FormField) -> Value {
 /// widget's own caption). `None` when the template's fixed text is over
 /// the text budget: the request could not be shown whole.
 fn group(label: Option<&str>, fields: &[FormField], template: &str) -> Option<Value> {
-    if template.chars().count() > MAX_TEXT {
+    if template.chars().count() > MAX_TEXT || has_bidi(template) {
+        return None;
+    }
+    // A form that could never be sent is none: a template field without
+    // an input, two inputs with one name.
+    let named = |n: &str| fields.iter().filter(|f| f.name == n).count();
+    if placeholders(template).iter().any(|p| named(p) != 1)
+        || fields.iter().any(|f| named(&f.name) != 1)
+    {
+        return None;
+    }
+    // A default is sent when the field is not touched: never cut.
+    let bad_default = |f: &FormField| {
+        f.default_value
+            .as_ref()
+            .and_then(Value::as_str)
+            .is_some_and(|d| d.chars().count() > MAX_TEXT || has_bidi(d))
+    };
+    if fields.iter().any(bad_default) {
         return None;
     }
     let fields: Vec<Value> = fields.iter().map(field).collect();
+    // A required select left without options (all over budget) cannot be
+    // answered.
+    if fields.iter().any(|f| {
+        f["kind"] == "select"
+            && f["required"] == true
+            && f["options"].as_array().is_none_or(|o| o.is_empty())
+    }) {
+        return None;
+    }
     let mut g = json!({ "fields": fields, "template": template_parts(template) });
     opt(&mut g, "label", label);
     Some(g)

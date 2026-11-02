@@ -33,7 +33,12 @@ pub fn http_hosts() -> &'static [String] {
 /// Whether `url` may become a link: `https://` with a host and no
 /// credentials, or `http://` to an admitted host.
 pub fn is_allowed_link(url: &str) -> bool {
-    if url.starts_with("https://") {
+    if let Some(rest) = url.strip_prefix("https://") {
+        // `https:///x` (or a backslash) parses with the path's first
+        // segment as host: the written authority is empty.
+        if rest.starts_with(['/', '\\']) {
+            return false;
+        }
         // Parsed, not prefix-matched: `https://good.example@evil.example/`
         // names one host and opens another.
         return url::Url::parse(url).is_ok_and(|u| {
@@ -78,6 +83,9 @@ mod tests {
         assert!(is_allowed_link("https://app.example.com/a"));
         assert!(!is_allowed_link("javascript:alert(1)"));
         assert!(!is_allowed_link("file:///etc/passwd"));
+        // An empty written authority: the path's first segment would be the host.
+        assert!(!is_allowed_link("https:///evil.example/x"));
+        assert!(!is_allowed_link("https:/\\evil.example/x"));
     }
 
     #[test]

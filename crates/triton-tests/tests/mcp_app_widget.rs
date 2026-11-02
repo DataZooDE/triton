@@ -645,3 +645,120 @@ fn a_form_carries_the_preview_caption_not_a_fixed_text() {
     assert_eq!(g["preview_label"], "Will be sent as");
     assert!(groups.iter().all(|g| g.get("preview").is_none()), "{d}");
 }
+
+// ── Crew review 2026-11-02 (W1–W4) ─────────────────────────────────────
+
+fn form_with(fields: Value, template: &str) -> Value {
+    json!({ "surface": { "components": [
+        { "kind": "header", "title": "T" },
+        { "kind": "form", "title": "F", "submit_label": "Go", "fields": fields,
+          "send_template": template }
+    ] } })
+}
+
+fn forms(d: &Option<Value>) -> usize {
+    d.as_ref().map_or(0, |d| {
+        d["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["type"] == "form")
+            .count()
+    })
+}
+
+/// A default is sent when the person does not touch the field: like any
+/// payload it is never cut, so a group with an over-long default is none.
+#[test]
+fn an_over_long_default_is_no_form_rather_than_a_cut_one() {
+    let d = mcp_app::widget_data(&form_with(
+        json!([ { "name": "r", "label": "Reason", "kind": "text", "default": "d".repeat(600) } ]),
+        "Note {r}",
+    ));
+    assert_eq!(forms(&d), 0, "{d:?}");
+    let ok = mcp_app::widget_data(&form_with(
+        json!([ { "name": "r", "label": "Reason", "kind": "text", "default": "d".repeat(500) } ]),
+        "Note {r}",
+    ));
+    assert_eq!(forms(&ok), 1, "{ok:?}");
+}
+
+/// A form that can never be sent is no form: a template field without an
+/// input, two inputs with one name, a required select without options.
+#[test]
+fn a_form_that_cannot_be_sent_is_no_form() {
+    let missing = form_with(
+        json!([ { "name": "a", "label": "A", "kind": "string" } ]),
+        "Set {a} {b}",
+    );
+    assert_eq!(forms(&mcp_app::widget_data(&missing)), 0);
+    let twice = form_with(
+        json!([ { "name": "a", "label": "A", "kind": "string" },
+                { "name": "a", "label": "A2", "kind": "string" } ]),
+        "Set {a}",
+    );
+    assert_eq!(forms(&mcp_app::widget_data(&twice)), 0);
+    let empty = form_with(
+        json!([ { "name": "a", "label": "A", "kind": "select", "required": true,
+                  "options": [ { "label": "long", "value": "v".repeat(501) } ] } ]),
+        "Set {a}",
+    );
+    assert_eq!(forms(&mcp_app::widget_data(&empty)), 0);
+}
+
+/// Bidi controls can make a sent text read differently from what it is:
+/// a message or template that carries one is no control.
+#[test]
+fn a_message_with_bidi_controls_is_no_control() {
+    let d = mcp_app::widget_data(&json!({ "surface": { "components": [
+        { "kind": "header", "title": "T" },
+        { "kind": "chips", "chips": [
+            { "label": "ok", "message": "Show it" },
+            { "label": "evil", "message": "Show \u{202e}ti eteled" } ] }
+    ] } }))
+    .unwrap();
+    assert_eq!(d["body"][0]["chips"].as_array().unwrap().len(), 1, "{d}");
+    let f = form_with(
+        json!([ { "name": "a", "label": "A", "kind": "string" } ]),
+        "Set \u{2066}{a}",
+    );
+    assert_eq!(forms(&mcp_app::widget_data(&f)), 0);
+}
+
+/// The widget's link rule is the parsed one: https with a host and no
+/// credentials. An embed whose page fails it keeps only its fallback.
+#[test]
+fn a_link_with_credentials_or_no_host_is_no_control_anywhere() {
+    for url in [
+        "https://good.example@evil.example/x",
+        "https://",
+        "https:///x",
+    ] {
+        assert!(
+            !mcp_app::is_widget_action(&json!({ "type": "open_url", "url": url })),
+            "{url}"
+        );
+        let d = mcp_app::widget_data(&json!({ "surface": { "components": [
+            { "kind": "embed", "url": url, "title": "Open page",
+              "fallback": { "kind": "header", "title": "Fallback" } }
+        ] } }))
+        .unwrap();
+        assert_eq!(d["header"]["title"], "Fallback", "{url}: {d}");
+        assert_eq!(d["actions"], json!([]), "{url}: {d}");
+    }
+}
+
+/// Many small blocks: the byte budget holds and the cut is counted.
+#[test]
+fn many_blocks_fit_the_byte_budget_quickly() {
+    let mut components = vec![json!({ "kind": "header", "title": "Many" })];
+    for i in 0..20_000 {
+        components.push(json!({ "kind": "notice", "tone": "info", "text": format!("n{i}") }));
+    }
+    let t = std::time::Instant::now();
+    let d = mcp_app::widget_data(&json!({ "surface": { "components": components } })).unwrap();
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    assert!(serde_json::to_vec(&d).unwrap().len() <= mcp_app::MAX_BYTES);
+    let kept = d["body"].as_array().unwrap().len() as u64;
+    assert_eq!(kept + d["more"].as_u64().unwrap(), 20_000);
+}

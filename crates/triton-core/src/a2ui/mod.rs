@@ -719,6 +719,11 @@ impl Component {
                 nodes: nodes.into_iter().map(sanitize_node).collect(),
                 gaps_toggle,
             },
+            // A page that fails the link rule is no embed: its fallback
+            // stands alone.
+            Component::Embed { url, fallback, .. } if !crate::links::is_allowed_link(&url) => {
+                return (*fallback).sanitized();
+            }
             Component::Embed {
                 url,
                 title,
