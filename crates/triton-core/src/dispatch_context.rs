@@ -46,6 +46,10 @@ pub struct ContextOverrides {
     pub triton_meta: serde_json::Map<String, serde_json::Value>,
     /// A request-scoped surface, in place of the channel's registered one.
     pub surface: Option<Arc<SurfaceDescriptor>>,
+    /// The client's files of this turn (spec A2A), written into args as
+    /// `_triton.client.files` at dispatch. Kept apart from `triton_meta`,
+    /// which a task stores: a resumed task runs without them.
+    pub client_files: Option<Arc<Vec<serde_json::Value>>>,
 }
 
 /// Map an adapter's audit `protocol` label to the channel name agents see.
