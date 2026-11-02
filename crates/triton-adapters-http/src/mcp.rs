@@ -8,10 +8,17 @@
 //! grows a session-bound capability.
 //!
 //! Methods implemented (FR-A-6):
+//!   * `server/discover` — MCP 2026-07-28 stateless discovery.
 //!   * `initialize`     — handshake; advertises tools capability.
 //!   * `tools/list`     — registry descriptors in MCP shape (camelCase).
 //!   * `tools/call`     — dispatch through `Dispatcher`.
 //!   * `resources/read` — stub for `ui://triton/runtime.html`.
+//!
+//! Both protocol eras share the endpoint: a request carrying the
+//! 2026-07-28 `_meta` envelope is served statelessly (results gain
+//! `resultType`, lists and resource reads gain cache hints, an unknown
+//! method is `404`); anything else is a handshake-era client.
+//! Notifications are `202 Accepted` with no body.
 //!
 //! ADR-6: this module is a thin unwrap/wrap shell. The dispatcher
 //! owns audit emission; the adapter calls `record_rejection` on
@@ -29,7 +36,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::{Value, json};
-use triton_core::a2ui::{build_envelope, extract_surface};
+use triton_core::a2ui::{build_envelope, extract_surface, mcp_app};
 use triton_core::{A2uiVersion, Dispatcher, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
@@ -51,7 +58,24 @@ const CODE_RATE_LIMITED: i32 = -32002;
 /// MCP protocol versions Triton speaks. Echoing a client-provided
 /// version we don't actually support would be a quiet lie; reject
 /// unknowns with `-32602` so the client downgrades or fails fast.
-const SUPPORTED_MCP_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
+/// Handshake-era (`initialize`) revisions, oldest first.
+const SUPPORTED_MCP_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"];
+
+/// Stateless revisions (per-request `_meta`, `server/discover`, no
+/// `initialize`), newest first.
+const MODERN_MCP_VERSIONS: &[&str] = &["2026-07-28"];
+
+/// `_meta` key carrying a 2026-07-28 request's protocol version.
+const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+
+/// MCP 2026-07-28 protocol error codes (schema `HeaderMismatchError`,
+/// `UnsupportedProtocolVersionError`).
+const CODE_HEADER_MISMATCH: i32 = -32020;
+const CODE_UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
+
+/// Cache hint on `server/discover`: the answer changes only when Triton
+/// is upgraded.
+const DISCOVER_TTL_MS: u64 = 300_000;
 
 /// Session ID registry. Stays in process memory (G-8); restart-clean
 /// by construction. PR 7 doesn't yet use the set — it's wired so a
@@ -81,6 +105,11 @@ pub struct McpState {
     /// Set on a customer path (`/mcp/<slug>`, [`crate::mcp_tenants`]): the
     /// verified principal must also pass the route's tenant binding.
     pub route: Option<Arc<crate::mcp_tenants::McpRoute>>,
+    /// Serve the answer-card MCP Apps widget ([`mcp_app`]): its resource,
+    /// the tool `_meta` that names it, and its data on each result. A host
+    /// without MCP Apps ignores all three; `TRITON_MCP_APP_WIDGET=off`
+    /// switches it off for a host that renders it badly.
+    pub widget: bool,
 }
 
 pub fn router(state: McpState) -> Router {
@@ -104,29 +133,95 @@ struct RpcResponse {
 struct RpcError {
     code: i32,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data: Option<Value>,
 }
 
 pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes) -> Response {
-    // Step 1: parse the body as raw JSON. A malformed body is the
-    // only path that yields -32700; anything that parses as JSON
-    // but is shape-wrong gets -32600 below.
-    let raw: Value = match serde_json::from_slice(&body) {
-        Ok(v) => v,
+    // Step 1: parse the body as raw JSON. The verdict is held until the
+    // caller is authenticated: an unauthenticated POST — even an empty
+    // one, which connectors send to find the authorization server — must
+    // get the 401 challenge, not a parse error.
+    let parsed: Result<Value, String> = serde_json::from_slice(&body).map_err(|e| e.to_string());
+    let method_hint = parsed
+        .as_ref()
+        .ok()
+        .and_then(|v| v.get("method"))
+        .and_then(Value::as_str)
+        .unwrap_or("rpc")
+        .to_string();
+
+    // Step 2: auth applies to every method. `initialize` could in
+    // principle be unauthenticated, but the substrate ACL already
+    // protects the MCP port (architecture §7) so we keep the same
+    // identity check across all methods for symmetry with REST/A2A.
+    let verified = match (state.identity.verify(&parts).await, &state.route) {
+        (Ok(p), Some(route)) => route.admit(&p).map(|()| p),
+        (verified, _) => verified,
+    };
+    let principal = match verified {
+        Ok(p) => p,
         Err(e) => {
-            let err = TritonError::Validation(format!("invalid JSON: {e}"));
+            // The audit line names only the method; the client and the uri
+            // tell a refused host fetch (a widget template) from a probe.
+            let uri = parsed
+                .as_ref()
+                .ok()
+                .and_then(|v| v.pointer("/params/uri"))
+                .and_then(|u| u.as_str())
+                .unwrap_or("");
+            tracing::info!(
+                method = %method_hint,
+                uri,
+                slug = state.route.as_ref().map(|r| r.slug.as_str()).unwrap_or(""),
+                client = user_agent(&parts),
+                error = %e,
+                "mcp request refused"
+            );
             state.dispatcher.record_rejection(
-                "rpc",
+                &method_hint,
                 "mcp",
                 "-",
                 "-",
                 &uuid::Uuid::new_v4().to_string(),
-                &err,
+                &e,
             );
-            return rpc_error(Value::Null, CODE_PARSE_ERROR, &err.to_string());
+            let id = parsed
+                .as_ref()
+                .ok()
+                .and_then(|v| v.get("id"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            // HTTP 401, not a 200 carrying the error: MCP's HTTP
+            // authorization makes a 401 (with `WWW-Authenticate`, added by
+            // the router's `bearer_challenge` layer) the signal on which a
+            // client starts its OAuth flow. The JSON-RPC body is kept.
+            let mut response = rpc_error(id, CODE_AUTH, &e.to_string());
+            // A missing delegated scope answers 403 (RFC 6750 §3.1
+            // `insufficient_scope`, ADR-22); every other failure is 401.
+            *response.status_mut() = match e {
+                TritonError::Forbidden(_) => StatusCode::FORBIDDEN,
+                _ => StatusCode::UNAUTHORIZED,
+            };
+            return state.identity.tag_rejection(&e, response);
         }
     };
 
-    // Step 2: envelope-shape checks (jsonrpc, method, batch vs object).
+    // Step 3: a body that is not JSON is -32700 with `400 Bad Request`
+    // (Streamable HTTP: a POST body MUST be one JSON-RPC message).
+    let raw = match parsed {
+        Ok(v) => v,
+        Err(e) => {
+            let err = TritonError::Validation(format!("invalid JSON: {e}"));
+            record_rejection(&state, "rpc", &err);
+            return with_status(
+                rpc_error(Value::Null, CODE_PARSE_ERROR, &err.to_string()),
+                StatusCode::BAD_REQUEST,
+            );
+        }
+    };
+
+    // Step 4: envelope-shape checks (jsonrpc, method, batch vs object).
     // Failures here are -32600 Invalid Request, NOT -32700.
     let Some(obj) = raw.as_object() else {
         let err = TritonError::Validation(
@@ -158,68 +253,74 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
         );
     };
 
-    // Step 3: detect notifications. A request without `id` is a
-    // notification per JSON-RPC 2.0; we MUST NOT respond. We still
-    // run auth + dispatch so the audit log records the call.
+    // Step 5: detect notifications. A message without `id` is a
+    // notification per JSON-RPC 2.0; it gets no JSON-RPC response, and
+    // Streamable HTTP answers an accepted one `202 Accepted` with no body.
     let id_present = obj.contains_key("id");
     let id = obj.get("id").cloned().unwrap_or(Value::Null);
     let params = obj.get("params").cloned().unwrap_or(Value::Null);
 
-    // Step 4: auth applies to every method. `initialize` could in
-    // principle be unauthenticated, but the substrate ACL already
-    // protects the MCP port (architecture §7) so we keep the same
-    // identity check across all methods for symmetry with REST/A2A.
-    let verified = match (state.identity.verify(&parts).await, &state.route) {
-        (Ok(p), Some(route)) => route.admit(&p).map(|()| p),
-        (verified, _) => verified,
-    };
-    let principal = match verified {
-        Ok(p) => p,
-        Err(e) => {
+    // Step 6: protocol era. A request carrying the 2026-07-28 envelope
+    // (`_meta` protocol version, or an `MCP-Protocol-Version` header naming
+    // no handshake-era revision) is served statelessly per that revision;
+    // anything else is a handshake-era (`initialize`) client.
+    let modern = match era(&parts, &params, &method) {
+        Ok(modern) => modern,
+        Err((code, message, data)) => {
+            let err = TritonError::Validation(message.clone());
             state.dispatcher.record_rejection(
                 &method,
                 "mcp",
-                "-",
-                "-",
-                &uuid::Uuid::new_v4().to_string(),
-                &e,
+                &principal.sub,
+                &principal.tenant,
+                &principal.trace_id,
+                &err,
             );
-            // HTTP 401, not a 200 carrying the error: MCP's HTTP
-            // authorization makes a 401 (with `WWW-Authenticate`, added by
-            // the router's `bearer_challenge` layer) the signal on which a
-            // client starts its OAuth flow. The JSON-RPC body is kept.
-            let mut response = maybe_respond(id_present, id, |id| {
-                rpc_error(id, CODE_AUTH, &e.to_string())
-            });
-            // A missing delegated scope answers 403 (RFC 6750 §3.1
-            // `insufficient_scope`, ADR-22); every other failure is 401.
-            *response.status_mut() = match e {
-                TritonError::Forbidden(_) => StatusCode::FORBIDDEN,
-                _ => StatusCode::UNAUTHORIZED,
-            };
-            return state.identity.tag_rejection(&e, response);
+            return with_status(
+                rpc_error_with_data(id, code, &message, data),
+                StatusCode::BAD_REQUEST,
+            );
         }
     };
 
-    // Step 5: method dispatch.
-    let resp_factory: Box<dyn FnOnce(Value) -> Response> = match method.as_str() {
-        "initialize" => Box::new(move |id| initialize_response(id, &params, &state)),
+    // Step 7: client notifications (`notifications/initialized`,
+    // `notifications/cancelled`, …) carry nothing Triton acts on.
+    if !id_present && method.starts_with("notifications/") {
+        return StatusCode::ACCEPTED.into_response();
+    }
+
+    // Step 8: method dispatch. Calls are audited by the dispatcher; the
+    // rest (lists, resource reads, discovery) is not a dispatch, and hosts
+    // send those out of band (ChatGPT fetches a widget at "Refresh tools"),
+    // so each is logged: whether a host ever asked is the first question
+    // when a widget does not open.
+    if method != "tools/call" {
+        let uri = params.get("uri").and_then(|u| u.as_str()).unwrap_or("");
+        let slug = state.route.as_ref().map(|r| r.slug.as_str()).unwrap_or("");
+        let client = user_agent(&parts);
+        tracing::info!(method = %method, uri, slug, client, "mcp request");
+    }
+    let response = match method.as_str() {
+        "server/discover" => maybe_respond(id_present, id, discover_response),
+        "initialize" => maybe_respond(id_present, id, |id| {
+            initialize_response(id, &params, &state)
+        }),
         "tools/list" => {
             let response = tools_list_response(id.clone(), &state).await;
-            return maybe_respond(id_present, id, |_| response);
+            maybe_respond(id_present, id, |_| response)
         }
         "tools/call" => {
             let response = tools_call(id.clone(), params, principal, &state).await;
-            return maybe_respond(id_present, id, |_| response);
+            maybe_respond(id_present, id, |_| response)
         }
-        "resources/list" => Box::new(resources_list),
+        "resources/list" => maybe_respond(id_present, id, |id| resources_list(id, &state)),
         "resources/read" => {
             let response = resources_read(id.clone(), &params, principal, &state).await;
-            return maybe_respond(id_present, id, |_| response);
+            maybe_respond(id_present, id, |_| response)
         }
         "updateModelContext" => {
             let response = update_model_context(id.clone(), &params, principal, &state).await;
-            return maybe_respond(id_present, id, |_| response);
+            maybe_respond(id_present, id, |_| response)
         }
         other => {
             let err = TritonError::Validation(format!("unknown method: {other}"));
@@ -231,15 +332,41 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
                 &principal.trace_id,
                 &err,
             );
-            let msg = err.to_string();
-            Box::new(move |id| rpc_error(id, CODE_METHOD_NOT_FOUND, &msg))
+            // A notification Triton cannot accept: an HTTP error status,
+            // the JSON-RPC error without an id. A request: -32601, and on
+            // a 2026-07-28 request `404 Not Found` (Streamable HTTP,
+            // Protocol Version Header).
+            let status = if !id_present {
+                StatusCode::BAD_REQUEST
+            } else if modern {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            };
+            return with_status(
+                rpc_error(id, CODE_METHOD_NOT_FOUND, &err.to_string()),
+                status,
+            );
         }
     };
-    maybe_respond(id_present, id, resp_factory)
+    if modern {
+        modernize(response, &method).await
+    } else {
+        response
+    }
+}
+
+fn user_agent(parts: &Parts) -> &str {
+    parts
+        .headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
 }
 
 /// If `id` was present, return the response. Otherwise (notification)
-/// return an empty `200 OK` per JSON-RPC 2.0.
+/// return `202 Accepted` with no body (Streamable HTTP, "Sending
+/// Messages" rule 5).
 fn maybe_respond<F>(id_present: bool, id: Value, build: F) -> Response
 where
     F: FnOnce(Value) -> Response,
@@ -247,8 +374,134 @@ where
     if id_present {
         build(id)
     } else {
-        StatusCode::OK.into_response()
+        StatusCode::ACCEPTED.into_response()
     }
+}
+
+fn with_status(mut response: Response, status: StatusCode) -> Response {
+    *response.status_mut() = status;
+    response
+}
+
+/// JSON-RPC error triple for a request rejected before dispatch.
+type EraRejection = (i32, String, Option<Value>);
+
+/// `Ok(true)` for a 2026-07-28 request, `Ok(false)` for a handshake-era
+/// one, `Err` for a 2026-07-28-style request Triton cannot serve: an
+/// unimplemented version (`UnsupportedProtocolVersionError`, -32022) or
+/// headers that contradict the body (`HeaderMismatch`, -32020).
+fn era(parts: &Parts, params: &Value, method: &str) -> Result<bool, EraRejection> {
+    let header = |name: &str| {
+        parts
+            .headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+    };
+    let header_version = header("mcp-protocol-version");
+    let meta_version = params
+        .get("_meta")
+        .and_then(|m| m.get(META_PROTOCOL_VERSION))
+        .and_then(Value::as_str);
+    if let (Some(h), Some(m)) = (header_version, meta_version)
+        && h != m
+    {
+        return Err((
+            CODE_HEADER_MISMATCH,
+            format!("Header mismatch: MCP-Protocol-Version header '{h}' does not match body '{m}'"),
+            None,
+        ));
+    }
+    let requested = meta_version.or(header_version.filter(|v| !SUPPORTED_MCP_VERSIONS.contains(v)));
+    let Some(requested) = requested else {
+        return Ok(false);
+    };
+    if !MODERN_MCP_VERSIONS.contains(&requested) {
+        return Err((
+            CODE_UNSUPPORTED_PROTOCOL_VERSION,
+            "Unsupported protocol version".to_string(),
+            Some(json!({ "supported": supported_versions(), "requested": requested })),
+        ));
+    }
+    if let Some(h) = header("mcp-method")
+        && h != method
+    {
+        return Err((
+            CODE_HEADER_MISMATCH,
+            format!("Header mismatch: Mcp-Method header '{h}' does not match body '{method}'"),
+            None,
+        ));
+    }
+    Ok(true)
+}
+
+/// Every version Triton serves, newest first: the stateless revisions,
+/// then the handshake-era ones.
+fn supported_versions() -> Vec<&'static str> {
+    MODERN_MCP_VERSIONS
+        .iter()
+        .chain(SUPPORTED_MCP_VERSIONS.iter().rev())
+        .copied()
+        .collect()
+}
+
+/// `server/discover` (MCP 2026-07-28): supported versions, capabilities
+/// and identity in one stateless result. The capabilities are those
+/// `initialize` advertises. Cache scope is private: the endpoint is
+/// authenticated and per customer.
+fn discover_response(id: Value) -> Response {
+    rpc_ok(
+        id,
+        json!({
+            "resultType": "complete",
+            "supportedVersions": supported_versions(),
+            "capabilities": {
+                "tools": {},
+                "resources": {}
+            },
+            "_meta": {
+                "io.modelcontextprotocol/serverInfo": {
+                    "name": "triton",
+                    "version": env!("CARGO_PKG_VERSION"),
+                }
+            },
+            "ttlMs": DISCOVER_TTL_MS,
+            "cacheScope": "private"
+        }),
+    )
+}
+
+/// A 2026-07-28 result names its `resultType`, and a list or resource-read
+/// result carries cache hints (`CacheableResult`). Handlers build the
+/// handshake-era shape; this adds the missing fields to a successful
+/// JSON-RPC result.
+async fn modernize(response: Response, method: &str) -> Response {
+    let (head, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
+        return (head, axum::body::Body::empty()).into_response();
+    };
+    let Ok(mut doc) = serde_json::from_slice::<Value>(&bytes) else {
+        return (head, axum::body::Body::from(bytes)).into_response();
+    };
+    if let Some(result) = doc.get_mut("result").and_then(Value::as_object_mut) {
+        result
+            .entry("resultType")
+            .or_insert_with(|| json!("complete"));
+        if matches!(method, "tools/list" | "resources/list" | "resources/read") {
+            // Lists and resource reads are `CacheableResult`s: both hints
+            // are required, and a host refuses a result without them.
+            // Tool and resource lists follow the upstream registry, and a
+            // proxied `ui://` read is the upstream's, so all are
+            // immediately stale unless the upstream said otherwise.
+            result.entry("ttlMs").or_insert_with(|| json!(0));
+            result
+                .entry("cacheScope")
+                .or_insert_with(|| json!("private"));
+        }
+    }
+    let mut head = head;
+    head.headers.remove(axum::http::header::CONTENT_LENGTH);
+    (head, axum::body::Body::from(doc.to_string())).into_response()
 }
 
 fn record_rejection(state: &McpState, tool: &str, err: &TritonError) {
@@ -314,7 +567,7 @@ async fn tools_list_response(id: Value, state: &McpState) -> Response {
         .map(|d| {
             let mut tool = json!({
                 "name": d.name,
-                "inputSchema": d.input_schema,
+                "inputSchema": object_schema(d.input_schema),
                 "x-triton": { "returns_a2ui": d.returns_a2ui, "upstream": d.upstream },
             });
             // The upstream's own description and annotations, verbatim;
@@ -324,6 +577,11 @@ async fn tools_list_response(id: Value, state: &McpState) -> Response {
             }
             if let Some(annotations) = d.annotations {
                 tool["annotations"] = annotations;
+            }
+            // A tool that answers with a surface names the answer-card
+            // widget, so an MCP Apps host (Claude, ChatGPT) renders it.
+            if state.widget && d.upstream && d.returns_a2ui {
+                tool["_meta"] = widget_tool_meta();
             }
             tool
         })
@@ -418,6 +676,12 @@ async fn tools_call(
             // Structured clients still get the full typed envelope in
             // `structuredContent` below, unchanged.
             let reply_text = crate::a2a_spec::reply_text(&d.result);
+            // The answer-card widget's data, from the canonical surface (and
+            // before the A2UI wrap). A result that brings its own MCP App
+            // (`_meta.ui`) keeps it; there is no card to draw then.
+            let widget = (state.widget && ui_meta.is_none())
+                .then(|| mcp_app::widget_data(&d.result))
+                .flatten();
             if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
                 return rpc_error(id, code_for(&e), &e.to_string());
             }
@@ -426,7 +690,10 @@ async fn tools_call(
             // `content` is the flattened prose+chart+sources (above);
             // `structuredContent` is the canonical typed envelope, the
             // same dict REST/A2A get.
-            let env_v = envelope(&d);
+            let mut env_v = envelope(&d);
+            if let Some(w) = widget {
+                env_v["widget"] = w;
+            }
             let mut meta = json!({ "trace_id": trace_id });
             if let Some(ui) = ui_meta {
                 meta["ui"] = ui;
@@ -586,17 +853,66 @@ async fn run_as_task(
 /// Only the local runtime stub is enumerable; upstream-owned `ui://`
 /// resources are loaded on demand via `resources/read` (#143 B), not
 /// listed here (upstream enumeration is optional in v1).
-fn resources_list(id: Value) -> Response {
-    rpc_ok(
-        id,
-        json!({
-            "resources": [{
-                "uri": "ui://triton/runtime.html",
-                "name": "triton-runtime",
-                "mimeType": "text/html"
-            }]
-        }),
-    )
+fn resources_list(id: Value, state: &McpState) -> Response {
+    let mut resources = vec![json!({
+        "uri": "ui://triton/runtime.html",
+        "name": "triton-runtime",
+        "mimeType": "text/html"
+    })];
+    if state.widget {
+        resources.push(json!({
+            "uri": mcp_app::resource_uri(),
+            "name": "answer-card",
+            "title": "Answer card",
+            "description": WIDGET_DESCRIPTION,
+            "mimeType": mcp_app::MIME_TYPE,
+            "_meta": widget_resource_meta(),
+        }));
+    }
+    rpc_ok(id, json!({ "resources": resources }))
+}
+
+const WIDGET_DESCRIPTION: &str = "Shows the answer as a card: a table, facts, a map or a form, \
+     with buttons that send a complete follow-up request or open a link.";
+
+/// MCP requires a tool's `inputSchema` to be an object schema
+/// (`"type": "object"`); strict clients (the MCP Apps reference host's SDK)
+/// refuse the whole tool list otherwise. An upstream that published none,
+/// or one without `type`, gets it filled in.
+fn object_schema(schema: Value) -> Value {
+    match schema {
+        Value::Object(mut m) => {
+            m.entry("type").or_insert_with(|| json!("object"));
+            Value::Object(m)
+        }
+        _ => json!({ "type": "object" }),
+    }
+}
+
+/// The tool descriptor `_meta` that points an MCP Apps host at the widget:
+/// the MCP Apps key (`ui.resourceUri`) and the ChatGPT Apps SDK alias
+/// (`openai/outputTemplate`). The flat `ui/resourceUri` is deprecated.
+fn widget_tool_meta() -> Value {
+    let uri = mcp_app::resource_uri();
+    json!({
+        "ui": { "resourceUri": uri },
+        "openai/outputTemplate": uri,
+    })
+}
+
+/// The resource `_meta`: no network at all (inline CSS and JS). The card
+/// draws its own border, so an answer without a card leaves no empty frame.
+fn widget_resource_meta() -> Value {
+    json!({
+        "ui": {
+            "csp": { "connectDomains": [], "resourceDomains": [] },
+            "prefersBorder": false,
+        },
+        // ChatGPT's own spelling of the same (empty) policy.
+        "openai/widgetCSP": { "connect_domains": [], "resource_domains": [] },
+        "openai/widgetDescription": WIDGET_DESCRIPTION,
+        "openai/widgetPrefersBorder": false,
+    })
 }
 
 async fn resources_read(
@@ -624,6 +940,21 @@ async fn resources_read(
                     // not serve the Lit runtime; the resource exists
                     // for MCP-spec compliance only.
                     "text": "<!-- triton runtime stub; see realizations.md §1 -->"
+                }]
+            }),
+        );
+    }
+    // The answer-card widget, any revision of its URI (a host may have
+    // listed the tools before an upgrade): always the current page.
+    if state.widget && mcp_app::is_widget_uri(&uri) {
+        return rpc_ok(
+            id,
+            json!({
+                "contents": [{
+                    "uri": uri,
+                    "mimeType": mcp_app::MIME_TYPE,
+                    "text": mcp_app::widget_html(),
+                    "_meta": widget_resource_meta(),
                 }]
             }),
         );
@@ -724,6 +1055,10 @@ fn rpc_ok(id: Value, result: Value) -> Response {
 }
 
 fn rpc_error(id: Value, code: i32, message: &str) -> Response {
+    rpc_error_with_data(id, code, message, None)
+}
+
+fn rpc_error_with_data(id: Value, code: i32, message: &str, data: Option<Value>) -> Response {
     (
         StatusCode::OK,
         Json(RpcResponse {
@@ -733,6 +1068,7 @@ fn rpc_error(id: Value, code: i32, message: &str) -> Response {
             error: Some(RpcError {
                 code,
                 message: message.to_string(),
+                data,
             }),
         }),
     )

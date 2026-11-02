@@ -619,6 +619,10 @@ async fn main() -> std::io::Result<()> {
         identity: identity.clone(),
         tasks: Some(a2a_state.runner()),
         route: None,
+        // The answer-card MCP Apps widget; `TRITON_MCP_APP_WIDGET=off`
+        // switches it off.
+        widget: !std::env::var("TRITON_MCP_APP_WIDGET")
+            .is_ok_and(|v| matches!(v.trim(), "0" | "false" | "off" | "no")),
     };
 
     // v0.2 chat-channel adapters. Each manifest-declared adapter

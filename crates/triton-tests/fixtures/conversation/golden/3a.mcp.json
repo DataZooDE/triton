@@ -1,0 +1,111 @@
+{
+  "actions": [
+    {
+      "action": {
+        "type": "open_url",
+        "url": "https://app.example.com/acme/open?view=planned"
+      },
+      "label": "Open in the portfolio",
+      "primary": true
+    },
+    {
+      "action": {
+        "text": "Which agents are planned with AI Act class high?",
+        "type": "send_message"
+      },
+      "label": "High AI Act only",
+      "primary": false
+    },
+    {
+      "action": {
+        "text": "Which agents are planned without an owner?",
+        "type": "send_message"
+      },
+      "label": "Without owner",
+      "primary": false
+    }
+  ],
+  "body": [
+    {
+      "columns": [
+        "Agent",
+        "Capability",
+        "Owner"
+      ],
+      "rows": [
+        {
+          "action": {
+            "text": "Show the agent \"Agent 3\"",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 3",
+            "Requirements: Monitor",
+            "Head of IT Operations"
+          ]
+        },
+        {
+          "action": {
+            "text": "Show the agent \"Agent 8\"",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 8",
+            "Design: Schedule",
+            "Data Protection Officer"
+          ]
+        },
+        {
+          "action": {
+            "text": "Show the agent \"Agent 12\"",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 12",
+            "Design: Forecast",
+            "No owner"
+          ]
+        },
+        {
+          "action": {
+            "text": "Show the agent \"Agent 17\"",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 17",
+            "Validation: Forecast",
+            "Head of Quality Assurance"
+          ]
+        },
+        {
+          "action": {
+            "text": "Show the agent \"Agent 21\"",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 21",
+            "Planning: Schedule",
+            "Head of Production Planning"
+          ]
+        },
+        {
+          "action": {
+            "text": "Show the agent \"Agent 28\"",
+            "type": "send_message"
+          },
+          "cells": [
+            "Agent 28",
+            "Sales: Forecast",
+            "Data Protection Officer"
+          ]
+        }
+      ],
+      "type": "table"
+    }
+  ],
+  "header": {
+    "stamp": "as of 18:17",
+    "title": "6 planned Agents"
+  },
+  "version": 1
+}

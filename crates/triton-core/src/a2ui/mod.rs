@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod ge;
+pub mod mcp_app;
 pub mod text;
 pub mod v08;
 pub mod v09;

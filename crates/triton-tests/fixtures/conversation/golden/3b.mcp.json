@@ -1,0 +1,119 @@
+{
+  "actions": [
+    {
+      "action": {
+        "type": "open_url",
+        "url": "https://app.example.com/acme/open?view=map"
+      },
+      "label": "Open in the portfolio",
+      "primary": true
+    }
+  ],
+  "body": [
+    {
+      "gaps_toggle": "Only gaps",
+      "nodes": [
+        {
+          "children": [
+            {
+              "count": "0",
+              "gap": true,
+              "label": "Finance: Forecast · Monitor · Schedule"
+            },
+            {
+              "action": {
+                "text": "Show the agent \"Agent 28\"",
+                "type": "send_message"
+              },
+              "action_label": "Sales: Forecast",
+              "count": "Agent 28",
+              "label": "Sales: Forecast"
+            },
+            {
+              "action": {
+                "text": "Show the agent \"Agent 29\"",
+                "type": "send_message"
+              },
+              "action_label": "Sales: Schedule · proposed",
+              "count": "Agent 29",
+              "label": "Sales: Schedule · proposed"
+            },
+            {
+              "action": {
+                "text": "Show the agent \"Agent 30\"",
+                "type": "send_message"
+              },
+              "action_label": "Service: Forecast",
+              "count": "Agent 30",
+              "label": "Service: Forecast"
+            },
+            {
+              "action": {
+                "text": "Show the agent \"Agent 31\"",
+                "type": "send_message"
+              },
+              "action_label": "Service: Monitor",
+              "count": "Agent 31",
+              "label": "Service: Monitor"
+            }
+          ],
+          "count": "4 Agents",
+          "expanded": true,
+          "label": "Commercial & service"
+        },
+        {
+          "children": [
+            {
+              "action": {
+                "text": "Show the agent \"Agent 21\"",
+                "type": "send_message"
+              },
+              "action_label": "Production: Schedule",
+              "count": "Agent 21",
+              "label": "Production: Schedule"
+            }
+          ],
+          "count": "8 Agents",
+          "label": "Operations"
+        },
+        {
+          "children": [
+            {
+              "action": {
+                "text": "Show the agent \"Agent 12\"",
+                "type": "send_message"
+              },
+              "action_label": "Design: Forecast",
+              "count": "Agent 12",
+              "label": "Design: Forecast"
+            }
+          ],
+          "count": "22 Agents",
+          "label": "Product & engineering"
+        },
+        {
+          "children": [
+            {
+              "action": {
+                "text": "Show the agent \"Agent 17\"",
+                "type": "send_message"
+              },
+              "action_label": "Validation: Forecast",
+              "count": "Agent 17",
+              "label": "Validation: Forecast"
+            }
+          ],
+          "count": "1 Agent",
+          "label": "SaaS quality assurance"
+        }
+      ],
+      "type": "tree"
+    }
+  ],
+  "header": {
+    "context": "31 Agents in 27 capabilities, 4 domains",
+    "stamp": "as of 18:18",
+    "title": "Capability map"
+  },
+  "version": 1
+}

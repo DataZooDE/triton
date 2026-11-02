@@ -1,0 +1,39 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>host</title>
+<style>
+body{margin:0;padding:24px;font-family:system-ui,sans-serif}
+body.dark{background:#262624;color:#eee} body.light{background:#faf9f5;color:#222}
+#frame{width:640px;border:0;display:block;background:transparent}
+</style>
+<script src="data.js"></script>
+</head><body>
+<iframe id="frame" src="widget.html" style="height:40px" scrolling="no"></iframe>
+<script>
+const q = new URLSearchParams(location.search);
+const theme = q.get("theme") || "light", name = q.get("data");
+document.body.className = theme;
+window.hostLog = [];
+const f = document.getElementById("frame");
+const send = (m) => f.contentWindow.postMessage(m, "*");
+window.followups = [];
+f.addEventListener("load", () => { f.contentWindow.openai = { sendFollowUpMessage: (a) => { window.followups.push(a.prompt); return Promise.resolve(); } }; });
+window.sendResult = (r) => send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: r });
+window.addEventListener("message", (e) => {
+  const d = e.data; if (!d || d.jsonrpc !== "2.0") return;
+  window.hostLog.push(d);
+  if (d.method === "ui/initialize") {
+    send({ jsonrpc: "2.0", id: d.id, result: { protocolVersion: "2026-01-26", hostInfo: { name: "harness", version: "1" },
+      hostCapabilities: { openLinks: {} }, hostContext: { theme, displayMode: "inline", locale: "en-US" } } });
+  } else if (d.method === "ui/notifications/initialized") {
+    send({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: {} } });
+    send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { content: [{ type: "text", text: "..." }],
+      structuredContent: { result: {}, widget: WIDGETS[name] } } });
+  } else if (d.method === "ui/notifications/size-changed") {
+    f.style.height = d.params.height + "px"; document.body.dataset.h = d.params.height;
+  } else if (d.method === "ui/message" && q.get("mode") === "noreply") {
+    /* a host that delivers the message but never answers */
+  } else if (d.id != null && d.method) {
+    send({ jsonrpc: "2.0", id: d.id, result: {} });
+  }
+});
+</script></body></html>

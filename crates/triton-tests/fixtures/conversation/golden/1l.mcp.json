@@ -1,0 +1,25 @@
+{
+  "actions": [],
+  "body": [
+    {
+      "fraction": 0.6,
+      "steps": [
+        {
+          "label": "Found 4 Agents without an owner",
+          "state": "done"
+        },
+        {
+          "label": "Step 2 of 3 · drafting proposals",
+          "state": "active"
+        },
+        {
+          "label": "Filing drafts for review",
+          "state": "pending"
+        }
+      ],
+      "title": "Request · working · 1:10",
+      "type": "progress"
+    }
+  ],
+  "version": 1
+}

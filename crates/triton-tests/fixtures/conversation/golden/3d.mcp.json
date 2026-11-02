@@ -1,0 +1,71 @@
+{
+  "actions": [
+    {
+      "action": {
+        "type": "open_url",
+        "url": "https://app.example.com/acme/open?view=match"
+      },
+      "label": "7 more…",
+      "primary": false
+    }
+  ],
+  "body": [
+    {
+      "groups": [
+        {
+          "fields": [
+            {
+              "kind": "select",
+              "label": "Agent",
+              "name": "request",
+              "options": [
+                {
+                  "label": "Agent 2 · Requirements: Forecast",
+                  "value": "Retire the agent \"Agent 2\"."
+                },
+                {
+                  "label": "Agent 20 · Design: Monitor",
+                  "value": "Retire the agent \"Agent 20\"."
+                },
+                {
+                  "label": "Agent 21 · Planning: Schedule",
+                  "value": "Retire the agent \"Agent 21\"."
+                }
+              ],
+              "required": true,
+              "style": "radio"
+            },
+            {
+              "kind": "string",
+              "label": "Reason (optional)",
+              "name": "reason",
+              "placeholder": "e.g. replaced by Agent 31"
+            }
+          ],
+          "template": [
+            {
+              "field": "request"
+            },
+            {
+              "optional": [
+                {
+                  "text": " Reason: "
+                },
+                {
+                  "field": "reason"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "submit_label": "Retire as draft",
+      "type": "form"
+    }
+  ],
+  "header": {
+    "context": "10 match \"Agent 2\". Nothing was changed.",
+    "title": "Which Agent should be retired?"
+  },
+  "version": 1
+}

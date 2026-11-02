@@ -70,3 +70,11 @@ ready-to-paste client recipes:
   webhook-registration flow when we wire a real bot.
 - **Substrate deploy.** These scripts run the binary directly. The
   Nomad/Packer wrapper is operator work (`substrate-platform` skill).
+
+## `mcp-widget/run.sh`
+
+The answer-card MCP Apps widget (`crates/triton-core/src/a2ui/mcp_app_widget.html`)
+in headless Chromium via rodney: `host.html` plays the MCP Apps host, the run
+checks the widget's behaviour (one transport per click, stale card cleared,
+the shared fill vectors, the user flows) and saves light and dark PNGs of the
+`*.mcp.json` goldens: `deploy/local-e2e/mcp-widget/run.sh [png-out-dir]`.

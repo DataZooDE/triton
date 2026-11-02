@@ -1593,6 +1593,21 @@ a trap the next developer should not have to step in.
   `IdentityProvider::tag_rejection` gets the challenge. A revocation or
   tenant-scoping 403 does not.
 
+- **MCP Apps widget (2026-11-01): one resource renders in Claude and ChatGPT.**
+  Both hosts implement the MCP Apps extension (`ext-apps`, spec 2026-01-26):
+  a `ui://` resource with mime type `text/html;profile=mcp-app`, named by the
+  tool descriptor's `_meta.ui.resourceUri`. ChatGPT also honours
+  `openai/outputTemplate` as an alias; no `text/html+skybridge` copy is
+  needed. Traps: the view must send `ui/initialize` and then
+  `ui/notifications/initialized` before the host sends the tool result (no
+  handshake = an invisible app); it must report its height
+  (`ui/notifications/size-changed`), else it renders at zero height; and
+  ChatGPT shows `structuredContent` to the model (only result `_meta` is
+  hidden), so widget data there costs tokens. ChatGPT caches the page by
+  URI, so the URI carries a hash of the page
+  (`a2ui::mcp_app::resource_uri`); after an upgrade a connector needs
+  "Refresh tools" (ChatGPT) or a reconnect (Claude) to see new metadata.
+
 ---
 
 ### 7.x A body extractor buffers before the handler authenticates (2026-11-01)

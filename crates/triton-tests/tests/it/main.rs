@@ -24,6 +24,8 @@ mod a2a_spec;
 mod a2a_spec_agents;
 #[path = "../a2a_trace_authz.rs"]
 mod a2a_trace_authz;
+#[path = "../a2a_v03_base.rs"]
+mod a2a_v03_base;
 #[path = "../a2ui_flutter_fixtures.rs"]
 mod a2ui_flutter_fixtures;
 #[path = "../a2ui_parity.rs"]
@@ -56,6 +58,8 @@ mod chat_identity;
 #[path = "../principal_denylist.rs"]
 mod principal_denylist;
 
+#[path = "../card_cors.rs"]
+mod card_cors;
 #[path = "../correlation_rotation.rs"]
 mod correlation_rotation;
 #[path = "../cors.rs"]
@@ -100,10 +104,16 @@ mod manifest;
 mod manifest_endpoint;
 #[path = "../mcp.rs"]
 mod mcp;
+#[path = "../mcp_app_widget.rs"]
+mod mcp_app_widget;
 #[path = "../mcp_apps_acceptance.rs"]
 mod mcp_apps_acceptance;
+#[path = "../mcp_era.rs"]
+mod mcp_era;
 #[path = "../mcp_protected_resource.rs"]
 mod mcp_protected_resource;
+#[path = "../mcp_schema.rs"]
+mod mcp_schema;
 #[path = "../metrics.rs"]
 mod metrics;
 #[path = "../metrics_endpoint.rs"]

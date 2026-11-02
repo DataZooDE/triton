@@ -127,6 +127,63 @@ pub fn card_router(state: CardState) -> Router {
         r = r.route(&format!("/.well-known/{name}"), card_route(name));
     }
     r.with_state(state)
+        .layer(axum::middleware::from_fn(public_card_cors))
+}
+
+/// CORS for the public cards. Discovery clients such as Copilot Studio's
+/// maker portal fetch the card from the user's browser, cross-origin; a
+/// card is public metadata, so any origin may read it, without
+/// credentials. Answers the `OPTIONS` preflight itself (`204`), including
+/// Chrome's Private Network Access preflight, which a public page sends
+/// before reaching a private address (e.g. a tailnet IP behind a funnel).
+/// Only the card routes carry this layer; the authenticated endpoints get
+/// no CORS grant from it.
+async fn public_card_cors(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::{HeaderValue, Method, StatusCode, header};
+    use axum::response::IntoResponse;
+
+    if request.method() == Method::OPTIONS {
+        let headers = request.headers();
+        let requested_headers = headers
+            .get(header::ACCESS_CONTROL_REQUEST_HEADERS)
+            .cloned()
+            .unwrap_or_else(|| HeaderValue::from_static("*"));
+        let private_network = headers
+            .get("access-control-request-private-network")
+            .is_some_and(|v| v.as_bytes().eq_ignore_ascii_case(b"true"));
+        let mut response = StatusCode::NO_CONTENT.into_response();
+        let out = response.headers_mut();
+        out.insert(
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            HeaderValue::from_static("*"),
+        );
+        out.insert(
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            HeaderValue::from_static("GET, OPTIONS"),
+        );
+        out.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, requested_headers);
+        out.insert(
+            header::ACCESS_CONTROL_MAX_AGE,
+            HeaderValue::from_static("600"),
+        );
+        out.insert(header::ALLOW, HeaderValue::from_static("GET, OPTIONS"));
+        if private_network {
+            out.insert(
+                "access-control-allow-private-network",
+                HeaderValue::from_static("true"),
+            );
+        }
+        return response;
+    }
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        header::ACCESS_CONTROL_ALLOW_ORIGIN,
+        HeaderValue::from_static("*"),
+    );
+    response
 }
 
 /// `agent-card.json` is the 1.0 card (`?version=0.3` selects 0.3);
@@ -152,6 +209,7 @@ fn card_route(name: &str) -> axum::routing::MethodRouter<CardState> {
 pub fn spec_routes(state: A2aState, config: SpecA2aConfig, card: CardState) -> Router {
     let config = Arc::new(config);
     jsonrpc_router(state.clone(), config.clone())
+        .merge(v03_router(state.clone(), config.clone(), card.clone()))
         .merge(crate::a2a_v1::rest_router(state, config))
         .merge(card_router_nested(card))
 }
@@ -168,8 +226,78 @@ pub fn card_router_nested(state: CardState) -> Router {
 pub fn jsonrpc_router(state: A2aState, config: Arc<SpecA2aConfig>) -> Router {
     Router::new()
         .route("/", post(jsonrpc))
-        .with_state(SpecState { a2a: state, config })
+        .with_state(SpecState {
+            a2a: state,
+            config,
+            only_v03: false,
+        })
         .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
+}
+
+/// The dedicated 0.3 base, relative to the A2A endpoint.
+///
+/// Some discovery clients accept only a 0.3 card and read the spec's
+/// `agent-card.json` spelling first, refusing the 1.0 card served there
+/// instead of falling back to `agent.json` (Microsoft Copilot Studio,
+/// 2026-11-01: "This agent card uses A2A protocol v1, which is not
+/// supported yet"). Such a client is registered with `<endpoint>/v0.3`.
+/// The segment contains `.`, so it can never collide with a per-agent
+/// slug (see [`validate_agent_slug`]).
+pub const V03_BASE: &str = "/v0.3";
+
+/// The card at [`V03_BASE`]: the 0.3 card as a plain-text agent, with
+/// neither `streaming` nor the A2UI extension advertised. A client
+/// limited to plain-text 0.3 messages is given nothing it might reject
+/// (Copilot Studio's orchestrator failed with a bare `SystemError`,
+/// before any request reached Triton, on the full card; 2026-11-01).
+/// `message/stream` stays callable at the base, just not advertised.
+fn plain_v03_card(state: &CardState) -> Response {
+    let mut card = crate::a2a_v1::card_v03(state);
+    card["capabilities"] = json!({ "streaming": false, "pushNotifications": false });
+    card["defaultInputModes"] = json!(["text/plain"]);
+    card["defaultOutputModes"] = json!(["text/plain"]);
+    let mut resp = (StatusCode::OK, Json(card)).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("public, max-age=300"),
+    );
+    resp
+}
+
+/// The 0.3-only face at [`V03_BASE`], to be merged into the router nested
+/// at the endpoint: every [`CARD_FILENAMES`] spelling under
+/// `<base>/.well-known/` is the plain-text 0.3 card ([`plain_v03_card`])
+/// whose `url` is the base, and
+/// `POST <base>` is the 0.3 JSON-RPC binding — the same handler, identity
+/// provider and task store as the endpoint itself, pinned to 0.3 (a 1.0
+/// request is VersionNotSupported in the 0.3 form).
+pub fn v03_router(state: A2aState, config: Arc<SpecA2aConfig>, card: CardState) -> Router {
+    let mut card_config = (*card.config).clone();
+    card_config.a2a_path = format!("{}{V03_BASE}", card_config.a2a_path.trim_end_matches('/'));
+    let card = CardState {
+        config: Arc::new(card_config),
+        ..card
+    };
+    let mut cards = Router::new();
+    for name in CARD_FILENAMES {
+        cards = cards.route(
+            &format!("{V03_BASE}/.well-known/{name}"),
+            get(|State(state): State<CardState>| async move { plain_v03_card(&state) }),
+        );
+    }
+    Router::new()
+        .route(V03_BASE, post(jsonrpc))
+        .with_state(SpecState {
+            a2a: state,
+            config,
+            only_v03: true,
+        })
+        .layer(axum::middleware::from_fn(crate::identity::bearer_challenge))
+        .merge(
+            cards
+                .with_state(card)
+                .layer(axum::middleware::from_fn(public_card_cors)),
+        )
 }
 
 /// Why a per-agent slug was refused. See [`validate_agent_slug`].
@@ -250,6 +378,7 @@ pub fn agent_router(
         .with_state(SpecState {
             a2a: state.clone(),
             config: config.clone(),
+            only_v03: false,
         })
         .nest(
             &format!("/{slug}"),
@@ -263,6 +392,8 @@ pub fn agent_router(
 pub(crate) struct SpecState {
     pub(crate) a2a: A2aState,
     pub(crate) config: Arc<SpecA2aConfig>,
+    /// The dedicated 0.3 base ([`V03_BASE`]): a 1.0 request is refused.
+    pub(crate) only_v03: bool,
 }
 
 // The Agent Card is built in `a2a_v1` (`card_v10`, `card_v03`). It is
@@ -384,10 +515,15 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Body) -> Re
     // belongs to (`message/send` is 0.3, `SendMessage` is 1.0).
     use crate::a2a_v1::{self as v1, A2aError, Version};
     let version = match v1::requested_version(&parts.headers, parts.uri.query()) {
+        Ok(Version::V10) if state.only_v03 => {
+            let e = A2aError::VersionNotSupported("1.0".into());
+            return v1::rpc_error_v03(&req.id, &e);
+        }
         Ok(v) => v,
         Err(raw) => {
             let e = A2aError::VersionNotSupported(raw);
-            return if req.method.contains('/') || !v1::is_v10_method(&req.method) {
+            return if state.only_v03 || req.method.contains('/') || !v1::is_v10_method(&req.method)
+            {
                 v1::rpc_error_v03(&req.id, &e)
             } else {
                 v1::rpc_error_v10(&req.id, &e)
