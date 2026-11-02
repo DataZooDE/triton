@@ -22,8 +22,15 @@ window.addEventListener("message", (e) => {
   const d = e.data; if (!d || d.jsonrpc !== "2.0") return;
   window.hostLog.push(d);
   if (d.method === "ui/initialize") {
-    send({ jsonrpc: "2.0", id: d.id, result: { protocolVersion: "2026-01-26", hostInfo: { name: "harness", version: "1" },
-      hostCapabilities: { openLinks: {} }, hostContext: { theme, displayMode: "inline", locale: "en-US" } } });
+    // mode: nolinks = no openLinks capability; slowinit = the answer comes
+    // after the widget's old 5 s handshake timeout; noinit = no MCP Apps
+    // host at all (ChatGPT's window.openai only, set by the test).
+    const mode = q.get("mode");
+    if (mode === "noinit") return;
+    const answer = () => send({ jsonrpc: "2.0", id: d.id, result: { protocolVersion: "2026-01-26", hostInfo: { name: "harness", version: "1" },
+      hostCapabilities: mode === "nolinks" ? {} : { openLinks: {} },
+      hostContext: { theme, displayMode: "inline", locale: q.get("locale") || "en-US" } } });
+    if (mode === "slowinit") setTimeout(answer, 6000); else answer();
   } else if (d.method === "ui/notifications/initialized") {
     send({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: {} } });
     send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { content: [{ type: "text", text: "..." }],

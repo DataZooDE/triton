@@ -22,5 +22,11 @@
     "text": "[[unclosed v" },
   { "template": "Mark it {flag}[[ because {why}]]",
     "values": { "flag": "true" },
-    "text": "Mark it true" }
+    "text": "Mark it true" },
+  { "template": "Note {n}",
+    "values": { "n": "\u0085" },
+    "missing": ["n"] },
+  { "template": "Say {n}",
+    "values": { "n": "\ufeffhi\u00a0" },
+    "text": "Say \ufeffhi" }
 ]

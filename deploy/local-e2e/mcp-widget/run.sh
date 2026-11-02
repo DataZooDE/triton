@@ -36,7 +36,7 @@ trap '$R stop >/dev/null 2>&1 || true; kill $SERVER 2>/dev/null || true' EXIT
 F='document.getElementById("frame").contentWindow'
 fail=0
 check() { if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1: got $2 want $3"; fail=1; fi; }
-load() { $R open "http://127.0.0.1:$PORT/host.html?data=$1&theme=${3:-light}&mode=${2:-ok}" >/dev/null; $R waitload >/dev/null; $R wait 'body[data-h]' >/dev/null; }
+load() { $R open "http://127.0.0.1:$PORT/host.html?data=$1&theme=${3:-light}&mode=${2:-ok}&locale=${4:-en-US}" >/dev/null; $R waitload >/dev/null; $R wait 'body[data-h]' >/dev/null; }
 last() { $R js "JSON.stringify(window.hostLog.filter(m=>m.method==='ui/message'||m.method==='ui/open-link').map(m=>m.params).slice(-1)[0])"; }
 
 load 3a noreply
@@ -73,6 +73,43 @@ load 3c
 $R js "(()=>{const d=$F.document;[...d.querySelectorAll('[role=tab]')][1].click();const p=[...d.querySelectorAll('form')][1];const s=p.querySelector('select');s.value='Retired';s.dispatchEvent(new Event('change',{bubbles:true}));const t=p.querySelector('textarea');t.value='  replaced by Agent 31 ';t.dispatchEvent(new Event('input',{bubbles:true}));p.querySelector('button[type=submit]').click();})()" >/dev/null
 $R sleep 0.3 >/dev/null
 check "a change form composes the complete request" "$(last)" '{"role":"user","content":[{"type":"text","text":"Set the lifecycle of Agent 28 to \"Retired\". Reason: replaced by Agent 31 (version 08cbcd825d41)"}]}'
+
+# Crew review 2026-11-02 (security, usability): duplicate sends, link
+# policy, silent failures, late handshake, keyboard, locale.
+msgs() { $R js "window.hostLog.filter(m=>m.method==='ui/message').length"; }
+load 3a noreply
+$R js "(()=>{const r=$F.document.querySelector('tbody tr');r.click();r.click();})()" >/dev/null; $R sleep 0.3 >/dev/null
+check "a double-clicked row sends once" "$(msgs)" "1"
+load 3c noreply
+$R js "(()=>{const d=$F.document;const p=d.querySelector('form');const t=p.querySelector('textarea, input[type=text]');const s=p.querySelector('select');if(s){s.value=[...s.options].map(o=>o.value).filter(Boolean)[0];s.dispatchEvent(new Event('change',{bubbles:true}));} if(t){t.value='x';t.dispatchEvent(new Event('input',{bubbles:true}));} p.querySelector('button[type=submit]').click();})()" >/dev/null; $R sleep 0.3 >/dev/null
+$R js "(()=>{const p=$F.document.querySelector('form');const t=p.querySelector('textarea, input[type=text]');if(t){t.value='xy';t.dispatchEvent(new Event('input',{bubbles:true}));} p.querySelector('button[type=submit]').click();})()" >/dev/null; $R sleep 0.3 >/dev/null
+check "editing a form while its request is pending does not send it again" "$(msgs)" "1"
+check "the pending form's submit stays disabled" "$($R js "$F.document.querySelector('form button[type=submit]').disabled")" "true"
+load 3a nolinks
+$R js "(()=>{window.popups=0;$F.open=()=>{window.popups++;return null;};$F.document.querySelector('.bar button.primary').click();})()" >/dev/null; $R sleep 0.3 >/dev/null
+check "a host without openLinks gets no ui/open-link" "$($R js "window.hostLog.filter(m=>m.method==='ui/open-link').length")" "0"
+check "a host without openLinks gets no popup" "$($R js "window.popups")" "0"
+check "a link not opened is not reported as opened" "$($R js "$F.document.getElementById('status').textContent.startsWith('Opened')")" "false"
+$R open "http://127.0.0.1:$PORT/host.html?data=3a&mode=slowinit" >/dev/null; $R waitload >/dev/null
+$R sleep 7 >/dev/null
+check "a late handshake answer still renders the card" "$($R js "!!$F.document.querySelector('#card .title')")" "true"
+$R open "http://127.0.0.1:$PORT/host.html?data=3a&mode=noinit" >/dev/null; $R waitload >/dev/null
+$R sleep 0.5 >/dev/null
+$R js "(()=>{window.unhandled=0;$F.addEventListener('unhandledrejection',()=>{window.unhandled++;});$F.openai={toolOutput:{widget:WIDGETS['3a']},sendFollowUpMessage:()=>Promise.reject(new Error('refused'))};const w=$F;w.dispatchEvent(new w.Event('openai:set_globals'));})()" >/dev/null
+$R sleep 0.3 >/dev/null
+$R js "$F.document.querySelector('tbody tr').click()" >/dev/null; $R sleep 0.5 >/dev/null
+check "a refused follow-up is no unhandled rejection" "$($R js "window.unhandled")" "0"
+check "a refused follow-up is announced" "$($R js "$F.document.getElementById('status').textContent")" "Not sent"
+load 3a
+check "an actionable row keeps its table role" "$($R js "$F.document.querySelector('tbody tr').hasAttribute('role')")" "false"
+check "an actionable row has a native control" "$($R js "$F.document.querySelectorAll('tbody tr td:first-child button').length === $F.document.querySelectorAll('tbody tr').length")" "true"
+load 3c
+$R js "(()=>{const t=$F.document.querySelector('[role=tab]');t.focus();t.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowRight',bubbles:true}));})()" >/dev/null
+check "arrow keys move between form tabs" "$($R js "(()=>{const t=[...$F.document.querySelectorAll('[role=tab]')];return t[1].getAttribute('aria-selected')+','+(t[1]===$F.document.activeElement)+','+t.map(x=>x.tabIndex).join('/');})()")" "true,true,-1/0/-1/-1"
+load 3a ok light de-DE
+$R js "window.sendResult({structuredContent:{widget:{version:1,body:[{type:'form',groups:[{fields:[{name:'f',label:'Flag',kind:'boolean',required:true}],template:[{text:'Mark it '},{field:'f'}]}]}],actions:[]}}})" >/dev/null
+$R sleep 0.3 >/dev/null
+check "the widget's own words follow the host locale" "$($R js "[...$F.document.querySelectorAll('option')].map(o=>o.textContent).join('|')+'|'+$F.document.querySelector('button[type=submit]').textContent")" "|Ja|Nein|Senden"
 
 for name in 3a 3b 3c 3d 3d-list 3e 3f 3g 2a-map 1l; do
   for theme in light dark; do
