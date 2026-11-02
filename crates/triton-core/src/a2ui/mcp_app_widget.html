@@ -115,12 +115,16 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
 .step .m { width: 14px; text-align: center; }
 .step.done .m { color: var(--ok); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-.sent { color: var(--muted); font-size: 12px; margin-top: 8px; min-height: 1em; }
+.sent { color: var(--muted); font-size: 13px; padding: 6px 4px 0; }
+.sent:empty { display: none; }
+.msg { display: block; color: var(--muted); font-size: 12px; font-weight: 400; overflow-wrap: anywhere; }
+button.b.primary .msg { color: inherit; opacity: .8; }
+.more { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; margin-top: 6px; }
 </style>
 </head>
 <body>
 <main id="card"></main>
-<div class="sr" id="status" role="status"></div>
+<div class="sent" id="status" role="status" aria-live="polite"></div>
 <script>
 (() => {
   "use strict";
@@ -135,9 +139,12 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
   // The widget's own words (the data brings its own, already localised).
   const WORDS = {
     en: { yes: "Yes", no: "No", send: "Send", gap: "gap", changesTo: "changes to",
-          sent: "Sent: ", opened: "Opened", notSent: "Not sent", notOpened: "Not opened" },
+          sent: "Sent", opened: "Opened", notSent: "Not sent — try again", notOpened: "Not opened — try again",
+          willSend: "Will be sent", opens: "Opens ", more: (n) => "… " + n + " more" },
     de: { yes: "Ja", no: "Nein", send: "Senden", gap: "Lücke", changesTo: "ändert sich zu",
-          sent: "Gesendet: ", opened: "Geöffnet", notSent: "Nicht gesendet", notOpened: "Nicht geöffnet" },
+          sent: "Gesendet", opened: "Geöffnet", notSent: "Nicht gesendet – bitte erneut versuchen",
+          notOpened: "Nicht geöffnet – bitte erneut versuchen",
+          willSend: "Wird gesendet", opens: "Öffnet ", more: (n) => "… " + n + " weitere" },
   };
   const t = (k) => (WORDS[document.documentElement.lang] || WORDS.en)[k];
 
@@ -260,8 +267,9 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
         if (idle) idle();
       }, 1200);
     }
+    // Visible under the card: the person sees whether the click went out.
     const send = action.type === "send_message";
-    status.textContent = ok ? (send ? t("sent") + action.text : t("opened")) : (send ? t("notSent") : t("notOpened"));
+    status.textContent = ok ? (send ? t("sent") : t("opened")) : (send ? t("notSent") : t("notOpened"));
   }
 
   // ── template: the producer's request, filled on the client ───────────
@@ -299,6 +307,18 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
   // Pure; exposed so a harness can run the shared fill vectors.
   window.tritonWidgetFill = fill;
 
+  // The live preview (PD48): once the request is complete, exactly the
+  // text a click sends; before that, the same text with each missing
+  // required field as ‹its label› (an optional segment shows only when
+  // complete, as it would be sent).
+  function previewText(parts, values, labels) {
+    const r = fill(parts, values);
+    if (!r.missing.length) return r.text;
+    const shown = Object.assign(Object.create(null), values);
+    for (const f of r.missing) shown[f] = "‹" + (labels[f] || f) + "›";
+    return fill(parts, shown).text;
+  }
+
   // ── rendering ─────────────────────────────────────────────────────────
   function el(tag, attrs, ...kids) {
     const n = document.createElement(tag);
@@ -311,12 +331,34 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
     for (const k of kids.flat()) if (k != null && k !== false) n.append(k.nodeType ? k : String(k));
     return n;
   }
+  // What a control does beyond its label (PD48): a message that differs
+  // from the label shows as a secondary line; a link names its host in the
+  // tooltip and the accessible description, not in the visible label.
+  const msgLine = (label, action) =>
+    action && action.type === "send_message" && trim(String(action.text)) !== trim(String(label))
+      ? el("span", { class: "msg" }, action.text) : null;
+  const describe = (node, action) => {
+    if (!action || action.type !== "open_url") return node;
+    try {
+      const host = new URL(action.url).host;
+      node.title = host;
+      node.setAttribute("aria-description", t("opens") + host);
+    } catch (_) { /* not a link the widget opens anyway */ }
+    return node;
+  };
   const btn = (label, action, cls) => {
-    const b = el("button", { type: "button", class: "b " + (cls || "") }, label);
+    const b = el("button", { type: "button", class: "b " + (cls || "") }, label, msgLine(label, action));
+    describe(b, action);
     b.addEventListener("click", () => run(action, b));
     return b;
   };
+  // "… N more" under a cut block, with the card's open link when it has one.
+  let openAction = null;
+  const more = (n) => typeof n === "number" && n > 0
+    ? el("div", { class: "more" }, el("span", { class: "n" }, t("more")(n)), openAction ? btn(openAction.label, openAction.action, "small") : null)
+    : null;
   const activate = (node, action) => {
+    describe(node, action);
     node.classList.add("act");
     node.tabIndex = 0;
     node.setAttribute("role", action.type === "open_url" ? "link" : "button");
@@ -336,7 +378,7 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
       // navigation); its first cell holds the native control, and a click
       // anywhere on the row is that control's click.
       const rows = b.rows.map((r) => {
-        const cells = r.cells.map((c, ci) => el("td", {}, r.action && ci === 0 ? el("button", { type: "button", class: "linkish" }, c) : c));
+        const cells = r.cells.map((c, ci) => el("td", {}, r.action && ci === 0 ? describe(el("button", { type: "button", class: "linkish" }, c, msgLine(c, r.action)), r.action) : c));
         const tr = el("tr", {}, cells);
         if (r.action) {
           tr.classList.add("act");
@@ -344,24 +386,24 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
         }
         return tr;
       });
-      return [sub(b.title), el("div", { class: "scroll" }, el("table", {}, el("thead", {}, head), el("tbody", {}, rows)))];
+      return [sub(b.title), el("div", { class: "scroll" }, el("table", {}, el("thead", {}, head), el("tbody", {}, rows))), more(b.more)];
     },
     list(b) {
       const items = b.items.map((it) => {
         const main = el("div", { class: "main" }, el("div", {}, it.label), it.detail ? el("div", { class: "detail" }, it.detail) : null);
         const li = el("li", { class: "row" }, main);
         if (it.action && it.action_label) li.append(btn(it.action_label, it.action, "small"));
-        else if (it.action) activate(li, it.action);
+        else if (it.action) { activate(li, it.action); main.append(msgLine(it.label, it.action) || ""); }
         return li;
       });
-      return [sub(b.title), el("ul", { class: "rows" }, items)];
+      return [sub(b.title), el("ul", { class: "rows" }, items), more(b.more)];
     },
     facts(b) {
       const dl = el("dl", { class: "facts" });
       for (const p of b.pairs) {
         dl.append(el("dt", {}, p.label), el("dd", {}, p.before ? [el("span", { class: "before" }, p.before), el("span", { class: "arrow", "aria-hidden": "true" }, "→"), el("span", { class: "sr" }, " " + t("changesTo") + " "), p.value] : p.value));
       }
-      return [sub(b.title), dl];
+      return [sub(b.title), dl, more(b.more)];
     },
     notice(b) {
       const mark = b.tone === "info" ? "i" : "!";
@@ -383,7 +425,11 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
       return [b.prompt ? el("p", { class: "sub" }, b.prompt) : null, el("div", { class: "btns" }, b.chips.map((c) => btn(c.label, c.action)))];
     },
     tree(b) {
-      const hasGap = (n) => !!n.gap || (n.children || []).some(hasGap);
+      const gaps = new Map();
+      const hasGap = (n) => {
+        if (!gaps.has(n)) gaps.set(n, !!n.gap || (n.children || []).some(hasGap));
+        return gaps.get(n);
+      };
       const node = (n) => {
         const kids = n.children || [];
         const li = el("li", { class: hasGap(n) ? "" : "nogap" });
@@ -400,7 +446,7 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
           row.append(tw);
         } else row.append(el("span", { class: "bullet", "aria-hidden": "true" }, "•"));
         const lbl = el("span", { class: "lbl" }, n.label);
-        if (n.action) lbl.replaceChildren(el("button", { type: "button", class: "linkish" }, n.label));
+        if (n.action) lbl.replaceChildren(describe(el("button", { type: "button", class: "linkish" }, n.label, msgLine(n.label, n.action)), n.action));
         if (n.action) lbl.firstChild.addEventListener("click", () => run(n.action, lbl.firstChild));
         row.append(lbl);
         if (n.gap) row.append(el("span", { class: "gap" }, t("gap")));
@@ -414,7 +460,7 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
         return li;
       };
       const tree = el("ul", { class: "tree" }, b.nodes.map(node));
-      const out = [sub(b.title), tree];
+      const out = [sub(b.title), tree, more(b.more)];
       if (b.gaps_toggle) {
         const t = el("button", { type: "button", class: "b small", "aria-pressed": "false" }, b.gaps_toggle);
         t.addEventListener("click", () => {
@@ -498,8 +544,15 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
       return v;
     };
     const submit = el("button", { type: "submit", class: "b primary" }, b.submit_label || t("send"));
+    const labels = Object.create(null);
+    for (const f of g.fields) labels[f.name] = f.label;
+    const preview = el("div", { class: "preview", "aria-live": "polite" });
     // A request in flight keeps the submit disabled, whatever is edited.
-    const sync = () => { submit.disabled = busy.has(submit) || fill(g.template, values()).missing.length > 0; };
+    const sync = () => {
+      const v = values();
+      submit.disabled = busy.has(submit) || fill(g.template, v).missing.length > 0;
+      preview.textContent = (g.preview_label || t("willSend")) + ": " + previewText(g.template, v, labels);
+    };
     form.addEventListener("input", sync);
     form.addEventListener("change", sync);
     form.addEventListener("submit", (e) => {
@@ -509,8 +562,7 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
       if (r.missing.length || !r.text) { sync(); return; }
       run({ type: "send_message", text: r.text }, submit, sync);
     });
-    form.append(el("div", { class: "btns" }, submit));
-    if (g.preview) form.append(el("div", { class: "preview" }, g.preview.label + ": " + g.preview.text));
+    form.append(preview, el("div", { class: "btns" }, submit));
     if (b.note) form.append(el("div", { class: "note" }, b.note));
     sync();
     return form;
@@ -518,19 +570,23 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
 
   function render(w) {
     card.replaceChildren();
+    status.textContent = "";
+    openAction = null;
     if (!w || typeof w !== "object" || w.version !== DATA_VERSION) { resize(); return; }
     if (w.header) {
       card.append(el("div", { class: "head" }, el("h1", { class: "title" }, w.header.title), w.header.stamp ? el("span", { class: "stamp" }, w.header.stamp) : null));
       if (w.header.context) card.append(el("p", { class: "context" }, w.header.context));
     }
-    (w.body || []).forEach((b, k) => {
-      const make = blocks[b.type];
-      if (!make) return;
+    const acts = Array.isArray(w.actions) ? w.actions : [];
+    openAction = acts.find((a) => a && a.action && a.action.type === "open_url") || null;
+    (Array.isArray(w.body) ? w.body : []).forEach((b, k) => {
+      if (!b || !Object.prototype.hasOwnProperty.call(blocks, b.type)) return;
       const sec = el("section", { class: "block" });
-      sec.append(...[make(b, k)].flat().filter(Boolean));
+      try { sec.append(...[blocks[b.type](b, k)].flat().filter(Boolean)); } catch (_) { return; }
       card.append(sec);
     });
-    const acts = w.actions || [];
+    const cut = more(w.more);
+    if (cut) card.append(el("section", { class: "block" }, cut));
     if (acts.length) card.append(el("div", { class: "btns bar" }, acts.map((a) => btn(a.label, a.action, a.primary ? "primary" : ""))));
     resize();
   }

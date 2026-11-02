@@ -17,13 +17,15 @@ PORT=${PORT:-18977}
 mkdir -p "$OUT"
 cp "$W/deploy/local-e2e/mcp-widget/host.html" "$H/"
 cp "$W/crates/triton-core/src/a2ui/mcp_app_widget.html" "$H/widget.html"
-(cd "$W" && WIDGET_FILL_VECTORS_OUT=$H/vectors.json cargo test -q -p triton-tests --offline \
-  --test it mcp_app_widget::fill_vectors >/dev/null)
+(cd "$W" && WIDGET_FILL_VECTORS_OUT=$H/vectors.json WIDGET_OVERSIZED_OUT=$H/oversized.json \
+  cargo test -q -p triton-tests --offline --test it -- \
+  mcp_app_widget::fill_vectors mcp_app_widget::an_oversized_answer >/dev/null)
 python3 - "$W" "$H" <<'PY'
 import json, glob, os, sys
 w, h = sys.argv[1], sys.argv[2]
 d = {os.path.basename(p)[:-9]: json.load(open(p))
      for p in sorted(glob.glob(f"{w}/crates/triton-tests/fixtures/conversation/golden/*.mcp.json"))}
+d["oversized"] = json.load(open(f"{h}/oversized.json"))
 v = json.load(open(f"{h}/vectors.json"))
 open(f"{h}/data.js", "w").write("window.WIDGETS=" + json.dumps(d) + ";window.FILL_VECTORS=" + json.dumps(v) + ";")
 PY
@@ -99,7 +101,7 @@ $R js "(()=>{window.unhandled=0;$F.addEventListener('unhandledrejection',()=>{wi
 $R sleep 0.3 >/dev/null
 $R js "$F.document.querySelector('tbody tr').click()" >/dev/null; $R sleep 0.5 >/dev/null
 check "a refused follow-up is no unhandled rejection" "$($R js "window.unhandled")" "0"
-check "a refused follow-up is announced" "$($R js "$F.document.getElementById('status').textContent")" "Not sent"
+check "a refused follow-up is announced" "$($R js "$F.document.getElementById('status').textContent")" "Not sent — try again"
 load 3a
 check "an actionable row keeps its table role" "$($R js "$F.document.querySelector('tbody tr').hasAttribute('role')")" "false"
 check "an actionable row has a native control" "$($R js "$F.document.querySelectorAll('tbody tr td:first-child button').length === $F.document.querySelectorAll('tbody tr').length")" "true"
@@ -111,7 +113,45 @@ $R js "window.sendResult({structuredContent:{widget:{version:1,body:[{type:'form
 $R sleep 0.3 >/dev/null
 check "the widget's own words follow the host locale" "$($R js "[...$F.document.querySelectorAll('option')].map(o=>o.textContent).join('|')+'|'+$F.document.querySelector('button[type=submit]').textContent")" "|Ja|Nein|Senden"
 
-for name in 3a 3b 3c 3d 3d-list 3e 3f 3g 2a-map 1l; do
+# Author decisions 2026-11-02: the exact message before the click (PD48),
+# a visible status line, the link host only in the description, budgets.
+txt() { $R js "(()=>{const e=$F.document.querySelector('$1');return e?e.textContent:'none';})()"; }
+load 1e
+check "a form previews its request before any input" "$(txt '.preview')" 'Will be sent as: Retire the agent "‹Agent›".'
+$R js "(()=>{const d=$F.document;const r=[...d.querySelectorAll('input[type=radio]')].find(x=>x.value==='Agent 28');r.click();const t=d.querySelector('input[type=text]');t.value=' gone ';t.dispatchEvent(new Event('input',{bubbles:true}));})()" >/dev/null
+check "the preview follows the fields" "$(txt '.preview')" 'Will be sent as: Retire the agent "Agent 28". Reason: gone'
+$R js "$F.document.querySelector('button[type=submit]').click()" >/dev/null; $R sleep 0.3 >/dev/null
+check "the form sends exactly the previewed text" "$($R js "window.hostLog.filter(m=>m.method==='ui/message').map(m=>m.params.content[0].text).pop()")" 'Retire the agent "Agent 28". Reason: gone'
+load 3c
+check "a form without a producer caption previews too" "$(txt 'form:not([hidden]) .preview')" 'Will be sent: Set the owner of Agent 28 to "‹New owner›". (version 08cbcd825d41)'
+load 3c ok light de-DE
+check "the preview caption follows the host locale" "$($R js "$F.document.querySelector('form .preview').textContent.split(':')[0]")" "Wird gesendet"
+load 3a
+check "a row shows the message it sends" "$(txt 'tbody tr .msg')" 'Show the agent "Agent 3"'
+check "a button shows the message it sends" "$($R js "[...$F.document.querySelectorAll('.bar button')].map(b=>(b.querySelector('.msg')||{}).textContent||'-').join('|')")" '-|Which agents are planned with AI Act class high?|Which agents are planned without an owner?'
+$R js "window.sendResult({_meta:{'triton/widget':{version:1,body:[{type:'chips',chips:[{label:'Show it',action:{type:'send_message',text:'Show it'}},{label:'More',action:{type:'send_message',text:'Show more of it'}}]}],actions:[]}}})" >/dev/null; $R sleep 0.3 >/dev/null
+check "a chip shows its message only when it differs from its label" "$($R js "[...$F.document.querySelectorAll('.btns button')].map(b=>b.querySelectorAll('.msg').length).join(',')")" "0,1"
+load 3a
+check "no status before a click" "$(txt '#status')" ""
+$R js "$F.document.querySelector('tbody tr').click()" >/dev/null; $R sleep 0.3 >/dev/null
+check "a sent request says so visibly" "$($R js "(()=>{const s=$F.document.getElementById('status');return s.textContent+'|'+(s.getBoundingClientRect().height>4)})()")" "Sent|true"
+$R js "$F.document.querySelector('.bar button.primary').click()" >/dev/null; $R sleep 0.3 >/dev/null
+check "an opened link says so" "$(txt '#status')" "Opened"
+check "a link names its host in the description, not the label" "$($R js "(()=>{const b=$F.document.querySelector('.bar button.primary');return b.textContent+'|'+b.title+'|'+b.getAttribute('aria-description')})()")" "Open in the portfolio|app.example.com|Opens app.example.com"
+load 3a ok light de-DE
+$R js "$F.document.querySelector('tbody tr').click()" >/dev/null; $R sleep 0.3 >/dev/null
+check "the status follows the host locale" "$(txt '#status')" "Gesendet"
+load 3a nolinks
+$R js "$F.document.querySelector('.bar button.primary').click()" >/dev/null; $R sleep 0.3 >/dev/null
+check "a link not opened asks to try again" "$(txt '#status')" "Not opened — try again"
+load oversized
+check "a cut table says how many rows are left out" "$(txt '.scroll + .more .n')" "… 70 more"
+check "the cut names the open link" "$(txt '.scroll + .more button')" "Open"
+check "a cut tree says how many nodes are left out" "$($R js "$F.document.querySelector('.tree').parentNode.querySelector('.more .n').textContent")" "… 224 more"
+load oversized ok light de-DE
+check "the cut follows the host locale" "$(txt '.more .n')" "… 70 weitere"
+
+for name in 3a 3b 3c 3d 3d-list 3e 3f 3g 2a-map 1l 1e oversized; do
   for theme in light dark; do
     load "$name" ok "$theme"
     $R sleep 0.3 >/dev/null

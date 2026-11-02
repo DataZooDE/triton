@@ -34,7 +34,7 @@ window.addEventListener("message", (e) => {
   } else if (d.method === "ui/notifications/initialized") {
     send({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: {} } });
     send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { content: [{ type: "text", text: "..." }],
-      structuredContent: { result: {}, widget: WIDGETS[name] } } });
+      structuredContent: { result: {} }, _meta: { "triton/widget": WIDGETS[name] } } });
   } else if (d.method === "ui/notifications/size-changed") {
     f.style.height = d.params.height + "px"; document.body.dataset.h = d.params.height;
   } else if (d.method === "ui/message" && q.get("mode") === "noreply") {
