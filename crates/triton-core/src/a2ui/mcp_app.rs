@@ -30,8 +30,8 @@
 use serde_json::{Value, json};
 
 use super::{
-    Action, Component, FormField, FormFieldKind, KeyValuePair, ListItem, SelectionStyle, StepState,
-    Tone, TreeNode,
+    Action, Chip, Component, FormField, FormFieldKind, KeyValuePair, ListItem, SelectionStyle,
+    StepState, Tone, TreeNode,
 };
 use triton_correlation::message::{preview_template, template_parts};
 
@@ -147,6 +147,17 @@ fn send(text: &str) -> Value {
     })
 }
 
+/// Chips as controls; a chip with a blank message would send an empty
+/// turn, so it is none.
+fn chip_list(chips: &[Chip]) -> Vec<Value> {
+    chips
+        .iter()
+        .map(|c| (c, send(&c.message)))
+        .filter(|(_, a)| is_widget_action(a))
+        .map(|(c, a)| json!({ "label": c.label, "action": a }))
+        .collect()
+}
+
 impl Card {
     fn component(&mut self, c: &Component) {
         match c {
@@ -158,7 +169,9 @@ impl Card {
                 let mut h = json!({ "title": title });
                 opt(&mut h, "context", context.as_deref());
                 opt(&mut h, "stamp", stamp.as_deref());
-                self.header = Some(h);
+                // One header: the first (a later one, say an embed's
+                // fallback, does not replace the surface's own).
+                self.header.get_or_insert(h);
             }
             Component::Table {
                 title,
@@ -244,10 +257,10 @@ impl Card {
                 self.body.push(b);
             }
             Component::Chips { prompt, chips } => {
-                let chips: Vec<Value> = chips
-                    .iter()
-                    .map(|c| json!({ "label": c.label, "action": send(&c.message) }))
-                    .collect();
+                let chips = chip_list(chips);
+                if chips.is_empty() {
+                    return;
+                }
                 let mut b = json!({ "type": "chips", "chips": chips });
                 opt(&mut b, "prompt", prompt.as_deref());
                 self.body.push(b);
@@ -390,12 +403,8 @@ fn tree_node(n: &TreeNode) -> Value {
     if n.expanded {
         v["expanded"] = json!(true);
     }
-    if !n.chips.is_empty() {
-        let chips: Vec<Value> = n
-            .chips
-            .iter()
-            .map(|c| json!({ "label": c.label, "action": send(&c.message) }))
-            .collect();
+    let chips = chip_list(&n.chips);
+    if !chips.is_empty() {
         v["chips"] = json!(chips);
     }
     if let Some(a) = n.action.as_ref().and_then(action) {
@@ -484,5 +493,36 @@ mod tests {
         .unwrap();
         assert_eq!(d["actions"], json!([]));
         assert!(d["body"][0]["items"][0].get("action").is_none(), "{d}");
+    }
+
+    /// A chip whose message is blank would send an empty turn: no chip.
+    #[test]
+    fn a_blank_chip_is_no_control() {
+        let d = widget_data(&json!({ "surface": { "components": [
+            { "kind": "header", "title": "T" },
+            { "kind": "chips", "chips": [
+                { "label": "blank", "message": "   " },
+                { "label": "ok", "message": "Show it" } ] },
+            { "kind": "chips", "chips": [ { "label": "only blank", "message": "" } ] },
+            { "kind": "tree", "nodes": [ { "label": "n", "chips": [
+                { "label": "blank", "message": " " } ] } ] }
+        ] } }))
+        .unwrap();
+        assert_eq!(d["body"].as_array().unwrap().len(), 2, "{d}");
+        assert_eq!(d["body"][0]["chips"].as_array().unwrap().len(), 1, "{d}");
+        assert!(d["body"][1]["nodes"][0].get("chips").is_none(), "{d}");
+    }
+
+    /// The card has one header: the surface's first, not one an embed's
+    /// fallback (or a second header) brings later.
+    #[test]
+    fn the_first_header_wins() {
+        let d = widget_data(&json!({ "surface": { "components": [
+            { "kind": "header", "title": "First" },
+            { "kind": "embed", "url": "https://a.example/x", "title": "Open",
+              "fallback": { "kind": "header", "title": "Fallback" } }
+        ] } }))
+        .unwrap();
+        assert_eq!(d["header"]["title"], "First", "{d}");
     }
 }
