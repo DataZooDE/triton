@@ -175,13 +175,13 @@ const SHAPES: [(&str, &str); 5] = [
     ("failure", "3g"),
 ];
 
-struct Rig {
-    triton: TritonProcess,
-    entra: TestIssuer,
+pub(crate) struct Rig {
+    pub(crate) triton: TritonProcess,
+    pub(crate) entra: TestIssuer,
     _agents: Vec<FakeAgent>,
 }
 
-async fn rig() -> Rig {
+pub(crate) async fn rig() -> Rig {
     let entra = TestIssuer::start().await;
     let mut agents = Vec::new();
     let mut upstreams = Vec::new();
@@ -223,7 +223,7 @@ async fn rig() -> Rig {
     }
 }
 
-fn token(entra: &TestIssuer) -> String {
+pub(crate) fn token(entra: &TestIssuer) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

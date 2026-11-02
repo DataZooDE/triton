@@ -10,8 +10,9 @@
 //! * `server/discover` returns a `DiscoverResult` (supported versions,
 //!   capabilities, server identity in `_meta`, cache hints).
 //! * A request carrying the 2026-07-28 envelope is served statelessly and
-//!   its result carries `resultType`; list results carry `ttlMs` and
-//!   `cacheScope`.
+//!   its result carries `resultType`; list and resource-read results carry
+//!   `ttlMs` and `cacheScope` (validated against the official schemas in
+//!   `mcp_schema.rs`).
 //! * A notification (no `id`) is accepted with `202 Accepted` and no body
 //!   (Streamable HTTP, "Sending Messages" rule 5).
 //! * An unknown method is JSON-RPC `-32601`; on a 2026-07-28 request the

@@ -16,9 +16,9 @@
 //!
 //! Both protocol eras share the endpoint: a request carrying the
 //! 2026-07-28 `_meta` envelope is served statelessly (results gain
-//! `resultType`, lists gain cache hints, an unknown method is `404`);
-//! anything else is a handshake-era client. Notifications are `202
-//! Accepted` with no body.
+//! `resultType`, lists and resource reads gain cache hints, an unknown
+//! method is `404`); anything else is a handshake-era client.
+//! Notifications are `202 Accepted` with no body.
 //!
 //! ADR-6: this module is a thin unwrap/wrap shell. The dispatcher
 //! owns audit emission; the adapter calls `record_rejection` on
@@ -471,9 +471,10 @@ fn discover_response(id: Value) -> Response {
     )
 }
 
-/// A 2026-07-28 result names its `resultType`, and a list result carries
-/// cache hints (`CacheableResult`). Handlers build the handshake-era
-/// shape; this adds the missing fields to a successful JSON-RPC result.
+/// A 2026-07-28 result names its `resultType`, and a list or resource-read
+/// result carries cache hints (`CacheableResult`). Handlers build the
+/// handshake-era shape; this adds the missing fields to a successful
+/// JSON-RPC result.
 async fn modernize(response: Response, method: &str) -> Response {
     let (head, body) = response.into_parts();
     let Ok(bytes) = axum::body::to_bytes(body, usize::MAX).await else {
@@ -486,9 +487,12 @@ async fn modernize(response: Response, method: &str) -> Response {
         result
             .entry("resultType")
             .or_insert_with(|| json!("complete"));
-        if matches!(method, "tools/list" | "resources/list") {
-            // Tool and resource lists follow the upstream registry, which
-            // can change at any time: immediately stale.
+        if matches!(method, "tools/list" | "resources/list" | "resources/read") {
+            // Lists and resource reads are `CacheableResult`s: both hints
+            // are required, and a host refuses a result without them.
+            // Tool and resource lists follow the upstream registry, and a
+            // proxied `ui://` read is the upstream's, so all are
+            // immediately stale unless the upstream said otherwise.
             result.entry("ttlMs").or_insert_with(|| json!(0));
             result
                 .entry("cacheScope")

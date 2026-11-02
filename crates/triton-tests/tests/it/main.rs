@@ -112,6 +112,8 @@ mod mcp_apps_acceptance;
 mod mcp_era;
 #[path = "../mcp_protected_resource.rs"]
 mod mcp_protected_resource;
+#[path = "../mcp_schema.rs"]
+mod mcp_schema;
 #[path = "../metrics.rs"]
 mod metrics;
 #[path = "../metrics_endpoint.rs"]
