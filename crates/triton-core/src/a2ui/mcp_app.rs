@@ -33,7 +33,7 @@ use super::{
     Action, Chip, Component, FormField, FormFieldKind, KeyValuePair, ListItem, SelectionStyle,
     StepState, Tone, TreeNode,
 };
-use triton_correlation::message::{preview_template, template_parts};
+use triton_correlation::message::template_parts;
 
 /// The MCP Apps resource mime type (ext-apps spec, `RESOURCE_MIME_TYPE`).
 pub const MIME_TYPE: &str = "text/html;profile=mcp-app";
@@ -41,6 +41,25 @@ pub const MIME_TYPE: &str = "text/html;profile=mcp-app";
 /// Version of the widget data shape; the widget ignores data it does not
 /// know.
 pub const DATA_VERSION: u32 = 1;
+
+/// The `tools/call` result `_meta` key that carries the widget data. The
+/// host hands result `_meta` to the widget, not to the model.
+pub const META_KEY: &str = "triton/widget";
+
+/// Budgets: a card larger than these is cut, visibly ("… N more"). A
+/// chat card is a summary; the full answer lives behind the open link.
+/// Rows of a table, items of a list, pairs of a fact list.
+pub const MAX_ROWS: usize = 50;
+/// Levels of a tree.
+pub const MAX_TREE_DEPTH: usize = 4;
+/// Nodes of a tree, all levels.
+pub const MAX_TREE_NODES: usize = 200;
+/// Characters of any one text.
+pub const MAX_TEXT: usize = 500;
+/// Characters of a deep link (a link is not cut, so it gets more room).
+pub const MAX_URL: usize = 2048;
+/// Bytes of the whole widget data, serialized.
+pub const MAX_BYTES: usize = 64 * 1024;
 
 const HTML: &str = include_str!("mcp_app_widget.html");
 
@@ -103,7 +122,54 @@ pub fn widget_data(result: &Value) -> Option<Value> {
     if let Some(t) = card.tone {
         out["tone"] = json!(t);
     }
+    cap_texts(&mut out);
+    fit_bytes(out)
+}
+
+/// Every shown text at most [`MAX_TEXT`] characters, cut with an ellipsis.
+/// What a control sends (a message, a template, an option value) is never
+/// cut — a control whose payload is too long is no control (see
+/// [`is_widget_action`], [`group`]) — so this pass only meets shown text.
+/// Links and field names are not shown.
+fn cap_texts(v: &mut Value) {
+    match v {
+        Value::String(s) if s.chars().count() > MAX_TEXT => {
+            let mut cut: String = s.chars().take(MAX_TEXT - 1).collect();
+            cut.push('\u{2026}');
+            *s = cut;
+        }
+        Value::Object(m) => m
+            .iter_mut()
+            .filter(|(k, _)| !matches!(k.as_str(), "url" | "name" | "field"))
+            .for_each(|(_, x)| cap_texts(x)),
+        Value::Array(a) => a.iter_mut().for_each(cap_texts),
+        _ => {}
+    }
+}
+
+/// The whole card at most [`MAX_BYTES`]: trailing body blocks go, counted
+/// as the card's `more`. A card that does not fit even without its body
+/// is none (the host still shows the text).
+fn fit_bytes(mut out: Value) -> Option<Value> {
+    let size = |v: &Value| serde_json::to_vec(v).map_or(usize::MAX, |b| b.len());
+    let mut dropped = 0u64;
+    while size(&out) > MAX_BYTES {
+        let body = out["body"].as_array_mut()?;
+        body.pop()?;
+        dropped += 1;
+        out["more"] = json!(dropped);
+    }
     Some(out)
+}
+
+/// The first [`MAX_ROWS`] of `items`; the count of the rest goes to the
+/// block's `more`.
+fn first_rows(block: &mut Value, key: &str, mut items: Vec<Value>) {
+    if items.len() > MAX_ROWS {
+        block["more"] = json!(items.len() - MAX_ROWS);
+        items.truncate(MAX_ROWS);
+    }
+    block[key] = json!(items);
 }
 
 #[derive(Default)]
@@ -123,16 +189,18 @@ fn opt(v: &mut Value, key: &str, s: Option<&str>) {
 /// The widget's own link rule: it opens `https` links only (through the
 /// host), so any other link — even one the core link rule admits, such as
 /// an `http://` link to a configured local host — would be a dead button.
+/// A message or link over its budget is no control either: cut, it would
+/// send or open something the producer did not mean.
 pub fn is_widget_action(a: &Value) -> bool {
     match a.get("type").and_then(Value::as_str) {
         Some("send_message") => a
             .get("text")
             .and_then(Value::as_str)
-            .is_some_and(|t| !t.trim().is_empty()),
+            .is_some_and(|t| !t.trim().is_empty() && t.chars().count() <= MAX_TEXT),
         Some("open_url") => a
             .get("url")
             .and_then(Value::as_str)
-            .is_some_and(|u| u.starts_with("https://")),
+            .is_some_and(|u| u.starts_with("https://") && u.len() <= MAX_URL),
         _ => false,
     }
 }
@@ -193,19 +261,22 @@ impl Card {
                     })
                     .collect();
                 let labels: Vec<&str> = columns.iter().map(|c| c.label.as_str()).collect();
-                let mut b = json!({ "type": "table", "columns": labels, "rows": rows });
+                let mut b = json!({ "type": "table", "columns": labels });
+                first_rows(&mut b, "rows", rows);
                 opt(&mut b, "title", title.as_deref());
                 self.body.push(b);
             }
             Component::List { title, items } => {
                 let items: Vec<Value> = items.iter().map(list_item).collect();
-                let mut b = json!({ "type": "list", "items": items });
+                let mut b = json!({ "type": "list" });
+                first_rows(&mut b, "items", items);
                 opt(&mut b, "title", title.as_deref());
                 self.body.push(b);
             }
             Component::KeyValue { title, pairs } => {
                 let pairs: Vec<Value> = pairs.iter().map(fact).collect();
-                let mut b = json!({ "type": "facts", "pairs": pairs });
+                let mut b = json!({ "type": "facts" });
+                first_rows(&mut b, "pairs", pairs);
                 opt(&mut b, "title", title.as_deref());
                 self.body.push(b);
             }
@@ -214,8 +285,12 @@ impl Card {
                 nodes,
                 gaps_toggle,
             } => {
-                let nodes: Vec<Value> = nodes.iter().map(tree_node).collect();
-                let mut b = json!({ "type": "tree", "nodes": nodes });
+                let mut budget = TreeBudget::new(nodes);
+                let kept = budget.nodes(nodes, 1);
+                let mut b = json!({ "type": "tree", "nodes": kept });
+                if budget.dropped > 0 {
+                    b["more"] = json!(budget.dropped);
+                }
                 opt(&mut b, "title", title.as_deref());
                 opt(&mut b, "gaps_toggle", gaps_toggle.as_deref());
                 self.body.push(b);
@@ -283,10 +358,10 @@ impl Card {
                     options: options.clone(),
                     style: *style,
                 }];
-                let mut g = group(None, &fields, &sub.template);
-                if let Some(label) = &sub.preview_label {
-                    g["preview"] = preview(label, &fields, &sub.template);
-                }
+                let Some(mut g) = group(None, &fields, &sub.template) else {
+                    return;
+                };
+                opt(&mut g, "preview_label", sub.preview_label.as_deref());
                 self.body.push(json!({
                     "type": "form",
                     "submit_label": sub.label,
@@ -301,10 +376,10 @@ impl Card {
                 preview_label,
                 ..
             } => {
-                let mut g = group(None, fields, tpl);
-                if let Some(label) = preview_label {
-                    g["preview"] = preview(label, fields, tpl);
-                }
+                let Some(mut g) = group(None, fields, tpl) else {
+                    return;
+                };
+                opt(&mut g, "preview_label", preview_label.as_deref());
                 let mut b = json!({
                     "type": "form",
                     "submit_label": submit_label,
@@ -319,10 +394,15 @@ impl Card {
                 submit_label,
                 note,
             } => {
+                // A group that cannot be sent whole is none; a form with
+                // none left is no block.
                 let groups: Vec<Value> = groups
                     .iter()
-                    .map(|g| group(Some(&g.label), &g.fields, &g.send_template))
+                    .filter_map(|g| group(Some(&g.label), &g.fields, &g.send_template))
                     .collect();
+                if groups.is_empty() {
+                    return;
+                }
                 let mut b = json!({
                     "type": "form",
                     "submit_label": submit_label,
@@ -387,6 +467,76 @@ fn fact(p: &KeyValuePair) -> Value {
     v
 }
 
+/// A tree within [`MAX_TREE_DEPTH`] levels and [`MAX_TREE_NODES`] nodes,
+/// kept breadth first: every level shown is whole, except the last one
+/// that fits, which keeps its first nodes. A depth-first walk meets the
+/// nodes of one level in that same order, so it admits by a per-level
+/// quota.
+struct TreeBudget {
+    /// Nodes admitted per level (index 0 is level 1).
+    quota: Vec<usize>,
+    used: Vec<usize>,
+    dropped: usize,
+}
+
+impl TreeBudget {
+    fn new(roots: &[TreeNode]) -> Self {
+        let mut per_level = Vec::new();
+        fn walk(ns: &[TreeNode], l: usize, acc: &mut Vec<usize>) {
+            if ns.is_empty() {
+                return;
+            }
+            if acc.len() <= l {
+                acc.push(0);
+            }
+            acc[l] += ns.len();
+            for n in ns {
+                walk(&n.children, l + 1, acc);
+            }
+        }
+        walk(roots, 0, &mut per_level);
+        let mut left = MAX_TREE_NODES;
+        let quota = per_level
+            .iter()
+            .take(MAX_TREE_DEPTH)
+            .map(|&n| {
+                let q = n.min(left);
+                left -= q;
+                q
+            })
+            .collect::<Vec<_>>();
+        let total: usize = per_level.iter().sum();
+        let kept: usize = quota.iter().sum();
+        Self {
+            used: vec![0; quota.len()],
+            quota,
+            dropped: total - kept,
+        }
+    }
+
+    fn nodes(&mut self, ns: &[TreeNode], level: usize) -> Vec<Value> {
+        let l = level - 1;
+        let mut out = Vec::new();
+        for n in ns {
+            if l < self.quota.len() && self.used[l] < self.quota[l] {
+                self.used[l] += 1;
+                out.push(self.node(n, level));
+            }
+        }
+        out
+    }
+
+    fn node(&mut self, n: &TreeNode, level: usize) -> Value {
+        let mut v = tree_node(n);
+        let children = self.nodes(&n.children, level + 1);
+        if !children.is_empty() {
+            v["children"] = json!(children);
+        }
+        v
+    }
+}
+
+/// One tree node without its children (the budget adds those).
 fn tree_node(n: &TreeNode) -> Value {
     let mut v = json!({ "label": n.label });
     let counts: Vec<String> = n
@@ -411,10 +561,6 @@ fn tree_node(n: &TreeNode) -> Value {
         v["action"] = a;
         v["action_label"] = json!(n.action_caption());
     }
-    if !n.children.is_empty() {
-        let children: Vec<Value> = n.children.iter().map(tree_node).collect();
-        v["children"] = json!(children);
-    }
     v
 }
 
@@ -435,9 +581,12 @@ fn field(f: &FormField) -> Value {
         v["default"] = d.clone();
     }
     if !f.options.is_empty() {
+        // An option whose value is over the text budget would send a cut
+        // value: it is no option.
         let options: Vec<Value> = f
             .options
             .iter()
+            .filter(|o| o.value.chars().count() <= MAX_TEXT)
             .map(|o| json!({ "label": o.label, "value": o.value }))
             .collect();
         v["options"] = json!(options);
@@ -448,23 +597,18 @@ fn field(f: &FormField) -> Value {
     v
 }
 
-fn group(label: Option<&str>, fields: &[FormField], template: &str) -> Value {
+/// A form group: its fields and its request template as parts the widget
+/// fills (and previews live, under the producer's `preview_label` or the
+/// widget's own caption). `None` when the template's fixed text is over
+/// the text budget: the request could not be shown whole.
+fn group(label: Option<&str>, fields: &[FormField], template: &str) -> Option<Value> {
+    if template.chars().count() > MAX_TEXT {
+        return None;
+    }
     let fields: Vec<Value> = fields.iter().map(field).collect();
     let mut g = json!({ "fields": fields, "template": template_parts(template) });
     opt(&mut g, "label", label);
-    g
-}
-
-/// "Will be sent as …" — only when the producer names the caption: the
-/// composed request is plumbing, not content.
-fn preview(label: &str, fields: &[FormField], template: &str) -> Value {
-    let text = preview_template(template, |name| {
-        fields
-            .iter()
-            .find(|f| f.name == name)
-            .map(|f| f.label.clone())
-    });
-    json!({ "label": label, "text": text })
+    Some(g)
 }
 
 #[cfg(test)]

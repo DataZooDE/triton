@@ -33,10 +33,7 @@
               "placeholder": "e.g. replaced by Agent 31"
             }
           ],
-          "preview": {
-            "label": "Will be sent as",
-            "text": "Retire the agent \"‹Agent›\". Reason: ‹Reason (optional)›"
-          },
+          "preview_label": "Will be sent as",
           "template": [
             {
               "text": "Retire the agent \""
