@@ -1,9 +1,11 @@
 //! Inbound identity providers, the spec A2A face and long-running task
-//! settings of the binary.
+//! settings — the ingress of the `triton` binary, as a library so a host
+//! that embeds Triton in-process configures it identically.
 //!
-//! Kept out of `main.rs` and `settings.rs` on purpose: the variables here
-//! are one clap `Args` group flattened into the CLI, and the wiring is one
-//! function per concern that `main` calls.
+//! The variables are one clap group, [`IngressConfig`]: the binary flattens
+//! it into its CLI, and an embedding host reads it with
+//! [`IngressConfig::from_env`] and passes it to
+//! [`crate::EmbedOpts::ingress`]. The wiring is one function per concern.
 //!
 //! | Variable | Meaning |
 //! |---|---|
@@ -32,11 +34,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use clap::Args;
+use clap::Parser;
 use triton_identity::{GoogleAccessTokenVerifier, OidcConfig, OidcVerifier};
 
-#[derive(Debug, Args)]
-pub struct IngressArgs {
+/// The ingress variables. `Parser` (which also implements `clap::Args`) so
+/// the binary can `#[command(flatten)]` it and a host can parse it alone.
+#[derive(Debug, Clone, Parser)]
+pub struct IngressConfig {
     /// Audience (`aud`) an Entra access token must carry. Setting it turns
     /// on the multi-tenant Entra verifier (Copilot Studio, Teams SSO, MCP
     /// clients registered in Entra).
@@ -112,8 +116,32 @@ pub struct IngressArgs {
     pub entra_scopes: Option<String>,
 }
 
+impl IngressConfig {
+    /// Read the `TRITON_*` variables of the table above from the process
+    /// environment, with the binary's defaults and parsing. Command-line
+    /// arguments are not read: the host owns its own CLI.
+    pub fn from_env() -> Result<Self, BootError> {
+        Self::try_parse_from(["triton"]).map_err(|e| BootError(format!("ingress: {e}")))
+    }
+}
+
+/// `TRITON_DEV_TOKEN`: the bearer the dev-token path accepts (`dev-token`
+/// when unset; empty disables the path). Read directly from the
+/// environment, never stored in a `Debug` struct, because it is a
+/// credential. Only consulted in a `dev-token` build without OIDC.
+pub fn dev_token_from_env() -> String {
+    std::env::var("TRITON_DEV_TOKEN").unwrap_or_else(|_| "dev-token".to_string())
+}
+
+/// `TRITON_MCP_APP_WIDGET`: the answer-card MCP Apps widget, on unless
+/// `0`, `false`, `off` or `no`.
+pub fn widget_from_env() -> bool {
+    !std::env::var("TRITON_MCP_APP_WIDGET")
+        .is_ok_and(|v| matches!(v.trim(), "0" | "false" | "off" | "no"))
+}
+
 /// The task timing knobs.
-pub fn task_settings(args: &IngressArgs) -> triton_adapters_http::tasks::TaskSettings {
+pub fn task_settings(args: &IngressConfig) -> triton_adapters_http::tasks::TaskSettings {
     use std::time::Duration;
     triton_adapters_http::tasks::TaskSettings {
         block: Duration::from_secs(args.a2a_block_secs.max(1)),
@@ -125,7 +153,9 @@ pub fn task_settings(args: &IngressArgs) -> triton_adapters_http::tasks::TaskSet
 }
 
 /// The task store: SQLite at `TRITON_TASK_DB`, else process memory.
-pub fn task_store(args: &IngressArgs) -> Result<triton_adapters_http::tasks::TaskStore, BootError> {
+pub fn task_store(
+    args: &IngressConfig,
+) -> Result<triton_adapters_http::tasks::TaskStore, BootError> {
     use std::time::Duration;
     let retention = Duration::from_secs(args.task_ttl_secs.max(1));
     match &args.task_db {
@@ -141,7 +171,7 @@ pub fn task_store(args: &IngressArgs) -> Result<triton_adapters_http::tasks::Tas
 
 /// The spec A2A configuration, when `TRITON_A2A_PUBLIC_URL` is set.
 pub fn spec_a2a_config(
-    args: &IngressArgs,
+    args: &IngressConfig,
 ) -> Result<Option<triton_adapters_http::a2a_spec::SpecA2aConfig>, BootError> {
     let Some(url) = args
         .a2a_public_url
@@ -212,6 +242,8 @@ impl std::fmt::Display for BootError {
     }
 }
 
+impl std::error::Error for BootError {}
+
 /// Parse `key[=value],…`; a bare key maps to itself when `self_default`,
 /// else to `None`.
 fn parse_map(raw: &str) -> Vec<(String, Option<String>)> {
@@ -232,7 +264,7 @@ fn parse_map(raw: &str) -> Vec<(String, Option<String>)> {
 /// multi-tenant (pushed into `verifiers`) and the opaque Google
 /// access-token verifier (returned). `env` gates the test overrides.
 pub fn identity_providers(
-    args: &IngressArgs,
+    args: &IngressConfig,
     env: &str,
     verifiers: &mut Vec<Arc<OidcVerifier>>,
     advertised: &mut Vec<(String, String)>,
@@ -356,7 +388,7 @@ fn default_mcp_scope(audience: &str) -> String {
 /// The Entra API's delegated scopes (`TRITON_ENTRA_SCOPES`, else
 /// `<audience>/access_as_user`); empty without Entra. Each must be an RFC
 /// 6749 scope token, because it is quoted into challenges.
-pub fn entra_scopes(args: &IngressArgs) -> Result<Vec<String>, BootError> {
+pub fn entra_scopes(args: &IngressConfig) -> Result<Vec<String>, BootError> {
     let Some(audience) = args
         .entra_audience
         .as_deref()
@@ -398,7 +430,7 @@ pub fn scp_names(scopes: &[String]) -> Vec<String> {
 /// names an allow-listed Entra tenant that maps to the same data tenant, so
 /// the binding on the path never contradicts the identity boundary.
 pub fn mcp_routes(
-    args: &IngressArgs,
+    args: &IngressConfig,
     oidc_issuer: Option<&str>,
 ) -> Result<Vec<triton_adapters_http::mcp_tenants::McpRoute>, BootError> {
     let entries: Vec<&str> = args
@@ -563,7 +595,7 @@ mod tests {
         #[derive(Parser)]
         struct Cli {
             #[command(flatten)]
-            ingress: super::IngressArgs,
+            ingress: super::IngressConfig,
         }
         let cli = Cli::try_parse_from([
             "triton",

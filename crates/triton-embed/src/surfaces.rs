@@ -1,7 +1,8 @@
 //! #352: the channel → surface registry the dispatcher hints to upstream
 //! agents with. Built from each chat crate's `SURFACE` profile, so the hint
 //! is the very profile the channel's mapper enforces, plus the operator's
-//! guidance overrides.
+//! guidance overrides. A library function (feature `chat`) so the binary
+//! and a host that embeds Triton build the same registry.
 
 use triton_core::{SurfaceProfile, SurfaceRegistry};
 use triton_manifest::{AdapterKind, MAX_SURFACE_GUIDANCE_CHARS, Manifest};
@@ -25,7 +26,7 @@ fn profile_for(kind: AdapterKind) -> Option<&'static SurfaceProfile> {
     })
 }
 
-/// Every channel this binary can dispatch from: the HTTP trio plus one
+/// Every channel Triton can dispatch from: the HTTP trio plus one
 /// profile per chat adapter, with guidance overridden by
 /// `adapters.<name>.surface_guidance` (the manifest already validated its
 /// length) and by `TRITON_SURFACE_GUIDANCE_REST|MCP|A2A|A2A_A2UI` for the

@@ -17,9 +17,23 @@
 //! (`/a2a/message:send`), and — with the `explorer-assets` feature — the
 //! SPA at `/explorer`. This mirrors `triton-bin`'s wiring but composes
 //! everything into one [`axum::Router`].
+//!
+//! A host that needs the binary's full ingress — Entra multi-tenant with
+//! required scopes, `/mcp/<slug>` with RFC 9728 metadata, spec A2A and the
+//! task store from `TRITON_*` — sets [`EmbedOpts::ingress`] and calls
+//! [`router_parts`], which also returns the task runner and identity
+//! provider for further surfaces (feature `chat`: `chat::msteams`,
+//! `surfaces::registry`). doc/upstream-agent-contract.md §8 describes the
+//! in-process upstream such a host dispatches to.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+
+#[cfg(feature = "chat")]
+pub mod chat;
+pub mod ingress;
+#[cfg(feature = "chat")]
+pub mod surfaces;
 
 use axum::Router;
 use triton_adapters_http::a2a::{self, A2aState, InMemoryTaskStore};
@@ -28,6 +42,7 @@ use triton_adapters_http::cors;
 use triton_adapters_http::identity::IdentityProvider;
 use triton_adapters_http::mcp::{self, McpSessions, McpState};
 use triton_adapters_http::rest::{self, OidcProviderInfo, RestState, RuntimeDiscovery};
+use triton_adapters_http::tasks::{Runner, TaskHub, TaskSettings};
 use triton_core::{Dispatcher, RuntimeInfo, ToolRegistry};
 use triton_identity::{GoogleAccessTokenVerifier, OidcConfig, OidcVerifier};
 
@@ -100,6 +115,24 @@ pub struct EmbedOpts {
     /// upstream (e.g. the DataZoo agent → anofox-evolve) therefore had no way
     /// to be an issuer at all. Set with [`EmbedOpts::oidc_signer`].
     pub oidc_signer: Option<Arc<triton_identity::JwtSigner>>,
+    /// The binary's ingress: Entra multi-tenant with required scopes, the
+    /// opaque Google access-token verifier, the per-customer MCP endpoints
+    /// (`/mcp/<slug>` and their RFC 9728 metadata), spec A2A from
+    /// `TRITON_A2A_*`, and the task store and timing. `None` (the default)
+    /// keeps the embedded host as it was: memory tasks, default timing,
+    /// only what the other fields configure. Set with
+    /// [`EmbedOpts::ingress`]; read it with
+    /// [`ingress::IngressConfig::from_env`].
+    pub ingress: Option<ingress::IngressConfig>,
+    /// Serve the answer-card MCP Apps widget (its resource and the tool
+    /// `_meta` pointing at it). On by default, like the binary's
+    /// `TRITON_MCP_APP_WIDGET`.
+    pub widget: bool,
+    /// The bearer the dev-token path accepts. `None` = the historical
+    /// `dev-token` literal; empty disables the path. Only consulted in a
+    /// `dev-token` build when no OIDC verifier is configured. Deliberately
+    /// not printed by `Debug` (there is none on this struct).
+    pub dev_token: Option<String>,
 }
 
 impl Default for EmbedOpts {
@@ -120,6 +153,9 @@ impl Default for EmbedOpts {
             spec_a2a_agents: Vec::new(),
             google_access: None,
             oidc_signer: None,
+            ingress: None,
+            widget: true,
+            dev_token: None,
         }
     }
 }
@@ -151,6 +187,26 @@ impl EmbedOpts {
     /// `/.well-known/openid-configuration` + `/.well-known/jwks.json` from it.
     pub fn oidc_signer(mut self, signer: Arc<triton_identity::JwtSigner>) -> Self {
         self.oidc_signer = Some(signer);
+        self
+    }
+
+    /// Configure the binary's ingress (see the field). Errors in it — an
+    /// override outside `env=local`, a customer path naming a tenant that
+    /// is not allow-listed — surface from [`router_parts`].
+    pub fn ingress(mut self, cfg: ingress::IngressConfig) -> Self {
+        self.ingress = Some(cfg);
+        self
+    }
+
+    /// Serve the answer-card widget or not (default on).
+    pub fn widget(mut self, on: bool) -> Self {
+        self.widget = on;
+        self
+    }
+
+    /// The bearer the dev-token path accepts (see the field).
+    pub fn dev_token(mut self, token: impl Into<String>) -> Self {
+        self.dev_token = Some(token.into());
         self
     }
 
@@ -322,6 +378,19 @@ impl EmbedOpts {
     }
 }
 
+/// What [`router_parts`] builds: the single-port router, plus the pieces a
+/// host needs to wire further surfaces into the same process — the task
+/// runner (one store and hub shared by A2A, MCP and, through
+/// `chat::msteams`, Teams) and the inbound identity boundary.
+pub struct EmbedParts {
+    pub router: Router,
+    /// Drives long-running tasks; the store is SQLite when the ingress
+    /// names `TRITON_TASK_DB`, else process memory.
+    pub runner: Runner,
+    /// The identity provider every route of `router` enforces.
+    pub identity: Arc<IdentityProvider>,
+}
+
 /// Compose the single-port router for an already-built [`Dispatcher`].
 /// Public so tests (and advanced hosts) can drive it without binding a
 /// port.
@@ -331,7 +400,48 @@ impl EmbedOpts {
 /// dev token out, so an unset issuer in production means every request is
 /// rejected while `/healthz` keeps answering. `/v1/runtime` reports the
 /// issuer precisely so that state is visible rather than inferred.
+///
+/// Panics when [`EmbedOpts::ingress`] is refused; a host that sets it
+/// should call [`router_parts`], which returns the error instead.
 pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
+    match router_parts(dispatcher, opts) {
+        Ok(parts) => parts.router,
+        Err(e) => panic!("triton-embed: {e}; refusing to serve"),
+    }
+}
+
+/// Like [`router`], but returns the task runner and identity provider
+/// beside the router, and a refused [`EmbedOpts::ingress`] as an error
+/// naming the variable.
+pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Result<EmbedParts> {
+    // The ingress is validated before anything process-wide happens, so a
+    // refused configuration leaves no trace. Same order as the binary:
+    // customer paths, identity providers, scopes, tasks, spec A2A.
+    let mut verifiers = opts.oidc.clone();
+    let mut providers = opts.oidc_providers.clone();
+    let mut google_access = opts.google_access.clone();
+    let mut scopes: Vec<String> = Vec::new();
+    let mut mcp_routes = Vec::new();
+    let mut spec_a2a = opts.spec_a2a.clone();
+    let (task_store, task_settings) = match &opts.ingress {
+        None => (InMemoryTaskStore::new(), TaskSettings::default()),
+        Some(cfg) => {
+            mcp_routes = ingress::mcp_routes(cfg, opts.oidc_issuer.as_deref())?;
+            if let Some(g) =
+                ingress::identity_providers(cfg, &opts.env, &mut verifiers, &mut providers)?
+            {
+                google_access = Some(g);
+            }
+            scopes = ingress::entra_scopes(cfg)?;
+            let store = ingress::task_store(cfg)?;
+            // An explicit `EmbedOpts::spec_a2a` wins over the variables.
+            if spec_a2a.is_none() {
+                spec_a2a = ingress::spec_a2a_config(cfg)?;
+            }
+            (store, ingress::task_settings(cfg))
+        }
+    };
+
     // F4: the A2UI action key, injected once per process from the host's
     // environment. A malformed value refuses to serve (a random fallback
     // would break every click that lands on another replica, silently).
@@ -375,9 +485,18 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
             announced_enforcing,
         );
     });
-    let mut identity = IdentityProvider::with_verifiers(opts.oidc.clone(), false);
-    if let Some(g) = &opts.google_access {
-        identity = identity.with_google_access(g.clone());
+    let mut identity = IdentityProvider::with_verifiers(verifiers, false);
+    if let Some(token) = &opts.dev_token {
+        identity = identity.with_dev_token(token.clone());
+    }
+    // ADR-22: a 403 from the Entra scope check names the scope.
+    if !scopes.is_empty() {
+        identity = identity
+            .with_scope_challenge(&scopes)
+            .map_err(|e| anyhow::anyhow!("TRITON_ENTRA_SCOPES: {e}"))?;
+    }
+    if let Some(g) = google_access {
+        identity = identity.with_google_access(g);
     }
     let identity = Arc::new(identity);
     let metrics = dispatcher.metrics();
@@ -397,8 +516,7 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         oidc_issuer: opts.oidc_issuer.clone(),
         oidc_audience: opts.oidc_audience.clone(),
         oidc_client_id: opts.oidc_client_id.clone(),
-        oidc_providers: opts
-            .oidc_providers
+        oidc_providers: providers
             .iter()
             .map(|(i, a)| OidcProviderInfo {
                 issuer: i.clone(),
@@ -425,24 +543,30 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
         // discovery + JWKS from it; otherwise those routes stay 404 as before.
         oidc_signer: opts.oidc_signer.clone(),
     };
-    let mcp_state = McpState {
-        dispatcher: dispatcher.clone(),
-        sessions: McpSessions::new(),
-        identity: identity.clone(),
-        tasks: None,
-        route: None,
-        widget: true,
-    };
     let dispatcher_for_card = dispatcher.clone();
     let a2a_state = A2aState {
-        dispatcher,
-        tasks: InMemoryTaskStore::new(),
-        hub: Default::default(),
-        task_settings: Default::default(),
-        identity,
+        dispatcher: dispatcher.clone(),
+        tasks: task_store,
+        hub: TaskHub::new(),
+        task_settings: Arc::new(task_settings),
+        identity: identity.clone(),
         // #306 crew F1: `tasks/get` scopes on a trace id.
         audit_operators,
     };
+    let runner = a2a_state.runner();
+    let mcp_state = McpState {
+        dispatcher,
+        sessions: McpSessions::new(),
+        identity: identity.clone(),
+        // MCP files long-running upstream calls as tasks in the same store.
+        tasks: Some(runner.clone()),
+        route: None,
+        widget: opts.widget,
+    };
+    // One MCP endpoint per customer (`/mcp/<slug>` + RFC 9728 metadata),
+    // at absolute paths; empty without `TRITON_MCP_TENANTS`.
+    let mcp_tenant_router =
+        triton_adapters_http::mcp_tenants::router(mcp_state.clone(), &mcp_routes);
 
     // The spec-A2A JSON-RPC route answers at the A2A BASE path itself
     // (`POST /a2a`), which is what an Agent Card's `url` points at,
@@ -451,31 +575,35 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
     // `/a2a` nest below as `/a2a/.well-known/<name>`) because Copilot
     // Studio's runtime resolves the card relative to the registered
     // endpoint URL, not the origin (see a2a_spec::card_router).
-    let a2a_router = match &opts.spec_a2a {
+    let a2a_router = match &spec_a2a {
         Some(cfg) => {
             let mut r = a2a::router(a2a_state.clone()).merge(a2a_spec::spec_routes(
                 a2a_state.clone(),
                 cfg.clone(),
-                a2a_spec::card_state(
-                    cfg.clone(),
-                    dispatcher_for_card.clone(),
-                    opts.oidc_providers.clone(),
-                ),
+                a2a_spec::card_state(cfg.clone(), dispatcher_for_card.clone(), providers.clone()),
             ));
+            // The per-agent faces hang off the origin: with an
+            // `EmbedOpts::spec_a2a` config the public URL IS the origin
+            // (its path is `/a2a`); one from the ingress names the
+            // endpoint itself (an empty path), so take its origin.
+            let agents_origin = if cfg.a2a_path.is_empty() {
+                url::Url::parse(&cfg.public_url)
+                    .map(|u| u.origin().ascii_serialization())
+                    .unwrap_or_else(|_| cfg.public_url.clone())
+            } else {
+                cfg.public_url.clone()
+            };
             // Per-agent faces at `/a2a/<slug>`: same state (identity, task
             // store) as the root route, origin + version from the primary.
             for agent in &opts.spec_a2a_agents {
                 let slug = agent.a2a_path.trim_start_matches("/a2a/");
                 let agent_cfg = SpecA2aConfig {
-                    public_url: cfg.public_url.clone(),
+                    public_url: agents_origin.clone(),
                     version: cfg.version.clone(),
                     ..agent.clone()
                 };
-                let card = a2a_spec::card_state(
-                    agent_cfg,
-                    dispatcher_for_card.clone(),
-                    opts.oidc_providers.clone(),
-                );
+                let card =
+                    a2a_spec::card_state(agent_cfg, dispatcher_for_card.clone(), providers.clone());
                 match a2a_spec::agent_router(slug, a2a_state.clone(), card) {
                     Ok(agent_router) => r = r.merge(agent_router),
                     // Unreachable through `spec_a2a_agent` (it validates);
@@ -500,15 +628,16 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
 
     let mut app = rest::router(rest_state)
         .nest("/mcp", mcp::router(mcp_state))
+        .merge(mcp_tenant_router)
         .nest("/a2a", a2a_router);
 
     // The card is also mounted at the HOST ROOT: browser-time discovery
     // looks at `<origin>/.well-known/...`.
-    if let Some(cfg) = &opts.spec_a2a {
+    if let Some(cfg) = &spec_a2a {
         app = app.merge(a2a_spec::card_router(a2a_spec::card_state(
             cfg.clone(),
             dispatcher_for_card,
-            opts.oidc_providers.clone(),
+            providers.clone(),
         )));
     }
 
@@ -526,7 +655,11 @@ pub fn router(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> Router {
     if let Some(layer) = cors::build_layer(&opts.cors_origins) {
         app = app.layer(layer);
     }
-    app
+    Ok(EmbedParts {
+        router: app,
+        runner,
+        identity,
+    })
 }
 
 /// Build a dispatcher from `reg` and serve the trio (+ `/explorer`) on one
@@ -553,7 +686,7 @@ pub async fn serve_dispatcher(dispatcher: Arc<Dispatcher>, opts: EmbedOpts) -> a
     // calls — a host that merges its own routes reaches `router` and
     // never gets here, and announcing in both would say it twice.
     let addr = SocketAddr::new(opts.host, opts.port);
-    let app = router(dispatcher, &opts);
+    let app = router_parts(dispatcher, &opts)?.router;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let actual = listener.local_addr()?;
     eprintln!(

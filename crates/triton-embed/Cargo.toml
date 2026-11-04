@@ -25,6 +25,26 @@ triton-identity = { path = "../triton-identity" }
 axum = { workspace = true }
 tokio = { workspace = true }
 anyhow = "1"
+# The ingress group (`ingress.rs`) is the binary's clap group, so a host
+# and `triton` parse the same `TRITON_*` variables the same way.
+clap = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+url = "2"
+
+# `chat`: the chat-channel wiring the binary uses (`chat::msteams`) and the
+# channel → surface registry (`surfaces`). Off by default: an embedded
+# trio host does not compile the chat adapters.
+triton-manifest = { path = "../triton-manifest", optional = true }
+triton-secrets = { path = "../triton-secrets", optional = true }
+triton-chat-telegram = { path = "../triton-chat-telegram", optional = true }
+triton-chat-discord = { path = "../triton-chat-discord", optional = true }
+triton-chat-whatsapp = { path = "../triton-chat-whatsapp", optional = true }
+triton-chat-googlechat = { path = "../triton-chat-googlechat", optional = true }
+triton-chat-msteams = { path = "../triton-chat-msteams", optional = true }
+triton-chat-signal = { path = "../triton-chat-signal", optional = true }
+triton-chat-email = { path = "../triton-chat-email", optional = true }
+triton-chat-twilio = { path = "../triton-chat-twilio", optional = true }
 
 # `explorer-assets`: embed the built Flutter SPA and serve it at /explorer.
 rust-embed = { version = "8", optional = true }
@@ -41,6 +61,19 @@ explorer-assets = ["dep:rust-embed", "dep:mime_guess"]
 # Dev-only request/response body capture feeding the Trace view. Never in
 # release.
 capture = ["triton-adapters-http/capture"]
+# Chat-channel wiring (`chat`, `surfaces`); see the dependencies above.
+chat = [
+    "dep:triton-manifest",
+    "dep:triton-secrets",
+    "dep:triton-chat-telegram",
+    "dep:triton-chat-discord",
+    "dep:triton-chat-whatsapp",
+    "dep:triton-chat-googlechat",
+    "dep:triton-chat-msteams",
+    "dep:triton-chat-signal",
+    "dep:triton-chat-email",
+    "dep:triton-chat-twilio",
+]
 
 [dev-dependencies]
 serde_json = "1"

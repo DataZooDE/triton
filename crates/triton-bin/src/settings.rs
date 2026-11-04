@@ -224,7 +224,7 @@ pub struct Settings {
     pub denied_principals: String,
     /// Inbound identity providers, spec A2A and long-running task settings;
     /// see `ingress.rs`.
-    pub ingress: crate::ingress::IngressArgs,
+    pub ingress: triton_embed::ingress::IngressConfig,
 }
 
 impl Settings {
@@ -680,7 +680,7 @@ struct Cli {
     denied_principals: String,
 
     #[command(flatten)]
-    ingress: crate::ingress::IngressArgs,
+    ingress: triton_embed::ingress::IngressConfig,
 }
 
 impl From<Cli> for Settings {
