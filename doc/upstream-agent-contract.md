@@ -491,3 +491,57 @@ agent).
 
 Pinned by `tests/async_tasks.rs` and `tests/msteams_async_task.rs` against
 `triton_tests::async_agent_fixture::FakeAsyncAgent`.
+
+## 8. In-process upstream (a host that embeds Triton)
+
+A host that embeds Triton (`triton-embed`) can serve its agents without
+HTTP between Triton and the agent: it implements
+`triton_core::UpstreamDispatch` and hands it to the dispatcher with
+`Dispatcher::with_upstream`. Everything above the dispatcher is the
+binary's: `triton_embed::router_parts(dispatcher, &opts)` mounts the same
+REST/MCP/A2A routes, and with `EmbedOpts::ingress(IngressConfig::from_env()?)`
+the same ingress — Entra multi-tenant with required scopes, opaque Google
+access tokens, `/mcp/<slug>` with its RFC 9728 metadata, spec A2A from
+`TRITON_A2A_*`, and the task store and timing from `TRITON_TASK_*` /
+`TRITON_MCP_*`. The variables, defaults and refusals are the ones in the
+table at the top of `crates/triton-embed/src/ingress.rs`; the binary
+flattens the same clap group. `router_parts` also returns the task
+`Runner` and the identity provider, so a host can wire a Teams adapter
+into the same store with `triton_embed::chat::msteams` (feature `chat`,
+with the binary's NFR-S-4 checks) and build the channel registry with
+`triton_embed::surfaces::registry`.
+
+The wire sections above map onto the trait as follows. An in-process
+upstream that keeps to this mapping is indistinguishable from a static
+upstream to every caller:
+
+| Wire (§) | In-process |
+|---|---|
+| `POST /` with `X-Triton-Tool` (§2) | `invoke(tool, args, principal, ctx)`; `invoke_streaming` for the A2A, MCP and Teams faces |
+| `X-Triton-Channel`, `_triton.surface` (§2b) | `ctx.channel`; call `triton_core::surface_hint(args, ctx)` to put `_triton.surface` into the args as the static upstream does, or read `ctx.surface` directly |
+| The bearer and its claims (§3) | `principal` — the verified identity, never a token to re-verify |
+| A JSON result or `done` (§4) | `Ok(value)` / `StreamEvent::Done(value)`, the same canonical surface envelope |
+| An agent fault: non-2xx, timeout, undecodable body | `Err(TritonError::Tool(..))` — mapped on every face as a static upstream's agent fault |
+| A tool the agent does not serve | `Err(TritonError::Validation("unknown tool: <name>"))` — a caller fault, as the static map answers |
+| `X-Triton-MCP: tools/list` (§2a) | `agent_tools()`; `list_agents()` names the tools |
+| `task`, `progress`, `done`, `error` events (§7) | `StreamEvent::Task({task_id, check_after_seconds?, receipt?, note?})`, `StreamEvent::Progress({text, step?, percent?})`, `StreamEvent::Done`, `StreamEvent::error(TritonError::Tool(message))` |
+| A stream that closes without a terminal event (§7) | a stream that ends after `Task` without `Done`/`Error`: the runner resumes it |
+| Resume with `X-Triton-Task` (§7) | `resume_streaming(tool, task_id, args, principal, ctx)`, answering from the task's current state; an unknown id is an `Err` |
+| `resources/read`, `updateModelContext` of a `ui://` resource | `read_resource`, `update_model_context` |
+
+The rules of §7 hold unchanged: a resume must never start the work again,
+only the task's owner drives one, and a stream that breaks before `Task`
+fails the call. In-process there is no egress, so the NFR-S-4 static-map
+allowlist and the minted upstream JWT do not apply; the principal the
+trait receives is the one Triton verified.
+
+Pinned by `tests/embed_parity.rs`: the `triton` binary dispatching to HTTP
+fakes through `TRITON_STATIC_UPSTREAMS` and an embedded host dispatching to
+an in-process upstream, both configured from the same `TRITON_*` names,
+answer MCP `tools/list` (with the answer-card widget `_meta`),
+`resources/list`, a widget-carrying `tools/call`, both A2A card versions,
+the RFC 9728 metadata and the 401/403 challenges of `/mcp/<slug>`, the
+error mapping of an agent fault and an unknown tool, and a broken task
+stream (resumed by the upstream task id, never refiled) identically.
+`tests/embed_ingress.rs` and `tests/embed_msteams.rs` pin the embedded
+ingress and the embedded Teams adapter.

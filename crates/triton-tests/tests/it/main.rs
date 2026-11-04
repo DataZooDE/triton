@@ -86,6 +86,8 @@ mod email_outbound;
 mod embed_ingress;
 #[path = "../embed_msteams.rs"]
 mod embed_msteams;
+#[path = "../embed_parity.rs"]
+mod embed_parity;
 #[path = "../entra_delegated_scope.rs"]
 mod entra_delegated_scope;
 #[path = "../explorer_contract.rs"]
