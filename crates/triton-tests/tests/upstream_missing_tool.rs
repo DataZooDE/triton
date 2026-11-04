@@ -26,8 +26,17 @@ fn env(agent: &FakeAgent) -> HashMap<String, String> {
     ])
 }
 
+/// The raw upstream error, in any of its spellings. Not a bare `404`: the
+/// task, context and message ids are random UUIDs, which contain `404` in a
+/// few percent of runs.
 fn raw(s: &str) -> bool {
-    s.contains("404") || s.contains("Not Found") || s.contains("upstream ghost")
+    s.contains("returned 404") || s.contains("Not Found") || s.contains("upstream ghost")
+}
+
+#[test]
+fn raw_ignores_404_inside_an_id() {
+    assert!(!raw(r#"{"taskId":"40434916-84e8-4e13-a460-be40793753c2"}"#));
+    assert!(raw("tool: upstream ghost returned 404 Not Found"));
 }
 
 async fn mcp_call(t: &TritonProcess, tool: &str) -> Value {
