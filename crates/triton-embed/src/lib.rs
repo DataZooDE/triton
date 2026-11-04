@@ -134,6 +134,12 @@ pub struct EmbedOpts {
     /// build when no OIDC verifier is configured. Deliberately not printed
     /// by `Debug` (there is none on this struct).
     pub dev_token: Option<String>,
+    /// The A2UI action key (`TRITON_A2UI_ACTION_KEY` syntax: one key, or
+    /// `new,old` during a rotation; each at least 16 bytes), for a host
+    /// that reads it from its own source, such as a key file. `None` = the
+    /// process environment's `TRITON_A2UI_ACTION_KEY`. Set it with
+    /// [`EmbedOpts::action_key`]. Not printed (no `Debug` on this struct).
+    pub action_key: Option<String>,
 }
 
 impl Default for EmbedOpts {
@@ -157,6 +163,7 @@ impl Default for EmbedOpts {
             ingress: None,
             widget: None,
             dev_token: None,
+            action_key: None,
         }
     }
 }
@@ -213,6 +220,15 @@ impl EmbedOpts {
     /// The bearer the dev-token path accepts (see the field).
     pub fn dev_token(mut self, token: impl Into<String>) -> Self {
         self.dev_token = Some(token.into());
+        self
+    }
+
+    /// The A2UI action key (see the field). It wins over
+    /// `TRITON_A2UI_ACTION_KEY` in the environment. The key is installed
+    /// once per process by the first router built; a malformed value
+    /// refuses to serve, as the environment variable does.
+    pub fn action_key(mut self, key: impl Into<String>) -> Self {
+        self.action_key = Some(key.into());
         self
     }
 
@@ -459,14 +475,17 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
         }
     };
 
-    // F4: the A2UI action key, injected once per process from the host's
-    // environment. A malformed value refuses to serve (a random fallback
-    // would break every click that lands on another replica, silently).
+    // F4: the A2UI action key, injected once per process: the host's
+    // `EmbedOpts::action_key` (a key file, say), else its environment. A
+    // malformed value refuses to serve (a random fallback would break every
+    // click that lands on another replica, silently).
+    let action_key = opts
+        .action_key
+        .clone()
+        .or_else(|| std::env::var("TRITON_A2UI_ACTION_KEY").ok());
     static ACTION_KEY: std::sync::Once = std::sync::Once::new();
     ACTION_KEY.call_once(|| {
-        match triton_core::a2ui::ge::configure_action_key(
-            std::env::var("TRITON_A2UI_ACTION_KEY").ok().as_deref(),
-        ) {
+        match triton_core::a2ui::ge::configure_action_key(action_key.as_deref()) {
             Ok(triton_core::a2ui::ge::ActionKeyState::Configured) => {}
             Ok(triton_core::a2ui::ge::ActionKeyState::Ephemeral) => eprintln!(
                 "triton-embed: TRITON_A2UI_ACTION_KEY unset: A2UI card actions resolve on \

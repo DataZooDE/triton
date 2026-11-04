@@ -3156,6 +3156,7 @@ dependencies = [
  "triton-chat-whatsapp",
  "triton-config",
  "triton-core",
+ "triton-correlation",
  "triton-identity",
  "triton-manifest",
  "triton-secrets",

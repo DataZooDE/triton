@@ -76,6 +76,8 @@ chat = [
 ]
 
 [dev-dependencies]
+# Verify the installed A2UI action key against a signer over the supplied one.
+triton-correlation = { path = "../triton-correlation" }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 tokio = { workspace = true }
