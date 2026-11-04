@@ -29,7 +29,7 @@ pub mod tool;
 pub mod trace;
 
 pub use audit::PostOutcome;
-pub use dispatch_context::{ContextOverrides, DispatchContext};
+pub use dispatch_context::{ContextOverrides, DispatchContext, surface_hint};
 pub use dispatcher::{Dispatch, Dispatcher, UpstreamDispatch, UpstreamToolInfo, envelope};
 pub use error::TritonError;
 pub use metrics::Metrics;
