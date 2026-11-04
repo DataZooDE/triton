@@ -1277,25 +1277,19 @@ async fn main() -> std::io::Result<()> {
                     // The NFR-S-4 egress checks, the build, the canonical
                     // path claim (triton#247) and the task resume (F8b) are
                     // library code shared with embedding hosts.
-                    let opts = triton_embed::chat::MsTeamsOpts {
-                        openid_url: settings.msteams_openid_url.clone(),
-                        token_url: settings.msteams_token_url.clone(),
-                        extra_service_url_hosts: settings.msteams_extra_service_url_hosts.clone(),
-                        async_reply: settings.msteams_async,
-                        canonical_path_taken: canonical_claimed,
-                    };
                     match triton_embed::chat::msteams(
                         m,
                         name,
                         &settings.env,
                         dispatcher.clone(),
                         a2a_state.runner(),
-                        &opts,
+                        &settings.msteams,
+                        resolver.as_ref(),
+                        &mut canonical_claimed,
                     )
                     .await
                     {
                         Ok((r, built)) => {
-                            canonical_claimed |= built.canonical_path();
                             // The outbound courier registry (proactive
                             // async-operation delivery) — mirrors WhatsApp.
                             outbound_couriers.insert(
@@ -1316,8 +1310,12 @@ async fn main() -> std::io::Result<()> {
                             );
                         }
                         // Egress and canonical-path refusals are logged
-                        // where they are decided and always stop the boot.
-                        Err(_) => std::process::exit(2),
+                        // where they are decided; every refusal stops the
+                        // boot.
+                        Err(e) => {
+                            tracing::error!(adapter = %name, error = %e, "msteams adapter refused");
+                            std::process::exit(2);
+                        }
                     }
                 }
                 AdapterKind::Email => {

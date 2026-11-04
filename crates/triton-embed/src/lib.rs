@@ -125,13 +125,14 @@ pub struct EmbedOpts {
     /// [`ingress::IngressConfig::from_env`].
     pub ingress: Option<ingress::IngressConfig>,
     /// Serve the answer-card MCP Apps widget (its resource and the tool
-    /// `_meta` pointing at it). On by default, like the binary's
-    /// `TRITON_MCP_APP_WIDGET`.
-    pub widget: bool,
-    /// The bearer the dev-token path accepts. `None` = the historical
-    /// `dev-token` literal; empty disables the path. Only consulted in a
-    /// `dev-token` build when no OIDC verifier is configured. Deliberately
-    /// not printed by `Debug` (there is none on this struct).
+    /// `_meta` pointing at it). `None` = the ingress's
+    /// `TRITON_MCP_APP_WIDGET` when one is set, else on.
+    pub widget: Option<bool>,
+    /// The bearer the dev-token path accepts. `None` = the ingress's
+    /// `TRITON_DEV_TOKEN` when one is set, else the historical `dev-token`
+    /// literal; empty disables the path. Only consulted in a `dev-token`
+    /// build when no OIDC verifier is configured. Deliberately not printed
+    /// by `Debug` (there is none on this struct).
     pub dev_token: Option<String>,
 }
 
@@ -154,7 +155,7 @@ impl Default for EmbedOpts {
             google_access: None,
             oidc_signer: None,
             ingress: None,
-            widget: true,
+            widget: None,
             dev_token: None,
         }
     }
@@ -193,6 +194,11 @@ impl EmbedOpts {
     /// Configure the binary's ingress (see the field). Errors in it — an
     /// override outside `env=local`, a customer path naming a tenant that
     /// is not allow-listed — surface from [`router_parts`].
+    ///
+    /// Precedence: an explicit option of this struct wins over the
+    /// ingress ([`Self::spec_a2a`], [`Self::dev_token`], [`Self::widget`]);
+    /// the Google verifier may come from one source only, so setting it
+    /// both here ([`Self::google_access`]) and in the ingress is refused.
     pub fn ingress(mut self, cfg: ingress::IngressConfig) -> Self {
         self.ingress = Some(cfg);
         self
@@ -200,7 +206,7 @@ impl EmbedOpts {
 
     /// Serve the answer-card widget or not (default on).
     pub fn widget(mut self, on: bool) -> Self {
-        self.widget = on;
+        self.widget = Some(on);
         self
     }
 
@@ -423,6 +429,9 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
     let mut scopes: Vec<String> = Vec::new();
     let mut mcp_routes = Vec::new();
     let mut spec_a2a = opts.spec_a2a.clone();
+    // Which shape the primary config has: `EmbedOpts::spec_a2a` names the
+    // origin (its path is `/a2a`), the ingress names the endpoint itself.
+    let mut spec_a2a_from_ingress = false;
     let (task_store, task_settings) = match &opts.ingress {
         None => (InMemoryTaskStore::new(), TaskSettings::default()),
         Some(cfg) => {
@@ -430,6 +439,13 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
             if let Some(g) =
                 ingress::identity_providers(cfg, &opts.env, &mut verifiers, &mut providers)?
             {
+                if google_access.is_some() {
+                    anyhow::bail!(
+                        "TRITON_GOOGLE_ACCESS_AUDIENCES is set, but the host already \
+                         configured EmbedOpts::google_access; configure the Google \
+                         verifier in one place"
+                    );
+                }
                 google_access = Some(g);
             }
             scopes = ingress::entra_scopes(cfg)?;
@@ -437,6 +453,7 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
             // An explicit `EmbedOpts::spec_a2a` wins over the variables.
             if spec_a2a.is_none() {
                 spec_a2a = ingress::spec_a2a_config(cfg)?;
+                spec_a2a_from_ingress = spec_a2a.is_some();
             }
             (store, ingress::task_settings(cfg))
         }
@@ -486,8 +503,16 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
         );
     });
     let mut identity = IdentityProvider::with_verifiers(verifiers, false);
-    if let Some(token) = &opts.dev_token {
-        identity = identity.with_dev_token(token.clone());
+    // The host's option, else the ingress's `TRITON_DEV_TOKEN`, else the
+    // provider's `dev-token` default.
+    let dev_token = opts.dev_token.clone().or_else(|| {
+        opts.ingress
+            .as_ref()
+            .and_then(|c| c.dev_token.as_ref())
+            .map(|t| t.0.clone())
+    });
+    if let Some(token) = dev_token {
+        identity = identity.with_dev_token(token);
     }
     // ADR-22: a 403 from the Entra scope check names the scope.
     if !scopes.is_empty() {
@@ -561,7 +586,10 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
         // MCP files long-running upstream calls as tasks in the same store.
         tasks: Some(runner.clone()),
         route: None,
-        widget: opts.widget,
+        widget: opts
+            .widget
+            .or_else(|| opts.ingress.as_ref().and_then(|c| c.widget))
+            .unwrap_or(true),
     };
     // One MCP endpoint per customer (`/mcp/<slug>` + RFC 9728 metadata),
     // at absolute paths; empty without `TRITON_MCP_TENANTS`.
@@ -583,10 +611,10 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
                 a2a_spec::card_state(cfg.clone(), dispatcher_for_card.clone(), providers.clone()),
             ));
             // The per-agent faces hang off the origin: with an
-            // `EmbedOpts::spec_a2a` config the public URL IS the origin
-            // (its path is `/a2a`); one from the ingress names the
-            // endpoint itself (an empty path), so take its origin.
-            let agents_origin = if cfg.a2a_path.is_empty() {
+            // `EmbedOpts::spec_a2a` config the public URL IS the origin;
+            // one from the ingress names the endpoint itself, so take its
+            // origin (scheme, host and a non-default port).
+            let agents_origin = if spec_a2a_from_ingress {
                 url::Url::parse(&cfg.public_url)
                     .map(|u| u.origin().ascii_serialization())
                     .unwrap_or_else(|_| cfg.public_url.clone())

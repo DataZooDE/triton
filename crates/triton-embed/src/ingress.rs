@@ -114,14 +114,49 @@ pub struct IngressConfig {
     /// Scopes advertised for the per-customer endpoints.
     #[arg(long, env = "TRITON_ENTRA_SCOPES")]
     pub entra_scopes: Option<String>,
+
+    /// `TRITON_DEV_TOKEN`, when read by [`IngressConfig::from_env`] or
+    /// [`IngressConfig::with_vars`]; never a flag, because a credential
+    /// does not belong on a command line. `None` = the `dev-token` literal.
+    #[arg(skip)]
+    pub dev_token: Option<DevToken>,
+    /// `TRITON_MCP_APP_WIDGET`, read like `dev_token`. `None` = on.
+    #[arg(skip)]
+    pub widget: Option<bool>,
+}
+
+/// The accepted dev token. `Debug` does not print it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DevToken(pub String);
+
+impl std::fmt::Debug for DevToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DevToken(<redacted>)")
+    }
 }
 
 impl IngressConfig {
     /// Read the `TRITON_*` variables of the table above from the process
     /// environment, with the binary's defaults and parsing. Command-line
     /// arguments are not read: the host owns its own CLI.
+    ///
+    /// Also reads the two variables the binary takes beside the group,
+    /// `TRITON_DEV_TOKEN` and `TRITON_MCP_APP_WIDGET` (see
+    /// [`Self::with_vars`]), so a host gets the binary's behaviour.
     pub fn from_env() -> Result<Self, BootError> {
-        Self::try_parse_from(["triton"]).map_err(|e| BootError(format!("ingress: {e}")))
+        Ok(Self::try_parse_from(["triton"])
+            .map_err(|e| BootError(format!("ingress: {e}")))?
+            .with_vars(|k| std::env::var(k).ok()))
+    }
+
+    /// Fill `dev_token` and `widget` from `lookup` (variable name → value),
+    /// as the binary reads `TRITON_DEV_TOKEN` and `TRITON_MCP_APP_WIDGET`.
+    /// [`Self::from_env`] passes the process environment; a host with its
+    /// own configuration source passes that.
+    pub fn with_vars(mut self, lookup: impl Fn(&str) -> Option<String>) -> Self {
+        self.dev_token = lookup("TRITON_DEV_TOKEN").map(DevToken);
+        self.widget = Some(widget_on(lookup("TRITON_MCP_APP_WIDGET").as_deref()));
+        self
     }
 }
 
@@ -136,8 +171,11 @@ pub fn dev_token_from_env() -> String {
 /// `TRITON_MCP_APP_WIDGET`: the answer-card MCP Apps widget, on unless
 /// `0`, `false`, `off` or `no`.
 pub fn widget_from_env() -> bool {
-    !std::env::var("TRITON_MCP_APP_WIDGET")
-        .is_ok_and(|v| matches!(v.trim(), "0" | "false" | "off" | "no"))
+    widget_on(std::env::var("TRITON_MCP_APP_WIDGET").ok().as_deref())
+}
+
+fn widget_on(raw: Option<&str>) -> bool {
+    !raw.is_some_and(|v| matches!(v.trim(), "0" | "false" | "off" | "no"))
 }
 
 /// The task timing knobs.

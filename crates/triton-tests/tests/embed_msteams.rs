@@ -12,10 +12,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use clap::Parser;
 use serde_json::json;
 use triton_core::dispatcher::DispatchControls;
 use triton_core::{Dispatcher, ToolRegistry};
-use triton_embed::chat::{MsTeamsError, MsTeamsOpts};
+use triton_embed::chat::LiteralResolver;
+use triton_embed::chat::{MsTeamsConfig, MsTeamsError};
 use triton_embed::{EmbedOpts, router_parts};
 use triton_tests::async_agent_fixture::{AsyncPlan, FakeAsyncAgent};
 use triton_tests::chat_courier_fixture::FakeBotFramework;
@@ -57,14 +59,32 @@ fn dispatcher(agent: &FakeAsyncAgent, m: &triton_manifest::Manifest) -> Arc<Disp
     )
 }
 
-fn local_opts(fake: &FakeBotFramework) -> MsTeamsOpts {
-    MsTeamsOpts {
-        openid_url: fake.openid_url(),
-        token_url: Some(fake.token_url()),
-        extra_service_url_hosts: vec!["127.0.0.1".to_string()],
-        async_reply: true,
-        canonical_path_taken: false,
-    }
+/// The Teams settings from flags, as `triton --flag …` would parse them.
+fn teams(flags: &[&str]) -> MsTeamsConfig {
+    let mut argv = vec!["host"];
+    argv.extend_from_slice(flags);
+    MsTeamsConfig::try_parse_from(argv).expect("teams flags parse")
+}
+
+fn local_opts(fake: &FakeBotFramework) -> MsTeamsConfig {
+    let (openid, token) = (fake.openid_url(), fake.token_url());
+    teams(&[
+        "--msteams-openid-url",
+        &openid,
+        "--msteams-token-url",
+        &token,
+        "--msteams-extra-service-url-hosts",
+        "127.0.0.1",
+        "--msteams-async",
+        "1",
+    ])
+}
+
+fn fixture(name: &str) -> triton_manifest::Manifest {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("fixtures")
+        .join(name);
+    triton_manifest::Manifest::load(&path).expect("fixture manifest")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -103,6 +123,8 @@ async fn an_embedded_teams_adapter_answers_a_long_running_turn_through_the_share
         dispatcher,
         parts.runner.clone(),
         &local_opts(&fake),
+        &LiteralResolver,
+        &mut false,
     )
     .await
     .expect("the Teams adapter builds");
@@ -195,6 +217,8 @@ async fn an_embedded_teams_adapter_refuses_endpoint_overrides_outside_local() {
         dispatcher,
         parts.runner,
         &local_opts(&fake),
+        &LiteralResolver,
+        &mut false,
     )
     .await
     .err()
@@ -203,4 +227,117 @@ async fn an_embedded_teams_adapter_refuses_endpoint_overrides_outside_local() {
         matches!(&err, MsTeamsError::Egress(m) if m.contains("TRITON_MSTEAMS_OPENID_URL")),
         "{err}"
     );
+}
+
+/// The Teams settings are the binary's clap group: defaults, the `true`/`1`
+/// switch, the host list, and an empty override kept as a value — which is
+/// refused outside `local` exactly as the binary refuses it.
+#[tokio::test]
+async fn teams_settings_parse_like_the_binary_and_an_empty_override_is_refused() {
+    let d = teams(&[]);
+    assert_eq!(
+        d.msteams_openid_url,
+        "https://login.botframework.com/v1/.well-known/openidconfiguration"
+    );
+    assert_eq!(d.msteams_token_url, None);
+    assert!(d.msteams_extra_service_url_hosts.0.is_empty());
+    assert!(!d.msteams_async);
+    assert!(teams(&["--msteams-async", "TRUE"]).msteams_async);
+    assert!(!teams(&["--msteams-async", "yes"]).msteams_async);
+    assert_eq!(
+        teams(&["--msteams-extra-service-url-hosts", " a, ,b "])
+            .msteams_extra_service_url_hosts
+            .0,
+        vec!["a".to_string(), "b".to_string()]
+    );
+
+    let fake = FakeBotFramework::start().await;
+    let agent = FakeAsyncAgent::start(AsyncPlan::default()).await;
+    let m = manifest();
+    let dispatcher = dispatcher(&agent, &m);
+    let parts = router_parts(dispatcher.clone(), &EmbedOpts::dev()).unwrap();
+    let empty = teams(&["--msteams-token-url", ""]);
+    assert_eq!(empty.msteams_token_url.as_deref(), Some(""));
+    let err = triton_embed::chat::msteams(
+        &m,
+        "msteams",
+        "prod",
+        dispatcher,
+        parts.runner,
+        &empty,
+        &LiteralResolver,
+        &mut false,
+    )
+    .await
+    .err()
+    .expect("an empty token URL is still an override");
+    assert!(
+        matches!(&err, MsTeamsError::Egress(m) if m.contains("TRITON_MSTEAMS_TOKEN_URL")),
+        "{err}"
+    );
+    drop(fake);
+}
+
+/// triton#247: the second adapter claiming `/api/messages` is refused by
+/// the library itself, which records the first claim.
+#[tokio::test]
+async fn a_second_canonical_path_claimant_is_refused() {
+    let fake = FakeBotFramework::start().await;
+    let agent = FakeAsyncAgent::start(AsyncPlan::default()).await;
+    let m = fixture("manifest-msteams-canonical.yaml");
+    let dispatcher = dispatcher(&agent, &m);
+    let parts = router_parts(dispatcher.clone(), &EmbedOpts::dev()).unwrap();
+    let mut claimed = false;
+    let (_, first) = triton_embed::chat::msteams(
+        &m,
+        "msteams",
+        "local",
+        dispatcher.clone(),
+        parts.runner.clone(),
+        &local_opts(&fake),
+        &LiteralResolver,
+        &mut claimed,
+    )
+    .await
+    .expect("the first claimant builds");
+    assert!(first.canonical_path() && claimed, "the claim is recorded");
+    let err = triton_embed::chat::msteams(
+        &m,
+        "msteams",
+        "local",
+        dispatcher,
+        parts.runner,
+        &local_opts(&fake),
+        &LiteralResolver,
+        &mut claimed,
+    )
+    .await
+    .err()
+    .expect("the second claimant is refused");
+    assert!(matches!(err, MsTeamsError::CanonicalPathTaken(_)), "{err}");
+}
+
+/// Only a webhook Teams adapter has a router to mount.
+#[tokio::test]
+async fn a_non_webhook_teams_adapter_is_refused() {
+    let fake = FakeBotFramework::start().await;
+    let agent = FakeAsyncAgent::start(AsyncPlan::default()).await;
+    let mut m = manifest();
+    m.adapters.get_mut("msteams").unwrap().inbound.kind = triton_manifest::InboundKind::LongPoll;
+    let dispatcher = dispatcher(&agent, &m);
+    let parts = router_parts(dispatcher.clone(), &EmbedOpts::dev()).unwrap();
+    let err = triton_embed::chat::msteams(
+        &m,
+        "msteams",
+        "local",
+        dispatcher,
+        parts.runner,
+        &local_opts(&fake),
+        &LiteralResolver,
+        &mut false,
+    )
+    .await
+    .err()
+    .expect("refused");
+    assert!(matches!(err, MsTeamsError::NotWebhook(_)), "{err}");
 }

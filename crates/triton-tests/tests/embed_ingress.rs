@@ -330,3 +330,149 @@ async fn dev_token_and_widget_are_host_options() {
         "the widget is on by default"
     );
 }
+
+/// The process variables the binary reads beside the clap group — the dev
+/// token and the widget switch — reach an embedded host through the
+/// ingress too, so `IngressConfig::from_env()` gives a host the binary's
+/// behaviour. `with_vars` is the injectable form of that read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_ingress_carries_the_dev_token_and_widget_variables() {
+    let vars = std::collections::HashMap::from([
+        ("TRITON_DEV_TOKEN", ""),
+        ("TRITON_MCP_APP_WIDGET", "off"),
+    ]);
+    let cfg = ingress(&[]).with_vars(|k| vars.get(k).map(|v| v.to_string()));
+    let secret = ingress(&[]).with_vars(|k| (k == "TRITON_DEV_TOKEN").then(|| "hunter2-x".into()));
+    assert!(
+        !format!("{secret:?}").contains("hunter2-x"),
+        "Debug does not print the dev token"
+    );
+    let parts = router_parts(dispatcher("test"), &EmbedOpts::dev().ingress(cfg)).unwrap();
+    let base = serve(parts.router).await;
+    let http = reqwest::Client::new();
+    let status = http
+        .post(format!("{base}/v1/tools/echo"))
+        .bearer_auth("dev-token")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED,
+        "TRITON_DEV_TOKEN=\"\" closes the dev-token path"
+    );
+
+    // An explicit host option still wins over the variables.
+    let cfg = ingress(&[]).with_vars(|k| vars.get(k).map(|v| v.to_string()));
+    let parts = router_parts(
+        dispatcher("test"),
+        &EmbedOpts::dev()
+            .ingress(cfg)
+            .dev_token("explicit")
+            .widget(true),
+    )
+    .unwrap();
+    let base = serve(parts.router).await;
+    let ok = http
+        .post(format!("{base}/v1/tools/echo"))
+        .bearer_auth("explicit")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap()
+        .status();
+    assert_eq!(ok, reqwest::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn the_widget_variable_switches_the_answer_card_off() {
+    let cfg = ingress(&[]).with_vars(|k| (k == "TRITON_MCP_APP_WIDGET").then(|| "off".into()));
+    let parts = router_parts(dispatcher("test"), &EmbedOpts::dev().ingress(cfg)).unwrap();
+    let base = serve(parts.router).await;
+    let body: Value = reqwest::Client::new()
+        .post(format!("{base}/mcp"))
+        .header("accept", "application/json, text/event-stream")
+        .bearer_auth("dev-token")
+        .json(&mcp("resources/list"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(
+        !body.to_string().contains("answer-card"),
+        "TRITON_MCP_APP_WIDGET=off: {body}"
+    );
+}
+
+/// Per-agent cards hang off the origin whichever way the primary card was
+/// configured: from the ingress (the public URL names the endpoint) or with
+/// `EmbedOpts::spec_a2a` (the public URL is the origin) — a non-default
+/// port included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_agent_cards_use_the_origin_for_both_primary_shapes() {
+    let from_ingress = EmbedOpts::dev().ingress(ingress(&[
+        "--a2a-public-url",
+        "https://agents.example.test:8443/a2a",
+        "--a2a-default-tool",
+        "echo",
+    ]));
+    let explicit = EmbedOpts::dev().spec_a2a(
+        "Primary",
+        "The primary agent.",
+        "https://agents.example.test:8443",
+        "echo",
+    );
+    for (label, opts) in [("ingress", from_ingress), ("explicit", explicit)] {
+        let opts = opts
+            .spec_a2a_agent("Second", "A second agent.", "second", "echo")
+            .unwrap();
+        let parts = router_parts(dispatcher("test"), &opts).unwrap();
+        let base = serve(parts.router).await;
+        let card: Value = reqwest::get(format!("{base}/a2a/second/.well-known/agent-card.json"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            card["supportedInterfaces"][0]["url"], "https://agents.example.test:8443/a2a/second",
+            "{label}: {card}"
+        );
+        let root: Value = reqwest::get(format!("{base}/.well-known/agent-card.json"))
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            root["supportedInterfaces"][0]["url"], "https://agents.example.test:8443/a2a",
+            "{label}: {root}"
+        );
+    }
+}
+
+/// Two sources for the Google verifier are a configuration error, not a
+/// silent choice.
+#[tokio::test]
+async fn google_access_from_both_the_host_and_the_ingress_is_refused() {
+    let cfg = ingress(&[
+        "--google-access-audiences",
+        "client-1",
+        "--google-access-allowed-hd",
+        "acme.example",
+    ]);
+    let opts = EmbedOpts::dev()
+        .google_access("client-2", Some("acme.example".into()))
+        .ingress(cfg);
+    let err = router_parts(dispatcher("test"), &opts)
+        .err()
+        .expect("refused");
+    assert!(
+        err.to_string().contains("TRITON_GOOGLE_ACCESS_AUDIENCES"),
+        "{err}"
+    );
+}

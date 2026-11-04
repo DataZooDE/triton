@@ -10,73 +10,91 @@
 use std::sync::Arc;
 
 use axum::Router;
+use clap::Parser;
 use triton_adapters_http::tasks::Runner;
 use triton_chat_msteams::MsTeamsAdapter;
 use triton_core::Dispatcher;
-use triton_manifest::Manifest;
-use triton_secrets::LiteralResolver;
+use triton_manifest::{InboundKind, Manifest};
+/// The resolvers a host passes to [`msteams`]: literals and `env://` refs
+/// (what the binary uses), or its own [`SecretResolver`].
+pub use triton_secrets::{LiteralResolver, SecretResolver};
 
-/// The Teams adapter's process-level settings (the binary's
-/// `TRITON_MSTEAMS_*` variables). Every override is refused outside
-/// `env=local`.
-#[derive(Debug, Clone)]
-pub struct MsTeamsOpts {
-    /// Bot Framework OpenID discovery (`TRITON_MSTEAMS_OPENID_URL`); must
-    /// be the canonical Microsoft endpoint outside `local`.
-    pub openid_url: String,
-    /// Token endpoint override (`TRITON_MSTEAMS_TOKEN_URL`); `local` only.
-    pub token_url: Option<String>,
-    /// Extra `serviceUrl` hosts (`TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS`);
-    /// `local` only.
-    pub extra_service_url_hosts: Vec<String>,
-    /// Ack the webhook at once and reply out of band
-    /// (`TRITON_MSTEAMS_ASYNC`).
-    pub async_reply: bool,
-    /// Another adapter of this process already serves the canonical
-    /// `/api/messages` path (triton#247); a second claimant is refused,
-    /// because `Router::merge` would panic on the overlap.
-    pub canonical_path_taken: bool,
+/// The Teams adapter's process-level settings: the binary's
+/// `TRITON_MSTEAMS_*` clap group (the binary flattens it into its CLI), so a
+/// host and `triton` parse them identically. Every override is refused
+/// outside `env=local`, an empty one included.
+#[derive(Debug, Clone, Parser)]
+pub struct MsTeamsConfig {
+    /// OpenID discovery URL for the Microsoft Teams adapter. Default
+    /// is the canonical Bot Framework endpoint. Outside `local` env
+    /// the binary refuses any override (NFR-S-4 egress allowlist).
+    #[arg(
+        long,
+        env = "TRITON_MSTEAMS_OPENID_URL",
+        default_value = "https://login.botframework.com/v1/.well-known/openidconfiguration"
+    )]
+    pub msteams_openid_url: String,
+
+    /// Optional override for Microsoft's OAuth2 token endpoint.
+    /// `None` (the default) ⇒ the canonical hardcoded URL inside
+    /// `token_client.rs`. Tests set this so the in-repo
+    /// `FakeBotFramework` can mint stub access tokens.
+    #[arg(long, env = "TRITON_MSTEAMS_TOKEN_URL")]
+    pub msteams_token_url: Option<String>,
+
+    /// PR 37: comma-separated `serviceUrl` host extras the MS Teams
+    /// JWT verifier accepts. Empty by default; the binary refuses
+    /// non-empty values outside `local` env.
+    #[arg(
+        long,
+        env = "TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS",
+        default_value = "",
+        value_parser = parse_hosts
+    )]
+    pub msteams_extra_service_url_hosts: ServiceUrlHosts,
+
+    /// #635 P4: async reply courier for msteams — ack the webhook 200
+    /// immediately and deliver out-of-band (streaming in 1:1 chats).
+    /// Bot Framework abandons the inbound connection at ~15s, which on
+    /// the inline path cancels the dispatch mid-turn. Accepts
+    /// `true`/`1` (case-insensitive) as on, like the googlechat twin.
+    #[arg(
+        long,
+        env = "TRITON_MSTEAMS_ASYNC",
+        default_value = "false",
+        action = clap::ArgAction::Set,
+        value_parser = parse_on
+    )]
+    pub msteams_async: bool,
 }
 
-impl Default for MsTeamsOpts {
-    fn default() -> Self {
-        Self {
-            openid_url: triton_chat_msteams::jwt_verifier::DEFAULT_OPENID_URL.to_string(),
-            token_url: None,
-            extra_service_url_hosts: Vec::new(),
-            async_reply: false,
-            canonical_path_taken: false,
-        }
-    }
+/// The `serviceUrl` host extras, parsed from a comma-separated list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServiceUrlHosts(pub Vec<String>);
+
+fn parse_hosts(raw: &str) -> Result<ServiceUrlHosts, std::convert::Infallible> {
+    Ok(ServiceUrlHosts(
+        raw.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+    ))
 }
 
-impl MsTeamsOpts {
-    /// Read the `TRITON_MSTEAMS_*` variables with the binary's defaults and
-    /// parsing. An unset or empty variable keeps the default.
-    pub fn from_env() -> Self {
-        let var = |k: &str| std::env::var(k).ok();
-        let d = Self::default();
-        Self {
-            openid_url: var("TRITON_MSTEAMS_OPENID_URL")
-                .filter(|v| !v.is_empty())
-                .unwrap_or(d.openid_url),
-            token_url: var("TRITON_MSTEAMS_TOKEN_URL").filter(|v| !v.is_empty()),
-            extra_service_url_hosts: var("TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS")
-                .unwrap_or_default()
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
-            async_reply: matches!(
-                var("TRITON_MSTEAMS_ASYNC")
-                    .unwrap_or_default()
-                    .trim()
-                    .to_ascii_lowercase()
-                    .as_str(),
-                "true" | "1"
-            ),
-            canonical_path_taken: false,
-        }
+fn parse_on(raw: &str) -> Result<bool, std::convert::Infallible> {
+    Ok(matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "true" | "1"
+    ))
+}
+
+impl MsTeamsConfig {
+    /// Read the `TRITON_MSTEAMS_*` variables from the process environment
+    /// with the binary's defaults and parsing. Command-line arguments are
+    /// not read: the host owns its own CLI.
+    pub fn from_env() -> Result<Self, crate::ingress::BootError> {
+        Self::try_parse_from(["triton"])
+            .map_err(|e| crate::ingress::BootError(format!("msteams: {e}")))
     }
 }
 
@@ -89,6 +107,8 @@ pub enum MsTeamsError {
     CanonicalPathTaken(String),
     /// The manifest has no adapter of that name.
     UnknownAdapter(String),
+    /// The adapter's inbound is not a webhook: there is no route to mount.
+    NotWebhook(String),
     /// The adapter itself refused (secrets, identity, kind). The binary
     /// lets an optional adapter be skipped on this one.
     Build(triton_chat_msteams::BuildError),
@@ -104,12 +124,23 @@ impl std::fmt::Display for MsTeamsError {
                  (triton#247)"
             ),
             Self::UnknownAdapter(name) => write!(f, "the manifest has no adapter `{name}`"),
+            Self::NotWebhook(name) => write!(
+                f,
+                "adapter `{name}`: a Teams adapter is mounted only with `inbound.kind: webhook`"
+            ),
             Self::Build(e) => write!(f, "msteams adapter: {e}"),
         }
     }
 }
 
-impl std::error::Error for MsTeamsError {}
+impl std::error::Error for MsTeamsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Build(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 fn is_canonical_url(raw: &str, expected_scheme: &str, expected_host: &str) -> bool {
     let Ok(parsed) = url::Url::parse(raw) else {
@@ -120,7 +151,7 @@ fn is_canonical_url(raw: &str, expected_scheme: &str, expected_host: &str) -> bo
 
 /// The NFR-S-4 rules for the Teams settings: outside `local` the OpenID
 /// URL is the canonical Microsoft endpoint and nothing else is overridden.
-fn check_egress(env: &str, opts: &MsTeamsOpts) -> Result<(), MsTeamsError> {
+fn check_egress(env: &str, opts: &MsTeamsConfig) -> Result<(), MsTeamsError> {
     if env == "local" {
         return Ok(());
     }
@@ -134,12 +165,12 @@ fn check_egress(env: &str, opts: &MsTeamsOpts) -> Result<(), MsTeamsError> {
     // PR 37: exact-string equality (the canonical URL has one documented
     // form) AND a parsed-URL host check, so a path-only tweak like
     // `.../openidconfiguration?foo=bar` still fails closed.
-    if opts.openid_url != CANONICAL_OPENID
-        || !is_canonical_url(&opts.openid_url, "https", "login.botframework.com")
+    if opts.msteams_openid_url != CANONICAL_OPENID
+        || !is_canonical_url(&opts.msteams_openid_url, "https", "login.botframework.com")
     {
         tracing::error!(
             env = %env,
-            msteams_openid_url = %opts.openid_url,
+            msteams_openid_url = %opts.msteams_openid_url,
             "non-`local` env MUST use TRITON_MSTEAMS_OPENID_URL={CANONICAL_OPENID} (NFR-S-4 egress allowlist)",
         );
         return Err(MsTeamsError::Egress(format!(
@@ -149,10 +180,10 @@ fn check_egress(env: &str, opts: &MsTeamsOpts) -> Result<(), MsTeamsError> {
     // PR 37 critical finding: the token endpoint accepts
     // `client_credentials`; posting them at another host exfiltrates the
     // bot's secret. Only the integration fixture sets it.
-    if opts.token_url.is_some() {
+    if opts.msteams_token_url.is_some() {
         tracing::error!(
             env = %env,
-            msteams_token_url = %opts.token_url.as_deref().unwrap_or(""),
+            msteams_token_url = %opts.msteams_token_url.as_deref().unwrap_or(""),
             "non-`local` env MUST NOT set TRITON_MSTEAMS_TOKEN_URL — \
              the Microsoft token endpoint is hardcoded for NFR-S-4 \
              (overriding would post client_credentials at an \
@@ -163,10 +194,10 @@ fn check_egress(env: &str, opts: &MsTeamsOpts) -> Result<(), MsTeamsError> {
         ));
     }
     // PR 37: the `serviceUrl` host extras, likewise test-only.
-    if !opts.extra_service_url_hosts.is_empty() {
+    if !opts.msteams_extra_service_url_hosts.0.is_empty() {
         tracing::error!(
             env = %env,
-            hosts = ?opts.extra_service_url_hosts,
+            hosts = ?opts.msteams_extra_service_url_hosts.0,
             "non-`local` env MUST NOT set TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS \
              (NFR-S-4 egress allowlist for outbound reply Activity)",
         );
@@ -178,49 +209,66 @@ fn check_egress(env: &str, opts: &MsTeamsOpts) -> Result<(), MsTeamsError> {
 }
 
 /// Build the Teams adapter `adapter_name` of `manifest`: NFR-S-4 checks,
-/// the adapter itself (secrets resolve as literals or `env://` refs, as in
-/// the binary), the canonical-path claim, then the task runner and the
-/// resume of its stored tasks. Returns its webhook router
-/// (`/<name>/webhook`, plus `/api/messages` when it claims it) and the
-/// adapter, which is also the outbound courier for proactive sends.
+/// the adapter itself (its secrets through `resolver`; the binary passes
+/// [`LiteralResolver`], literals and `env://` refs), the canonical-path
+/// claim, then the task runner and the resume of its stored tasks. Returns
+/// its webhook router (`/<name>/webhook`, plus `/api/messages` when it
+/// claims it) and the adapter, which is also the outbound courier for
+/// proactive sends.
+///
+/// `canonical_path_claimed` is the process's one `/api/messages` claim
+/// (triton#247): pass the same flag for every adapter of a router. A
+/// second claimant is refused before its stored tasks resume, because
+/// `Router::merge` would panic on the overlap.
+#[allow(clippy::too_many_arguments)]
 pub async fn msteams(
     manifest: &Manifest,
     adapter_name: &str,
     env: &str,
     dispatcher: Arc<Dispatcher>,
     runner: Runner,
-    opts: &MsTeamsOpts,
+    cfg: &MsTeamsConfig,
+    resolver: &dyn SecretResolver,
+    canonical_path_claimed: &mut bool,
 ) -> Result<(Router, Arc<MsTeamsAdapter>), MsTeamsError> {
-    check_egress(env, opts)?;
+    check_egress(env, cfg)?;
     let adapter = manifest
         .adapters
         .get(adapter_name)
         .ok_or_else(|| MsTeamsError::UnknownAdapter(adapter_name.to_string()))?;
+    if adapter.inbound.kind != InboundKind::Webhook {
+        return Err(MsTeamsError::NotWebhook(adapter_name.to_string()));
+    }
     let overrides = triton_chat_msteams::AdapterOverrides {
-        openid_url: Some(opts.openid_url.clone()),
-        token_url: opts.token_url.clone(),
-        extra_service_url_hosts: opts.extra_service_url_hosts.clone(),
+        openid_url: Some(cfg.msteams_openid_url.clone()),
+        token_url: cfg.msteams_token_url.clone(),
+        extra_service_url_hosts: cfg.msteams_extra_service_url_hosts.0.clone(),
     };
     let courier = triton_chat_msteams::CourierConfig {
         tracker: None,
-        enabled: opts.async_reply,
+        enabled: cfg.msteams_async,
     };
     let built = MsTeamsAdapter::from_manifest(
         adapter_name,
         adapter,
-        &LiteralResolver,
+        resolver,
         dispatcher,
         overrides,
         courier,
     )
     .await
     .map_err(MsTeamsError::Build)?;
-    if built.canonical_path() && opts.canonical_path_taken {
-        tracing::error!(
-            adapter = %adapter_name,
-            "at most one adapter may set `inbound.canonical_path`                                          (triton#247): the canonical /api/messages route is fixed                                          and a second claimant would panic Router::merge, taking                                          REST/MCP/A2A down with it",
-        );
-        return Err(MsTeamsError::CanonicalPathTaken(adapter_name.to_string()));
+    if built.canonical_path() {
+        if *canonical_path_claimed {
+            tracing::error!(
+                adapter = %adapter_name,
+                "at most one adapter may set `inbound.canonical_path` (triton#247): the \
+                 canonical /api/messages route is fixed and a second claimant would panic \
+                 Router::merge, taking REST/MCP/A2A down with it",
+            );
+            return Err(MsTeamsError::CanonicalPathTaken(adapter_name.to_string()));
+        }
+        *canonical_path_claimed = true;
     }
     tracing::info!(adapter = %adapter_name, "msteams webhook adapter wired");
     // F8b: long-running Teams turns are tasks in the same store as A2A's
@@ -235,23 +283,21 @@ pub async fn msteams(
 mod tests {
     use super::*;
 
+    fn cfg(flags: &[&str]) -> MsTeamsConfig {
+        let mut argv = vec!["t"];
+        argv.extend_from_slice(flags);
+        MsTeamsConfig::try_parse_from(argv).unwrap()
+    }
+
     #[test]
     fn overrides_are_refused_outside_local() {
-        let ok = MsTeamsOpts::default();
-        assert!(check_egress("prod", &ok).is_ok());
-        let openid = MsTeamsOpts {
-            openid_url: "https://login.botframework.com/v1/.well-known/openidconfiguration?x=1"
-                .into(),
-            ..MsTeamsOpts::default()
-        };
-        let token = MsTeamsOpts {
-            token_url: Some("http://127.0.0.1:1/token".into()),
-            ..MsTeamsOpts::default()
-        };
-        let hosts = MsTeamsOpts {
-            extra_service_url_hosts: vec!["127.0.0.1".into()],
-            ..MsTeamsOpts::default()
-        };
+        assert!(check_egress("prod", &cfg(&[])).is_ok());
+        let openid = cfg(&[
+            "--msteams-openid-url",
+            "https://login.botframework.com/v1/.well-known/openidconfiguration?x=1",
+        ]);
+        let token = cfg(&["--msteams-token-url", "http://127.0.0.1:1/token"]);
+        let hosts = cfg(&["--msteams-extra-service-url-hosts", "127.0.0.1"]);
         for (opts, var) in [
             (&openid, "TRITON_MSTEAMS_OPENID_URL"),
             (&token, "TRITON_MSTEAMS_TOKEN_URL"),

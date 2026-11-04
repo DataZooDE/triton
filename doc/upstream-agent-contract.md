@@ -502,14 +502,17 @@ binary's: `triton_embed::router_parts(dispatcher, &opts)` mounts the same
 REST/MCP/A2A routes, and with `EmbedOpts::ingress(IngressConfig::from_env()?)`
 the same ingress — Entra multi-tenant with required scopes, opaque Google
 access tokens, `/mcp/<slug>` with its RFC 9728 metadata, spec A2A from
-`TRITON_A2A_*`, and the task store and timing from `TRITON_TASK_*` /
-`TRITON_MCP_*`. The variables, defaults and refusals are the ones in the
-table at the top of `crates/triton-embed/src/ingress.rs`; the binary
-flattens the same clap group. `router_parts` also returns the task
-`Runner` and the identity provider, so a host can wire a Teams adapter
-into the same store with `triton_embed::chat::msteams` (feature `chat`,
-with the binary's NFR-S-4 checks) and build the channel registry with
-`triton_embed::surfaces::registry`.
+`TRITON_A2A_*`, the task store and timing from `TRITON_TASK_*` /
+`TRITON_MCP_*`, and `TRITON_DEV_TOKEN` and `TRITON_MCP_APP_WIDGET`. The
+variables, defaults and refusals are the ones in the table at the top of
+`crates/triton-embed/src/ingress.rs`; the binary flattens the same clap
+group. An explicit `EmbedOpts` option (`spec_a2a`, `dev_token`, `widget`)
+wins over the ingress; a Google verifier configured in both places is
+refused. `router_parts` also returns the task `Runner` and the identity
+provider, so a host can wire a Teams adapter into the same store with
+`triton_embed::chat::msteams` (feature `chat`; `MsTeamsConfig::from_env()`
+is the binary's `TRITON_MSTEAMS_*` group, with its NFR-S-4 refusals) and
+build the channel registry with `triton_embed::surfaces::registry`.
 
 The wire sections above map onto the trait as follows. An in-process
 upstream that keeps to this mapping is indistinguishable from a static

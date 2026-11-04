@@ -94,32 +94,10 @@ pub struct Settings {
     /// `unix://` path or a loopback IP literal (FR-I-9 / NFR-S-6) —
     /// the binary refuses to boot otherwise.
     pub signal_signald_addr: String,
-    /// OpenID discovery URL for Microsoft Bot Framework JWT
-    /// verification. Production stays at the canonical Microsoft
-    /// endpoint (the only `login.botframework.com` URL on the
-    /// NFR-S-4 egress allowlist for this adapter). Integration
-    /// tests override this with their `FakeBotFramework` fixture.
-    pub msteams_openid_url: String,
-    /// Optional override for the Microsoft OAuth2 token endpoint.
-    /// `None` ⇒ use the hardcoded canonical endpoint inside
-    /// `token_client.rs`. Tests set this so the fake bot framework
-    /// can mint stub access tokens. PR 37: NFR-S-4 — the binary
-    /// refuses any value outside `local` env so a compromised env
-    /// var can't post `client_credentials` at an attacker host.
-    pub msteams_token_url: Option<String>,
-    /// PR 37: comma-separated extra hosts the MS Teams JWT verifier
-    /// will accept on the inbound `serviceUrl` claim beyond Microsoft's
-    /// documented suffixes (`.botframework.com`, `.trafficmanager.net`).
-    /// Empty by default. The binary refuses non-empty values outside
-    /// `local` env (NFR-S-4 egress allowlist for the outbound reply
-    /// Activity).
-    pub msteams_extra_service_url_hosts: Vec<String>,
     /// Hosts whose plain `http://` links are kept as links
     /// (`TRITON_ALLOW_HTTP_LINK_HOSTS`). Empty by default; the binary
     /// refuses non-empty values outside `local` env.
     pub allow_http_link_hosts: Vec<String>,
-    /// #635 P4: async reply courier for msteams.
-    pub msteams_async: bool,
     pub courier_timeout: Duration,
     /// Comma-separated allow-list of origins that may make
     /// cross-origin requests to the HTTP trio. Empty by default —
@@ -225,6 +203,9 @@ pub struct Settings {
     /// Inbound identity providers, spec A2A and long-running task settings;
     /// see `ingress.rs`.
     pub ingress: triton_embed::ingress::IngressConfig,
+    /// The Teams adapter's `TRITON_MSTEAMS_*` settings; see
+    /// `triton_embed::chat`.
+    pub msteams: triton_embed::chat::MsTeamsConfig,
 }
 
 impl Settings {
@@ -481,47 +462,12 @@ struct Cli {
     #[arg(long, env = "TRITON_SIGNAL_SIGNALD_ADDR", default_value = "")]
     signal_signald_addr: String,
 
-    /// OpenID discovery URL for the Microsoft Teams adapter. Default
-    /// is the canonical Bot Framework endpoint. Outside `local` env
-    /// the binary refuses any override (NFR-S-4 egress allowlist).
-    #[arg(
-        long,
-        env = "TRITON_MSTEAMS_OPENID_URL",
-        default_value = "https://login.botframework.com/v1/.well-known/openidconfiguration"
-    )]
-    msteams_openid_url: String,
-
-    /// Optional override for Microsoft's OAuth2 token endpoint.
-    /// `None` (the default) ⇒ the canonical hardcoded URL inside
-    /// `token_client.rs`. Tests set this so the in-repo
-    /// `FakeBotFramework` can mint stub access tokens.
-    #[arg(long, env = "TRITON_MSTEAMS_TOKEN_URL")]
-    msteams_token_url: Option<String>,
-
-    /// PR 37: comma-separated `serviceUrl` host extras the MS Teams
-    /// JWT verifier accepts. Empty by default; the binary refuses
-    /// non-empty values outside `local` env.
-    #[arg(
-        long,
-        env = "TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS",
-        default_value = ""
-    )]
-    msteams_extra_service_url_hosts: String,
-
     /// Comma-separated hosts whose plain `http://` links Triton keeps
     /// as links (deep links, sources, embeds), e.g. `127.0.0.1,localhost`
     /// for local end-to-end tests. Empty by default (only `https://`); the
     /// binary refuses a non-empty value outside `local` env.
     #[arg(long, env = "TRITON_ALLOW_HTTP_LINK_HOSTS", default_value = "")]
     allow_http_link_hosts: String,
-
-    /// #635 P4: async reply courier for msteams — ack the webhook 200
-    /// immediately and deliver out-of-band (streaming in 1:1 chats).
-    /// Bot Framework abandons the inbound connection at ~15s, which on
-    /// the inline path cancels the dispatch mid-turn. Accepts
-    /// `true`/`1` (case-insensitive) as on, like the googlechat twin.
-    #[arg(long, env = "TRITON_MSTEAMS_ASYNC", default_value = "false")]
-    msteams_async: String,
 
     /// Comma-separated CORS allow-list (e.g.
     /// `https://explorer-nonprod.tailnet.ts.net`). Default empty:
@@ -681,6 +627,9 @@ struct Cli {
 
     #[command(flatten)]
     ingress: triton_embed::ingress::IngressConfig,
+
+    #[command(flatten)]
+    msteams: triton_embed::chat::MsTeamsConfig,
 }
 
 impl From<Cli> for Settings {
@@ -718,6 +667,7 @@ impl From<Cli> for Settings {
             optional_adapters: parse_optional_adapters(&c.optional_adapters),
             denied_principals: c.denied_principals,
             ingress: c.ingress,
+            msteams: c.msteams,
             upstream_timeout: Duration::from_millis(c.upstream_timeout_ms),
             stream_idle_timeout: Duration::from_millis(c.stream_idle_timeout_ms),
             stream_max_duration: Duration::from_millis(c.stream_max_duration_ms),
@@ -740,24 +690,12 @@ impl From<Cli> for Settings {
             ),
             google_chat_api_base: c.google_chat_api_base,
             signal_signald_addr: c.signal_signald_addr,
-            msteams_openid_url: c.msteams_openid_url,
-            msteams_token_url: c.msteams_token_url,
-            msteams_extra_service_url_hosts: c
-                .msteams_extra_service_url_hosts
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
             allow_http_link_hosts: c
                 .allow_http_link_hosts
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
-            msteams_async: matches!(
-                c.msteams_async.trim().to_ascii_lowercase().as_str(),
-                "true" | "1"
-            ),
             courier_timeout: Duration::from_millis(c.courier_timeout_ms),
             cors_allowed_origins: triton_adapters_http::cors::parse_origins(
                 &c.cors_allowed_origins,
