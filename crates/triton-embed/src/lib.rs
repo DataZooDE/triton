@@ -225,8 +225,8 @@ impl EmbedOpts {
 
     /// The A2UI action key (see the field). It wins over
     /// `TRITON_A2UI_ACTION_KEY` in the environment. The key is installed
-    /// once per process by the first router built; a malformed value
-    /// refuses to serve, as the environment variable does.
+    /// once per process by the first router built; a malformed value is
+    /// [`router_parts`]' error (the environment variable's too).
     pub fn action_key(mut self, key: impl Into<String>) -> Self {
         self.action_key = Some(key.into());
         self
@@ -483,17 +483,26 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
         .action_key
         .clone()
         .or_else(|| std::env::var("TRITON_A2UI_ACTION_KEY").ok());
-    static ACTION_KEY: std::sync::Once = std::sync::Once::new();
-    ACTION_KEY.call_once(|| {
-        match triton_core::a2ui::ge::configure_action_key(action_key.as_deref()) {
-            Ok(triton_core::a2ui::ge::ActionKeyState::Configured) => {}
-            Ok(triton_core::a2ui::ge::ActionKeyState::Ephemeral) => eprintln!(
-                "triton-embed: TRITON_A2UI_ACTION_KEY unset: A2UI card actions resolve on \
-                 this single replica only"
-            ),
-            Err(e) => panic!("TRITON_A2UI_ACTION_KEY is invalid ({e}); refusing to serve"),
-        }
-    });
+    // The first router's outcome stands for the process (the key is
+    // installed once); a malformed key is this function's error, so a host
+    // reports it like any other refused setting.
+    static ACTION_KEY: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+    ACTION_KEY
+        .get_or_init(
+            || match triton_core::a2ui::ge::configure_action_key(action_key.as_deref()) {
+                Ok(triton_core::a2ui::ge::ActionKeyState::Configured) => Ok(()),
+                Ok(triton_core::a2ui::ge::ActionKeyState::Ephemeral) => {
+                    eprintln!(
+                        "triton-embed: TRITON_A2UI_ACTION_KEY unset: A2UI card actions resolve on \
+                         this single replica only"
+                    );
+                    Ok(())
+                }
+                Err(e) => Err(format!("the A2UI action key is invalid ({e})")),
+            },
+        )
+        .clone()
+        .map_err(anyhow::Error::msg)?;
     // #306 crew F7: `router` is a public entry point — an embedding host
     // that merges its own routes (dz-agent-template does) calls this and
     // never `serve_dispatcher`, so announcing only there left exactly the

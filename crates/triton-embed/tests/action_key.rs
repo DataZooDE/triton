@@ -87,3 +87,26 @@ fn no_key_still_warns() {
     assert!(ok, "child failed:\n{logs}");
     assert!(logs.contains("TRITON_A2UI_ACTION_KEY unset"), "{logs}");
 }
+
+/// Child: a malformed supplied key is `router_parts`' error, not a panic,
+/// so a host reports it like any other refused setting.
+#[test]
+#[ignore = "child process of malformed_key_is_an_error"]
+fn child_malformed_key() {
+    let dispatcher = Arc::new(Dispatcher::new(
+        Arc::new(ToolRegistry::new()),
+        "test",
+        DispatchControls::unenforced(),
+    ));
+    let err = match triton_embed::router_parts(dispatcher, &EmbedOpts::dev().action_key("short")) {
+        Ok(_) => panic!("a malformed action key was accepted"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("A2UI action key"), "{err}");
+}
+
+#[test]
+fn malformed_key_is_an_error() {
+    let (ok, logs) = run_child("child_malformed_key");
+    assert!(ok, "child failed:\n{logs}");
+}
