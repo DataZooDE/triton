@@ -1958,6 +1958,43 @@ async fn doc_open_parts(
     parts
 }
 
+/// The `report` components' public images as Markdown, one paragraph each.
+fn chart_images(components: &[Value]) -> String {
+    components
+        .iter()
+        .filter(|c| c.get("kind").and_then(Value::as_str) == Some("report"))
+        .filter_map(|c| c.get("image_url").and_then(Value::as_str))
+        .map(|u| format!("![chart]({u})"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// What follows the card text on a host that renders the answer card: the
+/// parts of [`reply_text`] the card does not show — `narration` prose, the
+/// chart images and the sources. The answer's own text rendering (a
+/// top-level `text`, `text` components) is left out: it is the rows again.
+pub(crate) fn card_companions(result: &Value) -> Option<String> {
+    let components = result.get("surface")?.get("components")?.as_array()?;
+    let narration = components
+        .iter()
+        .filter(|c| c.get("kind").and_then(Value::as_str) == Some("narration"))
+        .filter_map(|c| c.get("text").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let parts: Vec<String> = [
+        Some(narration),
+        Some(chart_images(components)),
+        sources_markdown(result),
+    ]
+    .into_iter()
+    .flatten()
+    .filter(|p| !p.is_empty())
+    .collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
 pub(crate) fn sources_markdown(result: &Value) -> Option<String> {
     let components = result.get("surface")?.get("components")?.as_array()?;
     let links: Vec<String> = components
@@ -2027,13 +2064,7 @@ pub fn reply_text(result: &Value) -> String {
             // producer stamped a public `image_url` on the report (the
             // embedded agent's signed /report/img route), render it as a
             // Markdown image — Copilot Studio and Gemini display it inline.
-            let images = components
-                .iter()
-                .filter(|c| c.get("kind").and_then(Value::as_str) == Some("report"))
-                .filter_map(|c| c.get("image_url").and_then(Value::as_str))
-                .map(|u| format!("![chart]({u})"))
-                .collect::<Vec<_>>()
-                .join("\n\n");
+            let images = chart_images(components);
             if !images.is_empty() {
                 if !joined.is_empty() {
                     joined.push_str("\n\n");

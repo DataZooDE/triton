@@ -206,3 +206,74 @@ async fn multiple_origins_comma_separated_all_pass_preflight() {
         assert_eq!(echoed, origin, "origin {origin} must be allowed");
     }
 }
+
+/// A browser MCP client that renders the answer card gets an
+/// `Mcp-Session-Id` on `initialize`: it must be able to read it (exposed),
+/// and send it back with the protocol headers (allowed on the preflight).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_browser_mcp_client_can_read_and_send_its_session_id() {
+    let env = HashMap::from([(
+        "TRITON_CORS_ALLOWED_ORIGINS".to_string(),
+        ALLOWED.to_string(),
+    )]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let url = proc.mcp_url("/");
+
+    for method in ["POST"] {
+        let resp = reqwest::Client::new()
+            .request(Method::OPTIONS, &url)
+            .header(ORIGIN, ALLOWED)
+            .header(ACCESS_CONTROL_REQUEST_METHOD, method)
+            .header(
+                ACCESS_CONTROL_REQUEST_HEADERS,
+                "authorization,content-type,mcp-session-id,mcp-protocol-version,mcp-method",
+            )
+            .send()
+            .await
+            .expect("OPTIONS /mcp");
+        assert!(resp.status().is_success(), "{method}: {}", resp.status());
+        let header = |name| {
+            resp.headers()
+                .get(name)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_lowercase()
+        };
+        assert!(
+            header(ACCESS_CONTROL_ALLOW_METHODS).contains(&method.to_lowercase()),
+            "{method}: {}",
+            header(ACCESS_CONTROL_ALLOW_METHODS)
+        );
+        let allowed = header(ACCESS_CONTROL_ALLOW_HEADERS);
+        for h in ["mcp-session-id", "mcp-protocol-version", "mcp-method"] {
+            assert!(allowed.contains(h), "{method}: {h} not in `{allowed}`");
+        }
+    }
+
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .header(ORIGIN, ALLOWED)
+        .bearer_auth("dev-token")
+        .json(
+            &serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": { "protocolVersion": "2025-06-18",
+                "capabilities": { "extensions": { "io.modelcontextprotocol/ui":
+                    { "mimeTypes": ["text/html;profile=mcp-app"] } } },
+                "clientInfo": { "name": "browser", "version": "1" } } }),
+        )
+        .send()
+        .await
+        .expect("initialize");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    assert!(
+        resp.headers().get("mcp-session-id").is_some(),
+        "a card-rendering client gets a session id"
+    );
+    let exposed = resp
+        .headers()
+        .get(reqwest::header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    assert!(exposed.contains("mcp-session-id"), "exposed: `{exposed}`");
+}

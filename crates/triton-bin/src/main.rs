@@ -621,6 +621,7 @@ async fn main() -> std::io::Result<()> {
         // The answer-card MCP Apps widget; `TRITON_MCP_APP_WIDGET=off`
         // switches it off.
         widget: ingress::widget_from_env(),
+        card_note: ingress::card_note(Some(&settings.ingress)),
     };
 
     // v0.2 chat-channel adapters. Each manifest-declared adapter

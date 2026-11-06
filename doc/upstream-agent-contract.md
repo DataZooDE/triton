@@ -503,7 +503,8 @@ REST/MCP/A2A routes, and with `EmbedOpts::ingress(IngressConfig::from_env()?)`
 the same ingress — Entra multi-tenant with required scopes, opaque Google
 access tokens, `/mcp/<slug>` with its RFC 9728 metadata, spec A2A from
 `TRITON_A2A_*`, the task store and timing from `TRITON_TASK_*` /
-`TRITON_MCP_*`, and `TRITON_DEV_TOKEN` and `TRITON_MCP_APP_WIDGET`. The
+`TRITON_MCP_*` (including `TRITON_MCP_CARD_NOTE`), and `TRITON_DEV_TOKEN`
+and `TRITON_MCP_APP_WIDGET`. The
 variables, defaults and refusals are the ones in the table at the top of
 `crates/triton-embed/src/ingress.rs`; the binary flattens the same clap
 group. An explicit `EmbedOpts` option (`spec_a2a`, `dev_token`, `widget`)

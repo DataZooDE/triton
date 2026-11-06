@@ -50,12 +50,19 @@ pub fn build_layer(origins: &[String]) -> Option<CorsLayer> {
     Some(
         CorsLayer::new()
             .allow_origin(AllowOrigin::list(parsed))
+            // The MCP headers: a browser MCP client sends the protocol
+            // headers, and reads and returns the `Mcp-Session-Id` a
+            // card-rendering client gets on `initialize`.
             .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
             .allow_headers([
                 HeaderName::from_static("authorization"),
                 HeaderName::from_static("content-type"),
                 HeaderName::from_static("accept"),
+                HeaderName::from_static("mcp-session-id"),
+                HeaderName::from_static("mcp-protocol-version"),
+                HeaderName::from_static("mcp-method"),
             ])
+            .expose_headers([HeaderName::from_static("mcp-session-id")])
             .allow_credentials(true)
             .max_age(Duration::from_secs(600)),
     )

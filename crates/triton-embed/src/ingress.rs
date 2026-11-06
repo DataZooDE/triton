@@ -27,6 +27,7 @@
 //! | `TRITON_TASK_MAX_SECS` | a task still running after this fails as expired (3600). |
 //! | `TRITON_MCP_ASYNC_WAIT_SECS` | MCP wait for an async upstream before "filed" (20). |
 //! | `TRITON_MCP_CHECK_AFTER_SECS` | default `check_after_seconds` of a filed result (30). |
+//! | `TRITON_MCP_CARD_NOTE` | on a host that renders the answer card (MCP Apps declared), the note to the model after the one-line card text; unset = "The card shows these rows to the user; …"; empty = no note. |
 //! | `TRITON_MCP_TENANTS` | `slug=data-tenant:tid,…` — one MCP endpoint per customer at `/mcp/<slug>`, an RFC 9728 protected resource whose authorization server is that Entra tenant. Needs Entra and the origin. |
 //! | `TRITON_MCP_PUBLIC_ORIGIN` | `https://host[:port]` as clients reach Triton; the metadata `resource` is `<origin>/mcp/<slug>`. |
 //! | `TRITON_ENTRA_SCOPES` | the Entra API's delegated scope(s), space- or comma-separated; default `<Entra API>/access_as_user`. Every Entra token must carry one in `scp` (by its last path segment) on every face, else 403 `insufficient_scope`; MCP metadata and challenges advertise them. |
@@ -105,6 +106,10 @@ pub struct IngressConfig {
     pub mcp_async_wait_secs: u64,
     #[arg(long, env = "TRITON_MCP_CHECK_AFTER_SECS", default_value_t = 30)]
     pub mcp_check_after_secs: u64,
+    /// The note to the model after the card text on a host that renders
+    /// the answer card. Unset = a neutral note; empty = no note.
+    #[arg(long, env = "TRITON_MCP_CARD_NOTE")]
+    pub mcp_card_note: Option<String>,
     /// Per-customer MCP endpoints: `slug=data-tenant:entra-tid`, comma-separated.
     #[arg(long, env = "TRITON_MCP_TENANTS", default_value = "")]
     pub mcp_tenants: String,
@@ -188,6 +193,14 @@ pub fn task_settings(args: &IngressConfig) -> triton_adapters_http::tasks::TaskS
         mcp_wait: Duration::from_secs(args.mcp_async_wait_secs),
         mcp_check_after_secs: args.mcp_check_after_secs.max(1),
     }
+}
+
+/// The note after the card text (`TRITON_MCP_CARD_NOTE`), default
+/// [`triton_core::a2ui::mcp_app::CARD_NOTE`].
+pub fn card_note(args: Option<&IngressConfig>) -> Arc<str> {
+    args.and_then(|a| a.mcp_card_note.as_deref())
+        .unwrap_or(triton_core::a2ui::mcp_app::CARD_NOTE)
+        .into()
 }
 
 /// The task store: SQLite at `TRITON_TASK_DB`, else process memory.

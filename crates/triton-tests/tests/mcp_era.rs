@@ -254,8 +254,9 @@ async fn the_handshake_still_works_up_to_2025_11_25() {
 
 /// Streamable HTTP: the endpoint takes POST only. Triton opens no
 /// standalone SSE stream, so GET (2025-03-26..2025-11-25: "return
-/// `text/event-stream` or 405") and DELETE (session termination; Triton
-/// mints no sessions) answer `405 Method Not Allowed` with `Allow: POST`
+/// `text/event-stream` or 405") and DELETE (session termination; Triton's
+/// only sessions, those of card-rendering clients, hold no state, and a
+/// server MAY refuse termination with 405) answer `405 Method Not Allowed` with `Allow: POST`
 /// (RFC 9110 §15.5.6), with or without a token.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn get_and_delete_on_the_endpoint_are_405_with_allow_post() {

@@ -22,20 +22,20 @@ use triton_core::a2ui::mcp_app;
 use triton_tests::upstream_fixture::FakeAgent;
 use triton_tests::{TestIssuer, TritonProcess};
 
-fn dir(sub: &str) -> PathBuf {
+pub(crate) fn dir(sub: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(sub)
 }
 
-fn read_json(p: &PathBuf) -> Value {
+pub(crate) fn read_json(p: &PathBuf) -> Value {
     serde_json::from_str(&std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{p:?}: {e}")))
         .unwrap_or_else(|e| panic!("{p:?}: {e}"))
 }
 
-fn fixture(name: &str) -> Value {
+pub(crate) fn fixture(name: &str) -> Value {
     read_json(&dir(&format!("fixtures/conversation/surfaces/{name}.json")))
 }
 
-fn fixture_names() -> Vec<String> {
+pub(crate) fn fixture_names() -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(dir("fixtures/conversation/surfaces"))
         .expect("fixture dir")
         .filter_map(|e| {
@@ -47,11 +47,11 @@ fn fixture_names() -> Vec<String> {
     v
 }
 
-fn golden(name: &str) -> PathBuf {
+pub(crate) fn golden(name: &str) -> PathBuf {
     dir(&format!("fixtures/conversation/golden/{name}.mcp.json"))
 }
 
-fn pretty(v: &Value) -> String {
+pub(crate) fn pretty(v: &Value) -> String {
     format!("{}\n", serde_json::to_string_pretty(v).unwrap())
 }
 
@@ -198,6 +198,19 @@ pub(crate) async fn rig() -> Rig {
     let prose = FakeAgent::start_returning(json!({ "text": "just prose" })).await;
     upstreams.push(format!("prose={}", prose.host_port()));
     agents.push(prose);
+    // A card with rows beside prose the card does not show: a narration, a
+    // chart and sources (see `mcp_card_text`).
+    let narrated = FakeAgent::start_returning(json!({ "surface": { "components": [
+        { "kind": "header", "title": "3 Things" },
+        { "kind": "text", "value": "3 Things:\n- A\n- B\n- C" },
+        { "kind": "narration", "text": "Results exclude the archived system." },
+        { "kind": "list", "items": [ { "label": "A" }, { "label": "B" }, { "label": "C" } ] },
+        { "kind": "report", "image_url": "https://img.example/c.png" },
+        { "kind": "sources", "items": [ { "label": "Doc", "resource": "https://docs.example/d" } ] }
+    ] } }))
+    .await;
+    upstreams.push(format!("narrated={}", narrated.host_port()));
+    agents.push(narrated);
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_ENTRA_AUDIENCE".to_string(), ENTRA_AUD.to_string()),

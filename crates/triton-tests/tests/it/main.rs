@@ -114,6 +114,8 @@ mod mcp;
 mod mcp_app_widget;
 #[path = "../mcp_apps_acceptance.rs"]
 mod mcp_apps_acceptance;
+#[path = "../mcp_card_text.rs"]
+mod mcp_card_text;
 #[path = "../mcp_era.rs"]
 mod mcp_era;
 #[path = "../mcp_protected_resource.rs"]

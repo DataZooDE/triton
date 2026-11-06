@@ -25,7 +25,10 @@
 //! and it reaches the agent as a new turn of the host's conversation.
 //!
 //! Prose (`text`, `narration`) stays out of the widget: the host shows the
-//! tool's text content, and the card must not say it twice.
+//! tool's text content, and the card must not say it twice. The reverse
+//! holds too: on a host that renders the card, the text content does not
+//! repeat the card's rows — it is [`card_text`] (title and row names), then
+//! the narration, charts and sources the card does not show.
 
 use serde_json::{Value, json};
 
@@ -124,6 +127,105 @@ pub fn widget_data(result: &Value) -> Option<Value> {
     }
     cap_texts(&mut out);
     fit_bytes(out)
+}
+
+/// Names the card text lists at most; the card itself shows the rest.
+pub const SUMMARY_NAMES: usize = 20;
+/// Characters of one name in the card text.
+pub const SUMMARY_NAME_CHARS: usize = 60;
+
+/// What a card-rendering host's model is told after the card text, unless
+/// the deployment sets its own note (`TRITON_MCP_CARD_NOTE`).
+pub const CARD_NOTE: &str =
+    "The card shows these rows to the user; add at most one sentence and do not repeat them.";
+
+/// The model-visible text for a host that renders the card, in place of the
+/// full text: one line with the card's title and the names of its rows (the
+/// first cell of a table row, a list item's label, a tree's top-level
+/// labels), then `note`. `None` when the card has no rows, or was cut by a
+/// budget (rows, tree nodes, body blocks): then the full text stays, because
+/// the card does not show everything the text says.
+pub fn card_text(data: &Value, note: &str) -> Option<String> {
+    let cut = |v: &Value| v.get("more").and_then(Value::as_u64).unwrap_or(0) > 0;
+    if cut(data) || data["body"].as_array()?.iter().any(cut) {
+        return None;
+    }
+    let mut names: Vec<String> = Vec::new();
+    let mut more = 0usize;
+    let mut block_title: Option<&str> = None;
+    for b in data["body"].as_array()? {
+        let found: Vec<&str> = match b["type"].as_str() {
+            Some("table") => b["rows"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|r| r["cells"].get(0).and_then(Value::as_str))
+                .collect(),
+            Some("list") => b["items"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|i| i["label"].as_str())
+                .collect(),
+            Some("tree") => b["nodes"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|n| n["label"].as_str())
+                .collect(),
+            _ => continue,
+        };
+        if found.is_empty() {
+            continue;
+        }
+        block_title = block_title.or(b["title"].as_str());
+        names.extend(found.into_iter().map(row_name).filter(|n| !n.is_empty()));
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let title = data["header"]["title"]
+        .as_str()
+        .or(block_title)
+        .map(|t| t.trim().trim_end_matches(['.', ':', ';']).trim_end())
+        .filter(|t| !t.is_empty());
+    let context = data["header"]["context"]
+        .as_str()
+        .map(str::trim)
+        .filter(|c| !c.is_empty());
+    more += names.len().saturating_sub(SUMMARY_NAMES);
+    names.truncate(SUMMARY_NAMES);
+    let mut line = String::new();
+    if let Some(t) = title {
+        line.push_str(t);
+        if let Some(c) = context {
+            line.push_str(&format!(" ({c})"));
+        }
+        line.push_str(": ");
+    }
+    line.push_str(&names.join(", "));
+    if more > 0 {
+        line.push_str(&format!(", \u{2026} and {more} more"));
+    }
+    line.push_str(" \u{2014} shown in the card.");
+    let note = note.trim();
+    if !note.is_empty() {
+        line.push('\n');
+        line.push_str(note);
+    }
+    Some(line)
+}
+
+/// A row's name in the card text: the first part of a label that packs
+/// its details (`name · detail`), at most [`SUMMARY_NAME_CHARS`].
+fn row_name(label: &str) -> String {
+    let name = label.split(" \u{b7} ").next().unwrap_or(label).trim();
+    if name.chars().count() <= SUMMARY_NAME_CHARS {
+        return name.to_string();
+    }
+    let mut cut: String = name.chars().take(SUMMARY_NAME_CHARS - 1).collect();
+    cut.push('\u{2026}');
+    cut
 }
 
 /// Every shown text at most [`MAX_TEXT`] characters, cut with an ellipsis.
@@ -726,5 +828,133 @@ mod tests {
         ] } }))
         .unwrap();
         assert_eq!(d["header"]["title"], "First", "{d}");
+    }
+
+    fn table_card(names: &[&str]) -> Value {
+        let rows: Vec<Value> = names
+            .iter()
+            .map(|n| json!({ "cells": { "name": n, "owner": "Ops" } }))
+            .collect();
+        widget_data(&json!({ "surface": { "components": [
+            { "kind": "header", "title": "6 Things are open.", "stamp": "as of 9:00" },
+            { "kind": "table", "columns": [ { "key": "name", "label": "Name" },
+                { "key": "owner", "label": "Owner" } ], "rows": rows }
+        ] } }))
+        .unwrap()
+    }
+
+    /// One line: the card's title and its row names, then the note.
+    #[test]
+    fn the_card_text_is_the_title_and_the_row_names() {
+        let d = table_card(&["Thing 3", "Thing 8", "Thing 13"]);
+        assert_eq!(
+            card_text(&d, CARD_NOTE).as_deref(),
+            Some(
+                "6 Things are open: Thing 3, Thing 8, Thing 13 \u{2014} shown in the card.\n\
+                 The card shows these rows to the user; add at most one sentence and do not repeat them."
+            )
+        );
+        // A deployment's own note replaces the neutral one; an empty one is none.
+        assert_eq!(
+            card_text(&d, "Details via the lookup tool.")
+                .unwrap()
+                .lines()
+                .last(),
+            Some("Details via the lookup tool.")
+        );
+        assert_eq!(card_text(&d, "  ").unwrap().lines().count(), 1);
+    }
+
+    /// Many rows: the first names and a count of the rest.
+    #[test]
+    fn a_long_card_text_names_the_first_rows_and_counts_the_rest() {
+        let names: Vec<String> = (1..=SUMMARY_NAMES + 5).map(|i| format!("T{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let line = card_text(&table_card(&refs), "").unwrap();
+        assert!(
+            line.contains(&format!("T{SUMMARY_NAMES}, \u{2026} and 5 more")),
+            "{line}"
+        );
+        assert!(!line.contains(&format!("T{}", SUMMARY_NAMES + 1)), "{line}");
+    }
+
+    /// Lists and trees name their rows too; a card without rows has no card
+    /// text (the full text stays).
+    #[test]
+    fn lists_and_trees_have_card_text_and_other_cards_none() {
+        let list = widget_data(&json!({ "surface": { "components": [
+            { "kind": "list", "title": "Open drafts", "items": [ { "label": "A" }, { "label": "B" } ] }
+        ] } }))
+        .unwrap();
+        assert_eq!(
+            card_text(&list, "").as_deref(),
+            Some("Open drafts: A, B \u{2014} shown in the card.")
+        );
+        let tree = widget_data(&json!({ "surface": { "components": [
+            { "kind": "header", "title": "Map" },
+            { "kind": "tree", "nodes": [ { "label": "Sales", "children": [ { "label": "Leads" } ] },
+                { "label": "Finance" } ] }
+        ] } }))
+        .unwrap();
+        assert_eq!(
+            card_text(&tree, "").as_deref(),
+            Some("Map: Sales, Finance \u{2014} shown in the card.")
+        );
+        let facts = widget_data(&json!({ "surface": { "components": [
+            { "kind": "header", "title": "Agent 3" },
+            { "kind": "key_value", "pairs": [ { "label": "Owner", "value": "Ops" } ] }
+        ] } }))
+        .unwrap();
+        assert_eq!(card_text(&facts, CARD_NOTE), None);
+    }
+
+    /// A row label that packs its details (`name · detail · detail`) is
+    /// named by its first part, and a long name is cut: the line names
+    /// rows, it does not repeat them.
+    #[test]
+    fn a_row_is_named_by_its_first_part() {
+        let long = "L".repeat(SUMMARY_NAME_CHARS + 10);
+        let list = widget_data(&json!({ "surface": { "components": [
+            { "kind": "list", "items": [ { "label": "Thing 3 \u{b7} Ops \u{b7} Head" },
+                { "label": long } ] }
+        ] } }))
+        .unwrap();
+        let line = card_text(&list, "").unwrap();
+        let cut: String = "L".repeat(SUMMARY_NAME_CHARS - 1);
+        assert_eq!(
+            line,
+            format!("Thing 3, {cut}\u{2026} \u{2014} shown in the card.")
+        );
+    }
+
+    /// A block cut to its row or node budget does not show every row: no
+    /// card text, at the boundary exactly.
+    #[test]
+    fn a_block_cut_to_its_budget_has_no_card_text() {
+        let names: Vec<String> = (1..=MAX_ROWS + 1).map(|i| format!("T{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(card_text(&table_card(&refs), ""), None);
+        assert!(card_text(&table_card(&refs[..MAX_ROWS]), "").is_some());
+        let items: Vec<Value> = names.iter().map(|n| json!({ "label": n })).collect();
+        let list = widget_data(&json!({ "surface": { "components": [
+            { "kind": "list", "items": items } ] } }))
+        .unwrap();
+        assert_eq!(card_text(&list, ""), None);
+        let nodes: Vec<Value> = (0..=MAX_TREE_NODES)
+            .map(|i| json!({ "label": format!("N{i}") }))
+            .collect();
+        let tree = widget_data(&json!({ "surface": { "components": [
+            { "kind": "tree", "nodes": nodes } ] } }))
+        .unwrap();
+        assert_eq!(card_text(&tree, ""), None);
+    }
+
+    /// A card that lost body blocks to the size budget does not show all the
+    /// text says: no card text.
+    #[test]
+    fn a_cut_card_has_no_card_text() {
+        let mut d = table_card(&["A"]);
+        d["more"] = json!(2);
+        assert_eq!(card_text(&d, CARD_NOTE), None);
     }
 }
