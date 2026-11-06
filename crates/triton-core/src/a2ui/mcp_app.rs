@@ -128,6 +128,8 @@ pub fn widget_data(result: &Value) -> Option<Value> {
 
 /// Names the card text lists at most; the card itself shows the rest.
 pub const SUMMARY_NAMES: usize = 20;
+/// Characters of one name in the card text.
+pub const SUMMARY_NAME_CHARS: usize = 60;
 
 /// What a card-rendering host's model is told after the card text, unless
 /// the deployment sets its own note (`TRITON_MCP_CARD_NOTE`).
@@ -144,7 +146,7 @@ pub fn card_text(data: &Value, note: &str) -> Option<String> {
     if data.get("more").is_some() {
         return None;
     }
-    let mut names: Vec<&str> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
     let mut more = 0u64;
     let mut block_title: Option<&str> = None;
     for b in data["body"].as_array()? {
@@ -174,7 +176,7 @@ pub fn card_text(data: &Value, note: &str) -> Option<String> {
         }
         block_title = block_title.or(b["title"].as_str());
         more += b["more"].as_u64().unwrap_or(0);
-        names.extend(found.into_iter().map(str::trim).filter(|n| !n.is_empty()));
+        names.extend(found.into_iter().map(row_name).filter(|n| !n.is_empty()));
     }
     if names.is_empty() {
         return None;
@@ -209,6 +211,18 @@ pub fn card_text(data: &Value, note: &str) -> Option<String> {
         line.push_str(note);
     }
     Some(line)
+}
+
+/// A row's name in the card text: the first part of a label that packs
+/// its details (`name · detail`), at most [`SUMMARY_NAME_CHARS`].
+fn row_name(label: &str) -> String {
+    let name = label.split(" \u{b7} ").next().unwrap_or(label).trim();
+    if name.chars().count() <= SUMMARY_NAME_CHARS {
+        return name.to_string();
+    }
+    let mut cut: String = name.chars().take(SUMMARY_NAME_CHARS - 1).collect();
+    cut.push('\u{2026}');
+    cut
 }
 
 /// Every shown text at most [`MAX_TEXT`] characters, cut with an ellipsis.
@@ -889,6 +903,25 @@ mod tests {
         ] } }))
         .unwrap();
         assert_eq!(card_text(&facts, CARD_NOTE), None);
+    }
+
+    /// A row label that packs its details (`name · detail · detail`) is
+    /// named by its first part, and a long name is cut: the line names
+    /// rows, it does not repeat them.
+    #[test]
+    fn a_row_is_named_by_its_first_part() {
+        let long = "L".repeat(SUMMARY_NAME_CHARS + 10);
+        let list = widget_data(&json!({ "surface": { "components": [
+            { "kind": "list", "items": [ { "label": "Thing 3 \u{b7} Ops \u{b7} Head" },
+                { "label": long } ] }
+        ] } }))
+        .unwrap();
+        let line = card_text(&list, "").unwrap();
+        let cut: String = "L".repeat(SUMMARY_NAME_CHARS - 1);
+        assert_eq!(
+            line,
+            format!("Thing 3, {cut}\u{2026} \u{2014} shown in the card.")
+        );
     }
 
     /// A card that lost body blocks to the size budget does not show all the

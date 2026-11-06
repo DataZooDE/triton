@@ -93,7 +93,11 @@ const CARD_SESSION_PREFIX: &str = "triton-card-";
 /// other client stays sessionless, as before. The id itself says "renders
 /// the card" (a fixed prefix and a random UUID), so nothing is stored: it
 /// survives a restart, holds across replicas and cannot grow. A client can
-/// forge one, but all it buys is its own shorter text.
+/// forge one, but all it buys is its own shorter text. An id Triton does
+/// not recognise is not refused (no `404`): a sessionless answer is always
+/// valid, so a restart never strands a client. `DELETE` stays `405`, which
+/// Streamable HTTP allows for a server that does not let clients end a
+/// session; there is nothing to end.
 #[derive(Clone, Default)]
 pub struct McpSessions;
 
@@ -341,18 +345,19 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
     // says so itself (capabilities are per request, never inferred from an
     // earlier one); a handshake-era client said so in `initialize`, and its
     // session id carries it.
-    let card_host = if modern {
-        params
-            .get("_meta")
-            .and_then(|m| m.get(META_CLIENT_CAPABILITIES))
-            .is_some_and(renders_card)
-    } else {
-        parts
-            .headers
-            .get(SESSION_HEADER)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|id| state.sessions.renders_card(id.trim()))
-    };
+    let card_host = state.widget
+        && if modern {
+            params
+                .get("_meta")
+                .and_then(|m| m.get(META_CLIENT_CAPABILITIES))
+                .is_some_and(renders_card)
+        } else {
+            parts
+                .headers
+                .get(SESSION_HEADER)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|id| state.sessions.renders_card(id.trim()))
+        };
     let response = match method.as_str() {
         "server/discover" => maybe_respond(id_present, id, discover_response),
         "initialize" => maybe_respond(id_present, id, |id| {
@@ -594,7 +599,8 @@ fn initialize_response(id: Value, params: &Value, state: &McpState) -> Response 
     // A client that renders the card gets a session id that says so; the
     // log line tells which hosts declared MCP Apps at all.
     let capabilities = params.get("capabilities").unwrap_or(&Value::Null);
-    let card = state.widget && renders_card(capabilities);
+    let declares_ui = renders_card(capabilities);
+    let card = state.widget && declares_ui;
     let extensions: Vec<&str> = capabilities
         .get("extensions")
         .and_then(Value::as_object)
@@ -607,7 +613,8 @@ fn initialize_response(id: Value, params: &Value, state: &McpState) -> Response 
     tracing::info!(
         client,
         extensions = ?extensions,
-        card,
+        declares_ui,
+        widget = state.widget,
         "mcp initialize"
     );
     let mut response = rpc_ok(
