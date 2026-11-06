@@ -618,6 +618,7 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
             .widget
             .or_else(|| opts.ingress.as_ref().and_then(|c| c.widget))
             .unwrap_or(true),
+        card_note: ingress::card_note(opts.ingress.as_ref()),
     };
     // One MCP endpoint per customer (`/mcp/<slug>` + RFC 9728 metadata),
     // at absolute paths; empty without `TRITON_MCP_TENANTS`.

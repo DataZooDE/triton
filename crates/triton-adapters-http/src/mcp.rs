@@ -2,10 +2,9 @@
 //!
 //! Per realization §2: stay with serde_json + axum; don't pull in
 //! `rmcp`/`tonic` for a thin layer. Plain JSON responses (no SSE).
-//! `Arc<Mutex<HashSet<String>>>` for session tracking is overkill
-//! for our stateless surface — we initialise to an empty set and
-//! never branch on it, but the structure is here for the day MCP
-//! grows a session-bound capability.
+//! The one session-bound fact is whether the client renders the answer
+//! card ([`McpSessions`]); it rides in the session id, so Triton keeps no
+//! per-session state.
 //!
 //! Methods implemented (FR-A-6):
 //!   * `server/discover` — MCP 2026-07-28 stateless discovery.
@@ -24,8 +23,7 @@
 //! owns audit emission; the adapter calls `record_rejection` on
 //! boundary failures so the FR-AU-1 guarantee holds.
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -77,20 +75,55 @@ const CODE_UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
 /// is upgraded.
 const DISCOVER_TTL_MS: u64 = 300_000;
 
-/// Session ID registry. Stays in process memory (G-8); restart-clean
-/// by construction. PR 7 doesn't yet use the set — it's wired so a
-/// future PR can plug in MCP's session-bound capabilities without
-/// touching the public adapter API.
+/// The MCP Apps extension a client declares in its capabilities
+/// (ext-apps `EXTENSION_ID`).
+const UI_EXTENSION: &str = "io.modelcontextprotocol/ui";
+
+/// `_meta` key carrying a 2026-07-28 request's client capabilities.
+const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+
+/// Streamable HTTP session header.
+const SESSION_HEADER: &str = "mcp-session-id";
+
+/// Prefix of a session id issued to a client that renders the answer card.
+const CARD_SESSION_PREFIX: &str = "triton-card-";
+
+/// Handshake-era sessions. Only a client that declares the MCP Apps
+/// extension in `initialize` gets a session id (`Mcp-Session-Id`); every
+/// other client stays sessionless, as before. The id itself says "renders
+/// the card" (a fixed prefix and a random UUID), so nothing is stored: it
+/// survives a restart, holds across replicas and cannot grow. A client can
+/// forge one, but all it buys is its own shorter text.
 #[derive(Clone, Default)]
-pub struct McpSessions {
-    #[allow(dead_code)]
-    ids: Arc<Mutex<HashSet<String>>>,
-}
+pub struct McpSessions;
 
 impl McpSessions {
     pub fn new() -> Self {
-        Self::default()
+        Self
     }
+
+    /// A new session id for a client that renders the answer card.
+    pub fn open_card_session(&self) -> String {
+        format!("{CARD_SESSION_PREFIX}{}", uuid::Uuid::new_v4().simple())
+    }
+
+    /// Whether `id` is a session id [`Self::open_card_session`] issued.
+    pub fn renders_card(&self, id: &str) -> bool {
+        id.strip_prefix(CARD_SESSION_PREFIX)
+            .is_some_and(|u| u.len() == 32 && u.bytes().all(|b| b.is_ascii_hexdigit()))
+    }
+}
+
+/// Whether client capabilities declare the MCP Apps extension with the
+/// card's mime type (the check ext-apps recommends:
+/// `getUiCapability(caps)?.mimeTypes?.includes(RESOURCE_MIME_TYPE)`).
+fn renders_card(capabilities: &Value) -> bool {
+    capabilities
+        .pointer("/extensions")
+        .and_then(|e| e.get(UI_EXTENSION))
+        .and_then(|ui| ui.get("mimeTypes"))
+        .and_then(Value::as_array)
+        .is_some_and(|m| m.iter().any(|t| t.as_str() == Some(mcp_app::MIME_TYPE)))
 }
 
 #[derive(Clone)]
@@ -110,6 +143,10 @@ pub struct McpState {
     /// without MCP Apps ignores all three; `TRITON_MCP_APP_WIDGET=off`
     /// switches it off for a host that renders it badly.
     pub widget: bool,
+    /// The note to the model after the card text on a host that renders the
+    /// card ([`mcp_app::card_text`]); `TRITON_MCP_CARD_NOTE`, default
+    /// [`mcp_app::CARD_NOTE`].
+    pub card_note: Arc<str>,
 }
 
 pub fn router(state: McpState) -> Router {
@@ -300,6 +337,22 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
         let client = user_agent(&parts);
         tracing::info!(method = %method, uri, slug, client, "mcp request");
     }
+    // Whether this client renders the answer card: a 2026-07-28 request
+    // says so itself (capabilities are per request, never inferred from an
+    // earlier one); a handshake-era client said so in `initialize`, and its
+    // session id carries it.
+    let card_host = if modern {
+        params
+            .get("_meta")
+            .and_then(|m| m.get(META_CLIENT_CAPABILITIES))
+            .is_some_and(renders_card)
+    } else {
+        parts
+            .headers
+            .get(SESSION_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|id| state.sessions.renders_card(id.trim()))
+    };
     let response = match method.as_str() {
         "server/discover" => maybe_respond(id_present, id, discover_response),
         "initialize" => maybe_respond(id_present, id, |id| {
@@ -310,7 +363,7 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
             maybe_respond(id_present, id, |_| response)
         }
         "tools/call" => {
-            let response = tools_call(id.clone(), params, principal, &state).await;
+            let response = tools_call(id.clone(), params, principal, card_host, &state).await;
             maybe_respond(id_present, id, |_| response)
         }
         "resources/list" => maybe_respond(id_present, id, |id| resources_list(id, &state)),
@@ -515,7 +568,7 @@ fn record_rejection(state: &McpState, tool: &str, err: &TritonError) {
     );
 }
 
-fn initialize_response(id: Value, params: &Value, _state: &McpState) -> Response {
+fn initialize_response(id: Value, params: &Value, state: &McpState) -> Response {
     // FR-A-6: emit the version associated with the negotiated MCP
     // App. Reject unknown versions instead of silently echoing
     // back — Codex PR 7 finding.
@@ -538,7 +591,26 @@ fn initialize_response(id: Value, params: &Value, _state: &McpState) -> Response
             .unwrap_or("2025-06-18")
             .to_string(),
     };
-    rpc_ok(
+    // A client that renders the card gets a session id that says so; the
+    // log line tells which hosts declared MCP Apps at all.
+    let capabilities = params.get("capabilities").unwrap_or(&Value::Null);
+    let card = state.widget && renders_card(capabilities);
+    let extensions: Vec<&str> = capabilities
+        .get("extensions")
+        .and_then(Value::as_object)
+        .map(|e| e.keys().map(String::as_str).collect())
+        .unwrap_or_default();
+    let client = params
+        .pointer("/clientInfo/name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("");
+    tracing::info!(
+        client,
+        extensions = ?extensions,
+        card,
+        "mcp initialize"
+    );
+    let mut response = rpc_ok(
         id,
         json!({
             "protocolVersion": version,
@@ -551,7 +623,11 @@ fn initialize_response(id: Value, params: &Value, _state: &McpState) -> Response
                 "version": env!("CARGO_PKG_VERSION"),
             }
         }),
-    )
+    );
+    if card && let Ok(v) = axum::http::HeaderValue::from_str(&state.sessions.open_card_session()) {
+        response.headers_mut().insert(SESSION_HEADER, v);
+    }
+    response
 }
 
 async fn tools_list_response(id: Value, state: &McpState) -> Response {
@@ -593,6 +669,7 @@ async fn tools_call(
     id: Value,
     params: Value,
     principal: triton_core::Principal,
+    card_host: bool,
     state: &McpState,
 ) -> Response {
     let Some(tool_name) = params["name"].as_str() else {
@@ -682,6 +759,16 @@ async fn tools_call(
             let widget = (state.widget && ui_meta.is_none())
                 .then(|| mcp_app::widget_data(&d.result))
                 .flatten();
+            // A host that renders the card shows its rows to the user; with
+            // the rows in the text as well, its model repeats them as its
+            // own table. Such a host's model gets one line (the card's title
+            // and row names) and a note instead. Every other client, and a
+            // card without rows, keeps the full text.
+            let reply_text = widget
+                .as_ref()
+                .filter(|_| card_host)
+                .and_then(|w| mcp_app::card_text(w, &state.card_note))
+                .unwrap_or(reply_text);
             if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
                 return rpc_error(id, code_for(&e), &e.to_string());
             }

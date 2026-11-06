@@ -1618,6 +1618,27 @@ a trap the next developer should not have to step in.
   host stages it in the composer with a caution banner and waits for the
   user to confirm, so the widget's "Sent" status means "handed to the
   host", not "posted".
+- **A card-rendering host's model repeats the card's rows (observed
+  2026-11-06).** In Claude and ChatGPT the card showed a list's rows, and
+  the model then wrote the same rows again as its own table, because the
+  `tools/call` text carried the full list. For a client that declared the
+  MCP Apps extension (`io.modelcontextprotocol/ui` with
+  `text/html;profile=mcp-app` in `mimeTypes`), the text is now one line —
+  the card's title and its row names (`a2ui::mcp_app::card_text`) — and a
+  note to the model (`TRITON_MCP_CARD_NOTE`, default "The card shows these
+  rows to the user; add at most one sentence and do not repeat them."). A
+  card without rows, a card cut by the byte budget, and every client that
+  did not declare the extension (Copilot Studio, plain MCP clients) keep the
+  full text; REST, A2A and the chat channels are unchanged. Capabilities
+  arrive in `initialize` on the handshake era but each call is a separate
+  POST, so a declaring client gets an `Mcp-Session-Id` that carries the fact
+  (`triton-card-<uuid>`; nothing stored, restart- and replica-safe; a
+  forged id only shortens the forger's own text). A 2026-07-28 request
+  declares it per request in `_meta`, and the session header is ignored
+  there. `initialize` logs the declared extensions (`"mcp initialize"`), so
+  whether a host declares MCP Apps at all is visible. Open: ChatGPT also
+  shows `structuredContent` (the full envelope) to the model, which the
+  text change does not touch.
 
 ---
 

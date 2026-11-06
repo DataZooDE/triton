@@ -22,20 +22,20 @@ use triton_core::a2ui::mcp_app;
 use triton_tests::upstream_fixture::FakeAgent;
 use triton_tests::{TestIssuer, TritonProcess};
 
-fn dir(sub: &str) -> PathBuf {
+pub(crate) fn dir(sub: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(sub)
 }
 
-fn read_json(p: &PathBuf) -> Value {
+pub(crate) fn read_json(p: &PathBuf) -> Value {
     serde_json::from_str(&std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{p:?}: {e}")))
         .unwrap_or_else(|e| panic!("{p:?}: {e}"))
 }
 
-fn fixture(name: &str) -> Value {
+pub(crate) fn fixture(name: &str) -> Value {
     read_json(&dir(&format!("fixtures/conversation/surfaces/{name}.json")))
 }
 
-fn fixture_names() -> Vec<String> {
+pub(crate) fn fixture_names() -> Vec<String> {
     let mut v: Vec<String> = std::fs::read_dir(dir("fixtures/conversation/surfaces"))
         .expect("fixture dir")
         .filter_map(|e| {
@@ -47,11 +47,11 @@ fn fixture_names() -> Vec<String> {
     v
 }
 
-fn golden(name: &str) -> PathBuf {
+pub(crate) fn golden(name: &str) -> PathBuf {
     dir(&format!("fixtures/conversation/golden/{name}.mcp.json"))
 }
 
-fn pretty(v: &Value) -> String {
+pub(crate) fn pretty(v: &Value) -> String {
     format!("{}\n", serde_json::to_string_pretty(v).unwrap())
 }
 
