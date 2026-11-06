@@ -205,13 +205,12 @@ button.b.primary .msg { color: inherit; opacity: .8; }
     }
   }
 
-  // The card's data: result `_meta` (hidden from the model) or
-  // `structuredContent.widget`. A result without it clears the card.
+  // The card's data: result `_meta` only (hidden from the model; both
+  // reference hosts pass it). A result without it clears the card.
   const META_KEY = "triton/widget";
-  const pick = (meta, structured) =>
-    (meta && meta[META_KEY]) || (structured && structured.widget) || null;
+  const pick = (meta) => (meta && meta[META_KEY]) || null;
   function fromResult(r) {
-    render(r ? pick(r._meta, r.structuredContent) : null);
+    render(r ? pick(r._meta) : null);
   }
 
   // ChatGPT also hydrates window.openai; theme from there when present.
@@ -222,7 +221,7 @@ button.b.primary .msg { color: inherit; opacity: .8; }
     if (bridge) return; // the MCP Apps bridge delivers the result
     const m = o.toolResponseMetadata;
     const meta = m && (m._meta || (m.call_tool_result && m.call_tool_result._meta) || m);
-    if (o.toolOutput !== undefined || m !== undefined) render(pick(meta, o.toolOutput));
+    if (o.toolOutput !== undefined || m !== undefined) render(pick(meta));
   }
   window.addEventListener("openai:set_globals", fromOpenAI);
 

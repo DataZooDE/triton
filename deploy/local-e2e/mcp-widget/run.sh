@@ -157,8 +157,8 @@ load 3a
 form1
 check "a missing field does not complete an optional segment in the preview" "$(txt '.preview')" "Will be sent: Set ‹Value›"
 check "the preview is not a live region" "$($R js "$F.document.querySelector('.preview').getAttribute('aria-live')")" "null"
-$R js "window.sendResult({structuredContent:{result:{},widget:WIDGETS['3a']},_meta:{'triton/widget':WIDGETS['3e']}})" >/dev/null; $R sleep 0.3 >/dev/null
-check "result _meta wins over structured content" "$(txt '.title')" "Retire Agent 20: filed for review"
+$R js "window.sendResult({structuredContent:{result:{},widget:WIDGETS['3e']}})" >/dev/null; $R sleep 0.3 >/dev/null
+check "widget data in structured content alone draws no card" "$($R js "$F.document.querySelectorAll('#card *').length")" "0"
 form1
 $R js "window.sendContext({locale:'de-DE'})" >/dev/null; $R sleep 0.3 >/dev/null
 check "a locale change re-renders the widget's own words" "$(txt 'button[type=submit]')" "Senden"
