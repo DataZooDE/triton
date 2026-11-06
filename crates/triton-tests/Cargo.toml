@@ -60,7 +60,7 @@ serde = { workspace = true }
 #
 # The embedded trio host, exercised by tests/multi_issuer.rs. No cycle:
 # triton-embed does not depend on this crate.
-triton-embed = { path = "../triton-embed" }
+triton-embed = { path = "../triton-embed", features = ["chat"] }
 # The real static-upstream router, wired into an embedded host so spec A2A
 # (not mounted in the `triton` binary) can be tested against a real
 # recording upstream over TCP (#352).
@@ -72,6 +72,8 @@ triton-chat-msteams = { path = "../triton-chat-msteams" }
 # Implementing triton-core's `Tool` trait (it is #[async_trait]) for the
 # in-process router in tests/multi_issuer.rs.
 async-trait = "0.1"
+# Parse the ingress group from flags in tests/embed_ingress.rs.
+clap = { workspace = true }
 # Validates A2A cards, tasks and events against the vendored official A2A
 # 0.3.0 and 1.0.0 JSON schemas (fixtures/a2a). No network resolution.
 jsonschema = { version = "0.60", default-features = false }

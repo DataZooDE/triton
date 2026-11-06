@@ -52,6 +52,28 @@ pub struct ContextOverrides {
     pub client_files: Option<Arc<Vec<serde_json::Value>>>,
 }
 
+/// Write the channel's surface descriptor into object args under
+/// `_triton.surface` (#352), exactly as the static upstream router sends it
+/// to an HTTP agent. An in-process [`crate::UpstreamDispatch`] that hands
+/// the args to an agent loop calls this so the agent sees the same body
+/// over either transport. Non-object args, and a context without a
+/// registered surface, are returned unchanged.
+pub fn surface_hint(mut args: serde_json::Value, ctx: &DispatchContext) -> serde_json::Value {
+    let (Some(surface), Some(map)) = (&ctx.surface, args.as_object_mut()) else {
+        return args;
+    };
+    let reserved = map
+        .entry(crate::dispatcher::RESERVED_ARGS_KEY)
+        .or_insert_with(|| serde_json::Value::Object(Default::default()));
+    if let Some(reserved) = reserved.as_object_mut() {
+        reserved.insert(
+            "surface".to_string(),
+            serde_json::to_value(surface.as_ref()).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    args
+}
+
 /// Map an adapter's audit `protocol` label to the channel name agents see.
 ///
 /// * `messenger:<adapter>` and `messenger:<adapter>:<role>` (e.g. the
@@ -68,5 +90,40 @@ pub fn channel_for_protocol(protocol: &str) -> String {
     match adapter {
         "google_chat" => "googlechat".to_string(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    fn ctx(channel: &str) -> DispatchContext {
+        DispatchContext::for_protocol(channel, &SurfaceRegistry::with_trio_defaults())
+    }
+
+    /// An in-process upstream sees the same body an HTTP agent receives:
+    /// the channel's descriptor under `_triton.surface`, beside whatever
+    /// else Triton put under `_triton`.
+    #[test]
+    fn surface_hint_writes_the_descriptor_under_the_reserved_key() {
+        let ctx = ctx("mcp");
+        let args = json!({ "message": "hi", "_triton": { "protocol": "mcp" } });
+        let out = surface_hint(args, &ctx);
+        assert_eq!(out["message"], "hi");
+        assert_eq!(out["_triton"]["protocol"], "mcp");
+        assert_eq!(
+            out["_triton"]["surface"],
+            serde_json::to_value(ctx.surface.as_deref().expect("mcp has a profile")).unwrap()
+        );
+    }
+
+    #[test]
+    fn surface_hint_leaves_non_objects_and_unknown_channels_alone() {
+        assert_eq!(surface_hint(json!("text"), &ctx("mcp")), json!("text"));
+        let none = ctx("no-such-channel");
+        assert!(none.surface.is_none());
+        assert_eq!(surface_hint(json!({ "a": 1 }), &none), json!({ "a": 1 }));
     }
 }

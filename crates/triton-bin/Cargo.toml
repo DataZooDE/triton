@@ -17,6 +17,7 @@ path = "src/main.rs"
 default = ["dev-token"]
 dev-token = [
     "triton-adapters-http/dev-token",
+    "triton-embed/dev-token",
     "triton-chat-telegram/dev-token",
     "triton-chat-whatsapp/dev-token",
 ]
@@ -39,6 +40,11 @@ triton-chat-email = { path = "../triton-chat-email" }
 triton-chat-twilio = { path = "../triton-chat-twilio" }
 triton-rasterizer = { path = "../triton-rasterizer" }
 triton-adapters-http = { path = "../triton-adapters-http", default-features = false }
+# The ingress, the surface registry and the Teams wiring are library code
+# shared with hosts that embed Triton (`ingress`, `surfaces`, `chat`).
+# default-features = false: `dev-token` comes only through this crate's own
+# feature, so `--no-default-features` still compiles the dev token out.
+triton-embed = { path = "../triton-embed", default-features = false, features = ["chat"] }
 async-trait = "0.1"
 axum = { workspace = true }
 clap = { workspace = true }

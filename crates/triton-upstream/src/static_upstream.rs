@@ -263,23 +263,11 @@ impl StaticUpstream {
     /// `_triton.surface` (the dispatcher already removed any caller-supplied
     /// `_triton`). Non-object args can't carry a field and go out unchanged;
     /// the header alone tells the agent the channel.
-    fn with_hint(&self, mut args: Value, ctx: &DispatchContext) -> Value {
+    fn with_hint(&self, args: Value, ctx: &DispatchContext) -> Value {
         if !self.surface_hint {
             return args;
         }
-        let (Some(surface), Some(map)) = (&ctx.surface, args.as_object_mut()) else {
-            return args;
-        };
-        let reserved = map
-            .entry(triton_core::dispatcher::RESERVED_ARGS_KEY)
-            .or_insert_with(|| Value::Object(Default::default()));
-        if let Some(reserved) = reserved.as_object_mut() {
-            reserved.insert(
-                "surface".to_string(),
-                serde_json::to_value(surface.as_ref()).unwrap_or(Value::Null),
-            );
-        }
-        args
+        triton_core::surface_hint(args, ctx)
     }
 
     /// Attach a JWT signer: every dispatch now carries a freshly-minted RS256

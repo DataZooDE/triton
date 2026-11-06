@@ -28,12 +28,11 @@ use triton_rasterizer::{
 };
 use triton_secrets::{LiteralResolver, SecretResolver};
 
-mod ingress;
 mod optional_adapters;
 mod settings;
-mod surfaces;
 mod tools;
 use settings::Settings;
+use triton_embed::{ingress, surfaces};
 
 const BINARY_SHA: &str = env!("TRITON_BUILD_SHA");
 
@@ -542,7 +541,7 @@ async fn main() -> std::io::Result<()> {
     // an operator sets a secret, or empty to disable the dev-token path.
     // Only consulted when the `dev-token` feature is compiled in AND no
     // OIDC verifier is configured (OIDC always wins, ADR-10).
-    let dev_token = std::env::var("TRITON_DEV_TOKEN").unwrap_or_else(|_| "dev-token".to_string());
+    let dev_token = ingress::dev_token_from_env();
     // Further inbound issuers beside the deployment's own — Entra
     // (allow-listed customer tenants) and opaque Google access tokens.
     let mut verifiers: Vec<Arc<OidcVerifier>> = oidc_verifier.into_iter().collect();
@@ -621,8 +620,7 @@ async fn main() -> std::io::Result<()> {
         route: None,
         // The answer-card MCP Apps widget; `TRITON_MCP_APP_WIDGET=off`
         // switches it off.
-        widget: !std::env::var("TRITON_MCP_APP_WIDGET")
-            .is_ok_and(|v| matches!(v.trim(), "0" | "false" | "off" | "no")),
+        widget: ingress::widget_from_env(),
     };
 
     // v0.2 chat-channel adapters. Each manifest-declared adapter
@@ -1276,129 +1274,47 @@ async fn main() -> std::io::Result<()> {
                     }
                 }
                 AdapterKind::MsTeams => {
-                    // NFR-S-4: outside `local` env the OpenID discovery
-                    // URL MUST be the canonical Microsoft endpoint —
-                    // operators get no `TRITON_MSTEAMS_OPENID_URL`
-                    // override path that could redirect JWKS fetches
-                    // to an attacker-controlled host. The token
-                    // endpoint is hardcoded inside `token_client.rs`
-                    // for the same reason; the `serviceUrl` reply
-                    // target rides inside a JWT we just verified, so
-                    // it's trusted-by-derivation rather than allow-
-                    // listed.
-                    const CANONICAL_OPENID: &str =
-                        triton_chat_msteams::jwt_verifier::DEFAULT_OPENID_URL;
-                    // PR 37: keep exact-string equality (the canonical
-                    // URL has a single documented form) AND add a
-                    // parsed-URL host check so a path-only tweak like
-                    // `.../openidconfiguration?foo=bar` still fails
-                    // closed. Production has zero reason to vary this.
-                    if settings.env != "local"
-                        && (settings.msteams_openid_url != CANONICAL_OPENID
-                            || !is_canonical_url(
-                                &settings.msteams_openid_url,
-                                "https",
-                                "login.botframework.com",
-                            ))
-                    {
-                        tracing::error!(
-                            env = %settings.env,
-                            msteams_openid_url = %settings.msteams_openid_url,
-                            "non-`local` env MUST use TRITON_MSTEAMS_OPENID_URL={CANONICAL_OPENID} (NFR-S-4 egress allowlist)",
-                        );
-                        std::process::exit(2);
-                    }
-                    // PR 37 critical finding: the same NFR-S-4 rule
-                    // applies to `TRITON_MSTEAMS_TOKEN_URL`. The token
-                    // endpoint accepts `client_credentials` — posting
-                    // those credentials at an attacker-controlled host
-                    // exfiltrates the bot's `client_secret`. There is
-                    // NO valid production reason to override; only
-                    // the integration test fixture sets it. Refuse
-                    // any value outside `local`.
-                    if settings.env != "local" && settings.msteams_token_url.is_some() {
-                        tracing::error!(
-                            env = %settings.env,
-                            msteams_token_url = %settings.msteams_token_url.as_deref().unwrap_or(""),
-                            "non-`local` env MUST NOT set TRITON_MSTEAMS_TOKEN_URL — \
-                             the Microsoft token endpoint is hardcoded for NFR-S-4 \
-                             (overriding would post client_credentials at an \
-                             arbitrary host)",
-                        );
-                        std::process::exit(2);
-                    }
-                    // PR 37: same NFR-S-4 rule for the `serviceUrl`
-                    // host extras. Only the integration test fixture
-                    // needs additional hosts; production must use
-                    // Microsoft's documented suffixes only.
-                    if settings.env != "local"
-                        && !settings.msteams_extra_service_url_hosts.is_empty()
-                    {
-                        tracing::error!(
-                            env = %settings.env,
-                            hosts = ?settings.msteams_extra_service_url_hosts,
-                            "non-`local` env MUST NOT set TRITON_MSTEAMS_EXTRA_SERVICE_URL_HOSTS \
-                             (NFR-S-4 egress allowlist for outbound reply Activity)",
-                        );
-                        std::process::exit(2);
-                    }
-                    let overrides = triton_chat_msteams::AdapterOverrides {
-                        openid_url: Some(settings.msteams_openid_url.clone()),
-                        token_url: settings.msteams_token_url.clone(),
-                        extra_service_url_hosts: settings.msteams_extra_service_url_hosts.clone(),
-                    };
-                    let msteams_courier = triton_chat_msteams::CourierConfig {
-                        tracker: None,
-                        enabled: settings.msteams_async,
-                    };
-                    match triton_chat_msteams::MsTeamsAdapter::from_manifest(
+                    // The NFR-S-4 egress checks, the build, the canonical
+                    // path claim (triton#247) and the task resume (F8b) are
+                    // library code shared with embedding hosts.
+                    match triton_embed::chat::msteams(
+                        m,
                         name,
-                        adapter,
-                        resolver.as_ref(),
+                        &settings.env,
                         dispatcher.clone(),
-                        overrides,
-                        msteams_courier,
+                        a2a_state.runner(),
+                        &settings.msteams,
+                        resolver.as_ref(),
+                        &mut canonical_claimed,
                     )
                     .await
                     {
-                        Ok(built) => {
-                            if built.canonical_path() {
-                                if canonical_claimed {
-                                    tracing::error!(
-                                        adapter = %name,
-                                        "at most one adapter may set `inbound.canonical_path`                                          (triton#247): the canonical /api/messages route is fixed                                          and a second claimant would panic Router::merge, taking                                          REST/MCP/A2A down with it",
-                                    );
-                                    std::process::exit(2);
-                                }
-                                canonical_claimed = true;
-                            }
-                            tracing::info!(adapter = %name, "msteams webhook adapter wired");
-                            // F8b: long-running Teams turns are tasks in the
-                            // same store as A2A's (persisted with
-                            // TRITON_TASK_DB); stored ones resume at boot.
-                            let built = built.with_tasks(a2a_state.runner());
-                            // Keep an Arc for the outbound courier registry
-                            // (proactive async-operation delivery) before
-                            // `router()` consumes one — mirrors the WhatsApp arm.
-                            let built = Arc::new(built);
-                            built.resume_stored_tasks();
+                        Ok((r, built)) => {
+                            // The outbound courier registry (proactive
+                            // async-operation delivery) — mirrors WhatsApp.
                             outbound_couriers.insert(
                                 name.to_string(),
-                                built.clone() as Arc<dyn triton_core::OutboundCourier>,
+                                built as Arc<dyn triton_core::OutboundCourier>,
                             );
-                            let r = built.router();
                             chat_router = Some(match chat_router.take() {
                                 Some(acc) => acc.merge(r),
                                 None => r,
                             });
                         }
-                        Err(e) => {
+                        Err(triton_embed::chat::MsTeamsError::Build(e)) => {
                             optional_adapters::handle_build_error(
                                 name,
                                 &e,
                                 &settings.optional_adapters,
                                 "msteams",
                             );
+                        }
+                        // Egress and canonical-path refusals are logged
+                        // where they are decided; every refusal stops the
+                        // boot.
+                        Err(e) => {
+                            tracing::error!(adapter = %name, error = %e, "msteams adapter refused");
+                            std::process::exit(2);
                         }
                     }
                 }
