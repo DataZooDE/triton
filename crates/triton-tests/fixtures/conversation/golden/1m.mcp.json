@@ -81,10 +81,7 @@
               ]
             }
           ],
-          "preview": {
-            "label": "Will be sent as",
-            "text": "Find ‹Lifecycle› Agents with AI Act class ‹AI Act class› owned by ‹Owner›"
-          },
+          "preview_label": "Will be sent as",
           "template": [
             {
               "text": "Find "

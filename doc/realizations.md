@@ -1607,6 +1607,17 @@ a trap the next developer should not have to step in.
   URI, so the URI carries a hash of the page
   (`a2ui::mcp_app::resource_uri`); after an upgrade a connector needs
   "Refresh tools" (ChatGPT) or a reconnect (Claude) to see new metadata.
+- **Both reference hosts pass result `_meta` to the widget (observed
+  2026-11-06).** With the widget data only in the `tools/call` result's
+  `_meta["triton/widget"]`, the card rendered in Claude and in ChatGPT
+  (developer-mode app, after "Refresh tools"). The data is therefore kept
+  out of `structuredContent`, and the widget no longer reads a
+  `structuredContent.widget` fallback (pinned by the browser harness
+  `deploy/local-e2e/mcp-widget/run.sh`: structured data alone draws no
+  card). A `ui/message` from the widget is not sent at once in Claude: the
+  host stages it in the composer with a caution banner and waits for the
+  user to confirm, so the widget's "Sent" status means "handed to the
+  host", not "posted".
 
 ---
 

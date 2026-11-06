@@ -30,11 +30,23 @@ pub fn http_hosts() -> &'static [String] {
     HTTP_HOSTS.get().map(Vec::as_slice).unwrap_or(&[])
 }
 
-/// Whether `url` may become a link: `https://`, or `http://` to an
-/// admitted host.
+/// Whether `url` may become a link: `https://` with a host and no
+/// credentials, or `http://` to an admitted host.
 pub fn is_allowed_link(url: &str) -> bool {
-    if url.starts_with("https://") {
-        return true;
+    if let Some(rest) = url.strip_prefix("https://") {
+        // `https:///x` (or a backslash) parses with the path's first
+        // segment as host: the written authority is empty.
+        if rest.starts_with(['/', '\\']) {
+            return false;
+        }
+        // Parsed, not prefix-matched: `https://good.example@evil.example/`
+        // names one host and opens another.
+        return url::Url::parse(url).is_ok_and(|u| {
+            u.scheme() == "https"
+                && u.host_str().is_some_and(|h| !h.is_empty())
+                && u.username().is_empty()
+                && u.password().is_none()
+        });
     }
     http_link_allowed(url, http_hosts())
 }
@@ -71,6 +83,9 @@ mod tests {
         assert!(is_allowed_link("https://app.example.com/a"));
         assert!(!is_allowed_link("javascript:alert(1)"));
         assert!(!is_allowed_link("file:///etc/passwd"));
+        // An empty written authority: the path's first segment would be the host.
+        assert!(!is_allowed_link("https:///evil.example/x"));
+        assert!(!is_allowed_link("https:/\\evil.example/x"));
     }
 
     #[test]
@@ -93,5 +108,16 @@ mod tests {
         ));
         assert!(!http_link_allowed("http://user@127.0.0.1/", &hosts()));
         assert!(!http_link_allowed("http:/127.0.0.1/", &hosts()));
+    }
+
+    /// An `https` link must name a real host and carry no credentials:
+    /// `https://good.example@evil.example/` shows one host and opens another.
+    #[test]
+    fn an_https_link_with_userinfo_or_no_host_is_no_link() {
+        assert!(!is_allowed_link("https://app.example.com@evil.example/x"));
+        assert!(!is_allowed_link("https://user:pw@app.example.com/x"));
+        assert!(!is_allowed_link("https://"));
+        assert!(!is_allowed_link("https://exa mple.com/"));
+        assert!(is_allowed_link("https://app.example.com:8443/a?b=c#d"));
     }
 }

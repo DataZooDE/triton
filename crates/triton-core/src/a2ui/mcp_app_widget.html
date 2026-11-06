@@ -94,7 +94,7 @@ button.b:hover { background: var(--bg2); }
 button.b.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
 button.b.primary:hover { filter: brightness(1.08); }
 button.b.small { padding: 2px 10px; font-size: 13px; }
-button.b[aria-pressed="true"] { background: var(--bg2); border-color: var(--muted); }
+button.b[aria-pressed="true"], button.b[aria-selected="true"] { background: var(--bg2); border-color: var(--muted); }
 button.b:disabled { opacity: .55; cursor: default; }
 button.b:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
@@ -115,12 +115,21 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
 .step .m { width: 14px; text-align: center; }
 .step.done .m { color: var(--ok); }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-.sent { color: var(--muted); font-size: 12px; margin-top: 8px; min-height: 1em; }
+.sent { color: var(--muted); font-size: 13px; padding: 6px 4px 0; }
+.sent:empty { display: none; }
+.sent.bad { color: var(--bad); }
+.msg, .preview { white-space: pre-wrap; unicode-bidi: plaintext; }
+.msg { display: block; color: var(--muted); font-size: 12px; font-weight: 400; overflow-wrap: break-word; }
+/* A long unbroken string (an id, a URL-like value) wraps instead of
+   widening the card or squeezing its neighbours. */
+.title, .context, td, .row .main, .lbl, dd, .notice, .preview, .more { overflow-wrap: anywhere; min-width: 0; }
+button.b.primary .msg { color: inherit; opacity: .8; }
+.more { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; margin-top: 6px; }
 </style>
 </head>
 <body>
 <main id="card"></main>
-<div class="sr" id="status" role="status"></div>
+<div class="sent" id="status" role="status" aria-live="polite"></div>
 <script>
 (() => {
   "use strict";
@@ -132,17 +141,30 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
   let bridge = false;      // the MCP Apps host answered ui/initialize
   let canOpenLinks = true;
 
+  // The widget's own words (the data brings its own, already localised).
+  const WORDS = {
+    en: { yes: "Yes", no: "No", send: "Send", gap: "gap", changesTo: "changes to",
+          sent: "Sent", opened: "Opened", notSent: "Not sent — try again", notOpened: "Not opened — try again",
+          willSend: "Will be sent", opens: "Opens ", more: (n) => "… " + n + " more",
+          moreSections: (n) => "… " + n + " more sections", sending: "Sending…", opening: "Opening…" },
+    de: { yes: "Ja", no: "Nein", send: "Senden", gap: "Lücke", changesTo: "ändert sich zu",
+          sent: "Gesendet", opened: "Geöffnet", notSent: "Nicht gesendet – bitte erneut versuchen",
+          notOpened: "Nicht geöffnet – bitte erneut versuchen",
+          willSend: "Wird gesendet", opens: "Öffnet ", more: (n) => "… " + n + " weitere",
+          moreSections: (n) => "… " + n + " weitere Abschnitte", sending: "Wird gesendet…", opening: "Wird geöffnet…" },
+  };
+  const t = (k) => (WORDS[document.documentElement.lang] || WORDS.en)[k];
+
   // ── host bridge (MCP Apps JSON-RPC over postMessage) ─────────────────
   const post = (msg) => window.parent.postMessage(msg, "*");
   const notify = (method, params) => post({ jsonrpc: "2.0", method, params: params || {} });
-  // `timeoutMs` only for the handshake: a message or link request may wait
-  // on the user (a host confirmation), and giving up on it would invite a
-  // second send.
-  const request = (method, params, timeoutMs) => new Promise((resolve, reject) => {
+  // No timeout: a message or link request may wait on the user (a host
+  // confirmation), and giving up on it would invite a second send; a slow
+  // host's handshake answer must still count.
+  const request = (method, params) => new Promise((resolve, reject) => {
     const id = nextId++;
     pending.set(id, { resolve, reject });
     post({ jsonrpc: "2.0", id, method, params: params || {} });
-    if (timeoutMs) setTimeout(() => { if (pending.delete(id)) reject(new Error("timeout")); }, timeoutMs);
   });
 
   window.addEventListener("message", (e) => {
@@ -163,6 +185,7 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
   });
 
   let hostTheme = false;
+  let shown = null; // the widget data on screen, for a re-render
   function applyContext(ctx) {
     if (!ctx) return;
     if (ctx.theme === "dark" || ctx.theme === "light") { hostTheme = true; document.documentElement.dataset.theme = ctx.theme; }
@@ -172,27 +195,33 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
         if (/^--[a-z0-9-]+$/i.test(k) && typeof v === "string") document.documentElement.style.setProperty(k, v);
       }
     }
-    if (ctx.locale) document.documentElement.lang = String(ctx.locale).split(/[-_]/)[0];
+    if (ctx.locale) {
+      const lang = String(ctx.locale).split(/[-_]/)[0];
+      // The widget's own words follow a changed locale (a form starts over).
+      if (lang !== document.documentElement.lang) {
+        document.documentElement.lang = lang;
+        if (shown) render(shown);
+      }
+    }
   }
 
-  // The card's data: result `_meta` (hidden from the model) or
-  // `structuredContent.widget`. A result without it clears the card.
+  // The card's data: result `_meta` only (hidden from the model; both
+  // reference hosts pass it). A result without it clears the card.
   const META_KEY = "triton/widget";
-  const pick = (meta, structured) =>
-    (meta && meta[META_KEY]) || (structured && structured.widget) || null;
+  const pick = (meta) => (meta && meta[META_KEY]) || null;
   function fromResult(r) {
-    render(r ? pick(r._meta, r.structuredContent) : null);
+    render(r ? pick(r._meta) : null);
   }
 
   // ChatGPT also hydrates window.openai; theme from there when present.
   function fromOpenAI() {
     const o = window.openai;
     if (!o) return;
-    if (o.theme) applyContext({ theme: o.theme, locale: o.locale });
+    if (o.theme || o.locale) applyContext({ theme: o.theme, locale: o.locale });
     if (bridge) return; // the MCP Apps bridge delivers the result
     const m = o.toolResponseMetadata;
     const meta = m && (m._meta || (m.call_tool_result && m.call_tool_result._meta) || m);
-    if (o.toolOutput !== undefined || m !== undefined) render(pick(meta, o.toolOutput));
+    if (o.toolOutput !== undefined || m !== undefined) render(pick(meta));
   }
   window.addEventListener("openai:set_globals", fromOpenAI);
 
@@ -208,40 +237,77 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
       } catch (_) { return false; }
     }
     if (window.openai && window.openai.sendFollowUpMessage) {
-      await window.openai.sendFollowUpMessage({ prompt: text });
-      return true;
+      try { await window.openai.sendFollowUpMessage({ prompt: text }); return true; } catch (_) { return false; }
     }
     return false;
   }
+  // https with a host and no credentials (the server applies the same rule).
+  const safeLink = (url) => {
+    try {
+      if (!/^https:\/\/[^\/\\]/.test(url)) return false;
+      const u = new URL(url);
+      return u.protocol === "https:" && !!u.hostname && !u.username && !u.password;
+    } catch (_) { return false; }
+  };
   async function openLink(url) {
-    if (!/^https:\/\//i.test(url)) return false;
+    if (!safeLink(url)) return false;
     if (bridge && canOpenLinks) {
       try {
         const r = await request("ui/open-link", { url });
         return !(r && r.isError);
       } catch (_) { return false; }
     }
-    if (window.openai && window.openai.openExternal) { window.openai.openExternal({ href: url }); return true; }
-    window.open(url, "_blank", "noopener");
-    return true;
+    if (window.openai && window.openai.openExternal) {
+      try { await window.openai.openExternal({ href: url }); return true; } catch (_) { return false; }
+    }
+    // A host that answered the handshake without openLinks said no.
+    if (bridge) return false;
+    return !!window.open(url, "_blank");
   }
-  async function run(action, ctl) {
-    if (!action) return;
-    if (ctl) ctl.disabled = true;
+  // One request per control at a time: a control stays busy until the
+  // host settles the request, plus a short cooldown, so a double click or
+  // a held key cannot send the same complete request twice.
+  const busy = new WeakSet();
+  // The status line reports the latest click on the card it was made on:
+  // a slower earlier click, or one from a card since replaced, stays quiet.
+  let generation = 0, clicks = 0;
+  const say = (text, bad) => { status.textContent = text; status.className = "sent" + (bad ? " bad" : ""); };
+  async function run(action, ctl, idle) {
+    if (!action || (ctl && busy.has(ctl))) return;
+    const send = action.type === "send_message";
+    const gen = generation, click = ++clicks;
+    const focused = ctl && document.activeElement === ctl;
+    if (ctl) { busy.add(ctl); ctl.setAttribute("aria-busy", "true"); if ("disabled" in ctl) ctl.disabled = true; }
+    say(send ? t("sending") : t("opening"), false);
     let ok = false;
     try {
-      if (action.type === "send_message") ok = await sendMessage(action.text);
+      if (send) ok = await sendMessage(action.text);
       else if (action.type === "open_url") ok = await openLink(action.url);
     } finally {
-      if (ctl) setTimeout(() => { ctl.disabled = false; }, 1200);
+      if (ctl) setTimeout(() => {
+        busy.delete(ctl);
+        ctl.removeAttribute("aria-busy");
+        if ("disabled" in ctl) ctl.disabled = false;
+        if (idle) idle();
+        // Disabling moved the focus to the page; give it back.
+        if (focused && ctl.isConnected && (!document.activeElement || document.activeElement === document.body)) ctl.focus();
+      }, 1200);
     }
-    status.textContent = ok ? (action.type === "send_message" ? "Sent: " + action.text : "Opened") : "";
+    if (gen !== generation || click !== clicks) return;
+    say(ok ? (send ? t("sent") : t("opened")) : (send ? t("notSent") : t("notOpened")), !ok);
   }
 
   // ── template: the producer's request, filled on the client ───────────
   // Parts: {text}, {field}, {optional:[…]}; an optional segment is kept
   // only when all its fields are non-blank; a blank required field blocks.
-  function fill(parts, values) {
+  // Rust's `str::trim` (Unicode White_Space), not JS `trim`: the two
+  // differ on U+0085 and U+FEFF.
+  const WS = "\\t\\n\\v\\f\\r \\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+  const TRIM = new RegExp("^[" + WS + "]+|[" + WS + "]+$", "g");
+  const trim = (x) => x.replace(TRIM, "");
+  // `ph`, when given, stands in for a missing required field (the
+  // preview); optional segments are decided by the real values alone.
+  function fill(parts, values, ph) {
     const missing = [];
     const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
     const one = (list, out, miss) => {
@@ -249,12 +315,16 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
         if (has(p, "text")) out.push(p.text);
         else if (has(p, "field")) {
           const raw = has(values, p.field) ? values[p.field] : null;
-          const v = (raw == null ? "" : String(raw)).trim();
-          if (v) out.push(v); else if (!miss.includes(p.field)) miss.push(p.field);
+          const v = trim(raw == null ? "" : String(raw));
+          if (v) out.push(v);
+          else {
+            if (!miss.includes(p.field)) miss.push(p.field);
+            if (ph && out === top) out.push(ph(p.field));
+          }
         }
       }
     };
-    const out = [];
+    const out = [], top = out;
     for (const p of parts) {
       if (p.optional) {
         const o = [], m = [];
@@ -263,10 +333,18 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
       } else one([p], out, missing);
     }
     // Trimmed like the server-side `resolve` every other channel uses.
-    return { text: out.join("").trim(), missing };
+    return { text: trim(out.join("")), missing };
   }
   // Pure; exposed so a harness can run the shared fill vectors.
   window.tritonWidgetFill = fill;
+
+  // The live preview (PD48): once the request is complete, exactly the
+  // text a click sends; before that, the same text with each missing
+  // required field as ‹its label› (an optional segment shows only when
+  // complete, as it would be sent).
+  function previewText(parts, values, labels) {
+    return fill(parts, values, (f) => "‹" + (labels[f] || f) + "›").text;
+  }
 
   // ── rendering ─────────────────────────────────────────────────────────
   function el(tag, attrs, ...kids) {
@@ -280,46 +358,83 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
     for (const k of kids.flat()) if (k != null && k !== false) n.append(k.nodeType ? k : String(k));
     return n;
   }
+  // What a control does beyond its label (PD48): a message that differs
+  // from the label shows as a secondary line; a link names its host in the
+  // tooltip and the accessible description, not in the visible label.
+  const msgLine = (label, action) =>
+    action && action.type === "send_message" && trim(String(action.text)) !== trim(String(label))
+      ? el("span", { class: "msg" }, action.text) : null;
+  const describe = (node, action) => {
+    if (!action || action.type !== "open_url") return node;
+    try {
+      const host = new URL(action.url).host;
+      node.title = host;
+      node.setAttribute("aria-description", t("opens") + host);
+    } catch (_) { /* not a link the widget opens anyway */ }
+    return node;
+  };
   const btn = (label, action, cls) => {
-    const b = el("button", { type: "button", class: "b " + (cls || "") }, label);
+    const b = el("button", { type: "button", class: "b " + (cls || "") }, label, msgLine(label, action));
+    describe(b, action);
     b.addEventListener("click", () => run(action, b));
     return b;
   };
+  // "… N more" under a cut block, with the card's open link when it has one.
+  // The open link once per card, with the first cut.
+  let openAction = null, openShown = false;
+  const more = (n, words) => {
+    if (typeof n !== "number" || n <= 0) return null;
+    const link = openAction && !openShown ? btn(openAction.label, openAction.action, "small") : null;
+    if (link) openShown = true;
+    return el("div", { class: "more" }, el("span", { class: "n" }, t(words || "more")(n)), link);
+  };
   const activate = (node, action) => {
+    describe(node, action);
     node.classList.add("act");
     node.tabIndex = 0;
     node.setAttribute("role", action.type === "open_url" ? "link" : "button");
-    node.addEventListener("click", () => run(action));
-    node.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); run(action); } });
+    node.addEventListener("click", () => run(action, node));
+    node.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      if (!e.repeat) run(action, node);
+    });
   };
   const sub = (t) => t ? el("p", { class: "sub" }, t) : null;
 
   const blocks = {
     table(b) {
       const head = el("tr", {}, b.columns.map((c) => el("th", { scope: "col" }, c)));
+      // An actionable row stays a table row (screen-reader table
+      // navigation); its first cell holds the native control, and a click
+      // anywhere on the row is that control's click.
       const rows = b.rows.map((r) => {
-        const tr = el("tr", {}, r.cells.map((c) => el("td", {}, c)));
-        if (r.action) { activate(tr, r.action); tr.setAttribute("aria-label", r.cells.join(", ")); }
+        const cells = r.cells.map((c, ci) => el("td", {}, r.action && ci === 0 ? describe(el("button", { type: "button", class: "linkish" }, c, msgLine(c, r.action)), r.action) : c));
+        const tr = el("tr", {}, cells);
+        if (r.action) {
+          tr.classList.add("act");
+          tr.addEventListener("click", () => run(r.action, tr));
+        }
         return tr;
       });
-      return [sub(b.title), el("div", { class: "scroll" }, el("table", {}, el("thead", {}, head), el("tbody", {}, rows)))];
+      return [sub(b.title), el("div", { class: "scroll" }, el("table", {}, el("thead", {}, head), el("tbody", {}, rows))), more(b.more)];
     },
     list(b) {
       const items = b.items.map((it) => {
         const main = el("div", { class: "main" }, el("div", {}, it.label), it.detail ? el("div", { class: "detail" }, it.detail) : null);
         const li = el("li", { class: "row" }, main);
         if (it.action && it.action_label) li.append(btn(it.action_label, it.action, "small"));
-        else if (it.action) activate(li, it.action);
+        else if (it.action) { activate(li, it.action); main.append(msgLine(it.label, it.action) || ""); }
         return li;
       });
-      return [sub(b.title), el("ul", { class: "rows" }, items)];
+      return [sub(b.title), el("ul", { class: "rows" }, items), more(b.more)];
     },
     facts(b) {
       const dl = el("dl", { class: "facts" });
       for (const p of b.pairs) {
-        dl.append(el("dt", {}, p.label), el("dd", {}, p.before ? [el("span", { class: "before" }, p.before), el("span", { class: "arrow", "aria-label": "changes to" }, "→"), p.value] : p.value));
+        dl.append(el("dt", {}, p.label), el("dd", {}, p.before ? [el("span", { class: "before" }, p.before), el("span", { class: "arrow", "aria-hidden": "true" }, "→"), el("span", { class: "sr" }, " " + t("changesTo") + " "), p.value] : p.value));
       }
-      return [sub(b.title), dl];
+      return [sub(b.title), dl, more(b.more)];
     },
     notice(b) {
       const mark = b.tone === "info" ? "i" : "!";
@@ -341,7 +456,11 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
       return [b.prompt ? el("p", { class: "sub" }, b.prompt) : null, el("div", { class: "btns" }, b.chips.map((c) => btn(c.label, c.action)))];
     },
     tree(b) {
-      const hasGap = (n) => !!n.gap || (n.children || []).some(hasGap);
+      const gaps = new Map();
+      const hasGap = (n) => {
+        if (!gaps.has(n)) gaps.set(n, !!n.gap || (n.children || []).some(hasGap));
+        return gaps.get(n);
+      };
       const node = (n) => {
         const kids = n.children || [];
         const li = el("li", { class: hasGap(n) ? "" : "nogap" });
@@ -358,10 +477,16 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
           row.append(tw);
         } else row.append(el("span", { class: "bullet", "aria-hidden": "true" }, "•"));
         const lbl = el("span", { class: "lbl" }, n.label);
-        if (n.action) lbl.replaceChildren(el("button", { type: "button", class: "linkish" }, n.label));
-        if (n.action) lbl.firstChild.addEventListener("click", () => run(n.action));
+        // A caption of its own is its own control (as in a list); else the
+        // label is the control.
+        const caption = n.action && n.action_label && n.action_label !== n.label ? n.action_label : null;
+        if (n.action && !caption) {
+          lbl.replaceChildren(describe(el("button", { type: "button", class: "linkish" }, n.label, msgLine(n.label, n.action)), n.action));
+          lbl.firstChild.addEventListener("click", () => run(n.action, lbl.firstChild));
+        }
         row.append(lbl);
-        if (n.gap) row.append(el("span", { class: "gap" }, "gap"));
+        if (caption) row.append(btn(caption, n.action, "small"));
+        if (n.gap) row.append(el("span", { class: "gap" }, t("gap")));
         if (n.count) row.append(el("span", { class: "cnt" }, n.count));
         li.append(row);
         if (ul) {
@@ -372,7 +497,7 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
         return li;
       };
       const tree = el("ul", { class: "tree" }, b.nodes.map(node));
-      const out = [sub(b.title), tree];
+      const out = [sub(b.title), tree, more(b.more)];
       if (b.gaps_toggle) {
         const t = el("button", { type: "button", class: "b small", "aria-pressed": "false" }, b.gaps_toggle);
         t.addEventListener("click", () => {
@@ -390,17 +515,30 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
       const groups = b.groups || [];
       const panels = groups.map((g, gi) => formPanel(b, g, k + "-" + gi));
       if (groups.length > 1) {
+        // The ARIA tabs pattern: one tab in the tab order, arrows/Home/End
+        // move between tabs and select the one they land on.
         const tabs = el("div", { class: "tabs", role: "tablist" });
+        const select = (gi) => {
+          [...tabs.children].forEach((x, xi) => { x.setAttribute("aria-selected", String(xi === gi)); x.tabIndex = xi === gi ? 0 : -1; });
+          panels.forEach((p, pi) => { p.hidden = pi !== gi; });
+        };
         groups.forEach((g, gi) => {
-          const t = el("button", { type: "button", class: "b", role: "tab", "aria-selected": String(gi === 0), "aria-pressed": String(gi === 0), id: "tab-" + k + "-" + gi }, g.label || String(gi + 1));
-          t.addEventListener("click", () => {
-            tabs.querySelectorAll("[role=tab]").forEach((x, xi) => { x.setAttribute("aria-selected", String(xi === gi)); x.setAttribute("aria-pressed", String(xi === gi)); });
-            panels.forEach((p, pi) => { p.hidden = pi !== gi; });
-          });
-          tabs.append(t);
+          const tab = el("button", { type: "button", class: "b", role: "tab", id: "tab-" + k + "-" + gi, "aria-controls": "panel-" + k + "-" + gi }, g.label || String(gi + 1));
+          tab.addEventListener("click", () => select(gi));
+          tabs.append(tab);
+        });
+        tabs.addEventListener("keydown", (e) => {
+          const n = groups.length, cur = [...tabs.children].indexOf(document.activeElement);
+          if (cur < 0) return;
+          const to = { ArrowRight: (cur + 1) % n, ArrowLeft: (cur + n - 1) % n, Home: 0, End: n - 1 }[e.key];
+          if (to === undefined) return;
+          e.preventDefault();
+          select(to);
+          tabs.children[to].focus();
         });
         wrap.append(tabs);
-        panels.forEach((p, pi) => { p.setAttribute("role", "tabpanel"); p.setAttribute("aria-labelledby", "tab-" + k + "-" + pi); p.hidden = pi !== 0; });
+        panels.forEach((p, pi) => { p.id = "panel-" + k + "-" + pi; p.setAttribute("role", "tabpanel"); p.setAttribute("aria-labelledby", "tab-" + k + "-" + pi); });
+        select(0);
       }
       wrap.append(...panels);
       return wrap;
@@ -428,7 +566,7 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
         } else if (f.kind === "text") {
           ctl = el("textarea", { id, placeholder: f.placeholder, required: f.required }, f.default != null ? String(f.default) : "");
         } else if (f.kind === "boolean") {
-          ctl = el("select", { id, required: f.required }, el("option", { value: "" }, ""), el("option", { value: "true", selected: f.default === true }, "Yes"), el("option", { value: "false", selected: f.default === false }, "No"));
+          ctl = el("select", { id, required: f.required }, el("option", { value: "" }, ""), el("option", { value: "true", selected: f.default === true }, t("yes")), el("option", { value: "false", selected: f.default === false }, t("no")));
         } else {
           ctl = el("input", { id, type: f.kind === "integer" ? "number" : "text", placeholder: f.placeholder, required: f.required, value: f.default != null ? String(f.default) : null });
         }
@@ -442,18 +580,26 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
       for (const k of Object.keys(getters)) v[k] = getters[k]();
       return v;
     };
-    const submit = el("button", { type: "submit", class: "b primary" }, b.submit_label || "Send");
-    const sync = () => { submit.disabled = fill(g.template, values()).missing.length > 0; };
+    const submit = el("button", { type: "submit", class: "b primary" }, b.submit_label || t("send"));
+    const labels = Object.create(null);
+    for (const f of g.fields) labels[f.name] = f.label;
+    const preview = el("div", { class: "preview" });
+    // A request in flight keeps the submit disabled, whatever is edited.
+    const sync = () => {
+      const v = values();
+      submit.disabled = busy.has(submit) || fill(g.template, v).missing.length > 0;
+      preview.textContent = (g.preview_label || t("willSend")) + ": " + previewText(g.template, v, labels);
+    };
     form.addEventListener("input", sync);
     form.addEventListener("change", sync);
     form.addEventListener("submit", (e) => {
       e.preventDefault();
       const r = fill(g.template, values());
+      if (busy.has(submit)) return;
       if (r.missing.length || !r.text) { sync(); return; }
-      run({ type: "send_message", text: r.text }, submit);
+      run({ type: "send_message", text: r.text }, submit, sync);
     });
-    form.append(el("div", { class: "btns" }, submit));
-    if (g.preview) form.append(el("div", { class: "preview" }, g.preview.label + ": " + g.preview.text));
+    form.append(preview, el("div", { class: "btns" }, submit));
     if (b.note) form.append(el("div", { class: "note" }, b.note));
     sync();
     return form;
@@ -461,19 +607,26 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
 
   function render(w) {
     card.replaceChildren();
+    say("", false);
+    generation++;
+    shown = w;
+    openAction = null;
+    openShown = false;
     if (!w || typeof w !== "object" || w.version !== DATA_VERSION) { resize(); return; }
     if (w.header) {
       card.append(el("div", { class: "head" }, el("h1", { class: "title" }, w.header.title), w.header.stamp ? el("span", { class: "stamp" }, w.header.stamp) : null));
       if (w.header.context) card.append(el("p", { class: "context" }, w.header.context));
     }
-    (w.body || []).forEach((b, k) => {
-      const make = blocks[b.type];
-      if (!make) return;
+    const acts = Array.isArray(w.actions) ? w.actions : [];
+    openAction = acts.find((a) => a && a.action && a.action.type === "open_url") || null;
+    (Array.isArray(w.body) ? w.body : []).forEach((b, k) => {
+      if (!b || !Object.prototype.hasOwnProperty.call(blocks, b.type)) return;
       const sec = el("section", { class: "block" });
-      sec.append(...[make(b, k)].flat().filter(Boolean));
+      try { sec.append(...[blocks[b.type](b, k)].flat().filter(Boolean)); } catch (_) { return; }
       card.append(sec);
     });
-    const acts = w.actions || [];
+    const cut = more(w.more, "moreSections");
+    if (cut) card.append(el("section", { class: "block" }, cut));
     if (acts.length) card.append(el("div", { class: "btns bar" }, acts.map((a) => btn(a.label, a.action, a.primary ? "primary" : ""))));
     resize();
   }
@@ -509,7 +662,7 @@ input[type=radio] { accent-color: var(--accent); margin: 0; }
     protocolVersion: "2026-01-26",
     appInfo: { name: "triton-answer-card", version: "1" },
     appCapabilities: { availableDisplayModes: ["inline"] },
-  }, 5000).then((r) => {
+  }).then((r) => {
     bridge = true;
     r = r || {};
     canOpenLinks = !r.hostCapabilities || !!r.hostCapabilities.openLinks;

@@ -68,10 +68,7 @@
               "style": "radio"
             }
           ],
-          "preview": {
-            "label": "Will be sent as",
-            "text": "Show the capability map for ‹Domain›, area ‹Area (optional)›, ‹Show›"
-          },
+          "preview_label": "Will be sent as",
           "template": [
             {
               "text": "Show the capability map for "

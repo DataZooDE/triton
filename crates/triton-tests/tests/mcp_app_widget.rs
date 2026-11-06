@@ -3,7 +3,8 @@
 //! An MCP host that renders MCP Apps loads ONE static HTML resource for a
 //! tool (`_meta.ui.resourceUri` on the tool descriptor) and hands it the
 //! `tools/call` result. Triton maps the canonical surface to the widget's
-//! data (`structuredContent.widget`, beside the unchanged envelope), so the
+//! data (the result's `_meta["triton/widget"]`, which the host hands the
+//! widget but not the model; `structuredContent` stays the envelope), so the
 //! widget draws the same card anatomy as the Teams and Gemini mappings:
 //! header, body, one primary and the secondary actions.
 //!
@@ -334,7 +335,11 @@ async fn a_customer_mcp_path_serves_the_answer_card_widget() {
     for (tool, name) in SHAPES {
         let res = rpc(&r, "tools/call", json!({ "name": tool, "arguments": {} })).await;
         let want = read_json(&golden(name));
-        assert_eq!(res["structuredContent"]["widget"], want, "{tool}");
+        // The card's data rides the result `_meta`, which the host hands
+        // the widget but not the model; the model-visible structured
+        // content does not repeat it.
+        assert_eq!(res["_meta"]["triton/widget"], want, "{tool}");
+        assert!(res["structuredContent"].get("widget").is_none(), "{tool}");
         assert_eq!(
             res["content"][0]["text"],
             format!("full text of {name}"),
@@ -353,6 +358,7 @@ async fn a_customer_mcp_path_serves_the_answer_card_widget() {
     .await;
     assert_eq!(res["content"][0]["text"], "just prose");
     assert!(res["structuredContent"].get("widget").is_none(), "{res}");
+    assert!(res["_meta"].get("triton/widget").is_none(), "{res}");
 }
 
 /// The widget composes a form's request on the client. These vectors pin
@@ -467,4 +473,292 @@ async fn resource_reads_and_lists_are_logged_with_the_client() {
         "{refused}"
     );
     assert!(refused.contains(uri), "{refused}");
+}
+
+// ── Budgets ────────────────────────────────────────────────────────────
+
+fn chars(v: &Value, out: &mut Vec<usize>) {
+    match v {
+        Value::String(s) => out.push(s.chars().count()),
+        Value::Object(m) => m
+            .iter()
+            .filter(|(k, _)| k.as_str() != "url")
+            .for_each(|(_, x)| chars(x, out)),
+        Value::Array(a) => a.iter().for_each(|x| chars(x, out)),
+        _ => {}
+    }
+}
+
+fn depth(nodes: &Value) -> usize {
+    nodes.as_array().map_or(0, |a| {
+        a.iter()
+            .map(|n| 1 + depth(&n["children"]))
+            .max()
+            .unwrap_or(0)
+    })
+}
+
+fn count(nodes: &Value) -> usize {
+    nodes
+        .as_array()
+        .map_or(0, |a| a.iter().map(|n| 1 + count(&n["children"])).sum())
+}
+
+/// A chain `levels` deep under each of `width` roots, `fan` children per
+/// level: `width * (fan^levels - 1) / (fan - 1)` nodes.
+fn tree(levels: usize, fan: usize, prefix: &str) -> Vec<Value> {
+    if levels == 0 {
+        return vec![];
+    }
+    (0..fan)
+        .map(|i| {
+            let label = format!("{prefix}.{i}");
+            json!({ "label": label, "children": tree(levels - 1, fan, &label),
+                    "action": { "type": "send_message", "text": format!("Show {label}") } })
+        })
+        .collect()
+}
+
+/// An oversized answer: more rows, deeper and wider trees, longer texts
+/// than the widget budgets allow.
+fn oversized() -> Value {
+    let long = "x".repeat(2000);
+    let rows: Vec<Value> = (0..120)
+        .map(|i| json!({ "cells": { "a": format!("Row {i}"), "b": if i == 0 { long.clone() } else { "b".into() } },
+                         "action": { "type": "send_message", "text": format!("Show row {i}") } }))
+        .collect();
+    let items: Vec<Value> = (0..80)
+        .map(|i| json!({ "label": format!("Item {i}") }))
+        .collect();
+    let pairs: Vec<Value> = (0..70)
+        .map(|i| json!({ "label": format!("Key {i}"), "value": format!("Value {i}") }))
+        .collect();
+    json!({ "surface": { "components": [
+        { "kind": "header", "title": long.clone() },
+        { "kind": "table", "columns": [ { "key": "a", "label": "A" }, { "key": "b", "label": "B" } ], "rows": rows },
+        { "kind": "list", "items": items },
+        { "kind": "key_value", "pairs": pairs },
+        // 2 * (2^7 - 1) = 254 nodes, 7 levels deep.
+        { "kind": "tree", "nodes": tree(7, 2, "n") },
+        { "kind": "chips", "chips": [
+            { "label": "fits", "message": "Show it" },
+            { "label": "too long to send", "message": "m".repeat(501) } ] },
+        { "kind": "button", "label": "Open", "primary": true,
+          "action": { "type": "open_url", "url": "https://app.example.com/acme/open" } },
+        { "kind": "button", "label": "Too long a link",
+          "action": { "type": "open_url", "url": format!("https://app.example.com/{}", "p".repeat(3000)) } }
+    ] } })
+}
+
+#[test]
+fn an_oversized_answer_is_cut_to_the_widget_budgets_visibly() {
+    let d = mcp_app::widget_data(&oversized()).expect("a card");
+    let body = d["body"].as_array().unwrap();
+    let block = |t: &str| {
+        body.iter()
+            .find(|b| b["type"] == t)
+            .unwrap_or_else(|| panic!("{t}: {d}"))
+    };
+
+    // Rows, items, pairs: at most 50 each, the rest counted as "more".
+    let table = block("table");
+    assert_eq!(table["rows"].as_array().unwrap().len(), mcp_app::MAX_ROWS);
+    assert_eq!(table["more"], 70);
+    assert_eq!(block("list")["items"].as_array().unwrap().len(), 50);
+    assert_eq!(block("list")["more"], 30);
+    assert_eq!(block("facts")["pairs"].as_array().unwrap().len(), 50);
+    assert_eq!(block("facts")["more"], 20);
+
+    // A tree: at most 4 levels and 200 nodes; the rest counted.
+    let t = block("tree");
+    assert!(
+        depth(&t["nodes"]) <= mcp_app::MAX_TREE_DEPTH,
+        "{}",
+        depth(&t["nodes"])
+    );
+    let kept = count(&t["nodes"]);
+    assert!(kept <= mcp_app::MAX_TREE_NODES, "{kept}");
+    assert_eq!(kept as u64 + t["more"].as_u64().unwrap(), 254);
+
+    // Any text at most 500 characters, visibly cut.
+    let mut lens = Vec::new();
+    chars(&d, &mut lens);
+    assert!(
+        lens.iter().all(|&n| n <= mcp_app::MAX_TEXT),
+        "{:?}",
+        lens.iter().max()
+    );
+    let title = d["header"]["title"].as_str().unwrap();
+    assert!(title.ends_with('\u{2026}'), "{title}");
+
+    // A message or link too long to show whole is no control: cutting it
+    // would send or open something else than the producer meant.
+    let chips = block("chips")["chips"].as_array().unwrap();
+    assert_eq!(chips.len(), 1, "{chips:?}");
+    assert_eq!(d["actions"].as_array().unwrap().len(), 1, "{d}");
+
+    // The whole card fits the byte budget.
+    assert!(serde_json::to_vec(&d).unwrap().len() <= mcp_app::MAX_BYTES);
+
+    if let Ok(out) = std::env::var("WIDGET_OVERSIZED_OUT") {
+        std::fs::write(out, serde_json::to_string(&d).unwrap()).unwrap();
+    }
+}
+
+/// Past the byte budget the card drops whole trailing blocks and says how
+/// many: a reader sees that the card is incomplete.
+#[test]
+fn a_card_over_the_byte_budget_drops_trailing_blocks_visibly() {
+    let mut components = vec![json!({ "kind": "header", "title": "Big" })];
+    for b in 0..20 {
+        let rows: Vec<Value> = (0..50)
+            .map(|i| json!({ "cells": { "a": format!("{b}/{i} {}", "y".repeat(400)) } }))
+            .collect();
+        components.push(
+            json!({ "kind": "table", "columns": [ { "key": "a", "label": "A" } ], "rows": rows }),
+        );
+    }
+    let d = mcp_app::widget_data(&json!({ "surface": { "components": components } })).unwrap();
+    assert!(serde_json::to_vec(&d).unwrap().len() <= mcp_app::MAX_BYTES);
+    let kept = d["body"].as_array().unwrap().len();
+    assert!((1..20).contains(&kept), "{kept}");
+    assert_eq!(d["more"], 20 - kept as u64, "{}", d["more"]);
+}
+
+/// A form previews the exact request live; the producer may name the
+/// caption, and the widget composes the text from the fields (no fixed
+/// text that shows labels instead of values).
+#[test]
+fn a_form_carries_the_preview_caption_not_a_fixed_text() {
+    let d = mcp_app::widget_data(&fixture("1e")).unwrap();
+    let mut groups = Vec::new();
+    for b in d["body"].as_array().unwrap() {
+        if let Some(g) = b["groups"].as_array() {
+            groups.extend(g.iter().cloned());
+        }
+    }
+    assert!(!groups.is_empty(), "{d}");
+    let g = groups
+        .iter()
+        .find(|g| g.get("preview_label").is_some())
+        .unwrap_or_else(|| panic!("{d}"));
+    assert_eq!(g["preview_label"], "Will be sent as");
+    assert!(groups.iter().all(|g| g.get("preview").is_none()), "{d}");
+}
+
+// ── Crew review 2026-11-02 (W1–W4) ─────────────────────────────────────
+
+fn form_with(fields: Value, template: &str) -> Value {
+    json!({ "surface": { "components": [
+        { "kind": "header", "title": "T" },
+        { "kind": "form", "title": "F", "submit_label": "Go", "fields": fields,
+          "send_template": template }
+    ] } })
+}
+
+fn forms(d: &Option<Value>) -> usize {
+    d.as_ref().map_or(0, |d| {
+        d["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["type"] == "form")
+            .count()
+    })
+}
+
+/// A default is sent when the person does not touch the field: like any
+/// payload it is never cut, so a group with an over-long default is none.
+#[test]
+fn an_over_long_default_is_no_form_rather_than_a_cut_one() {
+    let d = mcp_app::widget_data(&form_with(
+        json!([ { "name": "r", "label": "Reason", "kind": "text", "default": "d".repeat(600) } ]),
+        "Note {r}",
+    ));
+    assert_eq!(forms(&d), 0, "{d:?}");
+    let ok = mcp_app::widget_data(&form_with(
+        json!([ { "name": "r", "label": "Reason", "kind": "text", "default": "d".repeat(500) } ]),
+        "Note {r}",
+    ));
+    assert_eq!(forms(&ok), 1, "{ok:?}");
+}
+
+/// A form that can never be sent is no form: a template field without an
+/// input, two inputs with one name, a required select without options.
+#[test]
+fn a_form_that_cannot_be_sent_is_no_form() {
+    let missing = form_with(
+        json!([ { "name": "a", "label": "A", "kind": "string" } ]),
+        "Set {a} {b}",
+    );
+    assert_eq!(forms(&mcp_app::widget_data(&missing)), 0);
+    let twice = form_with(
+        json!([ { "name": "a", "label": "A", "kind": "string" },
+                { "name": "a", "label": "A2", "kind": "string" } ]),
+        "Set {a}",
+    );
+    assert_eq!(forms(&mcp_app::widget_data(&twice)), 0);
+    let empty = form_with(
+        json!([ { "name": "a", "label": "A", "kind": "select", "required": true,
+                  "options": [ { "label": "long", "value": "v".repeat(501) } ] } ]),
+        "Set {a}",
+    );
+    assert_eq!(forms(&mcp_app::widget_data(&empty)), 0);
+}
+
+/// Bidi controls can make a sent text read differently from what it is:
+/// a message or template that carries one is no control.
+#[test]
+fn a_message_with_bidi_controls_is_no_control() {
+    let d = mcp_app::widget_data(&json!({ "surface": { "components": [
+        { "kind": "header", "title": "T" },
+        { "kind": "chips", "chips": [
+            { "label": "ok", "message": "Show it" },
+            { "label": "evil", "message": "Show \u{202e}ti eteled" } ] }
+    ] } }))
+    .unwrap();
+    assert_eq!(d["body"][0]["chips"].as_array().unwrap().len(), 1, "{d}");
+    let f = form_with(
+        json!([ { "name": "a", "label": "A", "kind": "string" } ]),
+        "Set \u{2066}{a}",
+    );
+    assert_eq!(forms(&mcp_app::widget_data(&f)), 0);
+}
+
+/// The widget's link rule is the parsed one: https with a host and no
+/// credentials. An embed whose page fails it keeps only its fallback.
+#[test]
+fn a_link_with_credentials_or_no_host_is_no_control_anywhere() {
+    for url in [
+        "https://good.example@evil.example/x",
+        "https://",
+        "https:///x",
+    ] {
+        assert!(
+            !mcp_app::is_widget_action(&json!({ "type": "open_url", "url": url })),
+            "{url}"
+        );
+        let d = mcp_app::widget_data(&json!({ "surface": { "components": [
+            { "kind": "embed", "url": url, "title": "Open page",
+              "fallback": { "kind": "header", "title": "Fallback" } }
+        ] } }))
+        .unwrap();
+        assert_eq!(d["header"]["title"], "Fallback", "{url}: {d}");
+        assert_eq!(d["actions"], json!([]), "{url}: {d}");
+    }
+}
+
+/// Many small blocks: the byte budget holds and the cut is counted.
+#[test]
+fn many_blocks_fit_the_byte_budget_quickly() {
+    let mut components = vec![json!({ "kind": "header", "title": "Many" })];
+    for i in 0..20_000 {
+        components.push(json!({ "kind": "notice", "tone": "info", "text": format!("n{i}") }));
+    }
+    let t = std::time::Instant::now();
+    let d = mcp_app::widget_data(&json!({ "surface": { "components": components } })).unwrap();
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    assert!(serde_json::to_vec(&d).unwrap().len() <= mcp_app::MAX_BYTES);
+    let kept = d["body"].as_array().unwrap().len() as u64;
+    assert_eq!(kept + d["more"].as_u64().unwrap(), 20_000);
 }

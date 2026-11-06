@@ -690,11 +690,15 @@ async fn tools_call(
             // `content` is the flattened prose+chart+sources (above);
             // `structuredContent` is the canonical typed envelope, the
             // same dict REST/A2A get.
-            let mut env_v = envelope(&d);
-            if let Some(w) = widget {
-                env_v["widget"] = w;
-            }
+            let env_v = envelope(&d);
             let mut meta = json!({ "trace_id": trace_id });
+            // The card's data rides the result `_meta`: the host hands it
+            // to the widget (MCP Apps `ui/notifications/tool-result`,
+            // ChatGPT `toolResponseMetadata`) but not to the model, which
+            // already has the text and the envelope.
+            if let Some(w) = widget {
+                meta[mcp_app::META_KEY] = w;
+            }
             if let Some(ui) = ui_meta {
                 meta["ui"] = ui;
             }

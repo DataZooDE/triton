@@ -54,10 +54,7 @@
               "placeholder": "Finance took over the process in October."
             }
           ],
-          "preview": {
-            "label": "Will be sent as",
-            "text": "Set the ‹What to change› of Agent 28 to \"‹New value›\". Reason: ‹Why›"
-          },
+          "preview_label": "Will be sent as",
           "template": [
             {
               "text": "Set the "
