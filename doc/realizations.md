@@ -1627,8 +1627,12 @@ a trap the next developer should not have to step in.
   the card's title and its row names (`a2ui::mcp_app::card_text`; a label
   packed as `name · detail` is named by its first part) — and a
   note to the model (`TRITON_MCP_CARD_NOTE`, default "The card shows these
-  rows to the user; add at most one sentence and do not repeat them."). A
-  card without rows, a card cut by the byte budget, and every client that
+  rows to the user; add at most one sentence and do not repeat them."),
+  then what the card does not show: `narration` components, chart images
+  and sources. The answer's own text rendering (a top-level `text`, `text`
+  components) is dropped there, because it is the rows again. A card
+  without rows, a card cut by any budget (rows, tree nodes, body blocks),
+  and every client that
   did not declare the extension (Copilot Studio, plain MCP clients) keep the
   full text; REST, A2A and the chat channels are unchanged. Capabilities
   arrive in `initialize` on the handshake era but each call is a separate

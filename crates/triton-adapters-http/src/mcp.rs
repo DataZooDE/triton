@@ -760,6 +760,7 @@ async fn tools_call(
             // Structured clients still get the full typed envelope in
             // `structuredContent` below, unchanged.
             let reply_text = crate::a2a_spec::reply_text(&d.result);
+            let companions = crate::a2a_spec::card_companions(&d.result);
             // The answer-card widget's data, from the canonical surface (and
             // before the A2UI wrap). A result that brings its own MCP App
             // (`_meta.ui`) keeps it; there is no card to draw then.
@@ -769,13 +770,20 @@ async fn tools_call(
             // A host that renders the card shows its rows to the user; with
             // the rows in the text as well, its model repeats them as its
             // own table. Such a host's model gets one line (the card's title
-            // and row names) and a note instead. Every other client, and a
-            // card without rows, keeps the full text.
-            let reply_text = widget
+            // and row names) and a note instead, followed by what the card
+            // does not show (narration, charts, sources). Every other client,
+            // and a card without rows, keeps the full text.
+            let reply_text = match widget
                 .as_ref()
                 .filter(|_| card_host)
                 .and_then(|w| mcp_app::card_text(w, &state.card_note))
-                .unwrap_or(reply_text);
+            {
+                Some(line) => match companions {
+                    Some(rest) => format!("{line}\n\n{rest}"),
+                    None => line,
+                },
+                None => reply_text,
+            };
             if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
                 return rpc_error(id, code_for(&e), &e.to_string());
             }

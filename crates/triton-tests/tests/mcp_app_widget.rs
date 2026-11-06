@@ -198,6 +198,19 @@ pub(crate) async fn rig() -> Rig {
     let prose = FakeAgent::start_returning(json!({ "text": "just prose" })).await;
     upstreams.push(format!("prose={}", prose.host_port()));
     agents.push(prose);
+    // A card with rows beside prose the card does not show: a narration, a
+    // chart and sources (see `mcp_card_text`).
+    let narrated = FakeAgent::start_returning(json!({ "surface": { "components": [
+        { "kind": "header", "title": "3 Things" },
+        { "kind": "text", "value": "3 Things:\n- A\n- B\n- C" },
+        { "kind": "narration", "text": "Results exclude the archived system." },
+        { "kind": "list", "items": [ { "label": "A" }, { "label": "B" }, { "label": "C" } ] },
+        { "kind": "report", "image_url": "https://img.example/c.png" },
+        { "kind": "sources", "items": [ { "label": "Doc", "resource": "https://docs.example/d" } ] }
+    ] } }))
+    .await;
+    upstreams.push(format!("narrated={}", narrated.host_port()));
+    agents.push(narrated);
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_ENTRA_AUDIENCE".to_string(), ENTRA_AUD.to_string()),

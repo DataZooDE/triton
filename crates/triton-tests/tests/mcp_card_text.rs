@@ -128,6 +128,20 @@ async fn a_client_that_renders_the_card_gets_the_card_text() {
     // A card without rows (a receipt's facts) keeps the full text.
     let res = call(&r, Some(&session), "receipt", None).await;
     assert_eq!(text(&res), "full text of 3e", "{res}");
+    // Prose the card does not show stays: the narration, the chart and the
+    // sources follow the card text; the text rendering of the rows does not.
+    let res = call(&r, Some(&session), "narrated", None).await;
+    assert_eq!(
+        text(&res),
+        format!(
+            "3 Things: A, B, C \u{2014} shown in the card.\n{}\n\n\
+             Results exclude the archived system.\n\n\
+             ![chart](https://img.example/c.png)\n\n\
+             Sources: [Doc](https://docs.example/d)",
+            mcp_app::CARD_NOTE
+        ),
+        "{res}"
+    );
     // No card at all: the text.
     let res = call(&r, Some(&session), "prose", None).await;
     assert_eq!(text(&res), "just prose");

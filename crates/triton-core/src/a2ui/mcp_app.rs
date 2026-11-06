@@ -25,7 +25,10 @@
 //! and it reaches the agent as a new turn of the host's conversation.
 //!
 //! Prose (`text`, `narration`) stays out of the widget: the host shows the
-//! tool's text content, and the card must not say it twice.
+//! tool's text content, and the card must not say it twice. The reverse
+//! holds too: on a host that renders the card, the text content does not
+//! repeat the card's rows — it is [`card_text`] (title and row names), then
+//! the narration, charts and sources the card does not show.
 
 use serde_json::{Value, json};
 
@@ -139,15 +142,16 @@ pub const CARD_NOTE: &str =
 /// The model-visible text for a host that renders the card, in place of the
 /// full text: one line with the card's title and the names of its rows (the
 /// first cell of a table row, a list item's label, a tree's top-level
-/// labels), then `note`. `None` when the card has no rows, or lost body
-/// blocks to the size budget: then the full text stays, because the card
-/// does not show everything the text says.
+/// labels), then `note`. `None` when the card has no rows, or was cut by a
+/// budget (rows, tree nodes, body blocks): then the full text stays, because
+/// the card does not show everything the text says.
 pub fn card_text(data: &Value, note: &str) -> Option<String> {
-    if data.get("more").is_some() {
+    let cut = |v: &Value| v.get("more").and_then(Value::as_u64).unwrap_or(0) > 0;
+    if cut(data) || data["body"].as_array()?.iter().any(cut) {
         return None;
     }
     let mut names: Vec<String> = Vec::new();
-    let mut more = 0u64;
+    let mut more = 0usize;
     let mut block_title: Option<&str> = None;
     for b in data["body"].as_array()? {
         let found: Vec<&str> = match b["type"].as_str() {
@@ -175,7 +179,6 @@ pub fn card_text(data: &Value, note: &str) -> Option<String> {
             continue;
         }
         block_title = block_title.or(b["title"].as_str());
-        more += b["more"].as_u64().unwrap_or(0);
         names.extend(found.into_iter().map(row_name).filter(|n| !n.is_empty()));
     }
     if names.is_empty() {
@@ -190,7 +193,7 @@ pub fn card_text(data: &Value, note: &str) -> Option<String> {
         .as_str()
         .map(str::trim)
         .filter(|c| !c.is_empty());
-    more += names.len().saturating_sub(SUMMARY_NAMES) as u64;
+    more += names.len().saturating_sub(SUMMARY_NAMES);
     names.truncate(SUMMARY_NAMES);
     let mut line = String::new();
     if let Some(t) = title {
@@ -922,6 +925,28 @@ mod tests {
             line,
             format!("Thing 3, {cut}\u{2026} \u{2014} shown in the card.")
         );
+    }
+
+    /// A block cut to its row or node budget does not show every row: no
+    /// card text, at the boundary exactly.
+    #[test]
+    fn a_block_cut_to_its_budget_has_no_card_text() {
+        let names: Vec<String> = (1..=MAX_ROWS + 1).map(|i| format!("T{i}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        assert_eq!(card_text(&table_card(&refs), ""), None);
+        assert!(card_text(&table_card(&refs[..MAX_ROWS]), "").is_some());
+        let items: Vec<Value> = names.iter().map(|n| json!({ "label": n })).collect();
+        let list = widget_data(&json!({ "surface": { "components": [
+            { "kind": "list", "items": items } ] } }))
+        .unwrap();
+        assert_eq!(card_text(&list, ""), None);
+        let nodes: Vec<Value> = (0..=MAX_TREE_NODES)
+            .map(|i| json!({ "label": format!("N{i}") }))
+            .collect();
+        let tree = widget_data(&json!({ "surface": { "components": [
+            { "kind": "tree", "nodes": nodes } ] } }))
+        .unwrap();
+        assert_eq!(card_text(&tree, ""), None);
     }
 
     /// A card that lost body blocks to the size budget does not show all the
