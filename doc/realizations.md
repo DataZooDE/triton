@@ -1646,6 +1646,22 @@ a trap the next developer should not have to step in.
   whether a host declares MCP Apps at all is visible. Open: ChatGPT also
   shows `structuredContent` (the full envelope) to the model, which the
   text change does not touch.
+- **Which host got the card text is a log question, not a guess (2026-11-07).**
+  ChatGPT wrote the rows as a table again behind an embedding host
+  (`triton_embed::router_parts`) after one sentence behind the binary the
+  day before, for the same upstream answer (same upstream response size in
+  the host's call audit). The embedded router builds the same `McpState`
+  and the same per-request decision; `embed_parity` now pins the card text
+  on both hosts, on a customer path, in both eras (handshake: `initialize`
+  with the extension, then the `triton-card-` session id; 2026-07-28: the
+  `_meta` client capabilities per request). So the difference is in what
+  the client sent, or in the model: ChatGPT also reads `structuredContent`,
+  which holds the rows whatever the text says, so a table under the card is
+  not by itself evidence of the full text. Every `tools/call` now logs
+  `"mcp tools/call card host"`: the client, era, the `_meta` keys, the
+  declared capability keys, extensions and MCP Apps mime types, the kind of
+  session id (`none`, `card`, `other`) and the verdict `card_host`. Names
+  only, never values or tokens.
 
 ---
 

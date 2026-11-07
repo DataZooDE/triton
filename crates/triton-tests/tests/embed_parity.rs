@@ -14,7 +14,8 @@
 //!   contract (doc/upstream-agent-contract.md, "In-process upstream").
 //!
 //! Compared: MCP `tools/list` (with the answer-card widget `_meta`) and
-//! `resources/list`, a widget-carrying `tools/call` result, the A2A cards in
+//! `resources/list`, a widget-carrying `tools/call` result, the card text a card-rendering
+//! host gets (handshake era by session id, 2026-07-28 per request), the A2A cards in
 //! both versions, the RFC 9728 metadata and the 401/403 challenges of a
 //! customer path, the error mapping of an agent fault and of an unknown
 //! tool, and a task whose upstream stream breaks and is resumed — not
@@ -60,6 +61,16 @@ fn card_answer() -> Value {
     ] } })
 }
 
+/// A list answer (the 3a fixture): a card with rows, so a card-rendering
+/// host gets the card text in place of the full text.
+fn rows_answer() -> Value {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/fixtures/conversation/surfaces/3a.json"
+    );
+    serde_json::from_str(&std::fs::read_to_string(path).expect("3a fixture")).unwrap()
+}
+
 fn task_result() -> Value {
     AsyncPlan::default().result
 }
@@ -100,6 +111,7 @@ impl UpstreamDispatch for InProcess {
             .push((tool.to_string(), args));
         match tool {
             "answer" => Ok(card_answer()),
+            "rows" => Ok(rows_answer()),
             // A non-2xx answer is an agent fault: `Tool`, as StaticUpstream
             // maps it.
             "broken" => Err(TritonError::Tool(
@@ -161,7 +173,12 @@ impl UpstreamDispatch for InProcess {
     }
 
     async fn list_agents(&self) -> Vec<String> {
-        vec!["answer".into(), "assistant".into(), "broken".into()]
+        vec![
+            "answer".into(),
+            "assistant".into(),
+            "broken".into(),
+            "rows".into(),
+        ]
     }
 }
 
@@ -212,7 +229,7 @@ struct Hosts {
     seen: Arc<Mutex<Seen>>,
     entra: TestIssuer,
     _triton: TritonProcess,
-    _fakes: (FakeAgent, FakeAgent),
+    _fakes: (FakeAgent, FakeAgent, FakeAgent),
 }
 
 async fn hosts() -> Hosts {
@@ -226,6 +243,7 @@ async fn hosts() -> Hosts {
     .await;
     let answer = FakeAgent::start_returning(card_answer()).await;
     let broken = FakeAgent::start_always_failing().await;
+    let rows = FakeAgent::start_returning(rows_answer()).await;
     let shared = ingress_env(&entra);
 
     let mut env: HashMap<String, String> = shared
@@ -239,10 +257,11 @@ async fn hosts() -> Hosts {
         (
             "TRITON_STATIC_UPSTREAMS".to_string(),
             format!(
-                "answer={},assistant={},broken={}",
+                "answer={},assistant={},broken={},rows={}",
                 answer.host_port(),
                 async_agent.host_port(),
-                broken.host_port()
+                broken.host_port(),
+                rows.host_port()
             ),
         ),
     ]);
@@ -275,7 +294,7 @@ async fn hosts() -> Hosts {
         seen,
         entra,
         _triton: triton,
-        _fakes: (answer, broken),
+        _fakes: (answer, broken, rows),
     }
 }
 
@@ -319,6 +338,49 @@ async fn rpc(
             .unwrap_or(Value::Null)
     });
     (status, challenge, body)
+}
+
+const UI: &str = "io.modelcontextprotocol/ui";
+
+fn ui_capabilities() -> Value {
+    json!({ "extensions": { UI: { "mimeTypes": [triton_core::a2ui::mcp_app::MIME_TYPE] } } })
+}
+
+/// A 2026-07-28 request `_meta` declaring `caps`.
+fn modern(caps: Value) -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "parity", "version": "1.0.0" },
+        "io.modelcontextprotocol/clientCapabilities": caps
+    })
+}
+
+/// POST one MCP request, with a session id when given; the session id the
+/// answer carries and the body.
+async fn mcp_post(
+    url: &str,
+    token: Option<&str>,
+    session: Option<&str>,
+    method: &str,
+    params: Value,
+) -> (Option<String>, Value) {
+    let mut req = reqwest::Client::new()
+        .post(url)
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }));
+    if let Some(t) = token {
+        req = req.bearer_auth(t);
+    }
+    if let Some(s) = session {
+        req = req.header("mcp-session-id", s);
+    }
+    let resp = req.send().await.expect("POST");
+    assert_eq!(resp.status().as_u16(), 200, "{method} {url}");
+    let session = resp
+        .headers()
+        .get("mcp-session-id")
+        .map(|v| v.to_str().unwrap().to_string());
+    (session, resp.json().await.expect("json"))
 }
 
 fn now() -> i64 {
@@ -497,6 +559,87 @@ async fn an_in_process_upstream_behaves_like_a_static_upstream_on_every_face() {
         calls[0]
     );
     assert_eq!(calls[0], calls[1], "tools/call with the answer card");
+
+    // 3b. The card text: a client that renders the card gets one line and a
+    //     note instead of the rows, on both hosts, in both protocol eras,
+    //     on a customer path (where ChatGPT and Claude connect); a client
+    //     that does not keep the full text.
+    let mut texts = Vec::new();
+    for (label, base) in hosts {
+        let url = format!("{base}/mcp/acme");
+        let session = mcp_post(
+            &url,
+            tok,
+            None,
+            "initialize",
+            json!({
+                "protocolVersion": "2025-06-18",
+                "capabilities": ui_capabilities(),
+                "clientInfo": { "name": "parity", "version": "1.0.0" }
+            }),
+        )
+        .await
+        .0
+        .unwrap_or_else(|| panic!("{label}: a card host gets a session id"));
+        assert!(session.starts_with("triton-card-"), "{label}: {session}");
+        let call = |meta: Option<Value>| {
+            let mut params = json!({ "name": "rows", "arguments": {} });
+            if let Some(m) = meta {
+                params["_meta"] = m;
+            }
+            params
+        };
+        let text = |r: &Value| {
+            r["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        };
+        let handshake = mcp_post(&url, tok, Some(&session), "tools/call", call(None))
+            .await
+            .1;
+        let modern_card = mcp_post(
+            &url,
+            tok,
+            None,
+            "tools/call",
+            call(Some(modern(ui_capabilities()))),
+        )
+        .await
+        .1;
+        let modern_plain = mcp_post(&url, tok, None, "tools/call", call(Some(modern(json!({})))))
+            .await
+            .1;
+        let plain = mcp_post(&url, tok, None, "tools/call", call(None)).await.1;
+        texts.push(json!({
+            "handshake": text(&handshake),
+            "modern_card": text(&modern_card),
+            "modern_plain": text(&modern_plain),
+            "plain": text(&plain),
+        }));
+    }
+    let short = texts[0]["handshake"].as_str().unwrap();
+    assert!(
+        short.contains("shown in the card"),
+        "reference, handshake era: {short}"
+    );
+    assert_eq!(
+        texts[0]["modern_card"], texts[0]["handshake"],
+        "reference, 2026-07-28"
+    );
+    assert!(
+        !texts[0]["plain"]
+            .as_str()
+            .unwrap()
+            .contains("shown in the card")
+    );
+    assert!(
+        !texts[0]["modern_plain"]
+            .as_str()
+            .unwrap()
+            .contains("shown in the card")
+    );
+    assert_eq!(texts[0], texts[1], "the card text on both hosts");
 
     // 4. Error mapping: an agent fault and an unknown tool, on MCP and on
     //    the REST face.
