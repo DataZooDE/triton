@@ -515,9 +515,10 @@ struct FakeBotFrameworkState {
     updates: Mutex<Vec<CapturedUpdate>>,
     /// Status the `PUT` route answers with. Default 200.
     update_status: Mutex<u16>,
-    /// Hold every `PUT` this long before answering (it is captured on
-    /// arrival) — a process killed meanwhile never learns it landed.
-    update_delay: Mutex<std::time::Duration>,
+    /// Hold a `PUT` this long before answering (it is captured on
+    /// arrival) — a process killed meanwhile never learns it landed. With
+    /// a text, only a `PUT` whose body contains it is held.
+    update_delay: Mutex<(std::time::Duration, Option<String>)>,
     /// Conversation members by the id they are looked up with
     /// (`GET …/members/{memberId}`), and how often that was asked.
     members: Mutex<std::collections::HashMap<String, Value>>,
@@ -561,7 +562,7 @@ impl FakeBotFramework {
             captured: Mutex::new(Vec::new()),
             updates: Mutex::new(Vec::new()),
             update_status: Mutex::new(200),
-            update_delay: Mutex::new(std::time::Duration::ZERO),
+            update_delay: Mutex::new((std::time::Duration::ZERO, None)),
             members: Mutex::new(std::collections::HashMap::new()),
             member_lookups: Mutex::new(Vec::new()),
             token_requests: Mutex::new(Vec::new()),
@@ -699,7 +700,15 @@ impl FakeBotFramework {
 
     /// Hold `updateActivity` answers for `delay` from now on.
     pub fn set_update_delay(&self, delay: std::time::Duration) {
-        *self.state.update_delay.lock().unwrap() = delay;
+        *self.state.update_delay.lock().unwrap() = (delay, None);
+    }
+
+    /// Hold only the `updateActivity` calls whose body contains `text`
+    /// (e.g. the final answer) for `delay`, from now on; every other update
+    /// is answered at once. A test that means "the final update is in
+    /// flight" holds exactly that update, not whichever one comes next.
+    pub fn set_update_delay_for(&self, text: &str, delay: std::time::Duration) {
+        *self.state.update_delay.lock().unwrap() = (delay, Some(text.to_string()));
     }
 
     /// Make `updateActivity` answer `status` from now on.
@@ -755,13 +764,19 @@ async fn handle_activity_put(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let delay = {
+        let (delay, only) = &*state.update_delay.lock().unwrap();
+        match only {
+            Some(text) if !body.to_string().contains(text.as_str()) => std::time::Duration::ZERO,
+            _ => *delay,
+        }
+    };
     state.updates.lock().unwrap().push(CapturedUpdate {
         conversation_id,
         activity_id: activity_id.clone(),
         bearer,
         body,
     });
-    let delay = *state.update_delay.lock().unwrap();
     if !delay.is_zero() {
         tokio::time::sleep(delay).await;
     }
