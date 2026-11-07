@@ -232,6 +232,13 @@ async fn a_revoked_sender_is_not_resumed() {
 /// Item 4: Triton is killed (SIGKILL) while the final card update is in
 /// flight — the task is complete but the answer was not confirmed. The
 /// restarted Triton delivers the stored answer into the card.
+///
+/// Only the update carrying the answer is held, set before the turn starts.
+/// Holding every update from the moment the test saw the card also held
+/// progress updates, and each one stalls the courier for its 10 s client
+/// timeout: the answer arrived after about 11 s when Triton's first
+/// progress update beat the test's poll, after about 30 s when it did not —
+/// a race against a 15 s deadline.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_kill_after_completion_still_delivers_the_answer() {
     let fake = FakeBotFramework::start().await;
@@ -242,6 +249,7 @@ async fn a_kill_after_completion_still_delivers_the_answer() {
     })
     .await;
     let db = tmp_db("kill");
+    fake.set_update_delay_for(ANSWER, Duration::from_secs(30));
     let first = TritonProcess::spawn_with_env(
         Duration::from_secs(10),
         env(&fake, &agent, "manifest-msteams-async-test.yaml", &db),
@@ -252,7 +260,6 @@ async fn a_kill_after_completion_still_delivers_the_answer() {
         fake.captured().iter().any(|c| is_card(&c.body))
     })
     .await;
-    fake.set_update_delay(Duration::from_secs(30));
     wait_until(Duration::from_secs(15), || answered(&fake) >= 1).await;
     let pid = first.pid().expect("pid") as i32;
     unsafe {
