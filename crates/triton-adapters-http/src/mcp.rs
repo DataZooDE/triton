@@ -358,6 +358,9 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
                 .and_then(|v| v.to_str().ok())
                 .is_some_and(|id| state.sessions.renders_card(id.trim()))
         };
+    if method == "tools/call" {
+        log_card_host(&parts, &params, modern, card_host, &state);
+    }
     let response = match method.as_str() {
         "server/discover" => maybe_respond(id_present, id, discover_response),
         "initialize" => maybe_respond(id_present, id, |id| {
@@ -412,6 +415,51 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
     } else {
         response
     }
+}
+
+/// One line per `tools/call`: what the client declared that decides the
+/// card text, so "why did this host get the full text" is answered from
+/// the log. Names only, never values: the `_meta` keys, the declared
+/// extensions and the MCP Apps mime types, and what kind of session id
+/// came (none, one Triton issued to a card host, another).
+fn log_card_host(parts: &Parts, params: &Value, modern: bool, card_host: bool, state: &McpState) {
+    let meta = params.get("_meta");
+    let keys = |v: Option<&Value>| -> Vec<String> {
+        v.and_then(Value::as_object)
+            .map(|o| o.keys().cloned().collect())
+            .unwrap_or_default()
+    };
+    let caps = meta.and_then(|m| m.get(META_CLIENT_CAPABILITIES));
+    let extensions = keys(caps.and_then(|c| c.get("extensions")));
+    let ui_mime_types: Vec<&str> = caps
+        .and_then(|c| c.pointer("/extensions"))
+        .and_then(|e| e.get(UI_EXTENSION))
+        .and_then(|ui| ui.get("mimeTypes"))
+        .and_then(Value::as_array)
+        .map(|m| m.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let session = match parts
+        .headers
+        .get(SESSION_HEADER)
+        .and_then(|v| v.to_str().ok())
+    {
+        None => "none",
+        Some(id) if state.sessions.renders_card(id.trim()) => "card",
+        Some(_) => "other",
+    };
+    tracing::info!(
+        client = user_agent(parts),
+        slug = state.route.as_ref().map(|r| r.slug.as_str()).unwrap_or(""),
+        era = if modern { "2026-07-28" } else { "handshake" },
+        meta_keys = ?keys(meta),
+        capability_keys = ?keys(caps),
+        extensions = ?extensions,
+        ui_mime_types = ?ui_mime_types,
+        session,
+        widget = state.widget,
+        card_host,
+        "mcp tools/call card host"
+    );
 }
 
 fn user_agent(parts: &Parts) -> &str {
