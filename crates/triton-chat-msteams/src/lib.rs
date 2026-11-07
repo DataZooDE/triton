@@ -3037,13 +3037,14 @@ async fn courier_deliver(
         }
     };
     // The working card's progress updates never hold up the turn.
-    let mut writer = CardWriter::new(
-        adapter.clone(),
-        verified.reply_base(),
-        &conversation_id,
-        &recipient_id,
-        &sender.from_id,
-    );
+    let target = Target {
+        service_url: verified.reply_base().to_string(),
+        conversation_id: conversation_id.clone(),
+        bot_id: recipient_id.clone(),
+        user_id: sender.from_id.clone(),
+        tenant: sender.tenant.clone(),
+    };
+    let mut writer = CardWriter::new(adapter.clone(), target.clone());
     let result: Result<Value, TritonError> = match dispatched {
         Err(e) => Err(e),
         Ok(mut stream) => {
@@ -3055,7 +3056,10 @@ async fn courier_deliver(
                 let ev = match next_card_turn(&mut stream, task_card.as_ref(), &mut writer).await {
                     CardTurn::Event(Some(ev)) => ev,
                     CardTurn::Event(None) => break,
-                    CardTurn::Flush | CardTurn::Written => {
+                    // Its end only frees the writer: the next turn flushes a
+                    // held step, or waits for the tick.
+                    CardTurn::Written => continue,
+                    CardTurn::Flush => {
                         if let Some(card) = task_card.as_mut() {
                             writer.update(card);
                         }
@@ -3167,11 +3171,11 @@ async fn courier_deliver(
                     | triton_core::stream::StreamEvent::Task(_)
                     | triton_core::stream::StreamEvent::Progress(_) => {}
                     triton_core::stream::StreamEvent::Done(v) => {
-                        writer.closed = true;
+                        writer.close();
                         terminal = Some(Ok(v));
                     }
                     triton_core::stream::StreamEvent::Error { error, .. } => {
-                        writer.closed = true;
+                        writer.close();
                         terminal = Some(Err(error));
                     }
                 }
@@ -3189,13 +3193,6 @@ async fn courier_deliver(
     }
     // No progress update lands after the answer.
     writer.settle().await;
-    let target = Target {
-        service_url: verified.reply_base().to_string(),
-        conversation_id: conversation_id.clone(),
-        bot_id: recipient_id.clone(),
-        user_id: sender.from_id.clone(),
-        tenant: sender.tenant.clone(),
-    };
     // The invoke's card response goes first (crew F1).
     if let Some(t) = task_card.as_ref().and_then(|c| c.not_before) {
         tokio::time::sleep_until(tokio::time::Instant::from_std(t)).await;
@@ -3218,6 +3215,7 @@ async fn courier_deliver(
 }
 
 /// Where a terminal answer goes.
+#[derive(Clone)]
 struct Target {
     service_url: String,
     conversation_id: String,
@@ -3462,38 +3460,31 @@ const CONNECTOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10
 ///
 /// A progress update is best-effort and superseded by the next one, so the
 /// loop never waits on it: at most one update is in flight, steps that
-/// arrive meanwhile only mark the card pending (the next update renders
-/// the card as it is then — coalesced), and the loop keeps reading events.
-/// Before the answer replaces the card, [`CardWriter::settle`] lets the
-/// update in flight finish (at most [`CONNECTOR_TIMEOUT`]) so the answer
-/// is the last write to the card; a pending step is dropped.
+/// arrive meanwhile only mark the card pending (the next update renders the
+/// card as it is then — coalesced), and the loop keeps reading events. Once
+/// the answer is known ([`CardWriter::close`]) no update starts, and
+/// [`CardWriter::settle`] lets the one in flight finish first — so no
+/// progress update is sent or awaited after the answer. That orders the
+/// requests, not what Teams applies: an update abandoned at its timeout may
+/// still be applied late (realizations §7).
 struct CardWriter {
     adapter: Arc<MsTeamsAdapter>,
-    /// Already trusted: the verified inbound serviceUrl, or a resumed
-    /// task's stored one (which came from one).
-    service_url: String,
-    conversation_id: String,
-    bot_id: String,
-    user_id: String,
-    inflight: Option<futures::future::BoxFuture<'static, ()>>,
+    /// Where the card lives (its serviceUrl is already trusted).
+    target: Target,
+    /// The update in flight and when it started.
+    inflight: Option<(
+        tokio::time::Instant,
+        futures::future::BoxFuture<'static, ()>,
+    )>,
     /// The answer is known: no update starts any more.
     closed: bool,
 }
 
 impl CardWriter {
-    fn new(
-        adapter: Arc<MsTeamsAdapter>,
-        service_url: &str,
-        conversation_id: &str,
-        bot_id: &str,
-        user_id: &str,
-    ) -> Self {
+    fn new(adapter: Arc<MsTeamsAdapter>, target: Target) -> Self {
         Self {
             adapter,
-            service_url: service_url.to_string(),
-            conversation_id: conversation_id.to_string(),
-            bot_id: bot_id.to_string(),
-            user_id: user_id.to_string(),
+            target,
             inflight: None,
             closed: false,
         }
@@ -3511,26 +3502,56 @@ impl CardWriter {
         if !card.due() {
             return;
         }
-        let body = card.activity(&self.bot_id, &self.conversation_id, &self.user_id);
+        let t = &self.target;
+        let body = card.activity(&t.bot_id, &t.conversation_id, &t.user_id);
         let adapter = self.adapter.clone();
-        let service_url = self.service_url.clone();
-        let conversation_id = self.conversation_id.clone();
-        self.inflight = Some(Box::pin(async move {
+        let service_url = t.service_url.clone();
+        let conversation_id = t.conversation_id.clone();
+        let put = Box::pin(async move {
             if let Err(e) =
                 put_activity_to(&adapter, &service_url, &conversation_id, &id, &body).await
             {
                 tracing::debug!(error = %e, "msteams courier: card update failed");
             }
-        }));
+        });
+        self.inflight = Some((tokio::time::Instant::now(), put));
     }
 
-    /// The answer is next: start no more updates, and let the one in flight
-    /// finish first — bounded, so a hung Teams costs the answer at most one
-    /// timeout.
-    async fn settle(&mut self) {
+    /// When the loop next flushes `card`: never while an update is in
+    /// flight (its end is a turn of its own) or once the answer is known.
+    fn flush_at(&self, card: Option<&TaskCard>) -> Option<tokio::time::Instant> {
+        if self.closed || self.inflight.is_some() {
+            return None;
+        }
+        card.and_then(TaskCard::flush_at)
+    }
+
+    /// The update in flight finished; pending forever when there is none.
+    /// Cancel-safe: dropped before it finishes, the update stays in flight.
+    async fn written(&mut self) {
+        match self.inflight.as_mut() {
+            Some((_, put)) => {
+                put.await;
+                self.inflight = None;
+            }
+            None => std::future::pending().await,
+        }
+    }
+
+    /// The answer is known: no update starts any more.
+    fn close(&mut self) {
         self.closed = true;
-        if let Some(put) = self.inflight.take()
-            && tokio::time::timeout(CONNECTOR_TIMEOUT, put).await.is_err()
+    }
+
+    /// The answer is next: let the update in flight finish first, but no
+    /// longer than [`CONNECTOR_TIMEOUT`] from its start (the HTTP client's
+    /// own timeout does not cover the token fetch).
+    async fn settle(&mut self) {
+        self.close();
+        if let Some((started, put)) = self.inflight.take()
+            && tokio::time::timeout_at(started + CONNECTOR_TIMEOUT, put)
+                .await
+                .is_err()
         {
             tracing::debug!("msteams courier: card update abandoned for the answer");
         }
@@ -3892,10 +3913,9 @@ enum CardTurn {
     Written,
 }
 
-/// Wait for the next stream event, or for the card's trailing flush when a
-/// step is held — whichever comes first. While an update is in flight there
-/// is no flush (a step held meanwhile goes out once it finishes); its end is
-/// a turn, so the held step is flushed then.
+/// Wait for the next stream event, for the end of the card update in
+/// flight, or for the card's trailing flush when a step is held — whichever
+/// comes first. Once the answer is known only the stream is drained.
 async fn next_card_turn<S>(
     stream: &mut S,
     card: Option<&TaskCard>,
@@ -3905,31 +3925,15 @@ where
     S: futures::Stream<Item = triton_core::stream::StreamEvent> + Unpin,
 {
     use futures::StreamExt as _;
-    if let Some(put) = writer.inflight.as_mut() {
-        let turn = tokio::select! {
-            biased;
-            ev = stream.next() => CardTurn::Event(ev),
-            () = put => CardTurn::Written,
-        };
-        if matches!(turn, CardTurn::Written) {
-            writer.inflight = None;
-        }
-        return turn;
-    }
-    // The answer is known: nothing is flushed any more (a due flush would
-    // only spin), the stream is drained to its end.
-    if writer.closed {
-        return CardTurn::Event(stream.next().await);
-    }
-    match card.and_then(TaskCard::flush_at) {
-        // Biased: an event that is already there (the answer above all) goes
-        // before a due flush or timer tick.
-        Some(at) => tokio::select! {
-            biased;
-            ev = stream.next() => CardTurn::Event(ev),
-            () = tokio::time::sleep_until(at) => CardTurn::Flush,
-        },
-        None => CardTurn::Event(stream.next().await),
+    let flush_at = writer.flush_at(card);
+    // Biased: a finished update is noted first (it never starves behind a
+    // busy stream); an event that is already there (the answer above all)
+    // goes before a due flush or timer tick.
+    tokio::select! {
+        biased;
+        () = writer.written() => CardTurn::Written,
+        ev = stream.next() => CardTurn::Event(ev),
+        () = async { tokio::time::sleep_until(flush_at.unwrap()).await }, if flush_at.is_some() => CardTurn::Flush,
     }
 }
 
@@ -4038,23 +4042,25 @@ async fn resume_task(adapter: Arc<MsTeamsAdapter>, rec: triton_tasks::TaskRecord
             refresh_token(&adapter, &rec.id, &d.tenant, &d.user_id).map(|t| (t, d.user_id.clone()));
         card
     });
+    let target = Target {
+        service_url: d.service_url.clone(),
+        conversation_id: d.conversation_id.clone(),
+        bot_id: d.bot_id.clone(),
+        user_id: d.user_id.clone(),
+        tenant: d.tenant.clone(),
+    };
     let mut terminal: Option<Result<Value, TritonError>> = None;
     if !rec.state.is_terminal()
         && let Some(rx) = runner.ensure_running(&rec, &principal)
     {
         let mut events = triton_tasks::as_stream_events(rx, runner.store.clone(), rec.id.clone());
-        let mut writer = CardWriter::new(
-            adapter.clone(),
-            &d.service_url,
-            &d.conversation_id,
-            &d.bot_id,
-            &d.user_id,
-        );
+        let mut writer = CardWriter::new(adapter.clone(), target.clone());
         loop {
             let ev = match next_card_turn(&mut events, card.as_ref(), &mut writer).await {
                 CardTurn::Event(Some(ev)) => ev,
                 CardTurn::Event(None) => break,
-                CardTurn::Flush | CardTurn::Written => {
+                CardTurn::Written => continue,
+                CardTurn::Flush => {
                     if let Some(card) = card.as_mut() {
                         writer.update(card);
                     }
@@ -4069,11 +4075,11 @@ async fn resume_task(adapter: Arc<MsTeamsAdapter>, rec: triton_tasks::TaskRecord
                     }
                 }
                 triton_core::stream::StreamEvent::Done(v) => {
-                    writer.closed = true;
+                    writer.close();
                     terminal = Some(Ok(v));
                 }
                 triton_core::stream::StreamEvent::Error { error, .. } => {
-                    writer.closed = true;
+                    writer.close();
                     terminal = Some(Err(error));
                 }
                 _ => {}
@@ -4097,13 +4103,6 @@ async fn resume_task(adapter: Arc<MsTeamsAdapter>, rec: triton_tasks::TaskRecord
             }
             _ => return,
         },
-    };
-    let target = Target {
-        service_url: d.service_url.clone(),
-        conversation_id: d.conversation_id.clone(),
-        bot_id: d.bot_id.clone(),
-        user_id: d.user_id.clone(),
-        tenant: d.tenant.clone(),
     };
     let delivered = deliver_terminal(
         &adapter,

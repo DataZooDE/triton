@@ -393,8 +393,9 @@ async fn the_last_step_shows_even_when_it_arrives_inside_the_throttle() {
 /// reporting steps and then answers after 3 s. The steps that arrive
 /// while an update is in flight are coalesced into the card, not queued
 /// behind it one timeout each; the answer follows the hung update as soon
-/// as it gives up — within one update timeout — and is the last write to
-/// the card: no progress update after it.
+/// as it gives up — within one update timeout — and is the last write
+/// sent to the card: no progress update after it. (The fake records a
+/// request on arrival, so this pins request order, not what Teams applies.)
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_hung_progress_update_does_not_delay_the_answer() {
     let fake = FakeBotFramework::start().await;
@@ -738,5 +739,103 @@ async fn a_fast_answer_does_not_race_the_clicked_cards_working_card() {
     assert!(
         clicked.elapsed() >= Duration::from_millis(1000),
         "the first update of the clicked card waits for the invoke response"
+    );
+}
+
+/// Steps that arrive while a (slow, not hung) update is in flight are
+/// coalesced into the next update, and a finished update starts no other
+/// one by itself: with nothing new to show, the card waits for its timer
+/// tick. Each update takes 1.5 s; five steps arrive within 1.5 s, then the
+/// upstream works quietly until it answers at 6 s.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn steps_during_a_slow_update_are_coalesced_into_the_next_one() {
+    let fake = FakeBotFramework::start().await;
+    let agent = FakeAsyncAgent::start(AsyncPlan {
+        total: Duration::from_secs(6),
+        tick: Duration::from_millis(300),
+        progress_limit: Some(5),
+        ..AsyncPlan::default()
+    })
+    .await;
+    fake.set_update_delay_for("Step ", Duration::from_millis(1500));
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(10), env(&fake, &agent)).await;
+    post(&proc, &fake, None).await;
+    wait_until(Duration::from_secs(15), || {
+        fake.updates()
+            .iter()
+            .any(|u| card_text(&u.body).contains(ANSWER))
+    })
+    .await;
+    let updates = fake.updates();
+    let progress: Vec<&Value> = updates
+        .iter()
+        .map(|u| &u.body)
+        .filter(|b| !card_text(b).contains(ANSWER))
+        .collect();
+    assert_eq!(
+        progress.len(),
+        2,
+        "step 1 at once, steps 2-5 in one update after it, nothing until the answer: {updates:#?}"
+    );
+    assert!(
+        card_text(progress[1]).contains("Step 5 of"),
+        "the coalesced update shows the latest step: {:#?}",
+        progress[1]
+    );
+    assert!(card_text(&updates.last().unwrap().body).contains(ANSWER));
+}
+
+/// The same for a task resumed after a restart: a hung progress update in
+/// the resumed card holds the answer back by at most one update timeout,
+/// and nothing is written after the answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hung_progress_update_does_not_delay_a_resumed_answer() {
+    let fake = FakeBotFramework::start().await;
+    let agent = FakeAsyncAgent::start(AsyncPlan {
+        total: Duration::from_secs(6),
+        tick: Duration::from_millis(300),
+        ..AsyncPlan::default()
+    })
+    .await;
+    let db = tmp_db("resume-hung");
+    let mut e = env(&fake, &agent);
+    e.insert("TRITON_TASK_DB".into(), db.display().to_string());
+    let mut first = TritonProcess::spawn_with_env(Duration::from_secs(10), e.clone()).await;
+    post(&first, &fake, None).await;
+    wait_until(Duration::from_secs(10), || {
+        fake.captured().iter().any(|c| is_card(&c.body))
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    first.terminate(Duration::from_secs(5));
+    drop(first);
+    let before = fake.updates().len();
+
+    fake.set_update_delay_for("Step ", Duration::from_secs(60));
+    let _second = TritonProcess::spawn_with_env(Duration::from_secs(10), e).await;
+    wait_until(Duration::from_secs(15), || fake.updates().len() > before).await;
+    let first_update = Instant::now();
+    wait_until(Duration::from_secs(25), || {
+        fake.updates()
+            .iter()
+            .any(|u| card_text(&u.body).contains(ANSWER))
+    })
+    .await;
+    let waited = first_update.elapsed();
+    assert!(
+        waited < Duration::from_secs(13),
+        "the resumed answer waited {waited:?} behind hung progress updates"
+    );
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let updates = fake.updates();
+    let resumed = &updates[before..];
+    assert!(
+        card_text(&resumed.last().unwrap().body).contains(ANSWER),
+        "the answer is the last write to the card: {resumed:#?}"
+    );
+    assert_eq!(
+        resumed.len(),
+        2,
+        "the one hung progress update, then the answer: {resumed:#?}"
     );
 }
