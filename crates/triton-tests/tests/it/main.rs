@@ -22,6 +22,8 @@ mod a2a_schema;
 mod a2a_spec;
 #[path = "../a2a_spec_agents.rs"]
 mod a2a_spec_agents;
+#[path = "../a2a_stream_errors.rs"]
+mod a2a_stream_errors;
 #[path = "../a2a_trace_authz.rs"]
 mod a2a_trace_authz;
 #[path = "../a2a_v03_base.rs"]

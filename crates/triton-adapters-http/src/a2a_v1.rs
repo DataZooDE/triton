@@ -629,6 +629,8 @@ struct Incoming {
     context_id: Option<String>,
     task_id: Option<String>,
     return_immediately: bool,
+    /// Nothing to dispatch (an empty message): answer with this text.
+    reply: Option<String>,
 }
 
 /// A 1.0 `SendMessageRequest`, validated.
@@ -692,7 +694,11 @@ fn parse_send(params: &Value, a2ui: bool) -> Result<Incoming, A2aError> {
     } else {
         text
     };
-    if text.is_empty() {
+    // Text parts that say nothing (a host opening the conversation): a
+    // short prompt, as in 0.3; the upstream is not called.
+    let reply = (text.is_empty() && crate::a2a_spec::has_text_part(parts))
+        .then(|| crate::a2a_spec::EMPTY_MESSAGE_REPLY.to_string());
+    if text.is_empty() && reply.is_none() {
         return Err(bad("the message needs a text part"));
     }
     let return_immediately = params
@@ -706,6 +712,7 @@ fn parse_send(params: &Value, a2ui: bool) -> Result<Incoming, A2aError> {
         context_id,
         task_id: opt_str(msg, "taskId", "task_id"),
         return_immediately,
+        reply,
     })
 }
 
@@ -739,6 +746,16 @@ pub(crate) fn start_task(
     Ok((state.a2a.tasks.get(&rec.id).unwrap_or(rec), rx))
 }
 
+/// The `{message}` answer to a turn that dispatches nothing.
+fn reply_message(incoming: &Incoming, text: &str) -> Value {
+    let mut m = json!({ "messageId": uuid::Uuid::new_v4().to_string(), "role": "ROLE_AGENT",
+        "parts": [{ "text": text }] });
+    if let Some(ctx) = &incoming.context_id {
+        m["contextId"] = json!(ctx);
+    }
+    json!({ "message": m })
+}
+
 /// No multi-turn: a message that names a task is refused.
 fn refuse_continuation(
     a2a: &A2aState,
@@ -767,6 +784,9 @@ async fn op_send(
     let mut incoming = parse_send(params, a2ui)?;
     if let Some(task_id) = &incoming.task_id {
         return Err(refuse_continuation(&state.a2a, &principal, task_id));
+    }
+    if let Some(text) = &incoming.reply {
+        return Ok(reply_message(&incoming, text));
     }
     let context_id = incoming
         .context_id
@@ -1110,6 +1130,12 @@ async fn op_stream(
     let mut incoming = parse_send(params, a2ui)?;
     if let Some(task_id) = &incoming.task_id {
         return Err(refuse_continuation(&state.a2a, &principal, task_id));
+    }
+    if let Some(text) = &incoming.reply {
+        // A single Message is a complete stream (1.0 §3.1.2).
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(1);
+        let _ = tx.try_send(framing.wrap(reply_message(&incoming, text)));
+        return Ok(sse(rx));
     }
     let context_id = incoming
         .context_id
