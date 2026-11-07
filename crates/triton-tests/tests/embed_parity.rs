@@ -583,3 +583,88 @@ async fn an_in_process_upstream_behaves_like_a_static_upstream_on_every_face() {
         assert_eq!(out[0].0, expected, "/mcp/acme, {what}");
     }
 }
+
+/// A streaming method answers as an event stream on both hosts, its errors
+/// included, and an empty message gets the same short reply without
+/// reaching the agent (A2A 0.3.0 §3.3.1, 1.0 §9.4.2).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn streaming_errors_and_empty_messages_match_on_both_hosts() {
+    let h = hosts().await;
+    let bearer = entra_token(&h.entra, "access_as_user");
+    let empty03 = json!({ "message": { "kind": "message", "role": "user", "messageId": "m-e",
+        "parts": [{ "kind": "text", "text": "" }] } });
+    let empty10 = json!({ "message": { "role": "ROLE_USER", "messageId": "m-e",
+        "parts": [{ "text": "" }] } });
+    let no_parts = json!({ "message": { "role": "ROLE_USER", "messageId": "m-n", "parts": [] } });
+    let cases = [
+        ("0.3 empty", "/a2a", None, "message/stream", empty03.clone()),
+        (
+            "0.3 base empty",
+            "/a2a/v0.3",
+            None,
+            "message/stream",
+            empty03,
+        ),
+        (
+            "1.0 empty",
+            "/a2a",
+            Some("1.0"),
+            "SendStreamingMessage",
+            empty10,
+        ),
+        (
+            "0.3 invalid",
+            "/a2a",
+            None,
+            "message/stream",
+            no_parts.clone(),
+        ),
+        (
+            "1.0 invalid",
+            "/a2a",
+            Some("1.0"),
+            "SendStreamingMessage",
+            no_parts,
+        ),
+    ];
+    let before = h.seen.lock().unwrap().calls.len();
+    for (what, path, version, method, params) in cases {
+        let mut answers = Vec::new();
+        for base in [&h.reference, &h.embedded] {
+            let mut req = reqwest::Client::new()
+                .post(format!("{base}{path}"))
+                .bearer_auth(&bearer)
+                .json(&json!({ "jsonrpc": "2.0", "id": 5, "method": method, "params": params }));
+            if let Some(v) = version {
+                req = req.header("A2A-Version", v);
+            }
+            let resp = req.send().await.unwrap();
+            let status = resp.status().as_u16();
+            let ct = resp
+                .headers()
+                .get("content-type")
+                .map(|v| v.to_str().unwrap().to_string())
+                .unwrap_or_default();
+            let text = resp.text().await.unwrap();
+            assert_eq!(status, 200, "{what} at {base}: {text}");
+            assert!(
+                ct.starts_with("text/event-stream"),
+                "{what} at {base}: `{ct}`: {text}"
+            );
+            let events: Vec<Value> = text
+                .lines()
+                .filter_map(|l| l.strip_prefix("data:"))
+                .filter_map(|d| serde_json::from_str(d.trim()).ok())
+                .map(|v| scrub(&v))
+                .collect();
+            assert_eq!(events.len(), 1, "{what} at {base}: {text}");
+            answers.push(events);
+        }
+        assert_eq!(answers[0], answers[1], "{what}: reference vs embedded");
+    }
+    assert_eq!(
+        h.seen.lock().unwrap().calls.len(),
+        before,
+        "an empty message must not reach the agent"
+    );
+}

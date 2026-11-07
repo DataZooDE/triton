@@ -506,6 +506,66 @@ async fn jsonrpc(State(state): State<SpecState>, parts: Parts, body: Body) -> Re
         Ok(r) => r,
         Err(e) => return rpc_error(&Value::Null, PARSE_ERROR, format!("invalid JSON: {e}")),
     };
+    // A streaming method is answered as an event stream, its errors
+    // included (0.3.0 §3.3.1 and §7: every SSE `data` is a
+    // `SendStreamingMessageResponse`, success or `JSONRPCErrorResponse`;
+    // 1.0 §9.4.2). The official clients open the answer as SSE and turn a
+    // JSON body into a protocol fault, so the error would never be shown.
+    let streaming = is_streaming_method(&req.method);
+    let resp = dispatch_rpc(state, &parts, principal, req, echo_a2ui).await;
+    if streaming {
+        errors_as_event_stream(resp).await
+    } else {
+        resp
+    }
+}
+
+/// The JSON-RPC methods whose answer is an event stream, in both versions.
+fn is_streaming_method(method: &str) -> bool {
+    matches!(
+        method,
+        "message/stream" | "tasks/resubscribe" | "SendStreamingMessage" | "SubscribeToTask"
+    )
+}
+
+/// A streaming method's JSON-RPC error, re-framed as an SSE stream of that
+/// one error event. An event stream passes through unchanged, and so does an
+/// HTTP error status (authentication, a body over the limit): a caller's
+/// middleware acts on the status before it reads a body.
+async fn errors_as_event_stream(resp: Response) -> Response {
+    let is_json = resp
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|ct| ct.starts_with("application/json"));
+    if resp.status() != StatusCode::OK || !is_json {
+        return resp;
+    }
+    let (head, body) = resp.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_A2A_BODY_BYTES).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    let mut out = crate::a2a_v1::error_stream(body);
+    // Keep what the handler set beyond the body (the extension echo).
+    for (name, value) in &head.headers {
+        if name != axum::http::header::CONTENT_TYPE && name != axum::http::header::CONTENT_LENGTH {
+            out.headers_mut().insert(name.clone(), value.clone());
+        }
+    }
+    out
+}
+
+/// One authenticated, parsed JSON-RPC call, answered in its version.
+async fn dispatch_rpc(
+    state: SpecState,
+    parts: &Parts,
+    principal: triton_core::Principal,
+    req: RpcRequest,
+    echo_a2ui: bool,
+) -> Response {
     if req.jsonrpc.as_deref() != Some("2.0") {
         return rpc_error(&req.id, INVALID_REQUEST, "jsonrpc must be \"2.0\"");
     }
@@ -757,16 +817,38 @@ fn text_from_params(params: &Value, client: &ClientInput) -> Option<Inbound> {
     if trimmed.is_empty() {
         // An event-only turn (a producer's button, a render error): the tool
         // reads the event from `_triton.client`.
-        return client.fallback.clone().map(|text| Inbound {
-            text,
+        if let Some(text) = client.fallback.clone() {
+            return Some(Inbound {
+                text,
+                open_doc: None,
+                missing: None,
+            });
+        }
+        // Text parts that say nothing (a host opening the conversation):
+        // a short prompt, the upstream is not called.
+        return has_text_part(parts).then(|| Inbound {
+            text: String::new(),
             open_doc: None,
-            missing: None,
+            missing: Some(EMPTY_MESSAGE_REPLY.to_string()),
         });
     }
     Some(Inbound {
         text: trimmed.to_string(),
         open_doc: None,
         missing: None,
+    })
+}
+
+/// The reply to a message whose text parts are all empty, in every binding
+/// and version, streaming or not. The upstream is not called.
+pub(crate) const EMPTY_MESSAGE_REPLY: &str = "Ask a question to get started.";
+
+/// Does the message carry a text part at all (empty or not)? A message of
+/// only files or data without a text part stays a validation error.
+pub(crate) fn has_text_part(parts: &[Value]) -> bool {
+    parts.iter().any(|p| {
+        p.get("text").is_some_and(Value::is_string)
+            && p.get("kind").and_then(Value::as_str).unwrap_or("text") == "text"
     })
 }
 
@@ -1135,7 +1217,8 @@ fn message_parts(params: &Value) -> &[Value] {
 struct Inbound {
     text: String,
     open_doc: Option<OpenDoc>,
-    /// A form submit that lacked required inputs: refused with this text.
+    /// Nothing to dispatch (a form submit that lacked required inputs, or an
+    /// empty message): answered with this text as an agent message.
     missing: Option<String>,
 }
 
