@@ -235,10 +235,9 @@ async fn a_revoked_sender_is_not_resumed() {
 ///
 /// Only the update carrying the answer is held, set before the turn starts.
 /// Holding every update from the moment the test saw the card also held
-/// progress updates, and each one stalls the courier for its 10 s client
-/// timeout: the answer arrived after about 11 s when Triton's first
-/// progress update beat the test's poll, after about 30 s when it did not —
-/// a race against a 15 s deadline.
+/// a progress update in flight, which the answer waits for (up to its 10 s
+/// client timeout, so no progress lands after the answer) — a race against
+/// the test's deadline that this test has no reason to run.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_kill_after_completion_still_delivers_the_answer() {
     let fake = FakeBotFramework::start().await;

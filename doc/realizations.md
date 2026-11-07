@@ -1663,6 +1663,26 @@ a trap the next developer should not have to step in.
   session id (`none`, `card`, `other`) and the verdict `card_host`. Names
   only, never values or tokens.
 
+- **A slow Teams must not hold the answer back (2026-11-07).** The Teams
+  courier awaited each working-card progress update (`updateActivity`)
+  inline: while Teams hung, every due update cost up to its 10 s client
+  timeout before the next event was read, so the answer queued behind
+  superseded progress and arrived tens of seconds late. Progress updates
+  now go through `CardWriter`, which the task loop polls next to the event
+  stream: at most one update in flight, later steps coalesced into the
+  next one, and a finished update starts nothing by itself (the next step
+  or the timer tick does — a re-trigger on completion would keep a slow
+  Teams under constant load). At the terminal event no update starts and
+  the one in flight is awaited, at most one timeout from its start, before
+  the answer is written; so no progress request is sent or awaited after
+  the answer, on the live and the resumed path (pinned by
+  `msteams_async_task::a_hung_progress_update_does_not_delay_the_answer`,
+  `…_a_resumed_answer` and `steps_during_a_slow_update_are_coalesced_into_the_next_one`).
+  This orders requests, not what Teams applies: an update abandoned at its
+  timeout may still be applied by Teams after the answer. Open: whether
+  Teams does so; if it does, posting the answer as a new activity when an
+  update was abandoned would close the gap.
+
 ---
 
 ### 7.x A body extractor buffers before the handler authenticates (2026-11-01)
