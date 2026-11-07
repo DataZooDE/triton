@@ -388,6 +388,53 @@ async fn the_last_step_shows_even_when_it_arrives_inside_the_throttle() {
     .await;
 }
 
+/// A slow Teams does not hold the answer back. Every progress update
+/// hangs (past the courier's 10 s client timeout) while the upstream keeps
+/// reporting steps and then answers after 3 s. The steps that arrive
+/// while an update is in flight are coalesced into the card, not queued
+/// behind it one timeout each; the answer follows the hung update as soon
+/// as it gives up — within one update timeout — and is the last write to
+/// the card: no progress update after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_hung_progress_update_does_not_delay_the_answer() {
+    let fake = FakeBotFramework::start().await;
+    let agent = FakeAsyncAgent::start(AsyncPlan {
+        total: Duration::from_secs(3),
+        tick: Duration::from_millis(300),
+        ..AsyncPlan::default()
+    })
+    .await;
+    // Only progress cards ("Step k of n") hang; the answer is answered at once.
+    fake.set_update_delay_for("Step ", Duration::from_secs(60));
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(10), env(&fake, &agent)).await;
+    post(&proc, &fake, None).await;
+    wait_until(Duration::from_secs(10), || !fake.updates().is_empty()).await;
+    let first_update = Instant::now();
+    wait_until(Duration::from_secs(25), || {
+        fake.updates()
+            .iter()
+            .any(|u| card_text(&u.body).contains(ANSWER))
+    })
+    .await;
+    let waited = first_update.elapsed();
+    assert!(
+        waited < Duration::from_secs(13),
+        "the answer waited {waited:?} behind hung progress updates (one 10 s timeout allowed)"
+    );
+    // Nothing is written after the answer.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let updates = fake.updates();
+    assert!(
+        card_text(&updates.last().unwrap().body).contains(ANSWER),
+        "the answer is the last write to the card: {updates:#?}"
+    );
+    assert_eq!(
+        updates.len(),
+        2,
+        "the one hung progress update (later steps coalesced), then the answer: {updates:#?}"
+    );
+}
+
 fn tmp_db(tag: &str) -> std::path::PathBuf {
     let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
         "msteams-task-{tag}-{}-{}",

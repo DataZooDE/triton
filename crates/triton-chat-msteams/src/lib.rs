@@ -588,7 +588,7 @@ impl MsTeamsAdapter {
         let token_client =
             outbound_token_client(client_id, outbound_credential, overrides.token_url)?;
         let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(CONNECTOR_TIMEOUT)
             .build()
             .map_err(|e| BuildError::Unsupported(format!("courier http client: {e}")))?;
 
@@ -3036,6 +3036,14 @@ async fn courier_deliver(
                 .await
         }
     };
+    // The working card's progress updates never hold up the turn.
+    let mut writer = CardWriter::new(
+        adapter.clone(),
+        verified.reply_base(),
+        &conversation_id,
+        &recipient_id,
+        &sender.from_id,
+    );
     let result: Result<Value, TritonError> = match dispatched {
         Err(e) => Err(e),
         Ok(mut stream) => {
@@ -3044,22 +3052,12 @@ async fn courier_deliver(
             let mut last_chunk = std::time::Instant::now();
             let mut terminal: Option<Result<Value, TritonError>> = None;
             loop {
-                let ev = match next_card_turn(&mut stream, task_card.as_ref()).await {
+                let ev = match next_card_turn(&mut stream, task_card.as_ref(), &mut writer).await {
                     CardTurn::Event(Some(ev)) => ev,
                     CardTurn::Event(None) => break,
-                    CardTurn::Flush => {
-                        if let Some(card) = task_card.as_mut()
-                            && let Some(id) = card.activity_id.clone()
-                            && card.due()
-                        {
-                            let body =
-                                card.activity(&recipient_id, &conversation_id, &sender.from_id);
-                            if let Err(e) =
-                                put_activity(&adapter, &verified, &conversation_id, &id, &body)
-                                    .await
-                            {
-                                tracing::debug!(error = %e, "msteams courier: card update failed");
-                            }
+                    CardTurn::Flush | CardTurn::Written => {
+                        if let Some(card) = task_card.as_mut() {
+                            writer.update(card);
                         }
                         continue;
                     }
@@ -3123,36 +3121,14 @@ async fn courier_deliver(
                     triton_core::stream::StreamEvent::Task(v) => {
                         if let Some(card) = task_card.as_mut() {
                             card.task(v);
-                            if let Some(id) = card.activity_id.clone()
-                                && card.due()
-                            {
-                                let body =
-                                    card.activity(&recipient_id, &conversation_id, &sender.from_id);
-                                if let Err(e) =
-                                    put_activity(&adapter, &verified, &conversation_id, &id, &body)
-                                        .await
-                                {
-                                    tracing::debug!(error = %e, "msteams courier: card update failed");
-                                }
-                            }
+                            writer.update(card);
                         }
                         continue;
                     }
                     triton_core::stream::StreamEvent::Progress(v) => {
                         if let Some(card) = task_card.as_mut() {
                             card.progress(v);
-                            if let Some(id) = card.activity_id.clone()
-                                && card.due()
-                            {
-                                let body =
-                                    card.activity(&recipient_id, &conversation_id, &sender.from_id);
-                                if let Err(e) =
-                                    put_activity(&adapter, &verified, &conversation_id, &id, &body)
-                                        .await
-                                {
-                                    tracing::debug!(error = %e, "msteams courier: card update failed");
-                                }
-                            }
+                            writer.update(card);
                         }
                         continue;
                     }
@@ -3190,8 +3166,12 @@ async fn courier_deliver(
                     triton_core::stream::StreamEvent::Tool(_)
                     | triton_core::stream::StreamEvent::Task(_)
                     | triton_core::stream::StreamEvent::Progress(_) => {}
-                    triton_core::stream::StreamEvent::Done(v) => terminal = Some(Ok(v)),
+                    triton_core::stream::StreamEvent::Done(v) => {
+                        writer.closed = true;
+                        terminal = Some(Ok(v));
+                    }
                     triton_core::stream::StreamEvent::Error { error, .. } => {
+                        writer.closed = true;
                         terminal = Some(Err(error));
                     }
                 }
@@ -3207,6 +3187,8 @@ async fn courier_deliver(
     if let Some(t) = typing_ticker {
         t.abort();
     }
+    // No progress update lands after the answer.
+    writer.settle().await;
     let target = Target {
         service_url: verified.reply_base().to_string(),
         conversation_id: conversation_id.clone(),
@@ -3473,29 +3455,93 @@ async fn post_activity_to(
     Ok((status, id))
 }
 
-/// `updateActivity`: replace activity `activity_id` in the conversation
-/// (`PUT /v3/conversations/{id}/activities/{activityId}`). Returns
-/// the HTTP status. Same serviceUrl trust and URL building as
-/// [`post_activity_to`].
-async fn put_activity(
-    adapter: &MsTeamsAdapter,
-    verified: &VerifiedClaims,
-    conversation_id: &str,
-    activity_id: &str,
-    body: &Value,
-) -> Result<u16, String> {
-    put_activity_to(
-        adapter,
-        verified.reply_base(),
-        conversation_id,
-        activity_id,
-        body,
-    )
-    .await
+/// Client timeout of every Bot Connector call the courier makes.
+const CONNECTOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The working card's in-place progress updates, off the event loop.
+///
+/// A progress update is best-effort and superseded by the next one, so the
+/// loop never waits on it: at most one update is in flight, steps that
+/// arrive meanwhile only mark the card pending (the next update renders
+/// the card as it is then — coalesced), and the loop keeps reading events.
+/// Before the answer replaces the card, [`CardWriter::settle`] lets the
+/// update in flight finish (at most [`CONNECTOR_TIMEOUT`]) so the answer
+/// is the last write to the card; a pending step is dropped.
+struct CardWriter {
+    adapter: Arc<MsTeamsAdapter>,
+    /// Already trusted: the verified inbound serviceUrl, or a resumed
+    /// task's stored one (which came from one).
+    service_url: String,
+    conversation_id: String,
+    bot_id: String,
+    user_id: String,
+    inflight: Option<futures::future::BoxFuture<'static, ()>>,
+    /// The answer is known: no update starts any more.
+    closed: bool,
 }
 
-/// [`put_activity`] to an explicit, already-trusted `service_url` (a
-/// resumed task's stored one, which came from a verified inbound JWT).
+impl CardWriter {
+    fn new(
+        adapter: Arc<MsTeamsAdapter>,
+        service_url: &str,
+        conversation_id: &str,
+        bot_id: &str,
+        user_id: &str,
+    ) -> Self {
+        Self {
+            adapter,
+            service_url: service_url.to_string(),
+            conversation_id: conversation_id.to_string(),
+            bot_id: bot_id.to_string(),
+            user_id: user_id.to_string(),
+            inflight: None,
+            closed: false,
+        }
+    }
+
+    /// Start an update of `card` if one is due and none is in flight. A
+    /// step held now stays pending and goes out with the next update.
+    fn update(&mut self, card: &mut TaskCard) {
+        if self.closed || self.inflight.is_some() {
+            return;
+        }
+        let Some(id) = card.activity_id.clone() else {
+            return;
+        };
+        if !card.due() {
+            return;
+        }
+        let body = card.activity(&self.bot_id, &self.conversation_id, &self.user_id);
+        let adapter = self.adapter.clone();
+        let service_url = self.service_url.clone();
+        let conversation_id = self.conversation_id.clone();
+        self.inflight = Some(Box::pin(async move {
+            if let Err(e) =
+                put_activity_to(&adapter, &service_url, &conversation_id, &id, &body).await
+            {
+                tracing::debug!(error = %e, "msteams courier: card update failed");
+            }
+        }));
+    }
+
+    /// The answer is next: start no more updates, and let the one in flight
+    /// finish first — bounded, so a hung Teams costs the answer at most one
+    /// timeout.
+    async fn settle(&mut self) {
+        self.closed = true;
+        if let Some(put) = self.inflight.take()
+            && tokio::time::timeout(CONNECTOR_TIMEOUT, put).await.is_err()
+        {
+            tracing::debug!("msteams courier: card update abandoned for the answer");
+        }
+    }
+}
+
+/// `updateActivity` to an explicit, already-trusted `service_url` (the
+/// verified inbound one, or a resumed task's stored one, which came from a
+/// verified inbound JWT): replace activity `activity_id` in the
+/// conversation (`PUT /v3/conversations/{id}/activities/{activityId}`).
+/// Returns the HTTP status. Same URL building as [`post_activity_to`].
 async fn put_activity_to(
     adapter: &MsTeamsAdapter,
     service_url: &str,
@@ -3838,20 +3884,43 @@ fn text_card(text: &str) -> Value {
     })
 }
 
-/// The next thing a task loop acts on: a stream event (or its end), or the
-/// working card's trailing flush.
+/// The next thing a task loop acts on: a stream event (or its end), the
+/// working card's trailing flush, or the end of the update in flight.
 enum CardTurn {
     Event(Option<triton_core::stream::StreamEvent>),
     Flush,
+    Written,
 }
 
 /// Wait for the next stream event, or for the card's trailing flush when a
-/// step is held — whichever comes first.
-async fn next_card_turn<S>(stream: &mut S, card: Option<&TaskCard>) -> CardTurn
+/// step is held — whichever comes first. While an update is in flight there
+/// is no flush (a step held meanwhile goes out once it finishes); its end is
+/// a turn, so the held step is flushed then.
+async fn next_card_turn<S>(
+    stream: &mut S,
+    card: Option<&TaskCard>,
+    writer: &mut CardWriter,
+) -> CardTurn
 where
     S: futures::Stream<Item = triton_core::stream::StreamEvent> + Unpin,
 {
     use futures::StreamExt as _;
+    if let Some(put) = writer.inflight.as_mut() {
+        let turn = tokio::select! {
+            biased;
+            ev = stream.next() => CardTurn::Event(ev),
+            () = put => CardTurn::Written,
+        };
+        if matches!(turn, CardTurn::Written) {
+            writer.inflight = None;
+        }
+        return turn;
+    }
+    // The answer is known: nothing is flushed any more (a due flush would
+    // only spin), the stream is drained to its end.
+    if writer.closed {
+        return CardTurn::Event(stream.next().await);
+    }
     match card.and_then(TaskCard::flush_at) {
         // Biased: an event that is already there (the answer above all) goes
         // before a due flush or timer tick.
@@ -3974,24 +4043,20 @@ async fn resume_task(adapter: Arc<MsTeamsAdapter>, rec: triton_tasks::TaskRecord
         && let Some(rx) = runner.ensure_running(&rec, &principal)
     {
         let mut events = triton_tasks::as_stream_events(rx, runner.store.clone(), rec.id.clone());
+        let mut writer = CardWriter::new(
+            adapter.clone(),
+            &d.service_url,
+            &d.conversation_id,
+            &d.bot_id,
+            &d.user_id,
+        );
         loop {
-            let ev = match next_card_turn(&mut events, card.as_ref()).await {
+            let ev = match next_card_turn(&mut events, card.as_ref(), &mut writer).await {
                 CardTurn::Event(Some(ev)) => ev,
                 CardTurn::Event(None) => break,
-                CardTurn::Flush => {
-                    if let Some(card) = card.as_mut()
-                        && let Some(id) = card.activity_id.clone()
-                        && card.due()
-                    {
-                        let body = card.activity(&d.bot_id, &d.conversation_id, &d.user_id);
-                        let _ = put_activity_to(
-                            &adapter,
-                            &d.service_url,
-                            &d.conversation_id,
-                            &id,
-                            &body,
-                        )
-                        .await;
+                CardTurn::Flush | CardTurn::Written => {
+                    if let Some(card) = card.as_mut() {
+                        writer.update(card);
                     }
                     continue;
                 }
@@ -4000,28 +4065,22 @@ async fn resume_task(adapter: Arc<MsTeamsAdapter>, rec: triton_tasks::TaskRecord
                 triton_core::stream::StreamEvent::Progress(v) => {
                     if let Some(card) = card.as_mut() {
                         card.progress(&v);
-                        if let Some(id) = card.activity_id.clone()
-                            && card.due()
-                        {
-                            let body = card.activity(&d.bot_id, &d.conversation_id, &d.user_id);
-                            let _ = put_activity_to(
-                                &adapter,
-                                &d.service_url,
-                                &d.conversation_id,
-                                &id,
-                                &body,
-                            )
-                            .await;
-                        }
+                        writer.update(card);
                     }
                 }
-                triton_core::stream::StreamEvent::Done(v) => terminal = Some(Ok(v)),
+                triton_core::stream::StreamEvent::Done(v) => {
+                    writer.closed = true;
+                    terminal = Some(Ok(v));
+                }
                 triton_core::stream::StreamEvent::Error { error, .. } => {
+                    writer.closed = true;
                     terminal = Some(Err(error));
                 }
                 _ => {}
             }
         }
+        // No progress update lands after the answer.
+        writer.settle().await;
     }
     // Not driven here (finished, expired or interrupted while down, or the
     // stream ended without a terminal event): the stored outcome stands.
