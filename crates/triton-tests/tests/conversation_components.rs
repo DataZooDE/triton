@@ -552,6 +552,52 @@ fn non_https_links_are_dropped_on_every_channel() {
     }
 }
 
+/// Gemini's in-card deep link (`TRITON_GE_OPEN_URL` on): an `open_url`
+/// button is a `MaterialButton` whose action calls the GE composite
+/// catalog's `openUrl` function, valid against the vendored v0.9 schema
+/// and catalog. With the switch off the card carries no link at all; the
+/// link then follows the summary in the text part
+/// (`ge::open_links_markdown`).
+#[test]
+fn gemini_open_url_is_a_schema_valid_open_url_function() {
+    let s = turn3("3a");
+    let url = "https://app.example.com/acme/open?view=planned";
+    let schemas = a2ui_validator();
+    let on = GeOptions {
+        open_url: true,
+        ..GeOptions::default()
+    };
+    for (opts, carries) in [(on, true), (GeOptions::default(), false)] {
+        let msgs = build_messages_with(&s, &signer(), opts).expect("ge");
+        for m in &msgs {
+            if let Err(e) = schemas.validate(m) {
+                panic!("A2UI message fails the v0.9 schema: {e}\n{}", pretty(m));
+            }
+        }
+        let opener: Vec<Value> = msgs
+            .iter()
+            .filter_map(|m| m.pointer("/updateComponents/components"))
+            .filter_map(Value::as_array)
+            .flatten()
+            .filter(|c| c.pointer("/action/functionCall/call") == Some(&json!("openUrl")))
+            .cloned()
+            .collect();
+        if carries {
+            assert_eq!(opener.len(), 1, "{}", pretty(&json!(msgs)));
+            assert_eq!(opener[0]["component"], "MaterialButton");
+            assert_eq!(opener[0]["label"], "Open in the portfolio");
+            assert_eq!(opener[0]["action"]["functionCall"]["args"]["url"], url);
+            assert_eq!(opener[0]["action"]["functionCall"]["returnType"], "void");
+        } else {
+            assert!(opener.is_empty(), "{}", pretty(&json!(msgs)));
+        }
+        assert_eq!(
+            triton_core::a2ui::ge::open_links_markdown(&s, opts, ""),
+            (!carries).then(|| format!("[Open in the portfolio]({url})"))
+        );
+    }
+}
+
 /// F9 (crew review): a template Selection needs the name its choice fills —
 /// an empty `args_key` is refused instead of each channel guessing.
 #[test]
