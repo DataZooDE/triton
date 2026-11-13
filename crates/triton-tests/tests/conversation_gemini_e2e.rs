@@ -319,14 +319,31 @@ async fn an_a2ui_reply_carries_the_one_sentence_summary_as_its_text_part() {
         json!([{ "kind": "text", "text": "Which agents are planned?" }]),
     )
     .await;
+    // The card's deep link ("Open in the portfolio") cannot ride the card
+    // while in-card links are off (the default), so it follows the summary
+    // as a Markdown link: Gemini renders that, and the link is said once.
     assert_eq!(
         text_parts(&reply),
-        vec!["6 Agents are planned.".to_string()],
+        vec![
+            "6 Agents are planned.\n\n\
+             [Open in the portfolio](https://app.example.com/acme/open?view=planned)"
+                .to_string()
+        ],
         "{reply}"
     );
+    let msgs = a2ui_messages(&reply);
+    assert!(!msgs.is_empty(), "the rows are in the components");
+    let schemas = super::conversation_components::a2ui_validator();
+    for m in &msgs {
+        if let Err(e) = schemas.validate(m) {
+            panic!("A2UI message fails the v0.9 schema: {e}\n{m}");
+        }
+    }
     assert!(
-        !a2ui_messages(&reply).is_empty(),
-        "the rows are in the components"
+        !serde_json::to_string(&msgs)
+            .unwrap()
+            .contains("app.example.com"),
+        "no raw link on the card"
     );
 
     // Without the extension: no components, so the full text.

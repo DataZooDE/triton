@@ -439,8 +439,9 @@ pub struct GeOptions {
     /// the composite catalog's own function). OFF: an earlier, malformed
     /// attempt (`{name: openUrl}` under the basic catalog, #263) was rejected
     /// live; the spec-correct `{call, args, returnType: void}` form is
-    /// schema-valid but unqualified. When off, deep links ride the prose
-    /// bubble (the producer's text) and rows show their label only.
+    /// schema-valid but unqualified. When off, the deep links of `open_url`
+    /// buttons follow the text part as Markdown links
+    /// ([`open_links_markdown`]) and rows show their label only.
     /// Env: `TRITON_GE_OPEN_URL`.
     pub open_url: bool,
     /// Render an `embed` as a Canvas side panel with an `IFrameUrl`. OFF:
@@ -542,6 +543,82 @@ fn beautify_vega_for_ge(spec: &Value) -> Value {
 /// yields a surface, so the caller can fall back to a text part.
 pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
     build_messages_with(result, ActionSigner::global(), GeOptions::from_env())
+}
+
+/// The deep links of `result`'s top-level `open_url` buttons as one
+/// Markdown line (`[label](url) · …`) for the text part beside the card,
+/// when the card cannot carry them (`opts.open_url` off). `None` when the
+/// card carries them or there are none.
+///
+/// Gemini Enterprise renders Markdown links in the message bubble, but no
+/// link inside an A2UI card: `Text` Markdown excludes links, and the
+/// composite catalog's `openUrl` button is not yet qualified live (see
+/// [`GeOptions::open_url`]). Without this, the primary "open" control every
+/// other channel shows is simply missing on Gemini. Row-level links
+/// (`list`/`table` items) are left out: a long table would turn the bubble
+/// into a link list; their rows still show their labels. A link whose URL
+/// `shown` already contains is left out (said once).
+pub fn open_links_markdown(result: &Value, opts: GeOptions, shown: &str) -> Option<String> {
+    if opts.open_url {
+        return None;
+    }
+    let components = result.get("surface")?.get("components")?.as_array()?;
+    let links: Vec<String> = components
+        .iter()
+        .filter(|c| c.get("kind").and_then(Value::as_str) == Some("button"))
+        .filter_map(|c| {
+            let action = c.get("action")?;
+            if action.get("type").and_then(Value::as_str) != Some("open_url") {
+                return None;
+            }
+            let url = action
+                .get("url")
+                .and_then(Value::as_str)
+                .filter(|u| crate::links::is_allowed_link(u))?;
+            let dest = md_destination(url)?;
+            if shown.contains(url) || shown.contains(&dest) {
+                return None;
+            }
+            let label = c
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .unwrap_or("Open");
+            Some(format!("[{}]({dest})", md_literal(label)))
+        })
+        .collect();
+    (!links.is_empty()).then(|| links.join(" · "))
+}
+
+/// `text` as literal Markdown link text: every character that could start
+/// emphasis, code, a link or HTML is backslash-escaped.
+fn md_literal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(
+            ch,
+            '\\' | '[' | ']' | '(' | ')' | '*' | '_' | '`' | '<' | '>' | '!' | '~' | '|' | '#'
+        ) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// `url` as a Markdown link destination: parsed and re-serialised (spaces
+/// and other unsafe bytes percent-encoded), with the parentheses that would
+/// end the destination early encoded as well.
+fn md_destination(url: &str) -> Option<String> {
+    let parsed = url::Url::parse(url).ok()?;
+    Some(
+        parsed
+            .as_str()
+            .replace('(', "%28")
+            .replace(')', "%29")
+            .replace(' ', "%20"),
+    )
 }
 
 /// [`build_messages`] for a request that did or did not activate the A2UI
@@ -1683,6 +1760,88 @@ mod tests {
 
     fn find<'a>(comps: &'a [Value], id: &str) -> &'a Value {
         comps.iter().find(|c| c["id"] == id).expect("component id")
+    }
+
+    fn open_button_surface() -> Value {
+        json!({ "summary": "7 Agents depend on Orders.", "surface": { "components": [
+            { "kind": "header", "title": "7 Agents" },
+            { "kind": "button", "label": "Open in the portfolio", "primary": true,
+              "action": { "type": "open_url", "url": "https://app.example.com/acme/open?view=deps" } },
+            { "kind": "button", "label": "Without owner",
+              "action": { "type": "send_message", "text": "Which of them have no owner?" } }
+        ] } })
+    }
+
+    /// With in-card links off (the default), an `open_url` button cannot be
+    /// on the card, so its deep link goes to the text part as a Markdown
+    /// link, the one link form Gemini Enterprise renders in its bubble.
+    #[test]
+    fn an_open_url_button_rides_the_text_part_when_the_card_cannot_carry_it() {
+        let r = open_button_surface();
+        assert_eq!(
+            open_links_markdown(&r, GeOptions::default(), "").as_deref(),
+            Some("[Open in the portfolio](https://app.example.com/acme/open?view=deps)")
+        );
+        // The card does not carry it: no button for it, no raw URL.
+        let msgs =
+            build_messages_with(&r, ActionSigner::global(), GeOptions::default()).expect("card");
+        let card = serde_json::to_string(&msgs).unwrap();
+        assert!(!card.contains("app.example.com"), "{card}");
+    }
+
+    /// With in-card links on, the card carries the deep link as a
+    /// `MaterialButton` whose action is the catalog's `openUrl` function;
+    /// the text part then carries nothing (said once).
+    #[test]
+    fn an_open_url_button_is_an_in_card_open_url_function_when_enabled() {
+        let r = open_button_surface();
+        let on = GeOptions {
+            open_url: true,
+            ..GeOptions::default()
+        };
+        assert_eq!(open_links_markdown(&r, on, ""), None);
+        let msgs = build_messages_with(&r, ActionSigner::global(), on).expect("card");
+        let card = serde_json::to_string(&msgs).unwrap();
+        let comps: Vec<Value> = msgs
+            .iter()
+            .filter_map(|m| m.pointer("/updateComponents/components"))
+            .filter_map(Value::as_array)
+            .flatten()
+            .cloned()
+            .collect();
+        let btn = comps
+            .iter()
+            .find(|c| c["label"] == "Open in the portfolio")
+            .unwrap_or_else(|| panic!("open button in {card}"));
+        assert_eq!(btn["component"], "MaterialButton");
+        assert_eq!(
+            btn["action"],
+            json!({ "functionCall": { "call": "openUrl",
+                "args": { "url": "https://app.example.com/acme/open?view=deps" },
+                "returnType": "void" } })
+        );
+    }
+
+    /// Only allowed links, labels as literal text, and a destination that
+    /// cannot end the Markdown link early.
+    #[test]
+    fn open_links_markdown_is_safe() {
+        let r = json!({ "surface": { "components": [
+            { "kind": "button", "label": "Evil", "action": { "type": "open_url", "url": "javascript:alert(1)" } },
+            { "kind": "button", "label": "a [b](c) *d*", "action": { "type": "open_url",
+              "url": "https://app.example.com/x(y) z" } },
+            { "kind": "button", "label": "Draft", "action": { "type": "open_url",
+              "url": "https://app.example.com/d" } }
+        ] } });
+        assert_eq!(
+            open_links_markdown(&r, GeOptions::default(), "").as_deref(),
+            Some(
+                "[a \\[b\\]\\(c\\) \\*d\\*](https://app.example.com/x%28y%29%20z) · \
+                 [Draft](https://app.example.com/d)"
+            )
+        );
+        let none = json!({ "surface": { "components": [ { "kind": "text", "value": "x" } ] } });
+        assert_eq!(open_links_markdown(&none, GeOptions::default(), ""), None);
     }
 
     /// A producer that speaks v0.9 itself puts its surfaces in `surface.a2ui`:

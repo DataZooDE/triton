@@ -406,7 +406,7 @@ component's id, so any replica resolves a click without a card store:
 |---|---|---|
 | `TRITON_A2UI_ACTION_KEY` | unset → per-process random key, boot warns "single replica only" | Shared HMAC key for GE card actions (≥ 16 bytes; `new,old` rotates, first signs). **Every replica must carry the same value.** A malformed value fails boot (exit 2). Inject it as a secret, like the adapters' `correlation_key`. |
 | `TRITON_ALLOW_HTTP_LINK_HOSTS` | empty → only `https://` links | Comma-separated hosts whose plain `http://` links (deep links, sources, embeds) are kept on every channel, e.g. `127.0.0.1,localhost` for local end-to-end tests. Exact host match after URL parsing, any port. **Local only:** a non-empty value outside `TRITON_ENV=local` fails boot (exit 2). |
-| `TRITON_GE_OPEN_URL` | off | Render `open_url` actions as in-card `functionCall openUrl` buttons. Off until qualified live; links then ride the prose. |
+| `TRITON_GE_OPEN_URL` | off | Render `open_url` actions as in-card `functionCall openUrl` buttons. Off until qualified live; an `open_url` button's link then follows the text part as a Markdown link (`[label](url)`), which Gemini renders in its bubble. |
 | `TRITON_GE_EMBED` | off | Render an `embed` as a Canvas + `IFrameUrl` surface; the framed host must be on GE's widget allowlist. Off: the embed's fallback renders inline. |
 
 ### 8.2 Logging vs audit

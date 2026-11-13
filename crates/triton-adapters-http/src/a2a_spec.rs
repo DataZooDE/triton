@@ -1766,7 +1766,15 @@ async fn message_stream(
                         // Streamed prose loses the clickable sources line (only in
                         // the final `reply`, which we skip); emit it as one more
                         // append delta so GE's bubble still gets the links.
-                        if did_stream && let Some(sources) = sources_markdown(&v) {
+                        // Likewise the deep links the card cannot carry
+                        // (`open_links_markdown`), when a card is shown.
+                        let tail = [
+                            sources_markdown(&v),
+                            a2ui_msgs
+                                .as_ref()
+                                .and_then(|_| open_links_markdown(&v, "")),
+                        ];
+                        for extra in tail.into_iter().flatten().filter(|_| did_stream) {
                             frames.push(rpc_frames(json!({
                                 "kind": "artifact-update",
                                 "taskId": task_for_frames,
@@ -1774,7 +1782,7 @@ async fn message_stream(
                                 "append": true,
                                 "artifact": {
                                     "artifactId": artifact_id,
-                                    "parts": [{ "kind": "text", "text": format!("\n\n{sources}") }],
+                                    "parts": [{ "kind": "text", "text": format!("\n\n{extra}") }],
                                 },
                             })));
                         }
@@ -2099,19 +2107,32 @@ pub(crate) fn sources_markdown(result: &Value) -> Option<String> {
 
 /// The text part of a reply (say it once): beside a rendered A2UI surface,
 /// the result's one-sentence `summary` when it has one, because the rows,
-/// choices and facts are in the components; with no surface shown, the full
-/// [`reply_text`].
+/// choices and facts are in the components, followed by the deep links the
+/// card cannot carry ([`open_links_markdown`]); with no surface shown, the
+/// full [`reply_text`].
 pub fn text_part(result: &Value, surface_shown: bool) -> String {
-    if surface_shown
-        && let Some(summary) = result
-            .get("summary")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-    {
-        return summary.to_string();
+    if !surface_shown {
+        return reply_text(result);
     }
-    reply_text(result)
+    let text = result
+        .get("summary")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| reply_text(result), str::to_string);
+    match open_links_markdown(result, &text) {
+        Some(links) if text.is_empty() => links,
+        Some(links) => format!("{text}\n\n{links}"),
+        None => text,
+    }
+}
+
+/// The `open_url` buttons the Gemini card leaves out, as Markdown links
+/// (`ge::open_links_markdown` with the process-wide options), minus any
+/// whose URL `shown` already contains.
+pub(crate) fn open_links_markdown(result: &Value, shown: &str) -> Option<String> {
+    let opts = triton_core::a2ui::ge::GeOptions::from_env();
+    triton_core::a2ui::ge::open_links_markdown(result, opts, shown)
 }
 
 pub fn reply_text(result: &Value) -> String {
@@ -2219,6 +2240,32 @@ pub fn card_state(
 #[cfg(test)]
 mod reply_text_tests {
     use super::*;
+
+    /// Beside a card that cannot carry a deep link (Gemini, in-card links
+    /// off), the text part is the summary plus the link as Markdown, so the
+    /// "open" control of every other channel is not lost on Gemini.
+    #[test]
+    fn text_part_beside_a_card_carries_the_open_link() {
+        let result = serde_json::json!({
+            "summary": "7 Agents depend on Orders.",
+            "surface": { "components": [
+                { "kind": "button", "label": "Open in the portfolio", "primary": true,
+                  "action": { "type": "open_url", "url": "https://app.example.com/o?v=1" } }
+            ] }
+        });
+        assert_eq!(
+            text_part(&result, true),
+            "7 Agents depend on Orders.\n\n[Open in the portfolio](https://app.example.com/o?v=1)"
+        );
+        // Said once: a summary that already links it gets nothing appended.
+        let mut linked = result.clone();
+        linked["summary"] =
+            serde_json::json!("7 Agents depend on Orders: https://app.example.com/o?v=1");
+        assert_eq!(
+            text_part(&linked, true),
+            "7 Agents depend on Orders: https://app.example.com/o?v=1"
+        );
+    }
 
     /// #635 E2E finding: the embedded agent's result is
     /// `surface.components`; without component extraction, A2A callers
