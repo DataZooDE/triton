@@ -13,13 +13,15 @@
           "component": "Text",
           "id": "c1",
           "text": "Agent · capability",
-          "variant": "caption"
+          "variant": "h5",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c2",
           "text": "AI Act",
-          "variant": "caption"
+          "variant": "h5",
+          "weight": 1
         },
         {
           "align": "center",
@@ -40,7 +42,8 @@
           "component": "Text",
           "id": "c5",
           "text": "Minimal",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -54,7 +57,8 @@
           "child": "c4",
           "component": "Button",
           "id": "c6",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",
@@ -75,7 +79,8 @@
           "component": "Text",
           "id": "c9",
           "text": "High",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -89,7 +94,8 @@
           "child": "c8",
           "component": "Button",
           "id": "c10",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",
@@ -110,7 +116,8 @@
           "component": "Text",
           "id": "c13",
           "text": "High",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -124,7 +131,8 @@
           "child": "c12",
           "component": "Button",
           "id": "c14",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",
@@ -145,7 +153,8 @@
           "component": "Text",
           "id": "c17",
           "text": "Limited",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -159,7 +168,8 @@
           "child": "c16",
           "component": "Button",
           "id": "c18",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",
@@ -180,7 +190,8 @@
           "component": "Text",
           "id": "c21",
           "text": "Minimal",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -194,7 +205,8 @@
           "child": "c20",
           "component": "Button",
           "id": "c22",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",
@@ -215,7 +227,8 @@
           "component": "Text",
           "id": "c25",
           "text": "Minimal",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -229,7 +242,8 @@
           "child": "c24",
           "component": "Button",
           "id": "c26",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",

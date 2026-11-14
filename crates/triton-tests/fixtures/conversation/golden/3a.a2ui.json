@@ -33,19 +33,22 @@
           "component": "Text",
           "id": "c4",
           "text": "Agent",
-          "variant": "caption"
+          "variant": "h5",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c5",
           "text": "Capability",
-          "variant": "caption"
+          "variant": "h5",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c6",
           "text": "Owner",
-          "variant": "caption"
+          "variant": "h5",
+          "weight": 1
         },
         {
           "align": "center",
@@ -67,13 +70,15 @@
           "component": "Text",
           "id": "c9",
           "text": "Requirements: Monitor",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c10",
           "text": "Head of IT Operations",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -87,7 +92,8 @@
           "child": "c8",
           "component": "Button",
           "id": "c11",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",
@@ -109,13 +115,15 @@
           "component": "Text",
           "id": "c14",
           "text": "Design: Schedule",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c15",
           "text": "Data Protection Officer",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -129,7 +137,8 @@
           "child": "c13",
           "component": "Button",
           "id": "c16",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",
@@ -151,13 +160,15 @@
           "component": "Text",
           "id": "c19",
           "text": "Design: Forecast",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c20",
           "text": "No owner",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -171,7 +182,8 @@
           "child": "c18",
           "component": "Button",
           "id": "c21",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",
@@ -193,13 +205,15 @@
           "component": "Text",
           "id": "c24",
           "text": "Validation: Forecast",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c25",
           "text": "Head of Quality Assurance",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -213,7 +227,8 @@
           "child": "c23",
           "component": "Button",
           "id": "c26",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",
@@ -235,13 +250,15 @@
           "component": "Text",
           "id": "c29",
           "text": "Planning: Schedule",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c30",
           "text": "Head of Production Planning",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -255,7 +272,8 @@
           "child": "c28",
           "component": "Button",
           "id": "c31",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",
@@ -277,13 +295,15 @@
           "component": "Text",
           "id": "c34",
           "text": "Sales: Forecast",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c35",
           "text": "Data Protection Officer",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "action": {
@@ -297,7 +317,8 @@
           "child": "c33",
           "component": "Button",
           "id": "c36",
-          "variant": "borderless"
+          "variant": "borderless",
+          "weight": 1
         },
         {
           "align": "center",

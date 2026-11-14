@@ -1172,3 +1172,33 @@ fn producer_surfaces_fit_a_byte_budget() {
         "the card stays"
     );
 }
+
+/// A table's columns line up: every cell of the header row and of each data
+/// row (the row's direct children) takes an equal share of the width, and
+/// the column labels read as headings, not captions.
+#[test]
+fn a_tables_columns_line_up() {
+    let d = card_of(&fixture("3a")).unwrap();
+    let comps = components(&d);
+    let by_id = |id: &str| comps.iter().find(|c| c["id"] == id).unwrap().clone();
+    let rows: Vec<Value> = comps
+        .iter()
+        .filter(|c| c["component"] == "Row" && refs(c).len() == 3)
+        // Not the action bar: a row of (non-borderless) buttons.
+        .filter(|c| {
+            !refs(c).iter().any(|id| {
+                let x = by_id(id);
+                x["component"] == "Button" && x["variant"] != "borderless"
+            })
+        })
+        .cloned()
+        .collect();
+    assert_eq!(rows.len(), 7, "the header row and six data rows");
+    for r in &rows {
+        for id in refs(r) {
+            assert_eq!(by_id(&id)["weight"], 1, "{id} in {r}");
+        }
+    }
+    let head: Vec<Value> = refs(&rows[0]).iter().map(|id| by_id(id)).collect();
+    assert!(head.iter().all(|c| c["variant"] == "h5"), "{head:?}");
+}

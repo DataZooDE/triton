@@ -262,6 +262,20 @@ impl Builder {
         }))
     }
 
+    /// A table row: every cell takes an equal share of the width, so the
+    /// columns of all rows line up (`weight` is flex-grow on a Row child).
+    fn table_row(&mut self, b: &mut Block, cells: Vec<String>) -> String {
+        for c in b.comps.iter_mut() {
+            if c["id"]
+                .as_str()
+                .is_some_and(|id| cells.iter().any(|x| x == id))
+            {
+                c["weight"] = json!(1);
+            }
+        }
+        self.row(b, cells)
+    }
+
     /// `child` as a borderless button when there is an action, else as is.
     fn maybe_button(&mut self, b: &mut Block, child: String, action: Option<Value>) -> String {
         match action {
@@ -327,9 +341,9 @@ impl Builder {
                 let mut b = Block::default();
                 let heads: Vec<String> = columns
                     .iter()
-                    .map(|c| self.text(&mut b, &c.label, "caption"))
+                    .map(|c| self.text(&mut b, &c.label, "h5"))
                     .collect();
-                let mut lines = vec![self.row(&mut b, heads)];
+                let mut lines = vec![self.table_row(&mut b, heads)];
                 for r in rows.iter().take(MAX_ROWS) {
                     let cells: Vec<String> = columns
                         .iter()
@@ -343,7 +357,7 @@ impl Builder {
                         let a = r.action.as_ref().and_then(event);
                         *first = self.maybe_button(&mut b, first.clone(), a);
                     }
-                    lines.push(self.row(&mut b, ids));
+                    lines.push(self.table_row(&mut b, ids));
                 }
                 let more = rows.len().saturating_sub(MAX_ROWS);
                 self.push_block(b, title.as_deref(), lines, more);

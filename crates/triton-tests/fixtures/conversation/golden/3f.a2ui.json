@@ -33,13 +33,15 @@
           "component": "Text",
           "id": "c4",
           "text": "Agent",
-          "variant": "caption"
+          "variant": "h5",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c5",
           "text": "Proposed owner",
-          "variant": "caption"
+          "variant": "h5",
+          "weight": 1
         },
         {
           "align": "center",
@@ -54,13 +56,15 @@
           "component": "Text",
           "id": "c7",
           "text": "Agent 12",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c8",
           "text": "Head of Production Planning",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "align": "center",
@@ -75,13 +79,15 @@
           "component": "Text",
           "id": "c10",
           "text": "Agent 19",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c11",
           "text": "Head of IT Operations",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "align": "center",
@@ -96,13 +102,15 @@
           "component": "Text",
           "id": "c13",
           "text": "Agent 24",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c14",
           "text": "Head of Quality Assurance",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "align": "center",
@@ -117,13 +125,15 @@
           "component": "Text",
           "id": "c16",
           "text": "Agent 27",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "component": "Text",
           "id": "c17",
           "text": "Data Protection Officer",
-          "variant": "body"
+          "variant": "body",
+          "weight": 1
         },
         {
           "align": "center",
