@@ -1,0 +1,390 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "Finance — 0 Agents",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": " ⚠️ Forecast",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Propose an Agent for Finance: Forecast"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c2",
+          "component": "Button",
+          "id": "c3",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c4",
+          "text": " ⚠️ Monitor",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Propose an Agent for Finance: Monitor"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c4",
+          "component": "Button",
+          "id": "c5",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c6",
+          "text": " ⚠️ Schedule",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Propose an Agent for Finance: Schedule"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c6",
+          "component": "Button",
+          "id": "c7",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c8",
+          "text": "Sales — 2 Agents",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c9",
+          "text": " Forecast",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c10",
+          "text": "Agent 28 · Planned",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show Agent 28"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c10",
+          "component": "Button",
+          "id": "c11",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c11"
+          ],
+          "component": "Row",
+          "id": "c12"
+        },
+        {
+          "children": [
+            "c9",
+            "c12"
+          ],
+          "component": "Column",
+          "id": "c13"
+        },
+        {
+          "component": "Text",
+          "id": "c14",
+          "text": " ⚠️ Monitor",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Propose an Agent for Sales: Monitor"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c14",
+          "component": "Button",
+          "id": "c15",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c16",
+          "text": " Schedule (proposed)",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c17",
+          "text": "Agent 29 · Candidate",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show Agent 29"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c17",
+          "component": "Button",
+          "id": "c18",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c18"
+          ],
+          "component": "Row",
+          "id": "c19"
+        },
+        {
+          "children": [
+            "c16",
+            "c19"
+          ],
+          "component": "Column",
+          "id": "c20"
+        },
+        {
+          "component": "Text",
+          "id": "c21",
+          "text": "Service — 2 Agents",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c22",
+          "text": " Forecast",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c23",
+          "text": "Agent 30 · Deployed",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show Agent 30"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c23",
+          "component": "Button",
+          "id": "c24",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c24"
+          ],
+          "component": "Row",
+          "id": "c25"
+        },
+        {
+          "children": [
+            "c22",
+            "c25"
+          ],
+          "component": "Column",
+          "id": "c26"
+        },
+        {
+          "component": "Text",
+          "id": "c27",
+          "text": " Monitor",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c28",
+          "text": "Agent 31 · Assessed",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show Agent 31"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c28",
+          "component": "Button",
+          "id": "c29",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c29"
+          ],
+          "component": "Row",
+          "id": "c30"
+        },
+        {
+          "children": [
+            "c27",
+            "c30"
+          ],
+          "component": "Column",
+          "id": "c31"
+        },
+        {
+          "component": "Text",
+          "id": "c32",
+          "text": " ⚠️ Schedule",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Propose an Agent for Service: Schedule"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c32",
+          "component": "Button",
+          "id": "c33",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c34",
+          "text": "Commercial & service · 4 Agents",
+          "variant": "h4"
+        },
+        {
+          "children": [
+            "c34",
+            "c1",
+            "c3",
+            "c5",
+            "c7",
+            "c8",
+            "c13",
+            "c15",
+            "c20",
+            "c21",
+            "c26",
+            "c31",
+            "c33"
+          ],
+          "component": "Column",
+          "id": "c35"
+        },
+        {
+          "component": "Text",
+          "id": "c36",
+          "text": "Expand map ⤢",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/open?view=capability-map&domain=commercial-service&embed=1"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c36",
+          "component": "Button",
+          "id": "c37",
+          "variant": "default"
+        },
+        {
+          "component": "Text",
+          "id": "c38",
+          "text": "Change domain",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Find Agents by capability"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c38",
+          "component": "Button",
+          "id": "c39",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c37",
+            "c39"
+          ],
+          "component": "Row",
+          "id": "c40"
+        },
+        {
+          "children": [
+            "c35",
+            "c40"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  }
+]

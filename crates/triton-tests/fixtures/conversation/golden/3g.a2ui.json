@@ -1,0 +1,104 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "⚠️ Couldn't answer this",
+          "variant": "h4"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": "We tried three times and stopped. Nothing was changed.",
+          "variant": "body"
+        },
+        {
+          "children": [
+            "c1",
+            "c2"
+          ],
+          "component": "Column",
+          "id": "c3"
+        },
+        {
+          "child": "c3",
+          "component": "Card",
+          "id": "c4"
+        },
+        {
+          "component": "Text",
+          "id": "c5",
+          "text": "Try again",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Propose an owner for every Agent without one."
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c5",
+          "component": "Button",
+          "id": "c6",
+          "variant": "primary"
+        },
+        {
+          "component": "Text",
+          "id": "c7",
+          "text": "Open in Inbox",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/open?request=r1"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c7",
+          "component": "Button",
+          "id": "c8",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c6",
+            "c8"
+          ],
+          "component": "Row",
+          "id": "c9"
+        },
+        {
+          "children": [
+            "c4",
+            "c9"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  }
+]

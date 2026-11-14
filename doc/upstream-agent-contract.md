@@ -323,7 +323,13 @@ Notes for agent authors:
   component: Triton does not verify that `children`/`child` ids resolve or
   that ids are unique, so a dangling reference still renders blank. Gemini
   Enterprise gets surfaces of either catalog (under its composite id, a
-  superset of basic). A click on a producer's button comes back as a
+  superset of basic). MCP Apps hosts (Claude, ChatGPT) render the
+  **basic-catalog** surfaces in Triton's answer-card widget, beside Triton's
+  own card (the widget bundles the official renderer, which ships the basic
+  catalog only; GE-composite surfaces stay Gemini-only). On MCP they ride the
+  result `_meta`, never the model-visible `content`/`structuredContent`. A
+  click on a producer's own event does nothing there yet (#369); avoid `Icon`
+  (it needs a font the host frame's CSP does not load). A click on a producer's button comes back as a
   client event (§2b); the producer handles it. Schema validity is not a
   security review: passthrough is still for upstreams the operator trusts like its own
   code. Producer surfaces only go to clients that negotiated A2UI; other

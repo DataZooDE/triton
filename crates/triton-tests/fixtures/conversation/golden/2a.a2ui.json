@@ -1,0 +1,170 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "ChoicePicker",
+          "id": "c1",
+          "label": "Domain *",
+          "options": [
+            {
+              "label": "Commercial & service",
+              "value": "Commercial & service"
+            },
+            {
+              "label": "Operations",
+              "value": "Operations"
+            },
+            {
+              "label": "Product & engineering",
+              "value": "Product & engineering"
+            }
+          ],
+          "value": {
+            "path": "/f0/domain"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "component": "ChoicePicker",
+          "id": "c2",
+          "label": "Area (optional)",
+          "options": [
+            {
+              "label": "All areas",
+              "value": ""
+            },
+            {
+              "label": "Finance",
+              "value": "Finance"
+            },
+            {
+              "label": "Sales",
+              "value": "Sales"
+            },
+            {
+              "label": "Service",
+              "value": "Service"
+            }
+          ],
+          "value": {
+            "path": "/f0/area"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "component": "ChoicePicker",
+          "displayStyle": "checkbox",
+          "id": "c3",
+          "label": "Show *",
+          "options": [
+            {
+              "label": "Include proposed",
+              "value": "including proposed capabilities"
+            },
+            {
+              "label": "Only capabilities without Agents",
+              "value": "only capabilities without Agents"
+            }
+          ],
+          "value": {
+            "path": "/f0/scope"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "component": "Text",
+          "id": "c4",
+          "text": "Show map",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "parts": "[{\"text\":\"Show the capability map for \"},{\"field\":\"domain\"},{\"optional\":[{\"text\":\", area \"},{\"field\":\"area\"}]},{\"text\":\", \"},{\"field\":\"scope\"}]",
+                "v:area": {
+                  "path": "/f0/area"
+                },
+                "v:domain": {
+                  "path": "/f0/domain"
+                },
+                "v:scope": {
+                  "path": "/f0/scope"
+                }
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c4",
+          "component": "Button",
+          "id": "c5",
+          "variant": "primary"
+        },
+        {
+          "children": [
+            "c1",
+            "c2",
+            "c3",
+            "c5"
+          ],
+          "component": "Column",
+          "id": "c6"
+        },
+        {
+          "component": "Text",
+          "id": "c7",
+          "text": "Find Agents by capability",
+          "variant": "h4"
+        },
+        {
+          "children": [
+            "c7",
+            "c6"
+          ],
+          "component": "Column",
+          "id": "c8"
+        },
+        {
+          "children": [
+            "c8"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateDataModel": {
+      "path": "/",
+      "surfaceId": "triton-card",
+      "value": {
+        "f0": {
+          "area": [],
+          "domain": [
+            "Commercial & service"
+          ],
+          "scope": [
+            "including proposed capabilities"
+          ]
+        }
+      }
+    },
+    "version": "v0.9"
+  }
+]

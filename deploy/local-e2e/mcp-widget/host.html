@@ -17,6 +17,10 @@ const f = document.getElementById("frame");
 const send = (m) => f.contentWindow.postMessage(m, "*");
 window.followups = [];
 f.addEventListener("load", () => { f.contentWindow.openai = { sendFollowUpMessage: (a) => { window.followups.push(a.prompt); return Promise.resolve(); } }; });
+// Lit renders inside shadow roots: query through them.
+window.deep = (sel) => { const out = []; const walk = (root) => { root.querySelectorAll(sel).forEach((e) => out.push(e)); root.querySelectorAll("*").forEach((e) => e.shadowRoot && walk(e.shadowRoot)); }; walk(f.contentWindow.document); return out; };
+window.deepText = () => window.deep("*").filter((e) => !e.children.length).map((e) => e.textContent.trim()).filter(Boolean).join(" | ");
+window.clickText = (t) => { const b = window.deep("button").find((e) => e.textContent.trim().includes(t)); if (!b) return "none"; b.click(); return "ok"; };
 window.sendContext = (c) => send({ jsonrpc: "2.0", method: "ui/notifications/host-context-changed", params: c });
 window.sendResult = (r) => send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: r });
 window.addEventListener("message", (e) => {
@@ -35,7 +39,7 @@ window.addEventListener("message", (e) => {
   } else if (d.method === "ui/notifications/initialized") {
     send({ jsonrpc: "2.0", method: "ui/notifications/tool-input", params: { arguments: {} } });
     send({ jsonrpc: "2.0", method: "ui/notifications/tool-result", params: { content: [{ type: "text", text: "..." }],
-      structuredContent: { result: {} }, _meta: { "triton/widget": WIDGETS[name] } } });
+      structuredContent: { result: {} }, _meta: { "triton/a2ui": WIDGETS[name] } } });
   } else if (d.method === "ui/notifications/size-changed") {
     f.style.height = d.params.height + "px"; document.body.dataset.h = d.params.height;
   } else if (d.method === "ui/message" && q.get("mode") === "noreply") {

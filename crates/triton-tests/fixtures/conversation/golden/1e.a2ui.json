@@ -1,0 +1,124 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "ChoicePicker",
+          "displayStyle": "checkbox",
+          "id": "c1",
+          "label": "Agent *",
+          "options": [
+            {
+              "label": "Agent 2 · Requirements: Forecast · Assessed",
+              "value": "Agent 2"
+            },
+            {
+              "label": "Agent 20 · Design: Monitor · Deployed",
+              "value": "Agent 20"
+            },
+            {
+              "label": "Agent 28 · Sales: Forecast · Planned",
+              "value": "Agent 28"
+            }
+          ],
+          "value": {
+            "path": "/f0/agent"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "component": "TextField",
+          "id": "c2",
+          "label": "Reason (optional)",
+          "value": {
+            "path": "/f0/reason"
+          },
+          "variant": "shortText"
+        },
+        {
+          "component": "Text",
+          "id": "c3",
+          "text": "Retire as draft",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "parts": "[{\"text\":\"Retire the agent \\\"\"},{\"field\":\"agent\"},{\"text\":\"\\\".\"},{\"optional\":[{\"text\":\" Reason: \"},{\"field\":\"reason\"}]}]",
+                "v:agent": {
+                  "path": "/f0/agent"
+                },
+                "v:reason": {
+                  "path": "/f0/reason"
+                }
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c3",
+          "component": "Button",
+          "id": "c4",
+          "variant": "primary"
+        },
+        {
+          "children": [
+            "c1",
+            "c2",
+            "c4"
+          ],
+          "component": "Column",
+          "id": "c5"
+        },
+        {
+          "component": "Text",
+          "id": "c6",
+          "text": "Which Agent should be retired?",
+          "variant": "h4"
+        },
+        {
+          "children": [
+            "c6",
+            "c5"
+          ],
+          "component": "Column",
+          "id": "c7"
+        },
+        {
+          "children": [
+            "c7"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateDataModel": {
+      "path": "/",
+      "surfaceId": "triton-card",
+      "value": {
+        "f0": {
+          "agent": [],
+          "reason": ""
+        }
+      }
+    },
+    "version": "v0.9"
+  }
+]

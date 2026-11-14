@@ -1,0 +1,282 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "Agent 3",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": "Requirements: Monitor — Head of IT Operations",
+          "variant": "caption"
+        },
+        {
+          "children": [
+            "c1",
+            "c2"
+          ],
+          "component": "Column",
+          "id": "c3"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/open?object=agent%3Aagent-3"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c3",
+          "component": "Button",
+          "id": "c4",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c5",
+          "text": "Agent 8",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c6",
+          "text": "Design: Schedule — Data Protection Officer",
+          "variant": "caption"
+        },
+        {
+          "children": [
+            "c5",
+            "c6"
+          ],
+          "component": "Column",
+          "id": "c7"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/open?object=agent%3Aagent-8"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c7",
+          "component": "Button",
+          "id": "c8",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c9",
+          "text": "Agent 12",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c10",
+          "text": "Design: Forecast — no owner",
+          "variant": "caption"
+        },
+        {
+          "children": [
+            "c9",
+            "c10"
+          ],
+          "component": "Column",
+          "id": "c11"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/open?object=agent%3Aagent-12"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c11",
+          "component": "Button",
+          "id": "c12",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c13",
+          "text": "6 planned Agents",
+          "variant": "h4"
+        },
+        {
+          "children": [
+            "c13",
+            "c4",
+            "c8",
+            "c12"
+          ],
+          "component": "Column",
+          "id": "c14"
+        },
+        {
+          "component": "Text",
+          "id": "c15",
+          "text": "Planned with high AI Act class",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Which planned Agents have a high AI Act class?"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c15",
+          "component": "Button",
+          "id": "c16",
+          "variant": "default"
+        },
+        {
+          "component": "Text",
+          "id": "c17",
+          "text": "Planned without owner",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Which planned Agents have no owner?"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c17",
+          "component": "Button",
+          "id": "c18",
+          "variant": "default"
+        },
+        {
+          "component": "Text",
+          "id": "c19",
+          "text": "Dependencies of planned Agents",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "What do the planned Agents depend on?"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c19",
+          "component": "Button",
+          "id": "c20",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c16",
+            "c18",
+            "c20"
+          ],
+          "component": "Row",
+          "id": "c21"
+        },
+        {
+          "component": "Text",
+          "id": "c22",
+          "text": "Ask next (sent as a new question)",
+          "variant": "h4"
+        },
+        {
+          "children": [
+            "c22",
+            "c21"
+          ],
+          "component": "Column",
+          "id": "c23"
+        },
+        {
+          "component": "Text",
+          "id": "c24",
+          "text": "Open in the portfolio",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/analyse?lifecycle=planned"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c24",
+          "component": "Button",
+          "id": "c25",
+          "variant": "primary"
+        },
+        {
+          "component": "Text",
+          "id": "c26",
+          "text": "Show 3 more",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "List all planned Agents"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c26",
+          "component": "Button",
+          "id": "c27",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c25",
+            "c27"
+          ],
+          "component": "Row",
+          "id": "c28"
+        },
+        {
+          "children": [
+            "c14",
+            "c23",
+            "c28"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  }
+]

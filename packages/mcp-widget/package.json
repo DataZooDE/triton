@@ -1,0 +1,21 @@
+{
+  "name": "@triton/mcp-widget",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Triton's MCP Apps answer-card widget: the official A2UI v0.9 renderer (@a2ui/lit, basic catalog) plus the MCP Apps host glue, built into one self-contained HTML file.",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "vite build && node scripts/place.mjs",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@a2ui/lit": "0.15.0",
+    "@a2ui/web_core": "0.15.0",
+    "lit": "3.3.3"
+  },
+  "devDependencies": {
+    "vite": "8.3.8",
+    "vite-plugin-singlefile": "2.3.4"
+  }
+}

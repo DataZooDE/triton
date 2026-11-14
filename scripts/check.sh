@@ -13,7 +13,7 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 # Formatting first: it is the cheapest failure and the most common one.
-PRE_PUSH=(fmt clippy consumer-smoke bins test capture flutter-a2ui flutter-explorer)
+PRE_PUSH=(fmt mcp-widget clippy consumer-smoke bins test capture flutter-a2ui flutter-explorer)
 # Not in the hook: the release dart2js compile is slow and memory-hungry
 # (CI adds 14 GB of swap for it) and it is a build, not a test.
 EXTRA=(flutter-web)
@@ -74,6 +74,18 @@ flutter_package() {
     fi
   done
   return "$rc"
+}
+
+# The MCP Apps widget (#368): the official A2UI renderer and Triton's glue,
+# built into the one HTML file `triton-core` `include_str!`s. The built file
+# is committed (cargo stays Node-free); this rebuilds it from the lockfile and
+# fails when the committed copy differs, so it can never go stale.
+step_mcp_widget() {
+  (cd packages/mcp-widget && npm ci --no-audit --no-fund && npm test && npm run build)
+  git diff --exit-code -- crates/triton-core/src/a2ui/mcp_widget.html || {
+    echo "mcp_widget.html is stale: run 'cd packages/mcp-widget && npm run build' and commit it" >&2
+    return 1
+  }
 }
 
 step_flutter_a2ui() {

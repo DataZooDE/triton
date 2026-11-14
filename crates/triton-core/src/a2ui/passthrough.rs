@@ -225,17 +225,18 @@ fn vet_one(s: &Value) -> Result<Value, Rejection> {
     Ok(out)
 }
 
-/// The v0.9 messages for vetted surfaces: `createSurface` (declaring
-/// `catalog_id`) + `updateComponents` (+ `updateDataModel`) each. A surface
-/// with no `root` or an unknown catalog is skipped, so an unvetted value (a
-/// task record stored before vetting existed) can still never go out broken.
-pub fn messages(vetted: Option<&Value>, catalog_id: &str) -> Vec<Value> {
+/// The v0.9 messages for vetted surfaces written for one of `catalogs`:
+/// `createSurface` (declaring `catalog_id`, the catalog the face's renderer
+/// knows) + `updateComponents` (+ `updateDataModel`) each. A surface with no
+/// `root` or an unknown catalog is skipped, so an unvetted value (a task
+/// record stored before vetting existed) can still never go out broken.
+pub fn messages(vetted: Option<&Value>, catalogs: &[Catalog], catalog_id: &str) -> Vec<Value> {
     let Some(list) = vetted.and_then(Value::as_array) else {
         return Vec::new();
     };
     list.iter()
         .filter(|s| {
-            catalog_of(s).is_some()
+            catalog_of(s).is_some_and(|c| catalogs.contains(&c))
                 && s.get("components")
                     .and_then(Value::as_array)
                     .is_some_and(|c| has_root(c))
@@ -509,7 +510,11 @@ mod tests {
                 "components": [ { "id": "root", "component": "Text", "text": "x" } ] }]);
             let (kept, rej) = vet(&raw);
             assert!(rej.is_empty(), "{model}: {rej:?}");
-            let msgs = messages(Some(&Value::Array(kept)), BASIC_CATALOG_ID);
+            let msgs = messages(
+                Some(&Value::Array(kept)),
+                &[Catalog::Basic],
+                BASIC_CATALOG_ID,
+            );
             assert_eq!(msgs[2]["updateDataModel"]["value"], model);
         }
     }
@@ -549,11 +554,21 @@ mod tests {
             { "components": [ { "id": "no-root" } ] },
             { "catalogId": "https://x.test/c.json", "components": [ { "id": "root" } ] }
         ]);
-        let ge = messages(Some(&vetted), GE_COMPOSITE_CATALOG_ID);
+        let ge = messages(
+            Some(&vetted),
+            &[Catalog::Basic, Catalog::GeComposite],
+            GE_COMPOSITE_CATALOG_ID,
+        );
         assert_eq!(
             ge.len(),
             5,
             "two surfaces; no-root and unknown catalog skipped"
+        );
+        let basic_only = messages(Some(&vetted), &[Catalog::Basic], BASIC_CATALOG_ID);
+        assert_eq!(basic_only.len(), 2, "only the basic surface");
+        assert_eq!(
+            basic_only[0]["createSurface"]["catalogId"],
+            BASIC_CATALOG_ID
         );
         assert!(ge.iter().all(|m| {
             m["createSurface"]["catalogId"]
