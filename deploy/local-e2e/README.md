@@ -73,8 +73,11 @@ ready-to-paste client recipes:
 
 ## `mcp-widget/run.sh`
 
-The answer-card MCP Apps widget (`crates/triton-core/src/a2ui/mcp_app_widget.html`)
-in headless Chromium via rodney: `host.html` plays the MCP Apps host, the run
-checks the widget's behaviour (one transport per click, stale card cleared,
-the shared fill vectors, the user flows) and saves light and dark PNGs of the
-`*.mcp.json` goldens: `deploy/local-e2e/mcp-widget/run.sh [png-out-dir]`.
+The answer-card MCP Apps widget (the official A2UI v0.9 renderer built from
+`packages/mcp-widget` into `crates/triton-core/src/a2ui/mcp_widget.html`) in
+headless Chromium via rodney: `host.html` plays the MCP Apps host and sends the
+`*.a2ui.json` goldens as `_meta["triton/a2ui"]`; the run checks the widget's
+behaviour (one send per click, deep links, forms, a producer's own surface, a
+broken message not breaking the rest, the ChatGPT fallback, the shared fill
+vectors) and saves light and dark PNGs:
+`deploy/local-e2e/mcp-widget/run.sh [png-out-dir]`.

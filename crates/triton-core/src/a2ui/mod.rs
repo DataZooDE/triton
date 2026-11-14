@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod basic;
 pub mod ge;
 pub mod mcp_app;
 pub mod passthrough;

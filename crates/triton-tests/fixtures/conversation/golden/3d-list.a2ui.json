@@ -1,0 +1,228 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "Agent 2",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": "Requirements: Forecast",
+          "variant": "caption"
+        },
+        {
+          "children": [
+            "c1",
+            "c2"
+          ],
+          "component": "Column",
+          "id": "c3"
+        },
+        {
+          "component": "Text",
+          "id": "c4",
+          "text": "Retire",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Retire the agent \"Agent 2\"."
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c4",
+          "component": "Button",
+          "id": "c5",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c3",
+            "c5"
+          ],
+          "component": "Row",
+          "id": "c6"
+        },
+        {
+          "component": "Text",
+          "id": "c7",
+          "text": "Agent 20",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c8",
+          "text": "Design: Monitor",
+          "variant": "caption"
+        },
+        {
+          "children": [
+            "c7",
+            "c8"
+          ],
+          "component": "Column",
+          "id": "c9"
+        },
+        {
+          "component": "Text",
+          "id": "c10",
+          "text": "Retire",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Retire the agent \"Agent 20\"."
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c10",
+          "component": "Button",
+          "id": "c11",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c9",
+            "c11"
+          ],
+          "component": "Row",
+          "id": "c12"
+        },
+        {
+          "component": "Text",
+          "id": "c13",
+          "text": "Agent 21",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c14",
+          "text": "Planning: Schedule",
+          "variant": "caption"
+        },
+        {
+          "children": [
+            "c13",
+            "c14"
+          ],
+          "component": "Column",
+          "id": "c15"
+        },
+        {
+          "component": "Text",
+          "id": "c16",
+          "text": "Retire",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Retire the agent \"Agent 21\"."
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c16",
+          "component": "Button",
+          "id": "c17",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c15",
+            "c17"
+          ],
+          "component": "Row",
+          "id": "c18"
+        },
+        {
+          "component": "Text",
+          "id": "c19",
+          "text": "7 more",
+          "variant": "body"
+        },
+        {
+          "children": [
+            "c19"
+          ],
+          "component": "Column",
+          "id": "c20"
+        },
+        {
+          "component": "Text",
+          "id": "c21",
+          "text": "Show",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Which agents match \"Agent 2\"?"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c21",
+          "component": "Button",
+          "id": "c22",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c20",
+            "c22"
+          ],
+          "component": "Row",
+          "id": "c23"
+        },
+        {
+          "children": [
+            "c6",
+            "c12",
+            "c18",
+            "c23"
+          ],
+          "component": "Column",
+          "id": "c24"
+        },
+        {
+          "children": [
+            "c24"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  }
+]

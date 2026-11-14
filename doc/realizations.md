@@ -420,6 +420,22 @@ production deployment can avoid by knowing about it.
 Items discovered while building the production Rust port; each is
 a trap the next developer should not have to step in.
 
+- **The MCP widget on the official A2UI renderer (2026-11-14, #368).** Four
+  traps. (1) The basic catalog's `openUrl` function calls `window.open`,
+  which a host frame blocks; Triton's card therefore uses its own events
+  (`triton.send_message`, `triton.open_url`) and the glue turns them into
+  `ui/message` / `ui/open-link`, one path for every click. (2) A host
+  request must have no timeout: Claude holds a `ui/message` behind its
+  confirmation banner as long as the person takes, so a timeout reports a
+  delivered message as failed. (3) `Icon` defaults to the Material Icons
+  font, which the self-contained page does not carry; the card never emits
+  one, and the contract tells producers to avoid it. (4) The bundle is
+  ~496 KB (~138 KB gzip) and the build is byte-deterministic, which is what
+  makes the committed-copy diff gate in `scripts/check.sh mcp-widget`
+  workable; `cargo test -p triton-tests` does not rebuild `triton-bin`, so
+  rebuild the binary after changing the page or an MCP test runs the old
+  one.
+
 - **Vet A2UI components one by one, not as a message (2026-11-14, #370).**
   Validating a whole `updateComponents` message against
   `server_to_client.json` reports a broken component as a failed `oneOf`

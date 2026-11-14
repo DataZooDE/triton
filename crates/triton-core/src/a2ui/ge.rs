@@ -1265,6 +1265,10 @@ pub fn build_messages_with(
     // of basic).
     let mut messages = passthrough::messages(
         result.get("surface").and_then(|s| s.get("a2ui")),
+        &[
+            passthrough::Catalog::Basic,
+            passthrough::Catalog::GeComposite,
+        ],
         GE_COMPOSITE_CATALOG,
     );
     messages.extend(card_messages(result, signer, opts).unwrap_or_default());

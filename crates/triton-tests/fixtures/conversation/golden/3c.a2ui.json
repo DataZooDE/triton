@@ -1,0 +1,375 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "Change Agent 28",
+          "variant": "h3"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": "Sales: Forecast · Planned · Owner: Data Protection Officer",
+          "variant": "caption"
+        },
+        {
+          "children": [
+            "c1",
+            "c2"
+          ],
+          "component": "Column",
+          "id": "c3"
+        },
+        {
+          "component": "ChoicePicker",
+          "id": "c4",
+          "label": "New owner *",
+          "options": [
+            {
+              "label": "IT Operations",
+              "value": "IT Operations"
+            },
+            {
+              "label": "Finance operations",
+              "value": "Finance operations"
+            },
+            {
+              "label": "Head of Quality Assurance",
+              "value": "Head of Quality Assurance"
+            }
+          ],
+          "value": {
+            "path": "/f0/i0"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "component": "TextField",
+          "id": "c5",
+          "label": "Why (optional)",
+          "value": {
+            "path": "/f0/i1"
+          },
+          "variant": "longText"
+        },
+        {
+          "component": "Text",
+          "id": "c6",
+          "text": "File for review",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "parts": "[{\"text\":\"Set the owner of Agent 28 to \\\"\"},{\"field\":\"value\"},{\"text\":\"\\\".\"},{\"optional\":[{\"text\":\" Reason: \"},{\"field\":\"reason\"}]},{\"text\":\" (version 08cbcd825d41)\"}]",
+                "v:reason": {
+                  "path": "/f0/i1"
+                },
+                "v:value": {
+                  "path": "/f0/i0"
+                }
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c6",
+          "component": "Button",
+          "id": "c7",
+          "variant": "primary"
+        },
+        {
+          "children": [
+            "c4",
+            "c5",
+            "c7"
+          ],
+          "component": "Column",
+          "id": "c8"
+        },
+        {
+          "component": "ChoicePicker",
+          "id": "c9",
+          "label": "New lifecycle *",
+          "options": [
+            {
+              "label": "Assessed",
+              "value": "Assessed"
+            },
+            {
+              "label": "Deployed",
+              "value": "Deployed"
+            },
+            {
+              "label": "Retired",
+              "value": "Retired"
+            }
+          ],
+          "value": {
+            "path": "/f1/i0"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "component": "TextField",
+          "id": "c10",
+          "label": "Why (optional)",
+          "value": {
+            "path": "/f1/i1"
+          },
+          "variant": "longText"
+        },
+        {
+          "component": "Text",
+          "id": "c11",
+          "text": "File for review",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "parts": "[{\"text\":\"Set the lifecycle of Agent 28 to \\\"\"},{\"field\":\"value\"},{\"text\":\"\\\".\"},{\"optional\":[{\"text\":\" Reason: \"},{\"field\":\"reason\"}]},{\"text\":\" (version 08cbcd825d41)\"}]",
+                "v:reason": {
+                  "path": "/f1/i1"
+                },
+                "v:value": {
+                  "path": "/f1/i0"
+                }
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c11",
+          "component": "Button",
+          "id": "c12",
+          "variant": "primary"
+        },
+        {
+          "children": [
+            "c9",
+            "c10",
+            "c12"
+          ],
+          "component": "Column",
+          "id": "c13"
+        },
+        {
+          "component": "ChoicePicker",
+          "id": "c14",
+          "label": "New AI Act class *",
+          "options": [
+            {
+              "label": "Minimal",
+              "value": "Minimal"
+            },
+            {
+              "label": "Limited",
+              "value": "Limited"
+            },
+            {
+              "label": "High",
+              "value": "High"
+            }
+          ],
+          "value": {
+            "path": "/f2/i0"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "component": "TextField",
+          "id": "c15",
+          "label": "Why (optional)",
+          "value": {
+            "path": "/f2/i1"
+          },
+          "variant": "longText"
+        },
+        {
+          "component": "Text",
+          "id": "c16",
+          "text": "File for review",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "parts": "[{\"text\":\"Set the AI Act class of Agent 28 to \\\"\"},{\"field\":\"value\"},{\"text\":\"\\\".\"},{\"optional\":[{\"text\":\" Reason: \"},{\"field\":\"reason\"}]},{\"text\":\" (version 08cbcd825d41)\"}]",
+                "v:reason": {
+                  "path": "/f2/i1"
+                },
+                "v:value": {
+                  "path": "/f2/i0"
+                }
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c16",
+          "component": "Button",
+          "id": "c17",
+          "variant": "primary"
+        },
+        {
+          "children": [
+            "c14",
+            "c15",
+            "c17"
+          ],
+          "component": "Column",
+          "id": "c18"
+        },
+        {
+          "component": "ChoicePicker",
+          "id": "c19",
+          "label": "What to change *",
+          "options": [
+            {
+              "label": "Capability: Sales: Schedule",
+              "value": "Capability: Sales: Schedule"
+            },
+            {
+              "label": "Purpose: Forecast quarterly demand",
+              "value": "Purpose: Forecast quarterly demand"
+            }
+          ],
+          "value": {
+            "path": "/f3/i0"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "component": "TextField",
+          "id": "c20",
+          "label": "Why (optional)",
+          "value": {
+            "path": "/f3/i1"
+          },
+          "variant": "longText"
+        },
+        {
+          "component": "Text",
+          "id": "c21",
+          "text": "File for review",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "parts": "[{\"text\":\"Change Agent 28: \"},{\"field\":\"value\"},{\"text\":\".\"},{\"optional\":[{\"text\":\" Reason: \"},{\"field\":\"reason\"}]},{\"text\":\" (version 08cbcd825d41)\"}]",
+                "v:reason": {
+                  "path": "/f3/i1"
+                },
+                "v:value": {
+                  "path": "/f3/i0"
+                }
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c21",
+          "component": "Button",
+          "id": "c22",
+          "variant": "primary"
+        },
+        {
+          "children": [
+            "c19",
+            "c20",
+            "c22"
+          ],
+          "component": "Column",
+          "id": "c23"
+        },
+        {
+          "component": "Tabs",
+          "id": "c24",
+          "tabs": [
+            {
+              "child": "c8",
+              "title": "Owner"
+            },
+            {
+              "child": "c13",
+              "title": "Lifecycle"
+            },
+            {
+              "child": "c18",
+              "title": "AI Act class"
+            },
+            {
+              "child": "c23",
+              "title": "More…"
+            }
+          ]
+        },
+        {
+          "component": "Text",
+          "id": "c25",
+          "text": "A colleague reviews it before it goes live.",
+          "variant": "caption"
+        },
+        {
+          "children": [
+            "c24",
+            "c25"
+          ],
+          "component": "Column",
+          "id": "c26"
+        },
+        {
+          "children": [
+            "c3",
+            "c26"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateDataModel": {
+      "path": "/",
+      "surfaceId": "triton-card",
+      "value": {
+        "f0": {
+          "i0": [],
+          "i1": ""
+        },
+        "f1": {
+          "i0": [],
+          "i1": ""
+        },
+        "f2": {
+          "i0": [],
+          "i1": ""
+        },
+        "f3": {
+          "i0": [],
+          "i1": ""
+        }
+      }
+    },
+    "version": "v0.9"
+  }
+]

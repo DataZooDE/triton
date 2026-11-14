@@ -1,0 +1,267 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "Capability map",
+          "variant": "h3"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": "31 Agents in 27 capabilities, 4 domains · as of 18:18",
+          "variant": "caption"
+        },
+        {
+          "children": [
+            "c1",
+            "c2"
+          ],
+          "component": "Column",
+          "id": "c3"
+        },
+        {
+          "component": "Text",
+          "id": "c4",
+          "text": "Commercial & service — 4 Agents",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c5",
+          "text": " ⚠️ Finance: Forecast · Monitor · Schedule — 0",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c6",
+          "text": " Sales: Forecast — Agent 28",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 28\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c6",
+          "component": "Button",
+          "id": "c7",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c8",
+          "text": " Sales: Schedule · proposed — Agent 29",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 29\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c8",
+          "component": "Button",
+          "id": "c9",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c10",
+          "text": " Service: Forecast — Agent 30",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 30\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c10",
+          "component": "Button",
+          "id": "c11",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c12",
+          "text": " Service: Monitor — Agent 31",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 31\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c12",
+          "component": "Button",
+          "id": "c13",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c14",
+          "text": "Operations — 8 Agents",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c15",
+          "text": " Production: Schedule — Agent 21",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 21\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c15",
+          "component": "Button",
+          "id": "c16",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c17",
+          "text": "Product & engineering — 22 Agents",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c18",
+          "text": " Design: Forecast — Agent 12",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 12\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c18",
+          "component": "Button",
+          "id": "c19",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c20",
+          "text": "SaaS quality assurance — 1 Agent",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c21",
+          "text": " Validation: Forecast — Agent 17",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 17\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c21",
+          "component": "Button",
+          "id": "c22",
+          "variant": "borderless"
+        },
+        {
+          "children": [
+            "c4",
+            "c5",
+            "c7",
+            "c9",
+            "c11",
+            "c13",
+            "c14",
+            "c16",
+            "c17",
+            "c19",
+            "c20",
+            "c22"
+          ],
+          "component": "Column",
+          "id": "c23"
+        },
+        {
+          "component": "Text",
+          "id": "c24",
+          "text": "Open in the portfolio",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/open?view=map"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c24",
+          "component": "Button",
+          "id": "c25",
+          "variant": "primary"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c25"
+          ],
+          "component": "Row",
+          "id": "c26"
+        },
+        {
+          "children": [
+            "c3",
+            "c23",
+            "c26"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  }
+]

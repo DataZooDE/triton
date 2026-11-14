@@ -1,0 +1,141 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "⚠️ Agent 28 changed",
+          "variant": "h4"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": "Changed at 18:10 since this card was shown: lifecycle Planned → In delivery. Your change was not filed.",
+          "variant": "body"
+        },
+        {
+          "children": [
+            "c1",
+            "c2"
+          ],
+          "component": "Column",
+          "id": "c3"
+        },
+        {
+          "child": "c3",
+          "component": "Card",
+          "id": "c4"
+        },
+        {
+          "component": "Text",
+          "id": "c5",
+          "text": "Owner",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c6",
+          "text": "Finance operations",
+          "variant": "body"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c5",
+            "c6"
+          ],
+          "component": "Row",
+          "id": "c7"
+        },
+        {
+          "component": "Text",
+          "id": "c8",
+          "text": "Reason",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c9",
+          "text": "Finance took over the process in October.",
+          "variant": "body"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c8",
+            "c9"
+          ],
+          "component": "Row",
+          "id": "c10"
+        },
+        {
+          "component": "Text",
+          "id": "c11",
+          "text": "Your input is kept:",
+          "variant": "h4"
+        },
+        {
+          "children": [
+            "c11",
+            "c7",
+            "c10"
+          ],
+          "component": "Column",
+          "id": "c12"
+        },
+        {
+          "component": "Text",
+          "id": "c13",
+          "text": "Check again with current version",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Set the owner of Agent 28 to \"Finance operations\". Reason: Finance took over the process in October."
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c13",
+          "component": "Button",
+          "id": "c14",
+          "variant": "primary"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c14"
+          ],
+          "component": "Row",
+          "id": "c15"
+        },
+        {
+          "children": [
+            "c4",
+            "c12",
+            "c15"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  }
+]

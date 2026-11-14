@@ -1,0 +1,435 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "6 planned Agents",
+          "variant": "h3"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": "as of 18:17",
+          "variant": "caption"
+        },
+        {
+          "children": [
+            "c1",
+            "c2"
+          ],
+          "component": "Column",
+          "id": "c3"
+        },
+        {
+          "component": "Text",
+          "id": "c4",
+          "text": "Agent",
+          "variant": "h5",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c5",
+          "text": "Capability",
+          "variant": "h5",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c6",
+          "text": "Owner",
+          "variant": "h5",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c4",
+            "c5",
+            "c6"
+          ],
+          "component": "Row",
+          "id": "c7"
+        },
+        {
+          "component": "Text",
+          "id": "c8",
+          "text": "Agent 3",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c9",
+          "text": "Requirements: Monitor",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c10",
+          "text": "Head of IT Operations",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 3\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c8",
+          "component": "Button",
+          "id": "c11",
+          "variant": "borderless",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c11",
+            "c9",
+            "c10"
+          ],
+          "component": "Row",
+          "id": "c12"
+        },
+        {
+          "component": "Text",
+          "id": "c13",
+          "text": "Agent 8",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c14",
+          "text": "Design: Schedule",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c15",
+          "text": "Data Protection Officer",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 8\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c13",
+          "component": "Button",
+          "id": "c16",
+          "variant": "borderless",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c16",
+            "c14",
+            "c15"
+          ],
+          "component": "Row",
+          "id": "c17"
+        },
+        {
+          "component": "Text",
+          "id": "c18",
+          "text": "Agent 12",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c19",
+          "text": "Design: Forecast",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c20",
+          "text": "No owner",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 12\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c18",
+          "component": "Button",
+          "id": "c21",
+          "variant": "borderless",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c21",
+            "c19",
+            "c20"
+          ],
+          "component": "Row",
+          "id": "c22"
+        },
+        {
+          "component": "Text",
+          "id": "c23",
+          "text": "Agent 17",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c24",
+          "text": "Validation: Forecast",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c25",
+          "text": "Head of Quality Assurance",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 17\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c23",
+          "component": "Button",
+          "id": "c26",
+          "variant": "borderless",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c26",
+            "c24",
+            "c25"
+          ],
+          "component": "Row",
+          "id": "c27"
+        },
+        {
+          "component": "Text",
+          "id": "c28",
+          "text": "Agent 21",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c29",
+          "text": "Planning: Schedule",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c30",
+          "text": "Head of Production Planning",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 21\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c28",
+          "component": "Button",
+          "id": "c31",
+          "variant": "borderless",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c31",
+            "c29",
+            "c30"
+          ],
+          "component": "Row",
+          "id": "c32"
+        },
+        {
+          "component": "Text",
+          "id": "c33",
+          "text": "Agent 28",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c34",
+          "text": "Sales: Forecast",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c35",
+          "text": "Data Protection Officer",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show the agent \"Agent 28\""
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c33",
+          "component": "Button",
+          "id": "c36",
+          "variant": "borderless",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c36",
+            "c34",
+            "c35"
+          ],
+          "component": "Row",
+          "id": "c37"
+        },
+        {
+          "children": [
+            "c7",
+            "c12",
+            "c17",
+            "c22",
+            "c27",
+            "c32",
+            "c37"
+          ],
+          "component": "Column",
+          "id": "c38"
+        },
+        {
+          "component": "Text",
+          "id": "c39",
+          "text": "Open in the portfolio",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/open?view=planned"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c39",
+          "component": "Button",
+          "id": "c40",
+          "variant": "primary"
+        },
+        {
+          "component": "Text",
+          "id": "c41",
+          "text": "High AI Act only",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Which agents are planned with AI Act class high?"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c41",
+          "component": "Button",
+          "id": "c42",
+          "variant": "default"
+        },
+        {
+          "component": "Text",
+          "id": "c43",
+          "text": "Without owner",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Which agents are planned without an owner?"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c43",
+          "component": "Button",
+          "id": "c44",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c40",
+            "c42",
+            "c44"
+          ],
+          "component": "Row",
+          "id": "c45"
+        },
+        {
+          "children": [
+            "c3",
+            "c38",
+            "c45"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  }
+]

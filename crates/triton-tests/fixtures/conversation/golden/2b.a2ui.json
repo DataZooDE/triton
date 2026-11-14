@@ -1,0 +1,263 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "Logistics — 2 Agents",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": " Forecast",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c3",
+          "text": "Agent 26 · In delivery",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show Agent 26"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c3",
+          "component": "Button",
+          "id": "c4",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c4"
+          ],
+          "component": "Row",
+          "id": "c5"
+        },
+        {
+          "children": [
+            "c2",
+            "c5"
+          ],
+          "component": "Column",
+          "id": "c6"
+        },
+        {
+          "component": "Text",
+          "id": "c7",
+          "text": " ⚠️ Monitor",
+          "variant": "caption"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Propose an Agent for Logistics: Monitor"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c7",
+          "component": "Button",
+          "id": "c8",
+          "variant": "borderless"
+        },
+        {
+          "component": "Text",
+          "id": "c9",
+          "text": " Schedule",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c10",
+          "text": "Agent 14 · Planned",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Show Agent 14"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c10",
+          "component": "Button",
+          "id": "c11",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c11"
+          ],
+          "component": "Row",
+          "id": "c12"
+        },
+        {
+          "children": [
+            "c9",
+            "c12"
+          ],
+          "component": "Column",
+          "id": "c13"
+        },
+        {
+          "component": "Text",
+          "id": "c14",
+          "text": "Planning — 3 Agents",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c15",
+          "text": "Production — 3 Agents · 1 proposed capability",
+          "variant": "body"
+        },
+        {
+          "component": "Text",
+          "id": "c16",
+          "text": "Operations · 8 Agents · 9 capabilities",
+          "variant": "h4"
+        },
+        {
+          "children": [
+            "c16",
+            "c1",
+            "c6",
+            "c8",
+            "c13",
+            "c14",
+            "c15"
+          ],
+          "component": "Column",
+          "id": "c17"
+        },
+        {
+          "component": "Text",
+          "id": "c18",
+          "text": "Operations Agents without owner",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Which Operations Agents have no owner?"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c18",
+          "component": "Button",
+          "id": "c19",
+          "variant": "default"
+        },
+        {
+          "component": "Text",
+          "id": "c20",
+          "text": "Data products Operations needs",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Which data products does Operations need?"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c20",
+          "component": "Button",
+          "id": "c21",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c19",
+            "c21"
+          ],
+          "component": "Row",
+          "id": "c22"
+        },
+        {
+          "component": "Text",
+          "id": "c23",
+          "text": "Ask next",
+          "variant": "h4"
+        },
+        {
+          "children": [
+            "c23",
+            "c22"
+          ],
+          "component": "Column",
+          "id": "c24"
+        },
+        {
+          "component": "Text",
+          "id": "c25",
+          "text": "Expand map ⤢",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/open?view=capability-map&domain=operations&embed=1"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c25",
+          "component": "Button",
+          "id": "c26",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c26"
+          ],
+          "component": "Row",
+          "id": "c27"
+        },
+        {
+          "children": [
+            "c17",
+            "c24",
+            "c27"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  }
+]

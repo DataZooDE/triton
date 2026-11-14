@@ -8,7 +8,8 @@
 //! card's title and its row names — and a note to the model. Every other
 //! client keeps the full text.
 //!
-//! * the card text per fixture surface is pinned in `card_texts.json`;
+//! * the card text per fixture surface is pinned in `card_texts.json` (built
+//!   from the basic-catalog card's summary, #368: the same text as before);
 //! * the real binary: a handshake-era client declares the extension in
 //!   `initialize` and gets a session id that carries it; a 2026-07-28
 //!   client declares it per request (`_meta` client capabilities).
@@ -27,8 +28,8 @@ use crate::mcp_app_widget::{
 fn every_fixture_surface_has_a_pinned_card_text() {
     let mut produced = serde_json::Map::new();
     for name in fixture_names() {
-        let data = mcp_app::widget_data(&fixture(&name)).unwrap();
-        let text = mcp_app::card_text(&data, mcp_app::CARD_NOTE);
+        let summary = mcp_app::card(&fixture(&name)).unwrap().summary.unwrap();
+        let text = mcp_app::card_text(&summary, mcp_app::CARD_NOTE);
         if let Some(t) = &text {
             assert!(t.ends_with(mcp_app::CARD_NOTE), "{name}: {t}");
             assert_eq!(t.lines().count(), 2, "{name}: one line and the note: {t}");
@@ -107,7 +108,8 @@ fn text(res: &Value) -> &str {
 
 /// The card text the 3a list answer gets on a card-rendering host.
 fn short_3a() -> String {
-    mcp_app::card_text(&read_json(&golden("3a")), mcp_app::CARD_NOTE).expect("3a has rows")
+    let summary = mcp_app::card(&fixture("3a")).unwrap().summary.unwrap();
+    mcp_app::card_text(&summary, mcp_app::CARD_NOTE).expect("3a has rows")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -123,7 +125,7 @@ async fn a_client_that_renders_the_card_gets_the_card_text() {
     let res = call(&r, Some(&session), "list_agents", None).await;
     assert_eq!(text(&res), short_3a(), "{res}");
     assert!(!text(&res).contains("full text of 3a"));
-    assert_eq!(res["_meta"]["triton/widget"], read_json(&golden("3a")));
+    assert_eq!(res["_meta"][mcp_app::META_KEY], read_json(&golden("3a")));
     assert!(res["structuredContent"]["result"]["surface"].is_object());
     // A card without rows (a receipt's facts) keeps the full text.
     let res = call(&r, Some(&session), "receipt", None).await;
@@ -167,11 +169,11 @@ async fn a_client_that_does_not_render_the_card_keeps_the_full_text() {
     let r = rig().await;
 
     // No extension declared (Copilot Studio, a plain MCP client): no
-    // session id, the full text, and the card data as before.
+    // session id, the full text, and the card's messages as before.
     assert_eq!(initialize(&r, json!({})).await, None);
     let res = call(&r, None, "list_agents", None).await;
     assert_eq!(text(&res), "full text of 3a", "{res}");
-    assert_eq!(res["_meta"]["triton/widget"], read_json(&golden("3a")));
+    assert_eq!(res["_meta"][mcp_app::META_KEY], read_json(&golden("3a")));
 
     // The extension without the HTML profile is not this card.
     let other = json!({ "extensions": { UI: { "mimeTypes": ["text/plain"] } } });

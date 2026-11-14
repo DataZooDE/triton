@@ -12,6 +12,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  mcp-widget:
+    name: mcp widget (npm test + build, committed copy fresh)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/mcp-widget/.nvmrc
+          cache: npm
+          cache-dependency-path: packages/mcp-widget/package-lock.json
+      - name: build the widget and compare with the committed copy
+        run: scripts/check.sh mcp-widget
+
   rust:
     name: cargo fmt + clippy + test (workspace)
     runs-on: ubuntu-latest

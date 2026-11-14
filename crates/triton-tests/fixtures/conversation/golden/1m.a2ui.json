@@ -1,0 +1,183 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "ChoicePicker",
+          "displayStyle": "checkbox",
+          "id": "c1",
+          "label": "Lifecycle *",
+          "options": [
+            {
+              "label": "Candidate",
+              "value": "candidate"
+            },
+            {
+              "label": "Assessed",
+              "value": "assessed"
+            },
+            {
+              "label": "Planned",
+              "value": "planned"
+            },
+            {
+              "label": "In delivery",
+              "value": "in delivery"
+            },
+            {
+              "label": "Deployed",
+              "value": "deployed"
+            }
+          ],
+          "value": {
+            "path": "/f0/i0"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "component": "ChoicePicker",
+          "displayStyle": "checkbox",
+          "id": "c2",
+          "label": "AI Act class *",
+          "options": [
+            {
+              "label": "High",
+              "value": "high"
+            },
+            {
+              "label": "Limited",
+              "value": "limited"
+            },
+            {
+              "label": "Minimal",
+              "value": "minimal"
+            },
+            {
+              "label": "Unassessed",
+              "value": "unassessed"
+            }
+          ],
+          "value": {
+            "path": "/f0/i1"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "component": "ChoicePicker",
+          "id": "c3",
+          "label": "Owner",
+          "options": [
+            {
+              "label": "Any owner",
+              "value": ""
+            },
+            {
+              "label": "Data Protection Officer",
+              "value": "Data Protection Officer"
+            },
+            {
+              "label": "Head of IT Operations",
+              "value": "Head of IT Operations"
+            }
+          ],
+          "value": {
+            "path": "/f0/i2"
+          },
+          "variant": "mutuallyExclusive"
+        },
+        {
+          "component": "Text",
+          "id": "c4",
+          "text": "Show Agents",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "parts": "[{\"text\":\"Find \"},{\"field\":\"lifecycle\"},{\"text\":\" Agents with AI Act class \"},{\"field\":\"ai_act\"},{\"optional\":[{\"text\":\" owned by \"},{\"field\":\"owner\"}]}]",
+                "v:ai_act": {
+                  "path": "/f0/i1"
+                },
+                "v:lifecycle": {
+                  "path": "/f0/i0"
+                },
+                "v:owner": {
+                  "path": "/f0/i2"
+                }
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c4",
+          "component": "Button",
+          "id": "c5",
+          "variant": "primary"
+        },
+        {
+          "children": [
+            "c1",
+            "c2",
+            "c3",
+            "c5"
+          ],
+          "component": "Column",
+          "id": "c6"
+        },
+        {
+          "component": "Text",
+          "id": "c7",
+          "text": "Find Agents",
+          "variant": "h4"
+        },
+        {
+          "children": [
+            "c7",
+            "c6"
+          ],
+          "component": "Column",
+          "id": "c8"
+        },
+        {
+          "children": [
+            "c8"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateDataModel": {
+      "path": "/",
+      "surfaceId": "triton-card",
+      "value": {
+        "f0": {
+          "i0": [
+            "planned"
+          ],
+          "i1": [
+            "high"
+          ],
+          "i2": []
+        }
+      }
+    },
+    "version": "v0.9"
+  }
+]

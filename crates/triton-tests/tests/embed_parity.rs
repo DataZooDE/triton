@@ -554,7 +554,7 @@ async fn an_in_process_upstream_behaves_like_a_static_upstream_on_every_face() {
         calls.push(scrub(&r));
     }
     assert!(
-        calls[0]["result"]["_meta"]["triton/widget"]["body"].is_array(),
+        calls[0]["result"]["_meta"]["triton/a2ui"].is_array(),
         "the reference carries the widget data: {:#}",
         calls[0]
     );
