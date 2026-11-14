@@ -544,7 +544,13 @@ async fn a_card_host_gets_producer_surfaces_and_the_card_as_v09_messages() {
         ],
         "a2ui": [
             basic_surface.clone(),
-            { "components": [ { "id": "root", "component": "MaterialCard", "children": [] } ] }
+            { "components": [ { "id": "root", "component": "MaterialCard", "children": [] } ] },
+            // A producer surface firing Triton's own event: dropped.
+            { "catalogId": triton_core::a2ui::passthrough::BASIC_CATALOG_ID, "components": [
+                { "id": "root", "component": "Button", "child": "l",
+                  "action": { "event": { "name": "triton.send_message",
+                                         "context": { "text": "spoofed" } } } },
+                { "id": "l", "component": "Text", "text": "Spoof" } ] }
         ]
     }}))
     .await;
@@ -609,6 +615,10 @@ async fn a_card_host_gets_producer_surfaces_and_the_card_as_v09_messages() {
     assert!(
         !json!(msgs).to_string().contains("MaterialCard"),
         "GE-only stays out"
+    );
+    assert!(
+        !json!(msgs).to_string().contains("spoofed"),
+        "reserved events dropped"
     );
     assert!(res["_meta"].get("triton/widget").is_none());
     assert_no_a2ui_for_the_model(res);
@@ -947,16 +957,21 @@ fn a_form_binds_its_inputs_and_seeds_the_defaults() {
         .find_map(|m| m["updateDataModel"]["value"].as_object().cloned())
         .expect("data model");
     let form = model.values().next().unwrap();
-    assert_eq!(form["who"], json!(["ops"]));
-    assert_eq!(form["why"], "");
-    assert_eq!(form["urgent"], false);
+    // Bound to generated keys, in field order; the submit names them.
+    assert_eq!(form["i0"], json!(["ops"]));
+    assert_eq!(form["i1"], "");
+    assert_eq!(form["i2"], json!([]), "a boolean is unanswered, not false");
     let (_, ctx) = events(&d).pop().unwrap();
-    for f in ["who", "why", "urgent"] {
+    for (f, key) in [("who", "i0"), ("why", "i1"), ("urgent", "i2")] {
         let path = ctx[format!("v:{f}")]["path"].as_str().unwrap();
-        assert!(path.ends_with(&format!("/{f}")), "{path}");
+        assert!(path.ends_with(&format!("/{key}")), "{path}");
     }
-    assert_eq!(of_kind(&d, "ChoicePicker").len(), 1);
-    assert_eq!(of_kind(&d, "CheckBox").len(), 1);
+    assert_eq!(
+        of_kind(&d, "ChoicePicker").len(),
+        2,
+        "the select and the boolean"
+    );
+    assert!(of_kind(&d, "CheckBox").is_empty());
     assert_eq!(of_kind(&d, "TextField")[0]["variant"], "longText");
 }
 
@@ -1062,4 +1077,98 @@ fn many_blocks_fit_the_byte_budget_quickly() {
         })
         .expect("a more line");
     assert_eq!(kept + more, 20_000);
+}
+
+/// A producer's field name is never a data-model path segment: names the
+/// renderer refuses (`constructor`) or reads as a pointer (`a/b`) still
+/// work, bound to generated keys; the submit maps them back.
+#[test]
+fn form_inputs_bind_to_generated_keys() {
+    let d = card_of(&form_with(
+        json!([ { "name": "constructor", "label": "C", "kind": "string" },
+                { "name": "a/b", "label": "AB", "kind": "string" } ]),
+        "Set {constructor} and {a/b}",
+    ))
+    .unwrap();
+    let (_, ctx) = events(&d).pop().unwrap();
+    for f in ["constructor", "a/b"] {
+        let path = ctx[format!("v:{f}")]["path"].as_str().unwrap();
+        assert!(
+            !path.contains("constructor") && path.matches('/').count() == 2,
+            "{f}: {path}"
+        );
+    }
+    let model = d
+        .iter()
+        .find_map(|m| m["updateDataModel"]["value"].as_object().cloned())
+        .unwrap();
+    let keys: Vec<&String> = model
+        .values()
+        .next()
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    assert!(keys.iter().all(|k| k.starts_with('i')), "{keys:?}");
+}
+
+/// A boolean is three-state, as on every other channel: unanswered until
+/// chosen (so a required one blocks the submit), never a silent `false`.
+#[test]
+fn a_boolean_is_unanswered_until_chosen() {
+    let d = card_of(&form_with(
+        json!([ { "name": "u", "label": "Urgent", "kind": "boolean", "required": true },
+                { "name": "d", "label": "Done", "kind": "boolean", "default": true } ]),
+        "Urgent {u}, done {d}",
+    ))
+    .unwrap();
+    assert!(of_kind(&d, "CheckBox").is_empty(), "no two-state box");
+    let pickers = of_kind(&d, "ChoicePicker");
+    assert_eq!(pickers.len(), 2);
+    let values: Vec<&Value> = pickers[0]["options"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|o| &o["value"])
+        .collect();
+    assert_eq!(values, [&json!("true"), &json!("false")]);
+    let model = d
+        .iter()
+        .find_map(|m| m["updateDataModel"]["value"].as_object().cloned())
+        .unwrap();
+    let form = model.values().next().unwrap();
+    let seeded: Vec<&Value> = form.as_object().unwrap().values().collect();
+    assert_eq!(seeded, [&json!([]), &json!(["true"])], "{form}");
+}
+
+/// The producer's surfaces have a byte budget too: past it, trailing
+/// surfaces go (Triton's own card stays).
+#[test]
+fn producer_surfaces_fit_a_byte_budget() {
+    let big = |i: usize| {
+        json!({ "catalogId": triton_core::a2ui::passthrough::BASIC_CATALOG_ID,
+                "components": [ { "id": "root", "component": "Text", "text": format!("{i} {}", "z".repeat(20_000)) } ] })
+    };
+    let c = mcp_app::card(&json!({ "surface": {
+        "components": [ { "kind": "header", "title": "Own" } ],
+        "a2ui": (0..8).map(big).collect::<Vec<_>>()
+    }}))
+    .unwrap();
+    let producer: Vec<&Value> = c
+        .messages
+        .iter()
+        .filter(|m| {
+            m["createSurface"]["surfaceId"]
+                .as_str()
+                .is_some_and(|s| s != basic::SURFACE_ID)
+        })
+        .collect();
+    assert!((1..8).contains(&producer.len()), "{}", producer.len());
+    let size = serde_json::to_vec(&c.messages).unwrap().len();
+    assert!(size <= 2 * basic::MAX_BYTES, "{size}");
+    assert!(
+        texts(&c.messages).contains(&"Own".to_string()),
+        "the card stays"
+    );
 }

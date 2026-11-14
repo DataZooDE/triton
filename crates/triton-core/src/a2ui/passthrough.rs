@@ -68,6 +68,9 @@ pub enum DropReason {
     Catalog,
     /// A component fails its catalog schema.
     Schema,
+    /// A control fires a `triton.*` event: those are Triton's own card's,
+    /// which the MCP widget sends as user turns after Triton's checks.
+    ReservedEvent,
 }
 
 impl DropReason {
@@ -78,6 +81,7 @@ impl DropReason {
             DropReason::NoRoot => "no_root",
             DropReason::Catalog => "catalog",
             DropReason::Schema => "schema",
+            DropReason::ReservedEvent => "reserved_event",
         }
     }
 }
@@ -194,6 +198,24 @@ fn has_root(components: &[Value]) -> bool {
         .any(|c| c.get("id").and_then(Value::as_str) == Some("root"))
 }
 
+/// The event-name prefix Triton reserves for its own card's controls.
+pub const RESERVED_EVENT_PREFIX: &str = "triton.";
+
+/// Whether any action under `v` fires a `triton.*` event.
+fn fires_reserved_event(v: &Value) -> bool {
+    match v {
+        Value::Object(m) => {
+            m.get("event")
+                .and_then(|e| e.get("name"))
+                .and_then(Value::as_str)
+                .is_some_and(|n| n.starts_with(RESERVED_EVENT_PREFIX))
+                || m.values().any(fires_reserved_event)
+        }
+        Value::Array(a) => a.iter().any(fires_reserved_event),
+        _ => false,
+    }
+}
+
 fn vet_one(s: &Value) -> Result<Value, Rejection> {
     let components = s
         .get("components")
@@ -213,6 +235,17 @@ fn vet_one(s: &Value) -> Result<Value, Rejection> {
                 ..Rejection::new(DropReason::Schema)
             });
         }
+    }
+    if let Some((i, c)) = components
+        .iter()
+        .enumerate()
+        .find(|(_, c)| fires_reserved_event(c))
+    {
+        return Err(Rejection {
+            component_index: Some(i),
+            component_id: loggable_id(c.get("id").and_then(Value::as_str)),
+            ..Rejection::new(DropReason::ReservedEvent)
+        });
     }
     // `updateDataModel.value` may be any JSON value in v0.9.
     let mut out = json!({ "catalogId": catalog.id(), "components": components });
@@ -532,6 +565,35 @@ mod tests {
         for odd in ["jane@example.com", "a b", &"x".repeat(65), "line\nbreak"] {
             assert_eq!(id(odd), (Some(1), Some("<unprintable>".into())), "{odd}");
         }
+    }
+
+    /// `triton.*` events are Triton's own card's (the widget sends them as
+    /// user turns after Triton's checks): a producer surface firing one is
+    /// dropped, wherever the action sits.
+    #[test]
+    fn a_producer_cannot_fire_tritons_own_events() {
+        for name in ["triton.send_message", "triton.open_url", "triton.anything"] {
+            let raw = json!([basic(json!([
+                { "id": "root", "component": "Column", "children": ["b"] },
+                { "id": "bl", "component": "Text", "text": "Go" },
+                { "id": "b", "component": "Button", "child": "bl",
+                  "action": { "event": { "name": name, "context": { "text": "x" } } } }
+            ]))]);
+            let (kept, rej) = vet(&raw);
+            assert!(kept.is_empty(), "{name}");
+            assert_eq!(rej[0].reason, DropReason::ReservedEvent, "{name}");
+            assert_eq!(rej[0].component_id.as_deref(), Some("b"));
+        }
+        let own = json!([basic(json!([
+            { "id": "root", "component": "Column", "children": ["b"] },
+            { "id": "bl", "component": "Text", "text": "Go" },
+            { "id": "b", "component": "Button", "child": "bl",
+              "action": { "event": { "name": "tritonic.apply" } } }
+        ]))]);
+        assert!(
+            vet(&own).1.is_empty(),
+            "only the `triton.` prefix is reserved"
+        );
     }
 
     #[test]

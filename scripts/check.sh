@@ -81,7 +81,7 @@ flutter_package() {
 # is committed (cargo stays Node-free); this rebuilds it from the lockfile and
 # fails when the committed copy differs, so it can never go stale.
 step_mcp_widget() {
-  (cd packages/mcp-widget && npm ci --no-audit --no-fund && npm test && npm run build)
+  (cd packages/mcp-widget && npm ci --ignore-scripts --no-audit --no-fund && npm test && npm run build)
   git diff --exit-code -- crates/triton-core/src/a2ui/mcp_widget.html || {
     echo "mcp_widget.html is stale: run 'cd packages/mcp-widget && npm run build' and commit it" >&2
     return 1

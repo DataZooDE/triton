@@ -16,6 +16,8 @@ const META_KEY = 'triton/a2ui';
 const SEND_MESSAGE = 'triton.send_message';
 const OPEN_URL = 'triton.open_url';
 const PROTOCOL = '2026-01-26';
+// Triton's own card: the only surface whose `triton.*` events are honoured.
+const CARD_SURFACE = 'triton-card';
 
 const app = document.getElementById('app');
 const status = document.getElementById('status');
@@ -84,7 +86,7 @@ function applyContext(ctx) {
   const vars = ctx.styles?.variables;
   if (vars && typeof vars === 'object') {
     for (const [k, v] of Object.entries(vars)) {
-      if (k.startsWith('--') && typeof v === 'string') {
+      if (/^--[a-z0-9-]+$/i.test(k) && typeof v === 'string') {
         document.documentElement.style.setProperty(k, v);
       }
     }
@@ -138,16 +140,27 @@ function safeLink(u) {
   }
 }
 
+// `triton.*` events come from Triton's own card only, whose controls passed
+// Triton's checks (basic.rs); a producer surface cannot fire them (the
+// dispatcher also drops such surfaces). A producer's own events are not
+// handled in this widget yet (#369).
 async function onAction(a) {
-  if (a.name === SEND_MESSAGE) return sendMessage(a.context || {});
-  if (a.name === OPEN_URL) return openUrl(a.context?.url);
+  if (a.surfaceId === CARD_SURFACE && a.name === SEND_MESSAGE) return sendMessage(a.context || {});
+  if (a.surfaceId === CARD_SURFACE && a.name === OPEN_URL) return openUrl(a.context?.url);
   say('This action is not available here.', true);
 }
 
 async function sendMessage(ctx) {
   let text = typeof ctx.text === 'string' ? ctx.text : null;
   if (text === null && typeof ctx.parts === 'string') {
-    const r = fill(JSON.parse(ctx.parts), inputs(ctx));
+    let parts;
+    try {
+      parts = JSON.parse(ctx.parts);
+    } catch {
+      say('Could not send this request.', true);
+      return;
+    }
+    const r = fill(parts, inputs(ctx));
     if (r.missing.length) {
       say(`Please fill in: ${r.missing.join(', ')}`, true);
       return;
@@ -180,16 +193,19 @@ async function sendMessage(ctx) {
   say(ok ? 'Sent.' : 'Could not send this request.', !ok);
 }
 
+let opening = false;
 async function openUrl(raw) {
   const url = safeLink(raw);
-  if (!url) return;
+  // One click opens once.
+  if (!url || opening) return;
+  opening = true;
   let ok = false;
   try {
     if (bridge && openLinks) {
       const res = await request('ui/open-link', { url });
       ok = !res?.isError;
     } else if (window.openai?.openExternal) {
-      window.openai.openExternal({ href: url });
+      await window.openai.openExternal({ href: url });
       ok = true;
     } else if (!bridge) {
       ok = !!window.open(url, '_blank', 'noopener,noreferrer');
@@ -197,27 +213,39 @@ async function openUrl(raw) {
   } catch {
     ok = false;
   }
+  opening = false;
   if (!ok) say('Could not open the link.', true);
 }
 
 // ── size ────────────────────────────────────────────────────────────────
-let lastHeight = 0;
-function resize() {
+let lastSize = '';
+/** Report the page's size when it changed; `force` once the host bridge is
+ * up (a change measured before it was could not be sent). */
+function resize(force) {
+  const width = document.documentElement.clientWidth;
   const height = Math.ceil(document.documentElement.getBoundingClientRect().height);
-  if (height === lastHeight) return;
-  lastHeight = height;
-  if (bridge) notify('ui/notifications/size-changed', { width: document.documentElement.clientWidth, height });
+  const size = `${width}x${height}`;
+  if (size === lastSize && force !== true) return;
+  lastSize = size;
+  if (bridge) notify('ui/notifications/size-changed', { width, height });
   window.openai?.notifyIntrinsicHeight?.(height);
 }
-new ResizeObserver(resize).observe(document.body);
+new ResizeObserver(() => resize()).observe(document.body);
 
 // ── start ───────────────────────────────────────────────────────────────
 // ChatGPT hands the result in `window.openai` (and on later results through
 // `openai:set_globals`); an MCP Apps host answers `ui/initialize`.
+let lastOpenAiMeta;
 function fromOpenAi() {
   if (bridge) return;
-  const meta = window.openai?.toolResponseMetadata;
-  if (meta && META_KEY in meta) render(meta[META_KEY]);
+  const m = window.openai?.toolResponseMetadata;
+  // Only a new result re-renders (other globals, a theme say, change too);
+  // a new result without the key is no card, so the old one goes.
+  if (m === lastOpenAiMeta) return;
+  lastOpenAiMeta = m;
+  if (!m) return;
+  const meta = m._meta ?? m.call_tool_result?._meta ?? m;
+  render(meta?.[META_KEY]);
 }
 window.addEventListener('openai:set_globals', fromOpenAi);
 fromOpenAi();
@@ -233,7 +261,7 @@ request('ui/initialize', {
     openLinks = !res?.hostCapabilities || !!res.hostCapabilities.openLinks;
     applyContext(res?.hostContext);
     notify('ui/notifications/initialized', {});
-    resize();
+    resize(true);
   })
   .catch(() => {
     // No MCP Apps host answered: ChatGPT's `window.openai` (if any) drives.

@@ -28,7 +28,7 @@
             }
           ],
           "value": {
-            "path": "/f0/domain"
+            "path": "/f0/i0"
           },
           "variant": "mutuallyExclusive"
         },
@@ -55,7 +55,7 @@
             }
           ],
           "value": {
-            "path": "/f0/area"
+            "path": "/f0/i1"
           },
           "variant": "mutuallyExclusive"
         },
@@ -75,7 +75,7 @@
             }
           ],
           "value": {
-            "path": "/f0/scope"
+            "path": "/f0/i2"
           },
           "variant": "mutuallyExclusive"
         },
@@ -91,13 +91,13 @@
               "context": {
                 "parts": "[{\"text\":\"Show the capability map for \"},{\"field\":\"domain\"},{\"optional\":[{\"text\":\", area \"},{\"field\":\"area\"}]},{\"text\":\", \"},{\"field\":\"scope\"}]",
                 "v:area": {
-                  "path": "/f0/area"
+                  "path": "/f0/i1"
                 },
                 "v:domain": {
-                  "path": "/f0/domain"
+                  "path": "/f0/i0"
                 },
                 "v:scope": {
-                  "path": "/f0/scope"
+                  "path": "/f0/i2"
                 }
               },
               "name": "triton.send_message"
@@ -155,11 +155,11 @@
       "surfaceId": "triton-card",
       "value": {
         "f0": {
-          "area": [],
-          "domain": [
+          "i0": [
             "Commercial & service"
           ],
-          "scope": [
+          "i1": [],
+          "i2": [
             "including proposed capabilities"
           ]
         }

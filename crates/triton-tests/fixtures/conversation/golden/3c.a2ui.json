@@ -48,7 +48,7 @@
             }
           ],
           "value": {
-            "path": "/f0/value"
+            "path": "/f0/i0"
           },
           "variant": "mutuallyExclusive"
         },
@@ -57,7 +57,7 @@
           "id": "c5",
           "label": "Why (optional)",
           "value": {
-            "path": "/f0/reason"
+            "path": "/f0/i1"
           },
           "variant": "longText"
         },
@@ -73,10 +73,10 @@
               "context": {
                 "parts": "[{\"text\":\"Set the owner of Agent 28 to \\\"\"},{\"field\":\"value\"},{\"text\":\"\\\".\"},{\"optional\":[{\"text\":\" Reason: \"},{\"field\":\"reason\"}]},{\"text\":\" (version 08cbcd825d41)\"}]",
                 "v:reason": {
-                  "path": "/f0/reason"
+                  "path": "/f0/i1"
                 },
                 "v:value": {
-                  "path": "/f0/value"
+                  "path": "/f0/i0"
                 }
               },
               "name": "triton.send_message"
@@ -115,7 +115,7 @@
             }
           ],
           "value": {
-            "path": "/f1/value"
+            "path": "/f1/i0"
           },
           "variant": "mutuallyExclusive"
         },
@@ -124,7 +124,7 @@
           "id": "c10",
           "label": "Why (optional)",
           "value": {
-            "path": "/f1/reason"
+            "path": "/f1/i1"
           },
           "variant": "longText"
         },
@@ -140,10 +140,10 @@
               "context": {
                 "parts": "[{\"text\":\"Set the lifecycle of Agent 28 to \\\"\"},{\"field\":\"value\"},{\"text\":\"\\\".\"},{\"optional\":[{\"text\":\" Reason: \"},{\"field\":\"reason\"}]},{\"text\":\" (version 08cbcd825d41)\"}]",
                 "v:reason": {
-                  "path": "/f1/reason"
+                  "path": "/f1/i1"
                 },
                 "v:value": {
-                  "path": "/f1/value"
+                  "path": "/f1/i0"
                 }
               },
               "name": "triton.send_message"
@@ -182,7 +182,7 @@
             }
           ],
           "value": {
-            "path": "/f2/value"
+            "path": "/f2/i0"
           },
           "variant": "mutuallyExclusive"
         },
@@ -191,7 +191,7 @@
           "id": "c15",
           "label": "Why (optional)",
           "value": {
-            "path": "/f2/reason"
+            "path": "/f2/i1"
           },
           "variant": "longText"
         },
@@ -207,10 +207,10 @@
               "context": {
                 "parts": "[{\"text\":\"Set the AI Act class of Agent 28 to \\\"\"},{\"field\":\"value\"},{\"text\":\"\\\".\"},{\"optional\":[{\"text\":\" Reason: \"},{\"field\":\"reason\"}]},{\"text\":\" (version 08cbcd825d41)\"}]",
                 "v:reason": {
-                  "path": "/f2/reason"
+                  "path": "/f2/i1"
                 },
                 "v:value": {
-                  "path": "/f2/value"
+                  "path": "/f2/i0"
                 }
               },
               "name": "triton.send_message"
@@ -245,7 +245,7 @@
             }
           ],
           "value": {
-            "path": "/f3/value"
+            "path": "/f3/i0"
           },
           "variant": "mutuallyExclusive"
         },
@@ -254,7 +254,7 @@
           "id": "c20",
           "label": "Why (optional)",
           "value": {
-            "path": "/f3/reason"
+            "path": "/f3/i1"
           },
           "variant": "longText"
         },
@@ -270,10 +270,10 @@
               "context": {
                 "parts": "[{\"text\":\"Change Agent 28: \"},{\"field\":\"value\"},{\"text\":\".\"},{\"optional\":[{\"text\":\" Reason: \"},{\"field\":\"reason\"}]},{\"text\":\" (version 08cbcd825d41)\"}]",
                 "v:reason": {
-                  "path": "/f3/reason"
+                  "path": "/f3/i1"
                 },
                 "v:value": {
-                  "path": "/f3/value"
+                  "path": "/f3/i0"
                 }
               },
               "name": "triton.send_message"
@@ -353,20 +353,20 @@
       "surfaceId": "triton-card",
       "value": {
         "f0": {
-          "reason": "",
-          "value": []
+          "i0": [],
+          "i1": ""
         },
         "f1": {
-          "reason": "",
-          "value": []
+          "i0": [],
+          "i1": ""
         },
         "f2": {
-          "reason": "",
-          "value": []
+          "i0": [],
+          "i1": ""
         },
         "f3": {
-          "reason": "",
-          "value": []
+          "i0": [],
+          "i1": ""
         }
       }
     },

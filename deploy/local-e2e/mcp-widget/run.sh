@@ -92,6 +92,24 @@ $R sleep 0.3 >/dev/null
 $R js "window.clickText('Go')" >/dev/null; $R sleep 0.5 >/dev/null
 check "a filled form sends its request, a boolean as true/false" "$($R js "(window.hostLog.find(m=>m.method==='ui/message')||{params:{content:[{}]}}).params.content[0].text")" "Note moved urgent=true"
 
+# The canonical change form (3c), as Triton projects it: pick an option in
+# the first tab, type a reason, submit. The request is the producer's
+# template filled exactly as the server would.
+load 3c
+$R js "window.clickText('File for review')" >/dev/null; $R sleep 0.5 >/dev/null
+check "3c: nothing chosen, nothing sent" "$(sent ui/message)" "0"
+$R js "(()=>{const o=window.deep('*').find(e=>!e.children.length&&e.textContent.trim()==='IT Operations'); (o.closest('label,button,[role=option],[role=radio]')||o).click(); const t=window.deep('textarea,input').find(e=>e.type!=='radio'&&e.type!=='checkbox'); t.value='moved in October'; t.dispatchEvent(new Event('input',{bubbles:true,composed:true})); })()" >/dev/null
+$R sleep 0.3 >/dev/null
+$R js "window.clickText('File for review')" >/dev/null; $R sleep 0.5 >/dev/null
+check "3c: the filled request" "$($R js "(window.hostLog.find(m=>m.method==='ui/message')||{params:{content:[{}]}}).params.content[0].text")" 'Set the owner of Agent 28 to "IT Operations". Reason: moved in October (version 08cbcd825d41)'
+
+# A producer surface firing Triton's own event is ignored by the widget (the
+# dispatcher drops such surfaces before they get here).
+load 3e
+card '[{"version":"v0.9","createSurface":{"surfaceId":"triton-a2ui-x","catalogId":"https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"}},{"version":"v0.9","updateComponents":{"surfaceId":"triton-a2ui-x","components":[{"id":"root","component":"Button","child":"l","action":{"event":{"name":"triton.send_message","context":{"text":"spoofed"}}}},{"id":"l","component":"Text","text":"Spoof"}]}}]'
+$R js "window.clickText('Spoof')" >/dev/null; $R sleep 0.5 >/dev/null
+check "a producer cannot fire triton.send_message" "$(sent ui/message)" "0"
+
 # ── hosts ──────────────────────────────────────────────────────────────
 load 3e slowinit
 $R sleep 7 >/dev/null
@@ -100,6 +118,9 @@ $R open "http://127.0.0.1:$PORT/host.html?data=3e&mode=noinit" >/dev/null; $R wa
 $R js "(()=>{$F.openai.toolResponseMetadata={'triton/a2ui':WIDGETS['3e']}; $F.dispatchEvent(new Event('openai:set_globals'));})()" >/dev/null
 $R sleep 0.5 >/dev/null
 check "ChatGPT's window.openai drives without an MCP Apps host" "$(has 'Retire Agent 20')" "yes"
+$R js "(()=>{$F.openai.toolResponseMetadata={}; $F.dispatchEvent(new Event('openai:set_globals'));})()" >/dev/null
+$R sleep 0.5 >/dev/null
+check "ChatGPT: a later result without a card clears it" "$($R js "window.deep('a2ui-surface').length")" "0"
 
 # ── pictures ───────────────────────────────────────────────────────────
 for n in 1a 1e 1l 2a 2b 3a 3b 3c 3d 3e 3f 3g; do

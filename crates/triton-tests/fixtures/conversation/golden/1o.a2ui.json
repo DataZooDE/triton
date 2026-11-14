@@ -53,7 +53,7 @@
             }
           ],
           "value": {
-            "path": "/f0/field"
+            "path": "/f0/i0"
           },
           "variant": "mutuallyExclusive"
         },
@@ -72,7 +72,7 @@
             }
           ],
           "value": {
-            "path": "/f0/value"
+            "path": "/f0/i1"
           },
           "variant": "mutuallyExclusive"
         },
@@ -81,7 +81,7 @@
           "id": "c7",
           "label": "Why",
           "value": {
-            "path": "/f0/reason"
+            "path": "/f0/i2"
           },
           "variant": "longText"
         },
@@ -97,13 +97,13 @@
               "context": {
                 "parts": "[{\"text\":\"Set the \"},{\"field\":\"field\"},{\"text\":\" of Agent 28 to \\\"\"},{\"field\":\"value\"},{\"text\":\"\\\".\"},{\"optional\":[{\"text\":\" Reason: \"},{\"field\":\"reason\"}]}]",
                 "v:field": {
-                  "path": "/f0/field"
+                  "path": "/f0/i0"
                 },
                 "v:reason": {
-                  "path": "/f0/reason"
+                  "path": "/f0/i2"
                 },
                 "v:value": {
-                  "path": "/f0/value"
+                  "path": "/f0/i1"
                 }
               },
               "name": "triton.send_message"
@@ -162,11 +162,11 @@
       "surfaceId": "triton-card",
       "value": {
         "f0": {
-          "field": [
+          "i0": [
             "owner"
           ],
-          "reason": "",
-          "value": []
+          "i1": [],
+          "i2": ""
         }
       }
     },

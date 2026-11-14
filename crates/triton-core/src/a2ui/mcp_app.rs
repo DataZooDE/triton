@@ -73,15 +73,50 @@ pub struct McpCard {
 /// basic-catalog passthrough surfaces (the renderer knows no other
 /// catalog), then Triton's card. `None` when there is nothing to draw.
 pub fn card(result: &Value) -> Option<McpCard> {
-    let mut messages = passthrough::messages(
-        result.get("surface").and_then(|s| s.get("a2ui")),
-        &[Catalog::Basic],
-        passthrough::BASIC_CATALOG_ID,
-    );
+    let mut messages = producer_messages(result);
     let own = basic::project(result);
     let summary = own.as_ref().map(|c| c.summary.clone());
     messages.extend(own.into_iter().flat_map(|c| c.messages));
     (!messages.is_empty()).then_some(McpCard { messages, summary })
+}
+
+/// Bytes of the producer's surfaces, serialized (Triton's own card has its
+/// own budget, [`basic::MAX_BYTES`]).
+pub const MAX_PRODUCER_BYTES: usize = basic::MAX_BYTES;
+
+/// The producer's basic-catalog surfaces, whole surfaces only, within
+/// [`MAX_PRODUCER_BYTES`]: past it, the trailing surfaces go (logged).
+fn producer_messages(result: &Value) -> Vec<Value> {
+    let all = passthrough::messages(
+        result.get("surface").and_then(|s| s.get("a2ui")),
+        &[Catalog::Basic],
+        passthrough::BASIC_CATALOG_ID,
+    );
+    // Group by surface: each starts with its createSurface.
+    let mut surfaces: Vec<Vec<Value>> = Vec::new();
+    for m in all {
+        if m.get("createSurface").is_some() || surfaces.is_empty() {
+            surfaces.push(Vec::new());
+        }
+        surfaces.last_mut().expect("a group").push(m);
+    }
+    let total = surfaces.len();
+    let mut used = 0;
+    let mut out = Vec::new();
+    for (i, s) in surfaces.into_iter().enumerate() {
+        used += serde_json::to_vec(&s).map_or(usize::MAX, |b| b.len());
+        if used > MAX_PRODUCER_BYTES {
+            tracing::warn!(
+                kept = i,
+                dropped = total - i,
+                cap = MAX_PRODUCER_BYTES,
+                "a2ui passthrough surfaces over the MCP widget byte budget dropped"
+            );
+            break;
+        }
+        out.extend(s);
+    }
+    out
 }
 
 /// Names the card text lists at most; the card itself shows the rest.

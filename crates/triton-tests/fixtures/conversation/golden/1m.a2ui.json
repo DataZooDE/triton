@@ -37,7 +37,7 @@
             }
           ],
           "value": {
-            "path": "/f0/lifecycle"
+            "path": "/f0/i0"
           },
           "variant": "mutuallyExclusive"
         },
@@ -65,7 +65,7 @@
             }
           ],
           "value": {
-            "path": "/f0/ai_act"
+            "path": "/f0/i1"
           },
           "variant": "mutuallyExclusive"
         },
@@ -88,7 +88,7 @@
             }
           ],
           "value": {
-            "path": "/f0/owner"
+            "path": "/f0/i2"
           },
           "variant": "mutuallyExclusive"
         },
@@ -104,13 +104,13 @@
               "context": {
                 "parts": "[{\"text\":\"Find \"},{\"field\":\"lifecycle\"},{\"text\":\" Agents with AI Act class \"},{\"field\":\"ai_act\"},{\"optional\":[{\"text\":\" owned by \"},{\"field\":\"owner\"}]}]",
                 "v:ai_act": {
-                  "path": "/f0/ai_act"
+                  "path": "/f0/i1"
                 },
                 "v:lifecycle": {
-                  "path": "/f0/lifecycle"
+                  "path": "/f0/i0"
                 },
                 "v:owner": {
-                  "path": "/f0/owner"
+                  "path": "/f0/i2"
                 }
               },
               "name": "triton.send_message"
@@ -168,13 +168,13 @@
       "surfaceId": "triton-card",
       "value": {
         "f0": {
-          "ai_act": [
-            "high"
-          ],
-          "lifecycle": [
+          "i0": [
             "planned"
           ],
-          "owner": []
+          "i1": [
+            "high"
+          ],
+          "i2": []
         }
       }
     },

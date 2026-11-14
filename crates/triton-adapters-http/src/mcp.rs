@@ -817,7 +817,8 @@ async fn tools_call(
                 .then(|| mcp_app::card(&d.result))
                 .flatten();
             // Producer surfaces are for the widget only: the model reads
-            // `structuredContent`, so they never ride the envelope (#368).
+            // `structuredContent`, so they never ride the envelope (#368),
+            // whether or not the widget is on.
             if let Some(s) = d.result.get_mut("surface").and_then(Value::as_object_mut) {
                 s.remove("a2ui");
             }

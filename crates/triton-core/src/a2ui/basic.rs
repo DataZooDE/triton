@@ -597,8 +597,12 @@ impl Builder {
         let mut context = Map::new();
         context.insert("parts".into(), json!(template_parts(template).to_string()));
         let mut children = Vec::new();
-        for f in fields {
-            let path = format!("/{form}/{}", f.name);
+        for (k, f) in fields.iter().enumerate() {
+            // A generated key, never the producer's name: the renderer
+            // refuses some names as path segments (`constructor`) and reads
+            // others as pointers (`a/b`). The submit maps names to keys.
+            let key = format!("i{k}");
+            let path = format!("/{form}/{key}");
             context.insert(format!("v:{}", f.name), json!({ "path": path }));
             let label = match f.required {
                 true => format!("{} *", f.label),
@@ -622,15 +626,19 @@ impl Builder {
                     }
                     (c, init)
                 }
+                // Three-state, as on every other channel: unanswered until
+                // chosen, never a silent `false`.
                 FormFieldKind::Boolean => (
-                    json!({ "id": id, "component": "CheckBox", "label": cap(&label),
-                            "value": { "path": path } }),
-                    json!(
-                        f.default_value
-                            .as_ref()
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                    ),
+                    json!({
+                        "id": id, "component": "ChoicePicker", "label": cap(&label),
+                        "options": [ { "label": "Yes", "value": "true" },
+                                     { "label": "No", "value": "false" } ],
+                        "value": { "path": path }, "variant": "mutuallyExclusive",
+                    }),
+                    f.default_value
+                        .as_ref()
+                        .and_then(Value::as_bool)
+                        .map_or(json!([]), |b| json!([b.to_string()])),
                 ),
                 FormFieldKind::Text | FormFieldKind::String | FormFieldKind::Integer => {
                     let variant = match f.kind {
@@ -650,7 +658,7 @@ impl Builder {
                     )
                 }
             };
-            model.insert(f.name.clone(), init);
+            model.insert(key, init);
             children.push(b.push(comp));
         }
         let label = self.text(b, submit_label, "body");

@@ -49,7 +49,7 @@
             }
           ],
           "value": {
-            "path": "/f0/request"
+            "path": "/f0/i0"
           },
           "variant": "mutuallyExclusive"
         },
@@ -58,7 +58,7 @@
           "id": "c5",
           "label": "Reason (optional)",
           "value": {
-            "path": "/f0/reason"
+            "path": "/f0/i1"
           },
           "variant": "shortText"
         },
@@ -74,10 +74,10 @@
               "context": {
                 "parts": "[{\"field\":\"request\"},{\"optional\":[{\"text\":\" Reason: \"},{\"field\":\"reason\"}]}]",
                 "v:reason": {
-                  "path": "/f0/reason"
+                  "path": "/f0/i1"
                 },
                 "v:request": {
-                  "path": "/f0/request"
+                  "path": "/f0/i0"
                 }
               },
               "name": "triton.send_message"
@@ -157,8 +157,8 @@
       "surfaceId": "triton-card",
       "value": {
         "f0": {
-          "reason": "",
-          "request": []
+          "i0": [],
+          "i1": ""
         }
       }
     },
