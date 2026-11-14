@@ -497,8 +497,14 @@ requires `Clone`).
 ### 8.7 Surface mapping (v0.2)
 
 > **Passthrough (2026-10).** `surface.a2ui` carries producer-built A2UI v0.9
-> surfaces for Gemini Enterprise. Only `ge::build_messages` reads it, and only
-> for a client that negotiated A2UI; the typed vocabulary below never sees it.
+> surfaces for Gemini Enterprise. The dispatcher vets it once per upstream
+> answer (`a2ui::passthrough::vet_result`, #370): each surface's components
+> must validate against the vendored schema of the catalog it declares
+> (`catalogId`: basic or GE composite, default GE composite); a failing
+> surface is dropped with a `warn` line and a
+> `triton_a2ui_passthrough_dropped_total{reason}` count. Only
+> `ge::build_messages` renders it, and only for a client that negotiated A2UI;
+> the typed vocabulary below never sees it.
 > Inbound client events reach tools as `_triton.client.a2ui_events` on both A2A
 > bindings (client-asserted, never Triton-authored). Contract:
 > `doc/upstream-agent-contract.md`.

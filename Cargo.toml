@@ -34,6 +34,9 @@ license = "BUSL-1.1"
 publish = false
 
 [workspace.dependencies]
+# JSON-schema validation (A2UI passthrough vetting, #370). No default
+# features: no HTTP/TLS resolver, everything is vendored (NFR-PT-2).
+jsonschema = { version = "0.60", default-features = false }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 clap = { version = "4", features = ["derive", "env"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "net", "process", "time", "io-util", "fs"] }

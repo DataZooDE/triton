@@ -1516,7 +1516,7 @@ fn a2ui_extension() -> Value {
         "description": "Ability to render A2UI v0.9",
         "required": false,
         "params": {
-            "supportedCatalogIds": [triton_core::a2ui::ge::BASIC_CATALOG],
+            "supportedCatalogIds": [triton_core::a2ui::ge::GE_COMPOSITE_CATALOG],
             "acceptsInlineCatalogs": false,
         },
     })

@@ -76,6 +76,6 @@ async-trait = "0.1"
 clap = { workspace = true }
 # Validates A2A cards, tasks and events against the vendored official A2A
 # 0.3.0 and 1.0.0 JSON schemas (fixtures/a2a). No network resolution.
-jsonschema = { version = "0.60", default-features = false }
+jsonschema = { workspace = true }
 # Edit a task DB between two Triton runs (tampering and policy tests).
 rusqlite = { version = "0.37", features = ["bundled"] }

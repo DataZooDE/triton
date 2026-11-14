@@ -97,7 +97,7 @@ impl jsonschema::Retrieve for Vendored {
 /// A compiled validator for one A2UI v0.9 server→client message, with the
 /// GE composite catalog registered as the active `catalog.json`.
 pub(crate) fn a2ui_validator() -> SchemaCheck {
-    let s = |f: &str| read_json(&dir(&format!("schemas/a2ui-v0_9/{f}")));
+    let s = |f: &str| read_json(&dir(&format!("../triton-core/schemas/a2ui-v0_9/{f}")));
     let mut catalog = s("gemini_enterprise_composite_catalog.json");
     catalog["$id"] = json!(format!("{A2UI_BASE}catalog.json"));
     let root = s("server_to_client.json");

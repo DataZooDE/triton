@@ -33,6 +33,7 @@
 
 use serde_json::{Value, json};
 
+use super::passthrough;
 use super::{Action, Component, FormField, FormFieldKind, FormGroup, StepState, Tone, TreeNode};
 
 /// The A2UI v0.9 A2A-extension URI (agent-card advertisement + activation).
@@ -56,8 +57,7 @@ pub const MIME: &str = "application/json+a2ui";
 /// `MaterialButton`/`MaterialText`/`MaterialCard` instead of plain primitives.
 /// (Authoritative id per Google's GE A2UI reference + the a2ui-project GE
 /// sample catalog's own `$id`.)
-pub const BASIC_CATALOG: &str =
-    "https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json";
+pub const GE_COMPOSITE_CATALOG: &str = passthrough::GE_COMPOSITE_CATALOG_ID;
 /// Surface theme `primaryColor` (`^#[0-9a-fA-F]{6}$`) sent in `createSurface`.
 /// Gemini brand blue — the same `--pk-brand` the peacock `gemini.css` host theme
 /// gives the charts — so the Material card's primary accents match the chart.
@@ -538,7 +538,7 @@ fn beautify_vega_for_ge(spec: &Value) -> Value {
 
 /// Build the A2UI v0.9 message array from a raw surface value with the
 /// process-wide signer and env options: the producer-built surfaces of
-/// `surface.a2ui` first (verbatim, see [`passthrough_surfaces`]), then
+/// `surface.a2ui` first (verbatim, see [`passthrough::messages`]), then
 /// Triton's own card from `surface.components`. Returns `None` when neither
 /// yields a surface, so the caller can fall back to a text part.
 pub fn build_messages(result: &Value) -> Option<Vec<Value>> {
@@ -1235,7 +1235,7 @@ fn surface_pair(flat: Vec<Value>) -> Vec<Value> {
             "version": "v0.9",
             "createSurface": {
                 "surfaceId": surface_id,
-                "catalogId": BASIC_CATALOG,
+                "catalogId": GE_COMPOSITE_CATALOG,
                 // v0.9 styling: `createSurface.theme` (which replaced v0.8's
                 // `styles`) carries theme params the Material renderer
                 // applies — GE uses `primaryColor` for primary buttons and
@@ -1260,7 +1260,13 @@ pub fn build_messages_with(
     signer: &ActionSigner,
     opts: GeOptions,
 ) -> Option<Vec<Value>> {
-    let mut messages = passthrough_surfaces(result.get("surface").and_then(|s| s.get("a2ui")));
+    // Producer surfaces, vetted by the dispatcher (`passthrough::vet_result`).
+    // GE renders every vendored catalog under its composite id (a superset
+    // of basic).
+    let mut messages = passthrough::messages(
+        result.get("surface").and_then(|s| s.get("a2ui")),
+        GE_COMPOSITE_CATALOG,
+    );
     messages.extend(card_messages(result, signer, opts).unwrap_or_default());
     (!messages.is_empty()).then_some(messages)
 }
@@ -1439,102 +1445,6 @@ fn card_messages(result: &Value, signer: &ActionSigner, opts: GeOptions) -> Opti
     (!messages.is_empty()).then_some(messages)
 }
 
-/// Upper bounds for producer-built surfaces in one reply.
-const MAX_PASSTHROUGH_SURFACES: usize = 8;
-const MAX_DISPLAY_NAME_CHARS: usize = 64;
-/// Producer-built surfaces get their own id prefix.
-const PASSTHROUGH_PREFIX: &str = "triton-a2ui-";
-
-/// The v0.9 messages for the producer-built surfaces in `surface.a2ui`:
-/// `[{components, data_model?, theme?}]`, at most
-/// [`MAX_PASSTHROUGH_SURFACES`].
-///
-/// Each surface is emitted verbatim as createSurface + updateComponents (+
-/// updateDataModel). `components` is the flat v0.9 component list and must
-/// contain the `root` component; a surface without one is dropped. `theme`
-/// may set `agentDisplayName` and `primaryColor` (`#rrggbb`) only. A click on
-/// a producer's button is not one of Triton's signed actions: it reaches the
-/// tool as `_triton.client.a2ui_events` (the producer handles it). The
-/// components themselves are the producer's responsibility: Triton does not
-/// vet them, so passthrough is for upstreams the operator trusts like its own
-/// code.
-fn passthrough_surfaces(spec: Option<&Value>) -> Vec<Value> {
-    let Some(surfaces) = spec.and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    if surfaces.len() > MAX_PASSTHROUGH_SURFACES {
-        eprintln!(
-            r#"{{"kind":"log","level":"warn","msg":"a2ui passthrough: surfaces beyond the cap dropped","surfaces":{},"cap":{MAX_PASSTHROUGH_SURFACES}}}"#,
-            surfaces.len()
-        );
-    }
-    surfaces
-        .iter()
-        .take(MAX_PASSTHROUGH_SURFACES)
-        .flat_map(passthrough_messages)
-        .collect()
-}
-
-fn passthrough_messages(surface: &Value) -> Vec<Value> {
-    let Some(components) = surface.get("components").and_then(Value::as_array) else {
-        return Vec::new();
-    };
-    if !components
-        .iter()
-        .any(|c| c.get("id").and_then(Value::as_str) == Some("root"))
-    {
-        eprintln!(
-            r#"{{"kind":"log","level":"warn","msg":"a2ui passthrough: surface without a root component dropped"}}"#
-        );
-        return Vec::new();
-    }
-    let surface_id = format!("{PASSTHROUGH_PREFIX}{}", uuid::Uuid::new_v4());
-    let create = json!({
-        "surfaceId": surface_id,
-        "catalogId": BASIC_CATALOG,
-        "theme": passthrough_theme(surface.get("theme")),
-    });
-    let mut messages = vec![
-        json!({ "version": "v0.9", "createSurface": create }),
-        json!({ "version": "v0.9", "updateComponents": { "surfaceId": surface_id, "components": components } }),
-    ];
-    if let Some(model) = surface.get("data_model").filter(|m| !m.is_null()) {
-        messages.push(json!({
-            "version": "v0.9",
-            "updateDataModel": { "surfaceId": surface_id, "path": "/", "value": model },
-        }));
-    }
-    messages
-}
-
-/// Triton's surface theme with the producer's `agentDisplayName` and
-/// `primaryColor` applied when they are well-formed; other keys are ignored.
-fn passthrough_theme(spec: Option<&Value>) -> Value {
-    let mut theme =
-        json!({ "primaryColor": THEME_PRIMARY_COLOR, "agentDisplayName": "DataZoo Agent" });
-    let Some(over) = spec.and_then(Value::as_object) else {
-        return theme;
-    };
-    if let Some(name) = over
-        .get("agentDisplayName")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        && !name.is_empty()
-        && name.chars().count() <= MAX_DISPLAY_NAME_CHARS
-        && !name.chars().any(char::is_control)
-    {
-        theme["agentDisplayName"] = json!(name);
-    }
-    if let Some(color) = over.get("primaryColor").and_then(Value::as_str)
-        && color.len() == 7
-        && color.starts_with('#')
-        && color[1..].chars().all(|c| c.is_ascii_hexdigit())
-    {
-        theme["primaryColor"] = json!(color);
-    }
-    theme
-}
-
 /// A Canvas-rooted surface framing `url` (GE renders a compact opener card
 /// in the stream that opens the side panel).
 fn embed_canvas(url: &str, title: &str, height: u32, auto_open: bool) -> Vec<Value> {
@@ -1584,7 +1494,7 @@ pub fn build_document_canvas(url: &str, title: &str) -> Vec<Value> {
             "version": "v0.9",
             "createSurface": {
                 "surfaceId": surface_id,
-                "catalogId": BASIC_CATALOG,
+                "catalogId": GE_COMPOSITE_CATALOG,
                 "theme": {
                     "primaryColor": THEME_PRIMARY_COLOR,
                     "agentDisplayName": "DataZoo Agent",
@@ -1724,7 +1634,7 @@ pub fn build_document_material(structured: &Value, title: &str) -> Vec<Value> {
             "version": "v0.9",
             "createSurface": {
                 "surfaceId": surface_id,
-                "catalogId": BASIC_CATALOG,
+                "catalogId": GE_COMPOSITE_CATALOG,
                 "theme": {
                     "primaryColor": THEME_PRIMARY_COLOR,
                     "agentDisplayName": "DataZoo Agent",
@@ -1878,7 +1788,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert_eq!(msgs[0]["version"], "v0.9");
-        assert_eq!(msgs[0]["createSurface"]["catalogId"], BASIC_CATALOG);
+        assert_eq!(msgs[0]["createSurface"]["catalogId"], GE_COMPOSITE_CATALOG);
         assert_eq!(
             msgs[0]["createSurface"]["theme"]["agentDisplayName"],
             "Coverage Matching"
@@ -1938,7 +1848,7 @@ mod tests {
     fn a2ui_theme_is_allowlisted() {
         let result = json!({ "surface": { "a2ui": [{
             "components": [ { "id": "root", "component": "MaterialCard", "children": [] } ],
-            "theme": { "agentDisplayName": "x".repeat(MAX_DISPLAY_NAME_CHARS + 1),
+            "theme": { "agentDisplayName": "x".repeat(65),
                        "primaryColor": "red", "logoUrl": "https://evil.example/l.png" }
         }]}});
         let msgs = build_messages(&result).expect("messages");
@@ -1946,20 +1856,6 @@ mod tests {
         assert_eq!(theme["agentDisplayName"], "DataZoo Agent");
         assert_eq!(theme["primaryColor"], THEME_PRIMARY_COLOR);
         assert!(theme.get("logoUrl").is_none());
-    }
-
-    /// At most MAX_PASSTHROUGH_SURFACES surfaces go out per result.
-    #[test]
-    fn a2ui_surfaces_are_capped() {
-        let one =
-            json!({ "components": [ { "id": "root", "component": "MaterialText", "text": "x" } ] });
-        let result = json!({ "surface": { "a2ui": vec![one; MAX_PASSTHROUGH_SURFACES + 3] } });
-        let msgs = build_messages(&result).expect("messages");
-        let creates = msgs
-            .iter()
-            .filter(|m| m.get("createSurface").is_some())
-            .count();
-        assert_eq!(creates, MAX_PASSTHROUGH_SURFACES);
     }
 
     /// Without A2UI negotiated only Triton's own card goes out.
@@ -1980,14 +1876,33 @@ mod tests {
         );
     }
 
-    /// A surface without a `root` component cannot render; it is dropped
-    /// rather than sent to a client that would show an empty card.
+    /// A surface without a `root` component cannot render: the dispatcher's
+    /// vetting drops it, and GE skips it even unvetted (a task record stored
+    /// by an older binary).
     #[test]
     fn a2ui_surface_without_root_is_dropped() {
-        let result = json!({ "surface": { "a2ui": [{ "components": [
+        let unvetted = json!({ "surface": { "a2ui": [{ "components": [
             { "id": "card", "component": "MaterialCard", "children": [] }
         ]}]}});
-        assert!(build_messages(&result).is_none());
+        assert!(build_messages(&unvetted).is_none());
+        let mut vetted = unvetted.clone();
+        passthrough::vet_result(&mut vetted);
+        assert!(build_messages(&vetted).is_none());
+    }
+
+    /// At most `passthrough::MAX_SURFACES` producer surfaces reach GE.
+    #[test]
+    fn a2ui_surfaces_are_capped() {
+        let one =
+            json!({ "components": [ { "id": "root", "component": "MaterialText", "text": "x" } ] });
+        let mut result = json!({ "surface": { "a2ui": vec![one; passthrough::MAX_SURFACES + 3] } });
+        passthrough::vet_result(&mut result);
+        let msgs = build_messages(&result).expect("messages");
+        let creates = msgs
+            .iter()
+            .filter(|m| m.get("createSurface").is_some())
+            .count();
+        assert_eq!(creates, passthrough::MAX_SURFACES);
     }
 
     /// The typed vocabulary every other channel uses ignores `surface.a2ui`, so
@@ -2017,7 +1932,7 @@ mod tests {
         let msgs = build_messages(&result).expect("renderable");
         assert_eq!(msgs.len(), 2, "createSurface + updateComponents");
         assert_eq!(msgs[0]["version"], "v0.9");
-        assert_eq!(msgs[0]["createSurface"]["catalogId"], BASIC_CATALOG);
+        assert_eq!(msgs[0]["createSurface"]["catalogId"], GE_COMPOSITE_CATALOG);
         // createSurface carries a v0.9 theme so GE styles the card (Material
         // primary accents) with the brand color.
         assert_eq!(
@@ -2214,7 +2129,7 @@ mod tests {
         let msgs =
             build_document_canvas("https://agent-lab.data-zoo.de/docs/tok", "Beverages GmbH");
         assert_eq!(msgs.len(), 2, "createSurface + updateComponents");
-        assert_eq!(msgs[0]["createSurface"]["catalogId"], BASIC_CATALOG);
+        assert_eq!(msgs[0]["createSurface"]["catalogId"], GE_COMPOSITE_CATALOG);
         let comps = msgs[1]["updateComponents"]["components"]
             .as_array()
             .unwrap();

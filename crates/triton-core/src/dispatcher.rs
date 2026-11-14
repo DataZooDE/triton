@@ -871,6 +871,7 @@ impl Dispatcher {
                 started.elapsed().as_millis() as u64,
             )),
             Ok(inner) => {
+                let inner = self.vet_stream(inner, tool_name);
                 // A2UI-wrap the terminal `Done` *inside* the finalizer so
                 // the audit observes the post-transform terminal (an agent
                 // advertised A2UI but emitted a non-surface → Error).
@@ -927,8 +928,31 @@ impl Dispatcher {
                 &e,
                 started.elapsed().as_millis() as u64,
             )),
-            Ok(inner) => Ok(self.audited_stream(inner, tool_name, protocol, &principal, started)),
+            Ok(inner) => {
+                let inner = self.vet_stream(inner, tool_name);
+                Ok(self.audited_stream(inner, tool_name, protocol, &principal, started))
+            }
         }
+    }
+
+    /// #370: vet the producer A2UI surfaces on an upstream stream's terminal
+    /// answer, as `run` does for a buffered one.
+    fn vet_stream(
+        &self,
+        inner: BoxStream<'static, StreamEvent>,
+        tool_name: &str,
+    ) -> BoxStream<'static, StreamEvent> {
+        let metrics = self.metrics.clone();
+        let tool = tool_name.to_string();
+        inner
+            .map(move |ev| match ev {
+                StreamEvent::Done(mut v) => {
+                    vet_passthrough(&metrics, &tool, &mut v);
+                    StreamEvent::Done(v)
+                }
+                other => other,
+            })
+            .boxed()
     }
 
     /// Wrap an open upstream stream so exactly one audit line is emitted
@@ -1347,7 +1371,9 @@ impl Dispatcher {
             };
         }
         if let Some(upstream) = &self.upstream {
-            return upstream.invoke(tool_name, args, principal, ctx).await;
+            let mut value = upstream.invoke(tool_name, args, principal, ctx).await?;
+            vet_passthrough(&self.metrics, tool_name, &mut value);
+            return Ok(value);
         }
         Err(TritonError::Validation(format!(
             "unknown tool: {tool_name}"
@@ -1478,6 +1504,25 @@ fn status_for(e: &TritonError) -> u16 {
     // Single source of truth in TritonError so the audit status
     // matches what REST/A2A return (circuit_open → 503, timeout → 504).
     e.http_status()
+}
+
+/// #370: vet the producer-built A2UI surfaces (`surface.a2ui`) of an upstream
+/// answer once, here, so every face renders only schema-valid ones. A dropped
+/// surface is one `warn` line (locations, never values) and one count.
+fn vet_passthrough(metrics: &Metrics, tool: &str, value: &mut Value) {
+    for r in crate::a2ui::passthrough::vet_result(value) {
+        metrics.record_passthrough_dropped(r.reason.as_str(), r.count);
+        tracing::warn!(
+            tool,
+            surface_index = r.surface_index,
+            surfaces = r.count,
+            reason = r.reason.as_str(),
+            schema_path = r.schema_path.as_deref().unwrap_or(""),
+            component_index = r.component_index,
+            component_id = r.component_id.as_deref().unwrap_or(""),
+            "a2ui passthrough surface dropped"
+        );
+    }
 }
 
 /// Wrap a single result value into a terminal A2UI [`StreamEvent`],

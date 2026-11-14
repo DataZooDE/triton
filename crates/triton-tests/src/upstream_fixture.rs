@@ -77,6 +77,9 @@ enum AgentMode {
     /// A2UI `{ surface: { components: [...] } }` payload so the streaming
     /// A2UI-wrap path can be exercised end-to-end.
     StreamingSurface,
+    /// Like [`AgentMode::Streaming`], but the terminal `done` carries the
+    /// fixed body given to [`FakeAgent::start_streaming_returning`].
+    StreamingReturning,
     /// Stream a couple of progress frames, then **hang** — never send
     /// another byte and never close the connection. Exercises TS-03: the
     /// per-frame idle timeout must fail the stream closed.
@@ -144,6 +147,12 @@ impl FakeAgent {
     /// See [`AgentMode::StreamingSurface`].
     pub async fn start_streaming_surface() -> Self {
         Self::start(AgentMode::StreamingSurface, 0, None).await
+    }
+
+    /// Emit an SSE stream whose terminal `done` carries `body`.
+    /// See [`AgentMode::StreamingReturning`].
+    pub async fn start_streaming_returning(body: Value) -> Self {
+        Self::start(AgentMode::StreamingReturning, 0, Some(body)).await
     }
 
     /// Emit a couple of progress frames then hang forever (no terminal,
@@ -325,6 +334,7 @@ async fn handler(
         | AgentMode::Streaming
         | AgentMode::StreamingTruncated
         | AgentMode::StreamingSurface
+        | AgentMode::StreamingReturning
         | AgentMode::StreamingHang
         | AgentMode::StreamingSlowDrip
         | AgentMode::McpApps
@@ -361,6 +371,13 @@ async fn handler(
         AgentMode::Streaming => sse_response(streaming_frames(&value, true)),
         AgentMode::StreamingTruncated => sse_response(streaming_frames(&value, false)),
         AgentMode::StreamingSurface => sse_response(streaming_surface_frames()),
+        AgentMode::StreamingReturning => {
+            let done = state.fixed_response.clone().unwrap_or(Value::Null);
+            sse_response(vec![
+                "event: tool\ndata: {\"step\":\"search\",\"hits\":30}\n\n".to_string(),
+                format!("event: done\ndata: {done}\n\n"),
+            ])
+        }
         AgentMode::StreamingHang => sse_response_hanging(streaming_frames(&value, false)),
         AgentMode::StreamingSlowDrip => sse_response_slow_drip(streaming_frames(&value, false)),
         AgentMode::McpApps => mcp_apps_response(mcp_verb.as_deref(), &value),
