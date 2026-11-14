@@ -97,8 +97,17 @@ impl jsonschema::Retrieve for Vendored {
 /// A compiled validator for one A2UI v0.9 server→client message, with the
 /// GE composite catalog registered as the active `catalog.json`.
 pub(crate) fn a2ui_validator() -> SchemaCheck {
+    a2ui_validator_for("gemini_enterprise_composite_catalog.json")
+}
+
+/// The same, with the a2ui.org basic catalog active (the MCP widget's).
+pub(crate) fn a2ui_basic_validator() -> SchemaCheck {
+    a2ui_validator_for("basic_catalog.json")
+}
+
+fn a2ui_validator_for(catalog_file: &str) -> SchemaCheck {
     let s = |f: &str| read_json(&dir(&format!("../triton-core/schemas/a2ui-v0_9/{f}")));
-    let mut catalog = s("gemini_enterprise_composite_catalog.json");
+    let mut catalog = s(catalog_file);
     catalog["$id"] = json!(format!("{A2UI_BASE}catalog.json"));
     let root = s("server_to_client.json");
     let resources = std::collections::HashMap::from([

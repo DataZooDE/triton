@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; connect-src 'none'; frame-src 'none'; form-action 'none'; base-uri 'none'">
+<meta name="generator" content="triton-a2ui-widget">
+<title>Triton answer card</title>
+<style>
+  :root { color-scheme: light dark; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  #app { display: flex; flex-direction: column; gap: 12px; padding: 2px; }
+  #status { font-size: 12px; opacity: .8; min-height: 0; }
+  #status.err { color: #b3261e; opacity: 1; }
+</style>
+</head>
+<body>
+<main id="app" aria-live="polite"></main>
+<div id="status" role="status"></div>
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>

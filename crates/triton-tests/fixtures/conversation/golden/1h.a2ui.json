@@ -1,0 +1,159 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "Lifecycle",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": "Deployed → Retired",
+          "variant": "body"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c1",
+            "c2"
+          ],
+          "component": "Row",
+          "id": "c3"
+        },
+        {
+          "component": "Text",
+          "id": "c4",
+          "text": "Reason",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c5",
+          "text": "Replaced (from your message)",
+          "variant": "body"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c4",
+            "c5"
+          ],
+          "component": "Row",
+          "id": "c6"
+        },
+        {
+          "component": "Text",
+          "id": "c7",
+          "text": "Assumed",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c8",
+          "text": "Owner, links and AI Act class unchanged",
+          "variant": "body"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c7",
+            "c8"
+          ],
+          "component": "Row",
+          "id": "c9"
+        },
+        {
+          "component": "Text",
+          "id": "c10",
+          "text": "Reviewer",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c11",
+          "text": "Anyone with review rights except you",
+          "variant": "body"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c10",
+            "c11"
+          ],
+          "component": "Row",
+          "id": "c12"
+        },
+        {
+          "component": "Text",
+          "id": "c13",
+          "text": "Proposal · open · needs review: Retire Agent 25",
+          "variant": "h4"
+        },
+        {
+          "children": [
+            "c13",
+            "c3",
+            "c6",
+            "c9",
+            "c12"
+          ],
+          "component": "Column",
+          "id": "c14"
+        },
+        {
+          "component": "Text",
+          "id": "c15",
+          "text": "Open in the portfolio review",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/review/d/01M636Z8XN"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c15",
+          "component": "Button",
+          "id": "c16",
+          "variant": "primary"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c16"
+          ],
+          "component": "Row",
+          "id": "c17"
+        },
+        {
+          "children": [
+            "c14",
+            "c17"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  }
+]

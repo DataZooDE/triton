@@ -1,0 +1,205 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "4 owner proposals filed for review",
+          "variant": "h3"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": "They go live once a colleague accepts them.",
+          "variant": "caption"
+        },
+        {
+          "children": [
+            "c1",
+            "c2"
+          ],
+          "component": "Column",
+          "id": "c3"
+        },
+        {
+          "component": "Text",
+          "id": "c4",
+          "text": "Agent",
+          "variant": "h5",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c5",
+          "text": "Proposed owner",
+          "variant": "h5",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c4",
+            "c5"
+          ],
+          "component": "Row",
+          "id": "c6"
+        },
+        {
+          "component": "Text",
+          "id": "c7",
+          "text": "Agent 12",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c8",
+          "text": "Head of Production Planning",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c7",
+            "c8"
+          ],
+          "component": "Row",
+          "id": "c9"
+        },
+        {
+          "component": "Text",
+          "id": "c10",
+          "text": "Agent 19",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c11",
+          "text": "Head of IT Operations",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c10",
+            "c11"
+          ],
+          "component": "Row",
+          "id": "c12"
+        },
+        {
+          "component": "Text",
+          "id": "c13",
+          "text": "Agent 24",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c14",
+          "text": "Head of Quality Assurance",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c13",
+            "c14"
+          ],
+          "component": "Row",
+          "id": "c15"
+        },
+        {
+          "component": "Text",
+          "id": "c16",
+          "text": "Agent 27",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "component": "Text",
+          "id": "c17",
+          "text": "Data Protection Officer",
+          "variant": "body",
+          "weight": 1
+        },
+        {
+          "align": "center",
+          "children": [
+            "c16",
+            "c17"
+          ],
+          "component": "Row",
+          "id": "c18"
+        },
+        {
+          "children": [
+            "c6",
+            "c9",
+            "c12",
+            "c15",
+            "c18"
+          ],
+          "component": "Column",
+          "id": "c19"
+        },
+        {
+          "component": "Text",
+          "id": "c20",
+          "text": "Review all 4",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/open?view=drafts"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c20",
+          "component": "Button",
+          "id": "c21",
+          "variant": "primary"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c21"
+          ],
+          "component": "Row",
+          "id": "c22"
+        },
+        {
+          "children": [
+            "c3",
+            "c19",
+            "c22"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  }
+]

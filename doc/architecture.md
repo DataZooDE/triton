@@ -502,9 +502,23 @@ requires `Clone`).
 > must validate against the vendored schema of the catalog it declares
 > (`catalogId`: basic or GE composite, default GE composite); a failing
 > surface is dropped with a `warn` line and a
-> `triton_a2ui_passthrough_dropped_total{reason}` count. Only
-> `ge::build_messages` renders it, and only for a client that negotiated A2UI;
-> the typed vocabulary below never sees it.
+> `triton_a2ui_passthrough_dropped_total{reason}` count. Two faces render it:
+> `ge::build_messages` (every catalog, only for a client that negotiated
+> A2UI) and the MCP Apps widget, `mcp_app::card` (basic-catalog surfaces only,
+> #368: the widget bundles the official `@a2ui/lit` renderer, which ships the
+> basic catalog). The typed vocabulary below never sees it, and on MCP it is
+> stripped from `structuredContent` (the model reads that).
+>
+> **MCP Apps widget (2026-11, #368).** The widget page is built from
+> `packages/mcp-widget` (vite, single file, committed and `include_str!`-ed;
+> `scripts/check.sh mcp-widget` rebuilds it and fails on a difference). Each
+> `tools/call` result carries A2UI v0.9 messages in `_meta["triton/a2ui"]`:
+> the producer's basic-catalog surfaces, then the canonical card projected
+> onto the basic catalog (`a2ui::basic`, one more builder file beside `ge.rs`
+> and the Teams card). Its controls are two Triton events the widget handles
+> itself, `triton.send_message` (`ui/message`) and `triton.open_url`
+> (`ui/open-link`); the model-visible `card_text` is built from the
+> projection's `CardSummary`.
 > Inbound client events reach tools as `_triton.client.a2ui_events` on both A2A
 > bindings (client-asserted, never Triton-authored). Contract:
 > `doc/upstream-agent-contract.md`.

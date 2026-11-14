@@ -1,0 +1,217 @@
+[
+  {
+    "parts": [
+      {
+        "text": "Set the owner of Agent 28 to \""
+      },
+      {
+        "field": "value"
+      },
+      {
+        "text": "\"."
+      },
+      {
+        "optional": [
+          {
+            "text": " Reason: "
+          },
+          {
+            "field": "reason"
+          }
+        ]
+      },
+      {
+        "text": " (version 08cbcd825d41)"
+      }
+    ],
+    "template": "Set the owner of Agent 28 to \"{value}\".[[ Reason: {reason}]] (version 08cbcd825d41)",
+    "text": "Set the owner of Agent 28 to \"IT Operations\". Reason: moved in October (version 08cbcd825d41)",
+    "values": {
+      "reason": "  moved in October ",
+      "value": "IT Operations"
+    }
+  },
+  {
+    "parts": [
+      {
+        "text": "Set the owner of Agent 28 to \""
+      },
+      {
+        "field": "value"
+      },
+      {
+        "text": "\"."
+      },
+      {
+        "optional": [
+          {
+            "text": " Reason: "
+          },
+          {
+            "field": "reason"
+          }
+        ]
+      },
+      {
+        "text": " (version 08cbcd825d41)"
+      }
+    ],
+    "template": "Set the owner of Agent 28 to \"{value}\".[[ Reason: {reason}]] (version 08cbcd825d41)",
+    "text": "Set the owner of Agent 28 to \"IT Operations\". (version 08cbcd825d41)",
+    "values": {
+      "reason": "   ",
+      "value": "IT Operations"
+    }
+  },
+  {
+    "missing": [
+      "request"
+    ],
+    "parts": [
+      {
+        "field": "request"
+      },
+      {
+        "optional": [
+          {
+            "text": " Reason: "
+          },
+          {
+            "field": "reason"
+          }
+        ]
+      }
+    ],
+    "template": "{request}[[ Reason: {reason}]]",
+    "values": {
+      "reason": "x"
+    }
+  },
+  {
+    "parts": [
+      {
+        "text": "  Show agents in "
+      },
+      {
+        "field": "cap"
+      },
+      {
+        "text": "\n"
+      }
+    ],
+    "template": "  Show agents in {cap}\n",
+    "text": "Show agents in Sales",
+    "values": {
+      "cap": "Sales"
+    }
+  },
+  {
+    "parts": [
+      {
+        "text": "set {a b} or { } or "
+      },
+      {
+        "field": "x"
+      }
+    ],
+    "template": "set {a b} or { } or {x}",
+    "text": "set {a b} or { } or 1",
+    "values": {
+      "x": "1"
+    }
+  },
+  {
+    "missing": [
+      "constructor",
+      "toString"
+    ],
+    "parts": [
+      {
+        "text": "Ask "
+      },
+      {
+        "field": "constructor"
+      },
+      {
+        "text": " about "
+      },
+      {
+        "field": "toString"
+      }
+    ],
+    "template": "Ask {constructor} about {toString}",
+    "values": {}
+  },
+  {
+    "parts": [
+      {
+        "text": "[[unclosed "
+      },
+      {
+        "field": "a"
+      }
+    ],
+    "template": "[[unclosed {a}",
+    "text": "[[unclosed v",
+    "values": {
+      "a": "v"
+    }
+  },
+  {
+    "parts": [
+      {
+        "text": "Mark it "
+      },
+      {
+        "field": "flag"
+      },
+      {
+        "optional": [
+          {
+            "text": " because "
+          },
+          {
+            "field": "why"
+          }
+        ]
+      }
+    ],
+    "template": "Mark it {flag}[[ because {why}]]",
+    "text": "Mark it true",
+    "values": {
+      "flag": "true"
+    }
+  },
+  {
+    "missing": [
+      "n"
+    ],
+    "parts": [
+      {
+        "text": "Note "
+      },
+      {
+        "field": "n"
+      }
+    ],
+    "template": "Note {n}",
+    "values": {
+      "n": ""
+    }
+  },
+  {
+    "parts": [
+      {
+        "text": "Say "
+      },
+      {
+        "field": "n"
+      }
+    ],
+    "template": "Say {n}",
+    "text": "Say ﻿hi",
+    "values": {
+      "n": "﻿hi "
+    }
+  }
+]

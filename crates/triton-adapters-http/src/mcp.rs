@@ -809,12 +809,19 @@ async fn tools_call(
             // `structuredContent` below, unchanged.
             let reply_text = crate::a2a_spec::reply_text(&d.result);
             let companions = crate::a2a_spec::card_companions(&d.result);
-            // The answer-card widget's data, from the canonical surface (and
-            // before the A2UI wrap). A result that brings its own MCP App
+            // The answer card's A2UI v0.9 messages, from the canonical
+            // surface and the producer's basic-catalog passthrough surfaces
+            // (before the A2UI wrap). A result that brings its own MCP App
             // (`_meta.ui`) keeps it; there is no card to draw then.
             let widget = (state.widget && ui_meta.is_none())
-                .then(|| mcp_app::widget_data(&d.result))
+                .then(|| mcp_app::card(&d.result))
                 .flatten();
+            // Producer surfaces are for the widget only: the model reads
+            // `structuredContent`, so they never ride the envelope (#368),
+            // whether or not the widget is on.
+            if let Some(s) = d.result.get_mut("surface").and_then(Value::as_object_mut) {
+                s.remove("a2ui");
+            }
             // A host that renders the card shows its rows to the user; with
             // the rows in the text as well, its model repeats them as its
             // own table. Such a host's model gets one line (the card's title
@@ -824,7 +831,8 @@ async fn tools_call(
             let reply_text = match widget
                 .as_ref()
                 .filter(|_| card_host)
-                .and_then(|w| mcp_app::card_text(w, &state.card_note))
+                .and_then(|w| w.summary.as_ref())
+                .and_then(|s| mcp_app::card_text(s, &state.card_note))
             {
                 Some(line) => match companions {
                     Some(rest) => format!("{line}\n\n{rest}"),
@@ -842,12 +850,12 @@ async fn tools_call(
             // same dict REST/A2A get.
             let env_v = envelope(&d);
             let mut meta = json!({ "trace_id": trace_id });
-            // The card's data rides the result `_meta`: the host hands it
-            // to the widget (MCP Apps `ui/notifications/tool-result`,
+            // The card's messages ride the result `_meta`: the host hands
+            // them to the widget (MCP Apps `ui/notifications/tool-result`,
             // ChatGPT `toolResponseMetadata`) but not to the model, which
             // already has the text and the envelope.
             if let Some(w) = widget {
-                meta[mcp_app::META_KEY] = w;
+                meta[mcp_app::META_KEY] = Value::Array(w.messages);
             }
             if let Some(ui) = ui_meta {
                 meta["ui"] = ui;

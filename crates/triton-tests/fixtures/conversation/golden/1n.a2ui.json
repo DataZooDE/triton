@@ -1,0 +1,223 @@
+[
+  {
+    "createSurface": {
+      "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  },
+  {
+    "updateComponents": {
+      "components": [
+        {
+          "component": "Text",
+          "id": "c1",
+          "text": "Capability",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c2",
+          "text": "Commercial & service › Sales: Forecast",
+          "variant": "body"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c1",
+            "c2"
+          ],
+          "component": "Row",
+          "id": "c3"
+        },
+        {
+          "component": "Text",
+          "id": "c4",
+          "text": "Owner",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c5",
+          "text": "Data Protection Officer",
+          "variant": "body"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c4",
+            "c5"
+          ],
+          "component": "Row",
+          "id": "c6"
+        },
+        {
+          "component": "Text",
+          "id": "c7",
+          "text": "AI Act class",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c8",
+          "text": "Minimal",
+          "variant": "body"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c7",
+            "c8"
+          ],
+          "component": "Row",
+          "id": "c9"
+        },
+        {
+          "component": "Text",
+          "id": "c10",
+          "text": "Depends on",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c11",
+          "text": "Customer master, Pricing API",
+          "variant": "body"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c10",
+            "c11"
+          ],
+          "component": "Row",
+          "id": "c12"
+        },
+        {
+          "component": "Text",
+          "id": "c13",
+          "text": "Open drafts",
+          "variant": "caption"
+        },
+        {
+          "component": "Text",
+          "id": "c14",
+          "text": "none",
+          "variant": "body"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c13",
+            "c14"
+          ],
+          "component": "Row",
+          "id": "c15"
+        },
+        {
+          "component": "Text",
+          "id": "c16",
+          "text": "Agent 28 · Planned",
+          "variant": "h4"
+        },
+        {
+          "children": [
+            "c16",
+            "c3",
+            "c6",
+            "c9",
+            "c12",
+            "c15"
+          ],
+          "component": "Column",
+          "id": "c17"
+        },
+        {
+          "component": "Text",
+          "id": "c18",
+          "text": "Request a change",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "Change Agent 28"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c18",
+          "component": "Button",
+          "id": "c19",
+          "variant": "primary"
+        },
+        {
+          "component": "Text",
+          "id": "c20",
+          "text": "Dependencies",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "text": "What does Agent 28 depend on?"
+              },
+              "name": "triton.send_message"
+            }
+          },
+          "child": "c20",
+          "component": "Button",
+          "id": "c21",
+          "variant": "default"
+        },
+        {
+          "component": "Text",
+          "id": "c22",
+          "text": "Open in the portfolio",
+          "variant": "body"
+        },
+        {
+          "action": {
+            "event": {
+              "context": {
+                "url": "https://app.example.com/acme/open?object=agent%3Aagent-28"
+              },
+              "name": "triton.open_url"
+            }
+          },
+          "child": "c22",
+          "component": "Button",
+          "id": "c23",
+          "variant": "default"
+        },
+        {
+          "align": "center",
+          "children": [
+            "c19",
+            "c21",
+            "c23"
+          ],
+          "component": "Row",
+          "id": "c24"
+        },
+        {
+          "children": [
+            "c17",
+            "c24"
+          ],
+          "component": "Column",
+          "id": "card-col"
+        },
+        {
+          "child": "card-col",
+          "component": "Card",
+          "id": "root"
+        }
+      ],
+      "surfaceId": "triton-card"
+    },
+    "version": "v0.9"
+  }
+]
