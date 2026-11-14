@@ -87,9 +87,47 @@ pub fn project(result: &Value) -> Option<BasicCard> {
     let components: Vec<Component> = raw.iter().filter_map(Component::parse).collect();
     let mut b = Builder::default();
     for c in &components {
+        // Past the byte budget a body block would be dropped anyway: count it
+        // without building it (an answer of thousands of blocks stays cheap).
+        if b.body_bytes > MAX_BYTES && makes_body_block(c) {
+            b.skipped += 1;
+            continue;
+        }
         b.component(c);
     }
     b.finish()
+}
+
+/// Whether `c` becomes a body block (not the header, an action, or nothing).
+fn makes_body_block(c: &Component) -> bool {
+    matches!(
+        c,
+        Component::Table { .. }
+            | Component::List { .. }
+            | Component::KeyValue { .. }
+            | Component::Tree { .. }
+            | Component::Notice { .. }
+            | Component::Progress { .. }
+            | Component::Chips { .. }
+            | Component::FormGroups { .. }
+            | Component::Selection {
+                submit: Some(_),
+                ..
+            }
+            | Component::Form {
+                send_template: Some(_),
+                ..
+            }
+    )
+}
+
+/// What a block costs in the card: its components, its data-model entries
+/// and its id in the card column's `children` (quoted, with a comma).
+fn block_size(b: &Block) -> usize {
+    serde_json::to_vec(&b.comps).map_or(usize::MAX, |v| v.len())
+        + serde_json::to_vec(&b.data).map_or(usize::MAX, |v| v.len())
+        + b.root.len()
+        + 3
 }
 
 // ── controls ──────────────────────────────────────────────────────────
@@ -182,6 +220,10 @@ struct Builder {
     /// `(primary, label, action)` in source order.
     actions: Vec<(bool, String, Value)>,
     forms: usize,
+    /// Bytes of the body blocks built so far.
+    body_bytes: usize,
+    /// Body blocks not built: past the byte budget already.
+    skipped: usize,
 }
 
 impl Block {
@@ -193,6 +235,11 @@ impl Block {
 }
 
 impl Builder {
+    fn push_body(&mut self, b: Block) {
+        self.body_bytes = self.body_bytes.saturating_add(block_size(&b));
+        self.body.push(b);
+    }
+
     fn text(&mut self, b: &mut Block, s: &str, variant: &str) -> String {
         let id = self.ids.next();
         b.push(json!({ "id": id, "component": "Text", "text": cap(s), "variant": variant }))
@@ -243,7 +290,7 @@ impl Builder {
             children.push(self.text(&mut b, &format!("\u{2026} {more} more"), "caption"));
         }
         b.root = self.column(&mut b, children);
-        self.body.push(b);
+        self.push_body(b);
     }
 
     fn component(&mut self, c: &Component) {
@@ -351,7 +398,7 @@ impl Builder {
                 let col = self.column(&mut b, children);
                 let id = self.ids.next();
                 b.root = b.push(json!({ "id": id, "component": "Card", "child": col }));
-                self.body.push(b);
+                self.push_body(b);
             }
             Component::Progress {
                 title,
@@ -686,14 +733,7 @@ impl Builder {
         }
 
         // The byte budget: trailing body blocks go, counted as "… N more".
-        // A block costs its components, its data-model entries and its id
-        // in the card column's `children` (quoted, with a comma).
-        let size = |b: &Block| {
-            serde_json::to_vec(&b.comps).map_or(usize::MAX, |v| v.len())
-                + serde_json::to_vec(&b.data).map_or(usize::MAX, |v| v.len())
-                + b.root.len()
-                + 3
-        };
+        let size = block_size;
         let fixed = self.header.as_ref().map_or(0, size) + size(&bar) + 1024;
         if fixed > MAX_BYTES {
             return None;
@@ -708,7 +748,7 @@ impl Builder {
             used += s;
             kept += 1;
         }
-        let dropped = self.body.len() - kept;
+        let dropped = self.body.len() - kept + self.skipped;
         self.body.truncate(kept);
 
         let mut summary = CardSummary {
