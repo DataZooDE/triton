@@ -420,6 +420,20 @@ production deployment can avoid by knowing about it.
 Items discovered while building the production Rust port; each is
 a trap the next developer should not have to step in.
 
+- **Vet A2UI components one by one, not as a message (2026-11-14, #370).**
+  Validating a whole `updateComponents` message against
+  `server_to_client.json` reports a broken component as a failed `oneOf`
+  at the message root: no component id, a schema path that says nothing.
+  `a2ui::passthrough` instead compiles one validator per catalog component
+  (`{"$ref": "<catalog id>#/components/<Name>"}`) and picks it by the
+  component's `component` name, so an unknown name and a missing required
+  property each point at the component id and a precise schema path. Two
+  more traps: `common_types.json` refers to the active catalog by the
+  relative `catalog.json`, so each catalog must also be registered under
+  that alias; and the old passthrough warnings were hand-built JSON on
+  **stderr** (`eprintln!`) while the log stream is tracing JSON on stdout,
+  so they never reached the log shipper's `log` kind. Use `tracing::warn!`.
+
 - **MCP-Apps `_meta.ui.*` rides on the tool *result*, not the dispatch
   envelope — and it must be lifted, not just preserved.** (#143 A) An
   upstream renderer returns its `ui://` resource link under

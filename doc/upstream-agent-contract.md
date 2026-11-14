@@ -304,10 +304,23 @@ Notes for agent authors:
 
   Each surface (at most 8) goes out verbatim as `createSurface` +
   `updateComponents` (+ `updateDataModel`) ahead of Triton's own card;
-  `components` must contain `root`; `theme` may set `agentDisplayName` and
-  `primaryColor` (`#rrggbb`). A click on a producer's button comes back as a
-  client event (§2b); the producer handles it. Triton does not vet the
-  components: passthrough is for upstreams the operator trusts like its own
+  `components` must contain `root`; `data_model`, if present, is an object;
+  `theme` may set `agentDisplayName` and
+  `primaryColor` (`#rrggbb`). `catalogId` names the catalog the components
+  are written for: `https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json`
+  (basic) or the GE composite id
+  (`https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json`,
+  the default when absent). Triton validates every component against the
+  pinned v0.9 schema of that catalog when the answer arrives; a surface that
+  fails (unknown component, missing required property, unknown catalog,
+  no `root`, beyond the cap) is **dropped**, the rest of the answer still
+  renders, and Triton logs a `warn` (`a2ui passthrough surface dropped`, with
+  `tool`, `surface_index`, `reason`, `schema_path`, `component_id`; never a
+  value) and counts `triton_a2ui_passthrough_dropped_total{reason}`. Gemini
+  Enterprise gets surfaces of either catalog (under its composite id, a
+  superset of basic). A click on a producer's button comes back as a
+  client event (§2b); the producer handles it. Schema validity is not a
+  security review: passthrough is still for upstreams the operator trusts like its own
   code. Producer surfaces only go to clients that negotiated A2UI; other
   channels see `components`. Measured in Gemini Enterprise (2026-10-31):
   Material cards, tables, chips, selects, checkboxes, progress bars,

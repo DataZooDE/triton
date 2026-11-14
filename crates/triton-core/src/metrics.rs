@@ -25,6 +25,7 @@ const OVERFLOW_LABEL: &str = "<overflow>";
 pub struct Metrics {
     dispatch: Mutex<BTreeMap<DispatchKey, u64>>,
     audit: Mutex<BTreeMap<String, u64>>,
+    passthrough_dropped: Mutex<BTreeMap<&'static str, u64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -73,6 +74,17 @@ impl Metrics {
         *g.entry(phase.to_string()).or_insert(0) += 1;
     }
 
+    /// Record one producer A2UI surface dropped by vetting (#370). `reason`
+    /// is a closed set (`a2ui::passthrough::DropReason`), so the label stays
+    /// bounded.
+    pub fn record_passthrough_dropped(&self, reason: &'static str) {
+        let mut g = self
+            .passthrough_dropped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *g.entry(reason).or_insert(0) += 1;
+    }
+
     /// Render the current state in Prometheus text exposition.
     pub fn render(&self) -> String {
         let mut out = String::new();
@@ -100,6 +112,21 @@ impl Metrics {
             out.push_str(&format!(
                 "triton_audit_lines_total{{phase=\"{}\"}} {v}\n",
                 escape_label(phase),
+            ));
+        }
+        drop(audit);
+
+        out.push_str(
+            "# HELP triton_a2ui_passthrough_dropped_total Producer A2UI surfaces dropped by vetting.\n",
+        );
+        out.push_str("# TYPE triton_a2ui_passthrough_dropped_total counter\n");
+        let dropped = self
+            .passthrough_dropped
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (reason, v) in dropped.iter() {
+            out.push_str(&format!(
+                "triton_a2ui_passthrough_dropped_total{{reason=\"{reason}\"}} {v}\n"
             ));
         }
         out

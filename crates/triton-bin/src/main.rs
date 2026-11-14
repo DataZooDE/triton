@@ -70,6 +70,19 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    // #370: compile the vendored A2UI schemas the passthrough vetting uses
+    // off the boot path (≈1 s in a debug build), so startup stays fast (G-4)
+    // and the first producer answer rarely waits. That they compile at all is
+    // pinned by `triton-core`'s unit tests (the files are `include_str!`-ed).
+    std::thread::spawn(|| {
+        let warm = std::time::Instant::now();
+        triton_core::a2ui::passthrough::warm();
+        tracing::info!(
+            ms = warm.elapsed().as_millis() as u64,
+            "a2ui passthrough schemas compiled"
+        );
+    });
+
     // Plain-http links for local end-to-end tests only. Outside
     // `local` the allowance would turn an injected http link into an
     // action, so it fails boot closed.

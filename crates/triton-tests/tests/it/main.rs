@@ -32,6 +32,8 @@ mod a2a_v03_base;
 mod a2ui_flutter_fixtures;
 #[path = "../a2ui_parity.rs"]
 mod a2ui_parity;
+#[path = "../a2ui_passthrough_vetting.rs"]
+mod a2ui_passthrough_vetting;
 #[path = "../acc_hardening.rs"]
 mod acc_hardening;
 #[path = "../async_tasks.rs"]

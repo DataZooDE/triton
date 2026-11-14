@@ -27,3 +27,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"
 triton-correlation = { path = "../triton-correlation" }
 tracing = { workspace = true }
+jsonschema = { workspace = true }
