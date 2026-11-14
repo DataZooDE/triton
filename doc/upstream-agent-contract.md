@@ -304,8 +304,8 @@ Notes for agent authors:
 
   Each surface (at most 8) goes out verbatim as `createSurface` +
   `updateComponents` (+ `updateDataModel`) ahead of Triton's own card;
-  `components` must contain `root`; `data_model`, if present, is an object;
-  `theme` may set `agentDisplayName` and
+  `components` must contain `root`; `data_model` (any JSON) becomes the
+  `updateDataModel` value; `theme` may set `agentDisplayName` and
   `primaryColor` (`#rrggbb`). `catalogId` names the catalog the components
   are written for: `https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json`
   (basic) or the GE composite id
@@ -315,8 +315,13 @@ Notes for agent authors:
   fails (unknown component, missing required property, unknown catalog,
   no `root`, beyond the cap) is **dropped**, the rest of the answer still
   renders, and Triton logs a `warn` (`a2ui passthrough surface dropped`, with
-  `tool`, `surface_index`, `reason`, `schema_path`, `component_id`; never a
-  value) and counts `triton_a2ui_passthrough_dropped_total{reason}`. Gemini
+  `tool`, `surface_index`, `surfaces`, `reason`, `schema_path`,
+  `component_index`, `component_id`; never a value; an id that is not a
+  plain identifier of at most 64 chars is logged as `<unprintable>`; every
+  surface past the cap is one line) and counts
+  `triton_a2ui_passthrough_dropped_total{reason}`. The check is per
+  component: Triton does not verify that `children`/`child` ids resolve or
+  that ids are unique, so a dangling reference still renders blank. Gemini
   Enterprise gets surfaces of either catalog (under its composite id, a
   superset of basic). A click on a producer's button comes back as a
   client event (§2b); the producer handles it. Schema validity is not a

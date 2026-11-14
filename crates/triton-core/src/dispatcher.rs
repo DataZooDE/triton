@@ -1511,12 +1511,14 @@ fn status_for(e: &TritonError) -> u16 {
 /// surface is one `warn` line (locations, never values) and one count.
 fn vet_passthrough(metrics: &Metrics, tool: &str, value: &mut Value) {
     for r in crate::a2ui::passthrough::vet_result(value) {
-        metrics.record_passthrough_dropped(r.reason.as_str());
+        metrics.record_passthrough_dropped(r.reason.as_str(), r.count);
         tracing::warn!(
             tool,
             surface_index = r.surface_index,
+            surfaces = r.count,
             reason = r.reason.as_str(),
             schema_path = r.schema_path.as_deref().unwrap_or(""),
+            component_index = r.component_index,
             component_id = r.component_id.as_deref().unwrap_or(""),
             "a2ui passthrough surface dropped"
         );

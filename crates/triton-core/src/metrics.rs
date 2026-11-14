@@ -77,12 +77,12 @@ impl Metrics {
     /// Record one producer A2UI surface dropped by vetting (#370). `reason`
     /// is a closed set (`a2ui::passthrough::DropReason`), so the label stays
     /// bounded.
-    pub fn record_passthrough_dropped(&self, reason: &'static str) {
+    pub fn record_passthrough_dropped(&self, reason: &'static str, count: usize) {
         let mut g = self
             .passthrough_dropped
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *g.entry(reason).or_insert(0) += 1;
+        *g.entry(reason).or_insert(0) += count as u64;
     }
 
     /// Render the current state in Prometheus text exposition.

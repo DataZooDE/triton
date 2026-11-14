@@ -82,27 +82,56 @@ impl DropReason {
     }
 }
 
-/// One dropped surface. Carries locations only, never values.
+/// One dropped surface (or, for [`DropReason::OverCap`], every surface past
+/// the cap). Carries locations only, never values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rejection {
-    /// Position in the producer's `surface.a2ui` list.
+    /// Position in the producer's `surface.a2ui` list (the first one past
+    /// the cap for `OverCap`).
     pub surface_index: usize,
     pub reason: DropReason,
+    /// Surfaces this rejection stands for: 1, or the excess for `OverCap`.
+    pub count: usize,
     /// JSON pointer into the catalog schema (`/components/Button/...`).
     pub schema_path: Option<String>,
-    /// The failing component's id (ids are structural, not user data).
+    /// Position of the failing component in the surface's `components`.
+    pub component_index: Option<usize>,
+    /// The failing component's id, if it is a plain identifier (see
+    /// [`loggable_id`]); a producer id is still producer text.
     pub component_id: Option<String>,
 }
 
 impl Rejection {
-    fn new(surface_index: usize, reason: DropReason) -> Self {
+    fn new(reason: DropReason) -> Self {
         Self {
-            surface_index,
+            surface_index: 0,
             reason,
+            count: 1,
             schema_path: None,
+            component_index: None,
             component_id: None,
         }
     }
+}
+
+/// Longest component id that is logged as is.
+const MAX_LOGGED_ID: usize = 64;
+
+/// A component id fit for a log line: a plain identifier (letters, digits,
+/// `_ . : -`) of at most [`MAX_LOGGED_ID`] chars, else a placeholder, so an
+/// id never smuggles user data or log noise into the operator's logs.
+fn loggable_id(id: Option<&str>) -> Option<String> {
+    let id = id?;
+    let plain = !id.is_empty()
+        && id.len() <= MAX_LOGGED_ID
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | ':' | '-'));
+    Some(if plain {
+        id.to_string()
+    } else {
+        "<unprintable>".to_string()
+    })
 }
 
 /// Vet the producer surfaces of an upstream answer in place: keep the valid
@@ -123,25 +152,29 @@ pub fn vet_result(result: &mut Value) -> Vec<Rejection> {
     rejections
 }
 
-/// Vet a raw `surface.a2ui` value (see [`vet_result`]).
+/// Vet a raw `surface.a2ui` value (see [`vet_result`]). Surfaces past
+/// [`MAX_SURFACES`] are not looked at: they are one `OverCap` rejection.
 pub fn vet(raw: &Value) -> (Vec<Value>, Vec<Rejection>) {
     let Some(list) = raw.as_array() else {
-        return (Vec::new(), vec![Rejection::new(0, DropReason::Shape)]);
+        return (Vec::new(), vec![Rejection::new(DropReason::Shape)]);
     };
     let mut kept = Vec::new();
     let mut rejections = Vec::new();
-    for (i, s) in list.iter().enumerate() {
-        if i >= MAX_SURFACES {
-            rejections.push(Rejection::new(i, DropReason::OverCap));
-            continue;
-        }
+    for (i, s) in list.iter().enumerate().take(MAX_SURFACES) {
         match vet_one(s) {
             Ok(v) => kept.push(v),
-            Err(mut r) => {
-                r.surface_index = i;
-                rejections.push(r);
-            }
+            Err(r) => rejections.push(Rejection {
+                surface_index: i,
+                ..r
+            }),
         }
+    }
+    if list.len() > MAX_SURFACES {
+        rejections.push(Rejection {
+            surface_index: MAX_SURFACES,
+            count: list.len() - MAX_SURFACES,
+            ..Rejection::new(DropReason::OverCap)
+        });
     }
     (kept, rejections)
 }
@@ -155,34 +188,35 @@ fn catalog_of(s: &Value) -> Option<Catalog> {
     }
 }
 
+fn has_root(components: &[Value]) -> bool {
+    components
+        .iter()
+        .any(|c| c.get("id").and_then(Value::as_str) == Some("root"))
+}
+
 fn vet_one(s: &Value) -> Result<Value, Rejection> {
     let components = s
         .get("components")
         .and_then(Value::as_array)
         .filter(|c| !c.is_empty())
-        .ok_or(Rejection::new(0, DropReason::Shape))?;
-    let catalog = catalog_of(s).ok_or(Rejection::new(0, DropReason::Catalog))?;
-    if !components
-        .iter()
-        .any(|c| c.get("id").and_then(Value::as_str) == Some("root"))
-    {
-        return Err(Rejection::new(0, DropReason::NoRoot));
+        .ok_or(Rejection::new(DropReason::Shape))?;
+    let catalog = catalog_of(s).ok_or(Rejection::new(DropReason::Catalog))?;
+    if !has_root(components) {
+        return Err(Rejection::new(DropReason::NoRoot));
     }
-    for c in components {
+    for (i, c) in components.iter().enumerate() {
         if let Some(schema_path) = schemas().check(catalog, c) {
             return Err(Rejection {
-                surface_index: 0,
-                reason: DropReason::Schema,
                 schema_path: Some(schema_path),
-                component_id: c.get("id").and_then(Value::as_str).map(String::from),
+                component_index: Some(i),
+                component_id: loggable_id(c.get("id").and_then(Value::as_str)),
+                ..Rejection::new(DropReason::Schema)
             });
         }
     }
+    // `updateDataModel.value` may be any JSON value in v0.9.
     let mut out = json!({ "catalogId": catalog.id(), "components": components });
     if let Some(m) = s.get("data_model").filter(|m| !m.is_null()) {
-        if !m.is_object() {
-            return Err(Rejection::new(0, DropReason::Shape));
-        }
         out["data_model"] = m.clone();
     }
     if let Some(t) = s.get("theme").filter(|t| t.is_object()) {
@@ -191,24 +225,22 @@ fn vet_one(s: &Value) -> Result<Value, Rejection> {
     Ok(out)
 }
 
-/// The v0.9 messages for already-vetted surfaces whose catalog `accept`s:
-/// `createSurface` + `updateComponents` (+ `updateDataModel`) each.
-/// `catalog_for` maps the surface's catalog to the id declared on the face
-/// (Gemini Enterprise only knows its composite catalog, a superset of basic).
-pub fn messages(
-    vetted: Option<&Value>,
-    accept: impl Fn(Catalog) -> bool,
-    catalog_for: impl Fn(Catalog) -> &'static str,
-) -> Vec<Value> {
+/// The v0.9 messages for vetted surfaces: `createSurface` (declaring
+/// `catalog_id`) + `updateComponents` (+ `updateDataModel`) each. A surface
+/// with no `root` or an unknown catalog is skipped, so an unvetted value (a
+/// task record stored before vetting existed) can still never go out broken.
+pub fn messages(vetted: Option<&Value>, catalog_id: &str) -> Vec<Value> {
     let Some(list) = vetted.and_then(Value::as_array) else {
         return Vec::new();
     };
     list.iter()
-        .filter_map(|s| {
-            let catalog = catalog_of(s)?;
-            accept(catalog).then(|| surface_messages(s, catalog_for(catalog)))
+        .filter(|s| {
+            catalog_of(s).is_some()
+                && s.get("components")
+                    .and_then(Value::as_array)
+                    .is_some_and(|c| has_root(c))
         })
-        .flatten()
+        .flat_map(|s| surface_messages(s, catalog_id))
         .collect()
 }
 
@@ -429,19 +461,72 @@ mod tests {
             basic(json!([{ "id": "a", "component": "Text", "text": "x" }])),
             json!({ "catalogId": "https://x.test/c.json", "components": [ { "id": "root" } ] }),
         ];
-        raw.extend(std::iter::repeat_n(ok, 6));
+        raw.extend(std::iter::repeat_n(ok, 97));
         let (kept, rej) = vet(&Value::Array(raw));
-        let reasons: Vec<_> = rej.iter().map(|r| (r.surface_index, r.reason)).collect();
+        let reasons: Vec<_> = rej
+            .iter()
+            .map(|r| (r.surface_index, r.reason, r.count))
+            .collect();
         assert_eq!(
             reasons,
             vec![
-                (0, DropReason::Shape),
-                (1, DropReason::NoRoot),
-                (2, DropReason::Catalog),
-                (8, DropReason::OverCap)
-            ]
+                (0, DropReason::Shape, 1),
+                (1, DropReason::NoRoot, 1),
+                (2, DropReason::Catalog, 1),
+                (8, DropReason::OverCap, 92)
+            ],
+            "everything past the cap is ONE rejection"
         );
         assert_eq!(kept.len(), 5);
+    }
+
+    #[test]
+    fn malformed_surfaces_and_components_are_shape_or_schema() {
+        let cases = [
+            (json!({ "components": [] }), DropReason::Shape),
+            (json!({ "components": "x" }), DropReason::Shape),
+            (
+                json!({ "catalogId": 7, "components": [ { "id": "root" } ] }),
+                DropReason::Catalog,
+            ),
+            (basic(json!([ { "id": "root" } ])), DropReason::Schema),
+            (
+                basic(json!([ { "id": "root", "component": "Text", "text": "x" }, "str" ])),
+                DropReason::Schema,
+            ),
+        ];
+        for (surface, want) in cases {
+            let (kept, rej) = vet(&json!([surface.clone()]));
+            assert!(kept.is_empty(), "{surface}");
+            assert_eq!(rej[0].reason, want, "{surface}");
+        }
+    }
+
+    #[test]
+    fn any_json_data_model_is_kept() {
+        for model in [json!([1, 2]), json!("s"), json!(3), json!({ "a": 1 })] {
+            let raw = json!([{ "catalogId": BASIC_CATALOG_ID, "data_model": model.clone(),
+                "components": [ { "id": "root", "component": "Text", "text": "x" } ] }]);
+            let (kept, rej) = vet(&raw);
+            assert!(rej.is_empty(), "{model}: {rej:?}");
+            let msgs = messages(Some(&Value::Array(kept)), BASIC_CATALOG_ID);
+            assert_eq!(msgs[2]["updateDataModel"]["value"], model);
+        }
+    }
+
+    #[test]
+    fn only_plain_component_ids_are_logged() {
+        let id = |raw: &str| {
+            let (_, rej) = vet(&json!([basic(json!([
+                { "id": "root", "component": "Column", "children": [] },
+                { "id": raw, "component": "NoSuchWidget" }
+            ]))]));
+            (rej[0].component_index, rej[0].component_id.clone())
+        };
+        assert_eq!(id("row-1.b:2_x"), (Some(1), Some("row-1.b:2_x".into())));
+        for odd in ["jane@example.com", "a b", &"x".repeat(65), "line\nbreak"] {
+            assert_eq!(id(odd), (Some(1), Some("<unprintable>".into())), "{odd}");
+        }
     }
 
     #[test]
@@ -456,21 +541,20 @@ mod tests {
     }
 
     #[test]
-    fn messages_follow_the_accepted_catalogs() {
+    fn messages_declare_the_face_catalog_and_skip_unrenderable_surfaces() {
         let vetted = json!([
             { "catalogId": BASIC_CATALOG_ID, "components": [ { "id": "root" } ] },
-            { "catalogId": GE_COMPOSITE_CATALOG_ID, "components": [ { "id": "root" } ],
-              "data_model": { "a": 1 }, "theme": { "primaryColor": "#00ff00", "x": 1 } }
+            { "components": [ { "id": "root" } ],
+              "data_model": { "a": 1 }, "theme": { "primaryColor": "#00ff00", "x": 1 } },
+            { "components": [ { "id": "no-root" } ] },
+            { "catalogId": "https://x.test/c.json", "components": [ { "id": "root" } ] }
         ]);
-        let basic_only = messages(Some(&vetted), |c| c == Catalog::Basic, Catalog::id);
-        assert_eq!(basic_only.len(), 2);
+        let ge = messages(Some(&vetted), GE_COMPOSITE_CATALOG_ID);
         assert_eq!(
-            basic_only[0]["createSurface"]["catalogId"],
-            BASIC_CATALOG_ID
+            ge.len(),
+            5,
+            "two surfaces; no-root and unknown catalog skipped"
         );
-
-        let ge = messages(Some(&vetted), |_| true, |_| GE_COMPOSITE_CATALOG_ID);
-        assert_eq!(ge.len(), 5);
         assert!(ge.iter().all(|m| {
             m["createSurface"]["catalogId"]
                 .as_str()

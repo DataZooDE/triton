@@ -248,8 +248,10 @@ async fn an_unknown_catalog_is_dropped() {
     );
 }
 
+/// A2A `message/stream` runs the turn through the task runner (buffered
+/// dispatch underneath); the streamed reply is vetted all the same.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_streamed_answer_is_vetted_too() {
+async fn an_a2a_streamed_answer_is_vetted_too() {
     let (triton, _agent) = spawn(answer(vec![unknown_component()])).await;
 
     let body = post(&triton, "message/stream")
@@ -269,4 +271,73 @@ async fn a_streamed_answer_is_vetted_too() {
     let warns = drop_warnings(&triton, 1).await;
     assert_eq!(warns[0]["fields"]["reason"], "schema");
     assert_no_secret_logged(&triton);
+}
+
+/// The `surface.a2ui` list wherever it sits in a REST reply or SSE frame.
+fn find_a2ui(v: &Value) -> Option<&Vec<Value>> {
+    match v {
+        Value::Object(m) => m
+            .get("surface")
+            .and_then(|s| s.get("a2ui"))
+            .and_then(Value::as_array)
+            .or_else(|| m.values().find_map(find_a2ui)),
+        Value::Array(a) => a.iter().find_map(find_a2ui),
+        _ => None,
+    }
+}
+
+async fn rest_call(triton: &TritonProcess, sse: bool) -> String {
+    let mut req = reqwest::Client::new()
+        .post(triton.rest_url("/v1/tools/ask_portfolio_agent"))
+        .bearer_auth("dev-token")
+        .json(&json!({ "message": "Which claims are close calls?" }));
+    if sse {
+        req = req.header("Accept", "text/event-stream");
+    }
+    let resp = req.send().await.expect("POST /v1/tools");
+    assert!(resp.status().is_success(), "{}", resp.status());
+    resp.text().await.expect("body")
+}
+
+/// A streaming upstream (`invoke_streaming`, REST `Accept: text/event-stream`)
+/// is vetted on its terminal `done`, and vetting does not need A2UI to be
+/// negotiated: a plain REST caller sees only the valid surface too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_streaming_upstream_is_vetted_without_a2ui_negotiated() {
+    let agent = FakeAgent::start_streaming_returning(answer(vec![unknown_component()])).await;
+    let triton =
+        TritonProcess::spawn_with_env(Duration::from_secs(10), a2a_env(&agent, true)).await;
+
+    let body = rest_call(&triton, true).await;
+    let done = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data:"))
+        .filter_map(|d| serde_json::from_str::<Value>(d.trim()).ok())
+        .find_map(|f| find_a2ui(&f).cloned())
+        .unwrap_or_else(|| panic!("no surface.a2ui in the stream:\n{body}"));
+    assert_eq!(
+        done,
+        vec![json!({
+            "catalogId": triton_core::a2ui::passthrough::GE_COMPOSITE_CATALOG_ID,
+            "components": good_ge_surface()["components"],
+            "theme": good_ge_surface()["theme"],
+        })]
+    );
+    let warns = drop_warnings(&triton, 1).await;
+    assert_eq!(warns[0]["fields"]["reason"], "schema");
+    assert_no_secret_logged(&triton);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_plain_rest_answer_is_vetted() {
+    let (triton, _agent) = spawn(answer(vec![button_without_action()])).await;
+
+    let body: Value = serde_json::from_str(&rest_call(&triton, false).await).expect("json");
+    let a2ui = find_a2ui(&body).unwrap_or_else(|| panic!("no surface.a2ui: {body:#}"));
+    assert_eq!(a2ui.len(), 1, "{body:#}");
+    let m = metrics(&triton).await;
+    assert!(
+        m.contains(r#"triton_a2ui_passthrough_dropped_total{reason="schema"} 1"#),
+        "{m}"
+    );
 }

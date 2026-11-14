@@ -1265,8 +1265,7 @@ pub fn build_messages_with(
     // of basic).
     let mut messages = passthrough::messages(
         result.get("surface").and_then(|s| s.get("a2ui")),
-        |_| true,
-        |_| GE_COMPOSITE_CATALOG,
+        GE_COMPOSITE_CATALOG,
     );
     messages.extend(card_messages(result, signer, opts).unwrap_or_default());
     (!messages.is_empty()).then_some(messages)
@@ -1877,15 +1876,33 @@ mod tests {
         );
     }
 
-    /// A surface without a `root` component cannot render; the dispatcher's
-    /// vetting drops it before GE ever sees it.
+    /// A surface without a `root` component cannot render: the dispatcher's
+    /// vetting drops it, and GE skips it even unvetted (a task record stored
+    /// by an older binary).
     #[test]
     fn a2ui_surface_without_root_is_dropped() {
-        let mut result = json!({ "surface": { "a2ui": [{ "components": [
+        let unvetted = json!({ "surface": { "a2ui": [{ "components": [
             { "id": "card", "component": "MaterialCard", "children": [] }
         ]}]}});
+        assert!(build_messages(&unvetted).is_none());
+        let mut vetted = unvetted.clone();
+        passthrough::vet_result(&mut vetted);
+        assert!(build_messages(&vetted).is_none());
+    }
+
+    /// At most `passthrough::MAX_SURFACES` producer surfaces reach GE.
+    #[test]
+    fn a2ui_surfaces_are_capped() {
+        let one =
+            json!({ "components": [ { "id": "root", "component": "MaterialText", "text": "x" } ] });
+        let mut result = json!({ "surface": { "a2ui": vec![one; passthrough::MAX_SURFACES + 3] } });
         passthrough::vet_result(&mut result);
-        assert!(build_messages(&result).is_none());
+        let msgs = build_messages(&result).expect("messages");
+        let creates = msgs
+            .iter()
+            .filter(|m| m.get("createSurface").is_some())
+            .count();
+        assert_eq!(creates, passthrough::MAX_SURFACES);
     }
 
     /// The typed vocabulary every other channel uses ignores `surface.a2ui`, so
