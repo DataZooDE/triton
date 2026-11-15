@@ -22,6 +22,7 @@
           "variant": "caption"
         },
         {
+          "align": "start",
           "children": [
             "c1",
             "c2"
@@ -56,6 +57,7 @@
           "variant": "caption"
         },
         {
+          "align": "start",
           "children": [
             "c5",
             "c6"
@@ -90,6 +92,7 @@
           "variant": "caption"
         },
         {
+          "align": "start",
           "children": [
             "c9",
             "c10"

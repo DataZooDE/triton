@@ -57,6 +57,14 @@ check "one click sends one ui/message (and a second, in flight, none)" "$(sent u
 check "the message is the row's request" "$($R js "(window.hostLog.find(m=>m.method==='ui/message')||{params:{content:[{}]}}).params.content[0].text")" 'Show the agent "Agent 3"'
 check "an unanswered ui/message is not re-sent through window.openai" "$($R js "window.followups.length")" "0"
 
+# A clickable list row's lines (label and detail, wrapped or not) all start
+# at the same x: an HTML <button> centres its content.
+rowsleft() { $R js "(()=>{const lefts=(e)=>{const r=document.createRange(); r.selectNodeContents(e); return [...r.getClientRects()].map((q)=>Math.round(q.left));}; const off=window.deep('button.a2ui-button-borderless').filter((b)=>b.querySelector('.a2ui-text-caption')).filter((b)=>{const l=[...lefts(b.querySelector('.a2ui-text-body')),...lefts(b.querySelector('.a2ui-text-caption'))]; return Math.max(...l)-Math.min(...l)>1;}); return off.length ? off.length+' rows off' : 'all'; })()"; }
+load 1a
+check "a list row's label and detail are left-aligned" "$(rowsleft)" "all"
+$R js "document.getElementById('frame').style.width='220px'" >/dev/null; $R sleep 0.5 >/dev/null
+check "... and stay left-aligned when they wrap" "$(rowsleft)" "all"
+
 # ── links ──────────────────────────────────────────────────────────────
 load 3a
 $R js "window.clickText('Open in the portfolio')" >/dev/null; $R sleep 0.5 >/dev/null

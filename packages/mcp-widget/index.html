@@ -12,6 +12,10 @@
   #app { display: flex; flex-direction: column; gap: 12px; padding: 2px; }
   #status { font-size: 12px; opacity: .8; min-height: 0; }
   #status.err { color: #b3261e; opacity: 1; }
+  /* A borderless button is a clickable row or cell, not a pill: its lines
+     start left like the text around it (a <button> centres by default,
+     and the basic catalog has no text-align prop). */
+  .a2ui-button-borderless { text-align: start; }
 </style>
 </head>
 <body>

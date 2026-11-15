@@ -1202,3 +1202,24 @@ fn a_tables_columns_line_up() {
     let head: Vec<Value> = refs(&rows[0]).iter().map(|id| by_id(id)).collect();
     assert!(head.iter().all(|c| c["variant"] == "h5"), "{head:?}");
 }
+
+/// A list row that is itself the control (a borderless button around the
+/// label and detail column) reads left-aligned: an HTML `<button>` centres
+/// its content, so the column packs its lines at the start instead of
+/// stretching them (where the shorter label line centred over the detail).
+#[test]
+fn a_clickable_list_rows_lines_are_left_aligned() {
+    let d = card_of(&fixture("1a")).unwrap();
+    let comps = components(&d);
+    let by_id = |id: &str| comps.iter().find(|c| c["id"] == id).unwrap().clone();
+    let inner: Vec<Value> = comps
+        .iter()
+        .filter(|c| c["component"] == "Button")
+        .map(|b| by_id(b["child"].as_str().unwrap()))
+        .filter(|c| c["component"] == "Column")
+        .collect();
+    assert_eq!(inner.len(), 6, "six clickable list rows");
+    for c in &inner {
+        assert_eq!(c["align"], "start", "{c}");
+    }
+}
