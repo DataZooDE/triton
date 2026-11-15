@@ -250,6 +250,13 @@ impl Builder {
         b.push(json!({ "id": id, "component": "Column", "children": children }))
     }
 
+    /// A column whose children keep their own width, packed at the start
+    /// (`align` is CSS `align-items` on a Column; the default stretches).
+    fn start_column(&mut self, b: &mut Block, children: Vec<String>) -> String {
+        let id = self.ids.next();
+        b.push(json!({ "id": id, "component": "Column", "children": children, "align": "start" }))
+    }
+
     fn row(&mut self, b: &mut Block, children: Vec<String>) -> String {
         let id = self.ids.next();
         b.push(json!({ "id": id, "component": "Row", "children": children, "align": "center" }))
@@ -544,18 +551,23 @@ impl Builder {
         if let Some(d) = non_blank(it.detail.as_deref()) {
             lines.push(self.text(b, d, "caption"));
         }
-        let col = self.column(b, lines);
         let Some(a) = it.action.as_ref().and_then(event) else {
-            return col;
+            return self.column(b, lines);
         };
         // A separate control at the end of the row, or the row itself.
         match non_blank(it.action_label.as_deref()) {
             Some(l) => {
+                let col = self.column(b, lines);
                 let label = self.text(b, l, "body");
                 let btn = self.button(b, label, a, "default");
                 self.row(b, vec![col, btn])
             }
-            None => self.button(b, col, a, "borderless"),
+            None => {
+                // A `<button>` centres its content: pack the lines at the
+                // start, or the label centres over a wider detail line.
+                let col = self.start_column(b, lines);
+                self.button(b, col, a, "borderless")
+            }
         }
     }
 
