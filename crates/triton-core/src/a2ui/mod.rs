@@ -18,6 +18,7 @@ use serde_json::Value;
 
 pub mod basic;
 pub mod ge;
+pub mod in_card;
 pub mod mcp_app;
 pub mod passthrough;
 pub mod text;
@@ -270,11 +271,29 @@ pub(crate) fn button_action(tool: &str, args: &Value, action: Option<&Action>) -
 /// with exactly `text` — the same as if the user had typed it; `open_url`
 /// opens a deep link. Neither needs the card to be remembered anywhere: the
 /// channel signs the payload into the control itself (triton-correlation).
+///
+/// `rerun` (#369) asks for the same answer with other arguments (a page, a
+/// filter, a refresh): where the card is rendered in place (an MCP Apps
+/// host, and only for a tool the operator declared in-card capable and the
+/// upstream annotates `readOnlyHint`), Triton calls the producing tool again
+/// with `args` laid over the call's own and replaces the card, without a new
+/// turn. Everywhere else it is exactly `send_message` with `fallback`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Action {
-    SendMessage { text: String },
-    OpenUrl { url: String },
+    SendMessage {
+        text: String,
+    },
+    OpenUrl {
+        url: String,
+    },
+    Rerun {
+        /// Laid over the producing call's arguments (top-level keys).
+        args: serde_json::Map<String, Value>,
+        /// The complete request sent as a new turn where the card cannot
+        /// be updated in place.
+        fallback: String,
+    },
 }
 
 /// The submit of a template-carrying [`Component::Selection`].
@@ -343,6 +362,11 @@ pub struct Chip {
     pub label: String,
     /// The complete request a click sends, verbatim.
     pub message: String,
+    /// #369: arguments laid over the producing call's own to re-run it in
+    /// place (a filter chip); `message` is then the fallback, as with
+    /// [`Action::Rerun`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerun: Option<serde_json::Map<String, Value>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -582,7 +606,7 @@ impl Action {
     pub fn is_safe(&self) -> bool {
         match self {
             Action::OpenUrl { url } => crate::links::is_allowed_link(url),
-            Action::SendMessage { .. } => true,
+            Action::SendMessage { .. } | Action::Rerun { .. } => true,
         }
     }
 }

@@ -38,6 +38,10 @@ tools:
   my-conversational-tool:
     surface_components: [text, buttons, selections, forms, lists, tables,
                          chips, trees, notices, progress, key_values, embeds]
+    # Optional (#369): the MCP Apps answer card may re-run this tool in
+    # place for `rerun` controls (paging, filter chips). Honoured only while
+    # the tool's tools/list entry says `readOnlyHint: true`.
+    # in_card: true
 
   # A raw-JSON tool with no UI declares an empty surface.
   my-raw-tool:

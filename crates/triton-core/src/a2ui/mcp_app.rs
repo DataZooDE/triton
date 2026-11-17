@@ -73,8 +73,14 @@ pub struct McpCard {
 /// basic-catalog passthrough surfaces (the renderer knows no other
 /// catalog), then Triton's card. `None` when there is nothing to draw.
 pub fn card(result: &Value) -> Option<McpCard> {
+    card_with(result, None)
+}
+
+/// [`card`], with the card's reruns signed by `rerun` as in-card calls
+/// (#369, [`super::in_card`]).
+pub fn card_with(result: &Value, rerun: Option<basic::Rerun<'_>>) -> Option<McpCard> {
     let mut messages = producer_messages(result);
-    let own = basic::project(result);
+    let own = basic::project_with(result, rerun);
     let summary = own.as_ref().map(|c| c.summary.clone());
     messages.extend(own.into_iter().flat_map(|c| c.messages));
     (!messages.is_empty()).then_some(McpCard { messages, summary })

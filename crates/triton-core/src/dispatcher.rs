@@ -203,7 +203,14 @@ pub struct Dispatcher {
     /// rendering hint. Defaults to the HTTP trio; the host adds its chat
     /// channels with [`Dispatcher::with_surfaces`].
     surfaces: Arc<SurfaceRegistry>,
+    /// #369: which tools a card may call in place, and the per-principal
+    /// rate limit on those calls. No tool by default: every in-card call is
+    /// refused until the operator declares one.
+    in_card: in_card::InCardPolicy,
 }
+
+mod in_card;
+pub use in_card::{InCardDispatch, InCardEvent};
 
 /// Everything a dispatcher enforces that is not a tool: who is revoked,
 /// which scopes are restricted, and how rejection audit is coalesced.
@@ -419,6 +426,7 @@ impl Dispatcher {
             denied: controls.denied_principals,
             scope_restrictions: controls.scope_restrictions,
             surfaces: Arc::new(SurfaceRegistry::with_trio_defaults()),
+            in_card: in_card::InCardPolicy::default(),
         }
     }
 
@@ -1049,6 +1057,23 @@ impl Dispatcher {
                 Ok(_) => unreachable!("constructed as Err"),
             }
         }
+        self.dispatch_authorized(tool_name, args, principal, protocol, overrides, None)
+            .await
+    }
+
+    /// The dispatch after every gate passed: reserved args, context, run,
+    /// the one audit line (with its in-card part, #369), the result. Shared
+    /// by [`Self::invoke_with`] and `invoke_in_card`, so a gate or metric
+    /// added here covers both.
+    async fn dispatch_authorized(
+        &self,
+        tool_name: &str,
+        args: Value,
+        principal: Principal,
+        protocol: &str,
+        overrides: ContextOverrides,
+        in_card: Option<&crate::audit::InCardAudit>,
+    ) -> Result<Dispatch, TritonError> {
         // #352: `_triton` is Triton's reserved key. Whatever a caller put
         // there is dropped, so it can't forge the hint an agent receives.
         let args = prepare_args(args, &overrides);
@@ -1056,7 +1081,9 @@ impl Dispatcher {
         let started = Instant::now();
         let outcome = self.run(tool_name, args, &principal, &ctx).await;
         let latency_ms = started.elapsed().as_millis() as u64;
-        self.audit_dispatch(tool_name, protocol, &principal, latency_ms, &outcome);
+        self.audit_dispatch_with(
+            tool_name, protocol, &principal, latency_ms, &outcome, in_card,
+        );
         let returns_a2ui = self
             .registry
             .get(tool_name)
@@ -1252,6 +1279,7 @@ impl Dispatcher {
             sender_ref: None,
             destination: None,
             suppressed,
+            in_card: None,
             trace_id,
         });
     }
@@ -1333,6 +1361,7 @@ impl Dispatcher {
             sender_ref: principal.sender_ref.as_deref(),
             destination,
             suppressed: None,
+            in_card: None,
             trace_id: &principal.trace_id,
         });
     }
@@ -1412,6 +1441,7 @@ impl Dispatcher {
             sender_ref: principal.sender_ref.as_deref(),
             destination: None,
             suppressed: None,
+            in_card: None,
             trace_id: &principal.trace_id,
         });
         // Reconstruct a parallel error so we can both audit and return.
@@ -1465,6 +1495,19 @@ impl Dispatcher {
         latency_ms: u64,
         outcome: &Result<Value, TritonError>,
     ) {
+        self.audit_dispatch_with(tool_name, protocol, principal, latency_ms, outcome, None);
+    }
+
+    /// [`Self::audit_dispatch`] with the in-card part of the line (#369).
+    fn audit_dispatch_with(
+        &self,
+        tool_name: &str,
+        protocol: &str,
+        principal: &Principal,
+        latency_ms: u64,
+        outcome: &Result<Value, TritonError>,
+        in_card: Option<&crate::audit::InCardAudit>,
+    ) {
         let (result, status) = match outcome {
             Ok(_) => ("ok".to_string(), 200),
             Err(e) => (format!("error:{}", e.class()), status_for(e)),
@@ -1495,6 +1538,7 @@ impl Dispatcher {
             sender_ref: principal.sender_ref.as_deref(),
             destination: None,
             suppressed: None,
+            in_card,
             trace_id: &principal.trace_id,
         });
     }
@@ -1615,6 +1659,7 @@ fn emit_stream_audit(a: StreamAudit<'_>) {
         sender_ref: a.sender_ref,
         destination: None,
         suppressed: None,
+        in_card: None,
         trace_id: a.trace_id,
     });
 }

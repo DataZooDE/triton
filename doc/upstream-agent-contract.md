@@ -328,10 +328,12 @@ Notes for agent authors:
   own card (the widget bundles the official renderer, which ships the basic
   catalog only; GE-composite surfaces stay Gemini-only). On MCP they ride the
   result `_meta`, never the model-visible `content`/`structuredContent`. A
-  click on a producer's own event does nothing there yet (#369); avoid `Icon`
+  click on a producer's own event there does nothing, except an in-card event
+  (`triton.in_card:<name>`, §4a); avoid `Icon`
   (it needs a font the host frame's CSP does not load). Event names starting
   `triton.` are reserved for Triton's own card: a surface whose control fires
-  one is dropped (`reason="reserved_event"`). On MCP a producer's basic
+  one is dropped (`reason="reserved_event"`), except the in-card marker
+  `triton.in_card:<name>`. On MCP a producer's basic
   surfaces (and their `data_model`) reach every client's result `_meta` while
   the widget is on, whether or not it negotiated anything; the widget's
   producer surfaces are capped at 64 KiB in all (trailing ones dropped). A click on a producer's button comes back as a
@@ -345,6 +347,78 @@ Notes for agent authors:
   `createSurface.sendDataModel` is not honoured.
 - Triton owns the dispatch/post audit pair (ADR-6). Agents emit their
   own logs but must not assume their response body is audited.
+
+### 4a. In-card actions: re-run a read-only tool in place (#369)
+
+On an MCP Apps host (Claude, ChatGPT) a click is normally a new user turn
+(`ui/message`; Claude stages it behind a confirmation banner). For a control
+that asks for **the same answer with other arguments** (a page, a filter
+chip, a refresh, a read-only search) the card can instead call your tool
+again and replace itself, without a turn and without the model. The rule
+"a click is a complete new request, the agent never asks back" still holds:
+each in-card call is a fresh, stateless `(tool, args, principal)` dispatch
+that you answer completely or refuse.
+
+**Mark the control.** On Triton's card (conversation components):
+
+```json
+{ "kind": "button", "label": "Next", "primary": true,
+  "action": { "type": "rerun", "args": { "page": 2 },
+              "fallback": "Show page 2 of the planned agents" } }
+{ "kind": "chips", "chips": [
+  { "label": "High risk", "message": "Show only the high-risk planned agents",
+    "rerun": { "filter": "high", "page": 1 } } ] }
+```
+
+`args` are laid over the arguments of the call that produced the card
+(top-level keys; `_triton` is never carried), so you name only what changes.
+`fallback` (a chip's `message`) is a complete request: every other channel
+(A2A, Gemini Enterprise, Teams, chat, text) and every host that cannot call
+in place sends it as a new turn, exactly like `send_message`, and so does the
+widget whenever the in-card call fails. A rerun without a sendable fallback is
+no control. On a producer's own basic-catalog surface (§4), name the event
+`triton.in_card:<name>`; it arrives as one entry of
+`_triton.client.a2ui_events` (§2b) on a re-run of the call that produced the
+surface, with the event's resolved `context`. Triton signs exactly the
+in-card event names and surfaces of that answer into the result's token, so
+a client cannot invent another name; the `context` stays client-asserted.
+An in-card event must not have a side effect, whatever its name. A producer
+event has no fallback turn: if the host cannot call in place, or the call is
+refused, the click does nothing (the widget never sends a producer's text as
+the user's). Form submits are not in-card yet: a form stays `send_message`.
+
+**What you receive.** An in-card dispatch is a normal call of your tool on
+the `mcp` channel with `_triton.client.in_card: true`. It is buffered (no
+`text/event-stream` offered), so it cannot become an asynchronous task (§7):
+answer within the normal timeout. Answer it like any call: the result's card (and producer surfaces) replace the old ones in
+place, and the widget sends the one-line card text to the model with
+`ui/update-model-context`. Put the card's state into the header so the user
+and the model can tell why it changed (`"context": "Page 2 of 3 · Filter:
+high"`). Drill-downs ("Show agent X") change the topic: keep them
+`send_message`. Anything that writes, files, drafts or proposes stays
+`send_message` too.
+
+**Conditions (all enforced by Triton, any failure is a refusal):**
+
+- The operator declares the tool in-card capable in `adapter.yaml`
+  (`tools.<name>.in_card: true`), **and** your `tools/list` (§2a) annotates
+  it `readOnlyHint: true`. Replaying a read is harmless; a write must stay a
+  visible turn the user confirms. A declared tool that is not annotated
+  read-only (or whose `tools/list` did not answer) gets no in-card controls,
+  only their fallbacks, and Triton logs a warning; a token for it is refused
+  (`forbidden`) before it reaches you. A yes is cached for 60 s, a no for 5 s.
+- Each control carries a token signed with `TRITON_A2UI_ACTION_KEY` over
+  `(tool, args)` (and, for producer events, the allowed names and surfaces),
+  bound to the tenant, the principal's `sub` and the issuer that verified it,
+  valid for at most 24 h. A client cannot change the tool or the arguments, and another
+  user cannot use a leaked card. There is no nonce store: a replay by the
+  same principal within the expiry re-reads what that principal may read.
+- Authorization is the dispatcher's, as for any call (revocation, scope
+  restrictions), with your bearer minted for the same principal.
+- A per-principal rate limit (10 in a burst, 2/s sustained).
+- One audit line per call, with `in_card: {ingress: "mcp-app-event", kind,
+  event, source_component_id, token, context_keys, context_bytes}`: key
+  names and sizes of the context, never values.
 
 ## 5. The `upstream` identity-resolution strategy (FR-I-7)
 

@@ -34,10 +34,12 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::{Value, json};
-use triton_core::a2ui::{build_envelope, extract_surface, mcp_app};
+use triton_core::a2ui::{build_envelope, extract_surface, in_card, mcp_app};
 use triton_core::{A2uiVersion, Dispatcher, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
+use crate::mcp_in_card::{self, Origin};
+use triton_core::a2ui::in_card::Holder;
 
 /// JSON-RPC 2.0 error codes per architecture.md §8.3.
 const CODE_PARSE_ERROR: i32 = -32700;
@@ -367,7 +369,7 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
             initialize_response(id, &params, &state)
         }),
         "tools/list" => {
-            let response = tools_list_response(id.clone(), &state).await;
+            let response = tools_list_response(id.clone(), &state, card_host).await;
             maybe_respond(id_present, id, |_| response)
         }
         "tools/call" => {
@@ -685,7 +687,7 @@ fn initialize_response(id: Value, params: &Value, state: &McpState) -> Response 
     response
 }
 
-async fn tools_list_response(id: Value, state: &McpState) -> Response {
+async fn tools_list_response(id: Value, state: &McpState, card_host: bool) -> Response {
     // MCP's tool descriptor uses camelCase (`inputSchema`) — we
     // translate from `ToolDescriptor` here. `returns_a2ui` and the
     // upstream flag are Triton-specific and not part of MCP's spec, so
@@ -717,6 +719,13 @@ async fn tools_list_response(id: Value, state: &McpState) -> Response {
             tool
         })
         .collect();
+    // #369: the card's own tool, for a host that renders the card, when the
+    // operator declared any tool in-card capable. Listing it is cosmetic
+    // (any bearer may call it); the dispatcher decides each call.
+    let mut tools = tools;
+    if card_host && state.dispatcher.has_in_card_tools() {
+        tools.push(mcp_in_card::descriptor());
+    }
     rpc_ok(id, json!({ "tools": tools }))
 }
 
@@ -742,6 +751,20 @@ async fn tools_call(
         Err(e) => return rpc_error(id, CODE_INVALID_PARAMS, &e),
     };
 
+    // #369: a card control re-running its tool in place.
+    if tool_name == in_card::TOOL_NAME {
+        return in_card_call(id, &args, principal, requested, state).await;
+    }
+    // The card's in-card controls repeat this call, for this principal:
+    // only on a host that renders the card, for a tool declared in-card
+    // capable and annotated read-only (checked again when a control is
+    // used). Everywhere else they are their fallback messages.
+    let origin_of = if card_host && state.dispatcher.in_card_ready(&tool_name).await {
+        Some((args.clone(), principal.clone()))
+    } else {
+        None
+    };
+
     let outcome = match &state.tasks {
         Some(runner)
             if state.dispatcher.has_upstream() && !state.dispatcher.is_in_process(&tool_name) =>
@@ -764,114 +787,13 @@ async fn tools_call(
         }
     };
     match outcome {
-        Ok(mut d) => {
-            let trace_id = d.trace_id.clone();
-            // Issue #143 (A): an MCP-Apps upstream (e.g. peacock's
-            // `render_report`) returns its UI resource link under the
-            // result's `_meta.ui.*`. Capture it before any A2UI wrap
-            // rewrites `d.result`, so it can be surfaced on the
-            // `tools/call` response `_meta` for the host to render.
-            // Unknown `ui.*` siblings are preserved verbatim, but only a
-            // structured object is reflected (#143 review, [MEDIUM]):
-            // refuse to mirror an arbitrary scalar/array blob a hostile
-            // upstream might stuff under `_meta.ui` to bloat the response.
-            // (The cross-upstream `resourceUri` confused-deputy surface
-            // noted in review is bounded by the trust model — every
-            // upstream is operator-registered in TRITON_STATIC_UPSTREAMS
-            // and any caller can already reach any registered tool — and
-            // documented in realizations.md §7.)
-            let ui_meta = d
-                .result
-                .get("_meta")
-                .and_then(|m| m.get("ui"))
-                .filter(|ui| ui.is_object())
-                .cloned();
-            // An upstream agent may attach a per-turn tool trace under
-            // `_meta.tool_trace` (which tools ran + the data they touched) —
-            // a host-render debug sidecar, mirrored to the response `_meta`
-            // exactly like `ui` (and captured before the A2UI wrap rewrites
-            // `d.result`). Only a structured array is reflected; a scalar/
-            // object blob is ignored, so an upstream can't bloat the response.
-            let tool_trace = d
-                .result
-                .get("_meta")
-                .and_then(|m| m.get("tool_trace"))
-                .filter(|t| t.is_array())
-                .cloned();
-            // Flatten the tool's A2UI surface to human-readable Markdown
-            // BEFORE the A2UI wrap rewrites `d.result` — the same prose the
-            // spec-A2A face serves (prose + `![chart](image_url)` + clickable
-            // sources). An MCP host with a text bubble (Copilot Studio's MCP
-            // tool, ChatGPT) then shows a real summary and renders the
-            // convergence chart inline, instead of the raw envelope JSON its
-            // model would otherwise re-summarise into a dead `ui://` stub.
-            // Structured clients still get the full typed envelope in
-            // `structuredContent` below, unchanged.
-            let reply_text = crate::a2a_spec::reply_text(&d.result);
-            let companions = crate::a2a_spec::card_companions(&d.result);
-            // The answer card's A2UI v0.9 messages, from the canonical
-            // surface and the producer's basic-catalog passthrough surfaces
-            // (before the A2UI wrap). A result that brings its own MCP App
-            // (`_meta.ui`) keeps it; there is no card to draw then.
-            let widget = (state.widget && ui_meta.is_none())
-                .then(|| mcp_app::card(&d.result))
-                .flatten();
-            // Producer surfaces are for the widget only: the model reads
-            // `structuredContent`, so they never ride the envelope (#368),
-            // whether or not the widget is on.
-            if let Some(s) = d.result.get_mut("surface").and_then(Value::as_object_mut) {
-                s.remove("a2ui");
-            }
-            // A host that renders the card shows its rows to the user; with
-            // the rows in the text as well, its model repeats them as its
-            // own table. Such a host's model gets one line (the card's title
-            // and row names) and a note instead, followed by what the card
-            // does not show (narration, charts, sources). Every other client,
-            // and a card without rows, keeps the full text.
-            let reply_text = match widget
-                .as_ref()
-                .filter(|_| card_host)
-                .and_then(|w| w.summary.as_ref())
-                .and_then(|s| mcp_app::card_text(s, &state.card_note))
-            {
-                Some(line) => match companions {
-                    Some(rest) => format!("{line}\n\n{rest}"),
-                    None => line,
-                },
-                None => reply_text,
-            };
-            if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
-                return rpc_error(id, code_for(&e), &e.to_string());
-            }
-            // MCP's `tools/call` result carries `content` (text-shaped
-            // for UI display) and `structuredContent` (typed value).
-            // `content` is the flattened prose+chart+sources (above);
-            // `structuredContent` is the canonical typed envelope, the
-            // same dict REST/A2A get.
-            let env_v = envelope(&d);
-            let mut meta = json!({ "trace_id": trace_id });
-            // The card's messages ride the result `_meta`: the host hands
-            // them to the widget (MCP Apps `ui/notifications/tool-result`,
-            // ChatGPT `toolResponseMetadata`) but not to the model, which
-            // already has the text and the envelope.
-            if let Some(w) = widget {
-                meta[mcp_app::META_KEY] = Value::Array(w.messages);
-            }
-            if let Some(ui) = ui_meta {
-                meta["ui"] = ui;
-            }
-            if let Some(trace) = tool_trace {
-                meta["tool_trace"] = trace;
-            }
-            rpc_ok(
-                id,
-                json!({
-                    "content": [{ "type": "text", "text": reply_text }],
-                    "structuredContent": env_v,
-                    "isError": false,
-                    "_meta": meta
-                }),
-            )
+        Ok(d) => {
+            let origin = origin_of.as_ref().map(|(args, p)| Origin {
+                tool: &tool_name,
+                args,
+                holder: Holder::of(p),
+            });
+            answer(id, d, card_host, requested, state, origin.as_ref())
         }
         Err(e) => {
             // An agent-side fault reaches the client (and through its model,
@@ -885,6 +807,179 @@ async fn tools_call(
             }
         }
     }
+}
+
+/// #369: an in-card call. The dispatcher checks and audits it; the answer
+/// is projected like any card host's (the widget replaces the card with
+/// it). A refusal is a tool error result (`isError`), on which the widget
+/// sends the control's fallback as a new turn.
+async fn in_card_call(
+    id: Value,
+    args: &Value,
+    principal: triton_core::Principal,
+    requested: Option<A2uiVersion>,
+    state: &McpState,
+) -> Response {
+    let caller = principal.clone();
+    match state
+        .dispatcher
+        .invoke_in_card(mcp_in_card::event(args), principal)
+        .await
+    {
+        Ok(ic) => {
+            let origin = Origin {
+                tool: &ic.tool,
+                args: &ic.args,
+                holder: Holder::of(&caller),
+            };
+            answer(id, ic.dispatch, true, requested, state, Some(&origin))
+        }
+        Err(e) => {
+            let text = match e {
+                TritonError::Tool(_) | TritonError::Provider(_) => e.user_notice().to_string(),
+                _ => e.to_string(),
+            };
+            rpc_ok(
+                id,
+                json!({
+                    "content": [{ "type": "text", "text": text }],
+                    "structuredContent": { "error": e.class() },
+                    "isError": true
+                }),
+            )
+        }
+    }
+}
+
+/// A successful `tools/call` result: text, envelope and the card data.
+/// `origin` signs the card's in-card controls (#369); without it they are
+/// their fallback messages.
+fn answer(
+    id: Value,
+    mut d: triton_core::Dispatch,
+    card_host: bool,
+    requested: Option<A2uiVersion>,
+    state: &McpState,
+    origin: Option<&Origin<'_>>,
+) -> Response {
+    let trace_id = d.trace_id.clone();
+    // Issue #143 (A): an MCP-Apps upstream (e.g. peacock's
+    // `render_report`) returns its UI resource link under the
+    // result's `_meta.ui.*`. Capture it before any A2UI wrap
+    // rewrites `d.result`, so it can be surfaced on the
+    // `tools/call` response `_meta` for the host to render.
+    // Unknown `ui.*` siblings are preserved verbatim, but only a
+    // structured object is reflected (#143 review, [MEDIUM]):
+    // refuse to mirror an arbitrary scalar/array blob a hostile
+    // upstream might stuff under `_meta.ui` to bloat the response.
+    // (The cross-upstream `resourceUri` confused-deputy surface
+    // noted in review is bounded by the trust model — every
+    // upstream is operator-registered in TRITON_STATIC_UPSTREAMS
+    // and any caller can already reach any registered tool — and
+    // documented in realizations.md §7.)
+    let ui_meta = d
+        .result
+        .get("_meta")
+        .and_then(|m| m.get("ui"))
+        .filter(|ui| ui.is_object())
+        .cloned();
+    // An upstream agent may attach a per-turn tool trace under
+    // `_meta.tool_trace` (which tools ran + the data they touched) —
+    // a host-render debug sidecar, mirrored to the response `_meta`
+    // exactly like `ui` (and captured before the A2UI wrap rewrites
+    // `d.result`). Only a structured array is reflected; a scalar/
+    // object blob is ignored, so an upstream can't bloat the response.
+    let tool_trace = d
+        .result
+        .get("_meta")
+        .and_then(|m| m.get("tool_trace"))
+        .filter(|t| t.is_array())
+        .cloned();
+    // Flatten the tool's A2UI surface to human-readable Markdown
+    // BEFORE the A2UI wrap rewrites `d.result` — the same prose the
+    // spec-A2A face serves (prose + `![chart](image_url)` + clickable
+    // sources). An MCP host with a text bubble (Copilot Studio's MCP
+    // tool, ChatGPT) then shows a real summary and renders the
+    // convergence chart inline, instead of the raw envelope JSON its
+    // model would otherwise re-summarise into a dead `ui://` stub.
+    // Structured clients still get the full typed envelope in
+    // `structuredContent` below, unchanged.
+    let reply_text = crate::a2a_spec::reply_text(&d.result);
+    let companions = crate::a2a_spec::card_companions(&d.result);
+    // The answer card's A2UI v0.9 messages, from the canonical
+    // surface and the producer's basic-catalog passthrough surfaces
+    // (before the A2UI wrap). A result that brings its own MCP App
+    // (`_meta.ui`) keeps it; there is no card to draw then.
+    let sign =
+        |overlay: &serde_json::Map<String, Value>| origin.and_then(|o| o.sign_rerun(overlay));
+    let rerun: Option<triton_core::a2ui::basic::Rerun<'_>> = origin.map(|_| &sign as _);
+    let widget = (state.widget && ui_meta.is_none())
+        .then(|| mcp_app::card_with(&d.result, rerun))
+        .flatten();
+    // A producer surface's in-card events repeat this call.
+    let event_token = widget
+        .as_ref()
+        .zip(origin)
+        .and_then(|(w, o)| o.sign_events(&w.messages));
+    // Producer surfaces are for the widget only: the model reads
+    // `structuredContent`, so they never ride the envelope (#368),
+    // whether or not the widget is on.
+    if let Some(s) = d.result.get_mut("surface").and_then(Value::as_object_mut) {
+        s.remove("a2ui");
+    }
+    // A host that renders the card shows its rows to the user; with
+    // the rows in the text as well, its model repeats them as its
+    // own table. Such a host's model gets one line (the card's title
+    // and row names) and a note instead, followed by what the card
+    // does not show (narration, charts, sources). Every other client,
+    // and a card without rows, keeps the full text.
+    let reply_text = match widget
+        .as_ref()
+        .filter(|_| card_host)
+        .and_then(|w| w.summary.as_ref())
+        .and_then(|s| mcp_app::card_text(s, &state.card_note))
+    {
+        Some(line) => match companions {
+            Some(rest) => format!("{line}\n\n{rest}"),
+            None => line,
+        },
+        None => reply_text,
+    };
+    if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
+        return rpc_error(id, code_for(&e), &e.to_string());
+    }
+    // MCP's `tools/call` result carries `content` (text-shaped
+    // for UI display) and `structuredContent` (typed value).
+    // `content` is the flattened prose+chart+sources (above);
+    // `structuredContent` is the canonical typed envelope, the
+    // same dict REST/A2A get.
+    let env_v = envelope(&d);
+    let mut meta = json!({ "trace_id": trace_id });
+    // The card's messages ride the result `_meta`: the host hands
+    // them to the widget (MCP Apps `ui/notifications/tool-result`,
+    // ChatGPT `toolResponseMetadata`) but not to the model, which
+    // already has the text and the envelope.
+    if let Some(w) = widget {
+        meta[mcp_app::META_KEY] = Value::Array(w.messages);
+    }
+    if let Some(t) = event_token {
+        meta[in_card::META_KEY] = Value::String(t);
+    }
+    if let Some(ui) = ui_meta {
+        meta["ui"] = ui;
+    }
+    if let Some(trace) = tool_trace {
+        meta["tool_trace"] = trace;
+    }
+    rpc_ok(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": reply_text }],
+            "structuredContent": env_v,
+            "isError": false,
+            "_meta": meta
+        }),
+    )
 }
 
 enum McpOutcome {

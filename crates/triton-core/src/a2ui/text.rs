@@ -156,7 +156,9 @@ pub fn degrade(c: &Component) -> Option<String> {
 pub fn action_line(label: &str, a: &Action) -> String {
     match a {
         Action::OpenUrl { url } => format!("{label}: {url}"),
-        Action::SendMessage { text } => format!("{SEND_MARK}{text}"),
+        Action::SendMessage { text } | Action::Rerun { fallback: text, .. } => {
+            format!("{SEND_MARK}{text}")
+        }
     }
 }
 
@@ -175,9 +177,11 @@ fn list(title: Option<&str>, items: &[ListItem]) -> String {
             line.push_str(&format!(" \u{2014} {d}"));
         }
         out.push(line);
-        match &it.action {
+        match it.action.as_ref() {
             Some(Action::OpenUrl { url }) => out.push(format!("   {url}")),
-            Some(Action::SendMessage { text }) => out.push(format!("   {SEND_MARK}{text}")),
+            Some(Action::SendMessage { text } | Action::Rerun { fallback: text, .. }) => {
+                out.push(format!("   {SEND_MARK}{text}"))
+            }
             None => {}
         }
     }
@@ -206,9 +210,11 @@ fn table(title: Option<&str>, columns: &[TableColumn], rows: &[TableRow]) -> Str
             })
             .collect();
         out.push(format!("{}. {}", i + 1, cells.join(" \u{b7} ")));
-        match &r.action {
+        match r.action.as_ref() {
             Some(Action::OpenUrl { url }) => out.push(format!("   {url}")),
-            Some(Action::SendMessage { text }) => out.push(format!("   {SEND_MARK}{text}")),
+            Some(Action::SendMessage { text } | Action::Rerun { fallback: text, .. }) => {
+                out.push(format!("   {SEND_MARK}{text}"))
+            }
             None => {}
         }
     }
@@ -272,9 +278,11 @@ fn tree_node(out: &mut Vec<String>, n: &TreeNode, depth: usize) {
             out.push(format!("{inner}\u{b7} {}", labels.join(", ")));
         }
     }
-    match &n.action {
+    match n.action.as_ref() {
         Some(Action::OpenUrl { url }) => out.push(format!("{inner}{}: {url}", n.action_caption())),
-        Some(Action::SendMessage { text }) => out.push(format!("{inner}{SEND_MARK}{text}")),
+        Some(Action::SendMessage { text } | Action::Rerun { fallback: text, .. }) => {
+            out.push(format!("{inner}{SEND_MARK}{text}"))
+        }
         None => {}
     }
     // Non-gap children first, then the gap leaves on one line. A gap leaf's

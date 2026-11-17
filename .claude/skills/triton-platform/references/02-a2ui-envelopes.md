@@ -43,12 +43,20 @@ Rule: **a click sends one complete new request.** An `action` is
 itself (HMAC, `triton-correlation`), so a click on any replica becomes a
 new user message with exactly that text — never a continuation.
 
+A read-only re-render (next page, filter chip, refresh) can instead be
+`{"type":"rerun","args":{"page":2},"fallback":"<the full request>"}` (a chip:
+`{label, message, rerun: {…}}`): on an MCP Apps host the card calls your tool
+again with `args` laid over the original call's and updates in place;
+everywhere else it is `fallback` as a new turn. Needs `in_card: true` for the
+tool in `adapter.yaml` and `readOnlyHint: true` on your `tools/list` —
+contract §4a (`doc/upstream-agent-contract.md`).
+
 | `kind` | Fields |
 |---|---|
 | `button` | `label`, `action`, `primary?` (legacy `tool`/`args` still works) |
 | `list` | `title?`, `items[]` of `{label, detail?, action?}` |
 | `table` | `title?`, `columns[]` of `{key, label}`, `rows[]` of `{cells: {key: text}, action?}` |
-| `chips` | `prompt?`, `chips[]` of `{label, message}` (`message` is sent verbatim) |
+| `chips` | `prompt?`, `chips[]` of `{label, message, rerun?}` (`message` is sent verbatim; with `rerun` it is the fallback) |
 | `tree` | `title?`, `gaps_toggle?` (label), `nodes[]` of `{label, counts?[{label, value}], gap?, expanded?, chips?, action?, action_label?, children?}` |
 | `notice` | `tone?` (`info` default \| `warn`), `title?`, `text` |
 | `progress` | `title?`, `steps[]` of `{label, state: done\|active\|pending}`, `fraction?` (0..1) |

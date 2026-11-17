@@ -102,6 +102,10 @@ enum AgentMode {
     /// Answer every tool call `404 {"error": "unknown tool"}` — an upstream
     /// that does not serve the tool Triton routed to it.
     NotFound,
+    /// A paged list with in-card controls (#369), see [`cards_response`].
+    /// Its `tools/list` annotates `list_planned` `readOnlyHint: true` and
+    /// `file_change` `readOnlyHint: false`.
+    Cards,
 }
 
 impl FakeAgent {
@@ -171,6 +175,13 @@ impl FakeAgent {
     /// and `updateModelContext` off the `X-Triton-MCP` header (#143).
     pub async fn start_mcp_apps() -> Self {
         Self::start(AgentMode::McpApps, 0, None).await
+    }
+
+    /// A paged list whose controls re-run it in place (#369): one agent for
+    /// the read-only `list_planned` and the writing `file_change` (see
+    /// [`cards_response`]).
+    pub async fn start_cards() -> Self {
+        Self::start(AgentMode::Cards, 0, None).await
     }
 
     /// Answer every tool call `404` (see [`AgentMode::NotFound`]).
@@ -300,6 +311,16 @@ async fn handler(
                 }]
             }))
             .into_response(),
+            AgentMode::Cards => Json(json!({ "tools": [
+                { "name": "list_planned", "description": "The planned agents, a page at a time.",
+                  "annotations": { "readOnlyHint": true },
+                  "inputSchema": { "type": "object", "properties": {
+                      "page": { "type": "integer" }, "filter": { "type": "string" } } } },
+                { "name": "file_change", "description": "Files a change request.",
+                  "annotations": { "readOnlyHint": false },
+                  "inputSchema": { "type": "object" } }
+            ] }))
+            .into_response(),
             _ => StatusCode::NOT_FOUND.into_response(),
         };
     }
@@ -338,6 +359,7 @@ async fn handler(
         | AgentMode::StreamingHang
         | AgentMode::StreamingSlowDrip
         | AgentMode::McpApps
+        | AgentMode::Cards
         | AgentMode::NotFound => false,
         AgentMode::AlwaysFail => true,
         AgentMode::FailingThenRecover => {
@@ -381,6 +403,7 @@ async fn handler(
         AgentMode::StreamingHang => sse_response_hanging(streaming_frames(&value, false)),
         AgentMode::StreamingSlowDrip => sse_response_slow_drip(streaming_frames(&value, false)),
         AgentMode::McpApps => mcp_apps_response(mcp_verb.as_deref(), &value),
+        AgentMode::Cards => Json(cards_response(&value)).into_response(),
         _ => Json(json!({ "echoed": value })).into_response(),
     }
 }
@@ -410,6 +433,60 @@ fn mcp_apps_response(verb: Option<&str>, body: &Value) -> axum::response::Respon
         }))
         .into_response(),
     }
+}
+
+/// The [`AgentMode::Cards`] answer for a dispatch body: page `page` (1..=3)
+/// of a list, filtered by `filter`, with a "Next" rerun, a "High risk"
+/// filter chip (rerun), a plain "Drafts" chip (a new turn), and a producer
+/// surface whose "Refresh" fires the in-card event `triton.in_card:refresh`
+/// and shows how many A2UI events the call carried.
+pub fn cards_response(body: &Value) -> Value {
+    let page = body.get("page").and_then(Value::as_u64).unwrap_or(1);
+    let filter = body.get("filter").and_then(Value::as_str);
+    let events = body
+        .pointer("/_triton/client/a2ui_events")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let in_card = body.pointer("/_triton/client/in_card") == Some(&json!(true));
+    let context = match filter {
+        Some(f) => format!("Page {page} of 3 \u{b7} Filter: {f}"),
+        None => format!("Page {page} of 3"),
+    };
+    let items: Vec<Value> = (1..=2)
+        .map(|i| json!({ "label": format!("Agent {page}-{i}") }))
+        .collect();
+    let mut components = vec![
+        json!({ "kind": "header", "title": "Planned agents", "context": context }),
+        json!({ "kind": "list", "items": items }),
+        json!({ "kind": "chips", "chips": [
+            { "label": "High risk", "message": "Show only the high-risk planned agents",
+              "rerun": { "filter": "high", "page": 1 } },
+            { "label": "Drafts", "message": "Show the drafts" }
+        ] }),
+    ];
+    if page < 3 {
+        components.push(json!({ "kind": "button", "label": "Next", "primary": true,
+            "action": { "type": "rerun", "args": { "page": page + 1 },
+                        "fallback": format!("Show page {} of the planned agents", page + 1) } }));
+    }
+    json!({
+        "text": format!("Planned agents, page {page} of 3"),
+        "surface": {
+            "components": components,
+            "a2ui": [{
+                "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+                "components": [
+                    { "id": "root", "component": "Column", "children": ["t", "b"] },
+                    { "id": "t", "component": "Text",
+                      "text": format!("Events: {events} \u{b7} in card: {in_card}") },
+                    { "id": "bl", "component": "Text", "text": "Refresh" },
+                    { "id": "b", "component": "Button", "child": "bl",
+                      "action": { "event": { "name": "triton.in_card:refresh",
+                                             "context": { "rev": "r1" } } } }
+                ]
+            }]
+        }
+    })
 }
 
 /// Progress frames followed by a terminal `done` carrying an A2UI

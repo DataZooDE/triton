@@ -1733,6 +1733,26 @@ life and re-sends them on every resume, so it drops `client_files` once
 the first dispatch is open (pinned by
 `async_tasks::a_resumed_task_does_not_send_the_files_again`).
 
+### In-card actions stay read-only, or they need a nonce store (2026-11-17, #369)
+
+The app-only tool `triton_ui_event` re-runs a card's tool without a turn and
+without the model. Its tokens are stateless (no nonce store, G-8), so a token
+can be replayed by its own principal until it expires. That is acceptable only
+because the dispatcher admits read-only tools alone: declared in-card capable
+by the operator AND annotated `readOnlyHint` by the upstream. Do not relax
+either condition to "let a form submit write in place": a write needs a nonce
+store or upstream idempotency keys first, and it should stay a visible,
+confirmed turn anyway. Visibility (`_meta.ui.visibility: ["app"]`) is not
+access control either; any bearer can call the tool, and the token is what
+binds it.
+
+Future note: an in-place re-render of a card with the SAME height left the
+host frame collapsed. The widget measured its height synchronously after
+emptying the page; the renderer then drew a page of the old size within the
+same frame, so the `ResizeObserver` saw no change and never fired again.
+Measure after the renderer has drawn (`requestAnimationFrame`), and pin the
+frame height in the browser harness for any in-place update path.
+
 ## 8. CI/CD build-time traps (2026-08-30)
 
 - **`flutter test` is a compile step, not a test step.** The

@@ -236,6 +236,12 @@ impl ActionSigner {
         })
     }
 
+    /// The key ring, for the other signed card payloads of this key
+    /// (in-card actions, [`super::in_card`]).
+    pub(crate) fn ring(&self) -> &triton_correlation::KeyRing {
+        &self.ring
+    }
+
     fn binding() -> triton_correlation::Binding<'static> {
         triton_correlation::Binding {
             platform: GE_PLATFORM,
@@ -750,7 +756,9 @@ impl Card<'_> {
 
     fn action_button(&mut self, label: &str, a: &Action, variant: &str) -> Option<String> {
         match a {
-            Action::SendMessage { text } => self.send_button(label, text, variant),
+            Action::SendMessage { text } | Action::Rerun { fallback: text, .. } => {
+                self.send_button(label, text, variant)
+            }
             Action::OpenUrl { url } => self.url_button(label, url),
         }
     }

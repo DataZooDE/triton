@@ -201,14 +201,20 @@ fn has_root(components: &[Value]) -> bool {
 /// The event-name prefix Triton reserves for its own card's controls.
 pub const RESERVED_EVENT_PREFIX: &str = "triton.";
 
-/// Whether any action under `v` fires a `triton.*` event.
+/// Whether any action under `v` fires a `triton.*` event. The one
+/// exception is a producer's in-card marker, `triton.in_card:<name>` (#369):
+/// the widget sends it to the app-only tool, which hands it back to the
+/// producer as an A2UI event.
 fn fires_reserved_event(v: &Value) -> bool {
     match v {
         Value::Object(m) => {
             m.get("event")
                 .and_then(|e| e.get("name"))
                 .and_then(Value::as_str)
-                .is_some_and(|n| n.starts_with(RESERVED_EVENT_PREFIX))
+                .is_some_and(|n| {
+                    n.starts_with(RESERVED_EVENT_PREFIX)
+                        && !n.starts_with(super::in_card::EVENT_PREFIX)
+                })
                 || m.values().any(fires_reserved_event)
         }
         Value::Array(a) => a.iter().any(fires_reserved_event),
@@ -572,7 +578,12 @@ mod tests {
     /// dropped, wherever the action sits.
     #[test]
     fn a_producer_cannot_fire_tritons_own_events() {
-        for name in ["triton.send_message", "triton.open_url", "triton.anything"] {
+        for name in [
+            "triton.send_message",
+            "triton.open_url",
+            "triton.anything",
+            "triton.in_card",
+        ] {
             let raw = json!([basic(json!([
                 { "id": "root", "component": "Column", "children": ["b"] },
                 { "id": "bl", "component": "Text", "text": "Go" },
@@ -594,6 +605,14 @@ mod tests {
             vet(&own).1.is_empty(),
             "only the `triton.` prefix is reserved"
         );
+        // #369: a producer marks its own in-card events with the prefix.
+        let in_card = json!([basic(json!([
+            { "id": "root", "component": "Column", "children": ["b"] },
+            { "id": "bl", "component": "Text", "text": "Refresh" },
+            { "id": "b", "component": "Button", "child": "bl",
+              "action": { "event": { "name": "triton.in_card:refresh" } } }
+        ]))]);
+        assert!(vet(&in_card).1.is_empty(), "the in-card marker is allowed");
     }
 
     #[test]
