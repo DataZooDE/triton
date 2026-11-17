@@ -158,6 +158,23 @@ pub struct RateLimit {
 pub struct ToolDecl {
     #[serde(default)]
     pub surface_components: Vec<ComponentKind>,
+    /// #369: the answer card may re-run this tool in place (paging, filter
+    /// chips, refresh) through the app-only MCP tool, without a new turn.
+    /// Only honoured while the tool is also annotated `readOnlyHint: true`
+    /// on its `tools/list`; a tool that writes must stay a visible turn.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_card: bool,
+}
+
+impl Manifest {
+    /// The tools declared in-card capable (#369).
+    pub fn in_card_tools(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .filter(|(_, t)| t.in_card)
+            .map(|(n, _)| n.clone())
+            .collect()
+    }
 }
 
 // ---------- closed sets ----------

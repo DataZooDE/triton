@@ -145,7 +145,50 @@ pub struct AuditRecord<'a> {
     /// byte-identical for existing audit consumers.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suppressed: Option<u64>,
+    /// An in-card action (#369): what the card asked for, never the values
+    /// it carried. Omitted on every other line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_card: Option<&'a InCardAudit>,
     pub trace_id: &'a str,
+}
+
+/// The in-card part of an audit line (#369): which event of which control,
+/// whether its token verified, and the context's key names and size. The
+/// context values themselves may carry personal data and are never logged.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct InCardAudit {
+    /// Always `mcp-app-event`: the call came from a card, not a model.
+    pub ingress: &'static str,
+    /// `rerun` (Triton's card), `event` (a producer surface), or `-` when
+    /// the token did not verify.
+    pub kind: &'static str,
+    pub event: String,
+    pub source_component_id: String,
+    /// `verified`, or why not: `missing`, `malformed`, `signature`,
+    /// `expired`; `unchecked` when the call was refused before (revoked,
+    /// rate-limited).
+    pub token: &'static str,
+    pub context_keys: Vec<String>,
+    pub context_bytes: usize,
+}
+
+/// Context key names recorded per in-card line, at most.
+pub const MAX_IN_CARD_KEYS: usize = 16;
+
+impl InCardAudit {
+    fn clamped(&self) -> Self {
+        Self {
+            event: clamp_audited(&self.event).into_owned(),
+            source_component_id: clamp_audited(&self.source_component_id).into_owned(),
+            context_keys: self
+                .context_keys
+                .iter()
+                .take(MAX_IN_CARD_KEYS)
+                .map(|k| clamp_audited(k).into_owned())
+                .collect(),
+            ..self.clone()
+        }
+    }
 }
 
 /// How much of a principal-derived field is recorded in an audit line.
@@ -253,6 +296,9 @@ pub struct AuditEntry {
     /// to know the entry stands for more than one refusal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suppressed: Option<u64>,
+    /// See [`AuditRecord::in_card`]; clamped like the principal fields.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub in_card: Option<InCardAudit>,
     pub trace_id: String,
 }
 
@@ -288,6 +334,7 @@ impl<'a> From<&AuditRecord<'a>> for AuditEntry {
             ttfb_ms: r.ttfb_ms,
             sender_ref: r.sender_ref.map(|v| clamp_audited(v).into_owned()),
             suppressed: r.suppressed,
+            in_card: r.in_card.map(InCardAudit::clamped),
             trace_id: r.trace_id.to_string(),
         }
     }
@@ -405,6 +452,7 @@ mod rejection_reason_tests {
             sender_ref: None,
             destination: None,
             suppressed: None,
+            in_card: None,
             trace_id: "t-1",
         };
         let v = serde_json::to_value(&rec).expect("serialises");
@@ -440,6 +488,7 @@ mod rejection_reason_tests {
             sender_ref: None,
             destination: None,
             suppressed: None,
+            in_card: None,
             trace_id: "t-2",
         };
         let v = serde_json::to_value(&rec).expect("serialises");

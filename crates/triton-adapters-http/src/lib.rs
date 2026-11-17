@@ -21,6 +21,7 @@ pub mod capture;
 pub mod cors;
 pub mod identity;
 pub mod mcp;
+pub mod mcp_in_card;
 pub mod mcp_tenants;
 pub mod metrics;
 pub mod outbound;

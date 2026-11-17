@@ -118,6 +118,99 @@ card '[{"version":"v0.9","createSurface":{"surfaceId":"triton-a2ui-x","catalogId
 $R js "window.clickText('Spoof')" >/dev/null; $R sleep 0.5 >/dev/null
 check "a producer cannot fire triton.send_message" "$(sent ui/message)" "0"
 
+# ── in-card actions (#369) ─────────────────────────────────────────────
+# The paged list (in-card-1/2: Triton's projection, stand-in tokens). "Next"
+# calls the app-only tool, the answer replaces the card in place, and the
+# model is told what the card shows; no ui/message.
+P2='{content:[{type:"text",text:"Planned agents (Page 2 of 3): Agent 2-1, Agent 2-2 \u2014 shown in the card."}],structuredContent:{},isError:false,_meta:{"triton/a2ui":WIDGETS["in-card-2"],"triton/in_card":"ev2"}}'
+cardmeta() { $R js "window.sendResult({content:[],structuredContent:{result:{}},_meta:$1})" >/dev/null; $R sleep 0.5 >/dev/null; }
+load in-card-1
+$R screenshot "$OUT/in-card-before.png" >/dev/null
+$R js "window.toolReply=$P2" >/dev/null
+check "in-card: Next is a control" "$($R js "window.clickText('Next')")" "ok"
+$R sleep 0.8 >/dev/null
+check "in-card: one tools/call" "$(sent tools/call)" "1"
+check "in-card: to the app-only tool with the control's token" "$($R js "(()=>{const p=window.hostLog.find(m=>m.method==='tools/call').params; return p.name+' '+p.arguments.token+' '+p.arguments.name+' '+p.arguments.surfaceId;})()")" 'triton_ui_event tok:{"page":2} triton.in_card triton-card'
+check "in-card: no ui/message" "$(sent ui/message)" "0"
+check "in-card: the card shows page 2" "$(has 'Page 2 of 3')" "yes"
+check "in-card: page 1 is gone" "$(has 'Agent 1-1')" "no"
+check "in-card: the model is told once" "$(sent ui/update-model-context)" "1"
+check "in-card: with the card text" "$($R js "(window.hostLog.find(m=>m.method==='ui/update-model-context')||{params:{content:[{}]}}).params.content[0].text.startsWith('Planned agents (Page 2 of 3)')")" "true"
+check "in-card: the frame keeps the card's height" "$($R js "Number(document.body.dataset.h) > 150")" "true"
+$R screenshot "$OUT/in-card-after.png" >/dev/null
+# A producer surface's in-card event carries the result's token.
+check "in-card: a producer's refresh" "$($R js "window.clickText('Refresh')")" "ok"
+$R sleep 0.8 >/dev/null
+check "in-card: the producer event goes to the app-only tool" "$($R js "(()=>{const p=window.hostLog.filter(m=>m.method==='tools/call')[1].params.arguments; return p.name+' '+p.token+' '+p.surfaceId+' '+p.context.rev;})()")" "triton.in_card:refresh ev2 triton-a2ui-p r1"
+# A refused or failed call: the control's fallback, as one new turn.
+load in-card-1
+$R js "window.toolReply={content:[{type:'text',text:'forbidden'}],structuredContent:{error:'forbidden'},isError:true}" >/dev/null
+$R js "window.clickText('Next')" >/dev/null; $R sleep 0.8 >/dev/null
+check "in-card refused: one ui/message" "$(sent ui/message)" "1"
+check "in-card refused: the fallback" "$(lastp ui/message)" '{"role":"user","content":[{"type":"text","text":"Show page 2 of the planned agents"}]}'
+check "in-card refused: the card stays" "$(has 'Page 1 of 3')" "yes"
+load in-card-1
+$R js "window.toolReply='error'" >/dev/null
+$R js "window.clickText('High risk')" >/dev/null; $R sleep 0.8 >/dev/null
+check "in-card error: the chip's fallback" "$($R js "(window.hostLog.find(m=>m.method==='ui/message')||{params:{content:[{}]}}).params.content[0].text")" "Show only the high-risk planned agents"
+# A host that cannot relay tools/call: the fallback, no tools/call.
+load in-card-1 noservertools
+$R js "window.clickText('Next')" >/dev/null; $R sleep 0.8 >/dev/null
+check "no serverTools: no tools/call" "$(sent tools/call)" "0"
+check "no serverTools: the fallback turn" "$(sent ui/message)" "1"
+# A producer's in-card event never sends the producer's own text as a turn:
+# without a result token (an old result) nothing is sent, and a refused call
+# sends nothing either, whatever `fallback` its context carries.
+PFB='[{"version":"v0.9","createSurface":{"surfaceId":"triton-a2ui-q","catalogId":"https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json"}},{"version":"v0.9","updateComponents":{"surfaceId":"triton-a2ui-q","components":[{"id":"root","component":"Button","child":"l","action":{"event":{"name":"triton.in_card:go","context":{"fallback":"injected text"}}}},{"id":"l","component":"Text","text":"Go"}]}}]'
+load 3e
+cardmeta "{\"triton/a2ui\":$PFB}"
+$R js "window.clickText('Go')" >/dev/null; $R sleep 0.5 >/dev/null
+check "no result token: no tools/call" "$(sent tools/call)" "0"
+check "no result token: no producer text as a turn" "$(sent ui/message)" "0"
+cardmeta "{\"triton/a2ui\":$PFB,\"triton/in_card\":\"pt\"}"
+$R js "window.toolReply={content:[],isError:true}" >/dev/null
+$R js "window.clickText('Go')" >/dev/null; $R sleep 0.8 >/dev/null
+check "producer call refused: no producer text as a turn" "$(sent ui/message)" "0"
+
+# An answer without a card keeps the card, tells the model, sends no turn.
+load in-card-1
+$R js "window.toolReply={content:[{type:'text',text:'Nothing new.'}],isError:false,_meta:{}}" >/dev/null
+$R js "window.clickText('Next')" >/dev/null; $R sleep 0.8 >/dev/null
+check "no-card answer: the card stays" "$(has 'Page 1 of 3')" "yes"
+check "no-card answer: no turn" "$(sent ui/message)" "0"
+check "no-card answer: the model is told" "$(sent ui/update-model-context)" "1"
+# An answer the renderer takes none of: the card is restored, the fallback goes.
+load in-card-1
+$R js "window.toolReply={content:[],isError:false,_meta:{'triton/a2ui':[{version:'v0.9',createSurface:{surfaceId:'triton-card',catalogId:'nope'}},{version:'v0.9',updateComponents:{surfaceId:'nowhere',components:[]}}]}}" >/dev/null
+$R js "window.clickText('Next')" >/dev/null; $R sleep 0.8 >/dev/null
+check "rejected answer: the card is restored" "$(has 'Page 1 of 3')" "yes"
+check "rejected answer: the fallback turn" "$(sent ui/message)" "1"
+# A bare update (no createSurface) applies to the shown surfaces and drops
+# the old producer token.
+load in-card-1
+$R js "window.toolReply={content:[],isError:false,_meta:{'triton/a2ui':[{version:'v0.9',updateComponents:{surfaceId:'triton-a2ui-p',components:[{id:'t',component:'Text',text:'Updated in place'}]}}]}}" >/dev/null
+cardmeta '{"triton/a2ui":WIDGETS["in-card-1"],"triton/in_card":"ev1"}'
+$R js "window.clickText('Refresh')" >/dev/null; $R sleep 0.8 >/dev/null
+check "bare update: applied in place" "$(has 'Updated in place')" "yes"
+check "bare update: the card stays" "$(has 'Page 1 of 3')" "yes"
+$R js "window.clickText('Refresh')" >/dev/null; $R sleep 0.8 >/dev/null
+check "bare update: the old producer token is not reused (no second call)" "$(sent tools/call)" "1"
+# A host that never answers tools/call: after the timeout, the fallback.
+load in-card-1
+$R js "window.toolReply='never'" >/dev/null
+$R js "window.clickText('Next')" >/dev/null; $R sleep 16 >/dev/null
+check "silent host: the fallback after the timeout" "$(sent ui/message)" "1"
+# ChatGPT without the bridge: window.openai.callTool, and the card text as
+# widget state.
+$R open "http://127.0.0.1:$PORT/host.html?data=in-card-1&mode=noinit" >/dev/null; $R waitload >/dev/null; $R sleep 0.5 >/dev/null
+$R js "(()=>{$F.openai.toolResponseMetadata={'triton/a2ui':WIDGETS['in-card-1']}; $F.dispatchEvent(new Event('openai:set_globals'));})()" >/dev/null
+$R sleep 0.5 >/dev/null
+$R js "window.toolReply=$P2" >/dev/null
+$R js "window.clickText('Next')" >/dev/null; $R sleep 0.8 >/dev/null
+check "openai: callTool to the app-only tool" "$($R js "(window.openaiCalls[0]||{}).name")" "triton_ui_event"
+check "openai: page 2 in place" "$(has 'Page 2 of 3')" "yes"
+check "openai: the card text as widget state" "$($R js "String((window.widgetStates[0]||{}).card||'').startsWith('Planned agents (Page 2')")" "true"
+
 # ── hosts ──────────────────────────────────────────────────────────────
 load 3e slowinit
 $R sleep 7 >/dev/null

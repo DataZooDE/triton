@@ -325,9 +325,18 @@ async fn main() -> std::io::Result<()> {
             std::process::exit(2);
         }
     };
+    let in_card_tools = manifest
+        .as_ref()
+        .map(triton_manifest::Manifest::in_card_tools)
+        .unwrap_or_default();
+    if !in_card_tools.is_empty() {
+        tracing::info!(tools = ?in_card_tools, "in-card tools declared (read-only ones run in place)");
+    }
     let mut dispatcher = Dispatcher::new(registry, settings.env.clone(), controls)
         .with_metrics(metrics.clone())
-        .with_surfaces(surface_registry);
+        .with_surfaces(surface_registry)
+        // #369: the tools the answer card may re-run in place.
+        .with_in_card_tools(in_card_tools.clone());
 
     // One announcement, one place, for whichever host is running
     // (#306 crew F6) — announcing from a host's `main` is how the

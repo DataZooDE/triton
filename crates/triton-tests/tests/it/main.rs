@@ -122,6 +122,8 @@ mod mcp_apps_acceptance;
 mod mcp_card_text;
 #[path = "../mcp_era.rs"]
 mod mcp_era;
+#[path = "../mcp_in_card.rs"]
+mod mcp_in_card;
 #[path = "../mcp_protected_resource.rs"]
 mod mcp_protected_resource;
 #[path = "../mcp_schema.rs"]

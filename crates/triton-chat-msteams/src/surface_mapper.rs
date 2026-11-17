@@ -547,7 +547,7 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
             // message; the callback turns it into a new user turn.
             Component::Button {
                 label,
-                action: Some(Action::SendMessage { text }),
+                action: Some(Action::SendMessage { text } | Action::Rerun { fallback: text, .. }),
                 ..
             } => Some(InteractiveSpec::Button {
                 label: label.clone(),

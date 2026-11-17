@@ -200,7 +200,9 @@ impl Builder<'_, '_> {
     /// The card action for a stateless [`Action`].
     fn action(&mut self, title: &str, a: &Action) -> Option<Value> {
         match a {
-            Action::SendMessage { text } => self.send_action(title, text),
+            Action::SendMessage { text } | Action::Rerun { fallback: text, .. } => {
+                self.send_action(title, text)
+            }
             Action::OpenUrl { url } => Some(json!({
                 "type": "Action.OpenUrl", "title": title, "url": url,
             })),

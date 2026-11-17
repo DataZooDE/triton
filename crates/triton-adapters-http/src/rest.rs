@@ -1063,6 +1063,7 @@ mod trace_scope_tests {
             sender_ref: None,
             destination: None,
             suppressed: None,
+            in_card: None,
             trace_id: "t-1".into(),
         }
     }

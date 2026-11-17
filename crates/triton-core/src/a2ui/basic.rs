@@ -18,7 +18,13 @@
 //!   `context["v:<field>"]` exactly as the server's `fill_template` would,
 //!   and send the result;
 //! * [`OPEN_URL`] with `context.url`: open an `https` deep link through the
-//!   host (`ui/open-link`).
+//!   host (`ui/open-link`);
+//! * [`in_card::EVENT`] with `context.token` and `context.fallback` (#369): a
+//!   rerun ([`Action::Rerun`], a chip's `rerun`) the widget sends to the
+//!   app-only tool [`in_card::TOOL_NAME`], which re-runs the producing tool
+//!   and replaces the card in place. Only where the caller signs it
+//!   ([`project_with`]); otherwise, and whenever the call fails, it is the
+//!   `fallback` message.
 //!
 //! The basic catalog has no table, tree, progress or chip components, so
 //! those are composed from `Row`/`Column`/`Text`/`Button`. Budgets cut a
@@ -26,6 +32,7 @@
 
 use serde_json::{Map, Value, json};
 
+use super::in_card;
 use super::passthrough::BASIC_CATALOG_ID;
 use super::{
     Action, Chip, Component, FormField, FormFieldKind, KeyValuePair, ListItem, SelectionStyle,
@@ -76,16 +83,29 @@ pub struct BasicCard {
     pub summary: CardSummary,
 }
 
+/// Signs a rerun's arguments (laid over the producing call's) into an
+/// in-card token; `None` when this one cannot be an in-card call.
+pub type Rerun<'a> = &'a dyn Fn(&Map<String, Value>) -> Option<String>;
+
 /// The card for a tool result, or `None` when the result has no
 /// conversation component to draw (prose only, a legacy surface, none).
+/// Reruns are their fallback messages.
 pub fn project(result: &Value) -> Option<BasicCard> {
+    project_with(result, None)
+}
+
+/// [`project`], with reruns signed by `rerun` as in-card calls.
+pub fn project_with(result: &Value, rerun: Option<Rerun<'_>>) -> Option<BasicCard> {
     let raw = result
         .get("surface")
         .and_then(|s| s.get("components"))
         .and_then(Value::as_array)?;
     // Per component: one malformed component drops itself, not the card.
     let components: Vec<Component> = raw.iter().filter_map(Component::parse).collect();
-    let mut b = Builder::default();
+    let mut b = Builder {
+        rerun,
+        ..Builder::default()
+    };
     for c in &components {
         // Past the byte budget a body block would be dropped anyway: count it
         // without building it (an answer of thousands of blocks stays cheap).
@@ -153,7 +173,8 @@ fn openable(u: &str) -> bool {
 }
 
 /// A stateless action as a v0.9 event, or `None` when it is no control (a
-/// message or link the widget could not send or open whole).
+/// message or link the widget could not send or open whole). A rerun needs
+/// the builder's signer: see [`Builder::event`].
 fn event(a: &Action) -> Option<Value> {
     match a {
         Action::SendMessage { text } if sendable(text) => {
@@ -162,6 +183,7 @@ fn event(a: &Action) -> Option<Value> {
         Action::OpenUrl { url } if openable(url) => {
             Some(json!({ "event": { "name": OPEN_URL, "context": { "url": url } } }))
         }
+        Action::Rerun { fallback, .. } => send(fallback),
         _ => None,
     }
 }
@@ -211,7 +233,9 @@ impl Ids {
 }
 
 #[derive(Default)]
-struct Builder {
+struct Builder<'a> {
+    /// Signs reruns as in-card calls; `None` = they are their fallbacks.
+    rerun: Option<Rerun<'a>>,
     ids: Ids,
     header: Option<Block>,
     title: Option<String>,
@@ -234,7 +258,27 @@ impl Block {
     }
 }
 
-impl Builder {
+impl Builder<'_> {
+    /// [`event`], with a rerun as an in-card call where it can be signed. Its
+    /// fallback must be sendable either way: the widget falls back to it.
+    fn event(&self, a: &Action) -> Option<Value> {
+        match a {
+            Action::Rerun { args, fallback } => self.rerun_event(args, fallback),
+            other => event(other),
+        }
+    }
+
+    fn rerun_event(&self, args: &Map<String, Value>, fallback: &str) -> Option<Value> {
+        if !sendable(fallback) {
+            return None;
+        }
+        match self.rerun.and_then(|sign| sign(args)) {
+            Some(token) => Some(json!({ "event": { "name": in_card::EVENT,
+                "context": { "token": token, "fallback": fallback } } })),
+            None => send(fallback),
+        }
+    }
+
     fn push_body(&mut self, b: Block) {
         self.body_bytes = self.body_bytes.saturating_add(block_size(&b));
         self.body.push(b);
@@ -361,7 +405,7 @@ impl Builder {
                     let mut ids: Vec<String> =
                         cells.iter().map(|t| self.text(&mut b, t, "body")).collect();
                     if let Some(first) = ids.first_mut() {
-                        let a = r.action.as_ref().and_then(event);
+                        let a = r.action.as_ref().and_then(|a| self.event(a));
                         *first = self.maybe_button(&mut b, first.clone(), a);
                     }
                     lines.push(self.table_row(&mut b, ids));
@@ -521,7 +565,7 @@ impl Builder {
                 primary,
                 ..
             } => {
-                if let Some(a) = event(a) {
+                if let Some(a) = self.event(a) {
                     self.actions.push((*primary, label.clone(), a));
                 }
             }
@@ -551,7 +595,7 @@ impl Builder {
         if let Some(d) = non_blank(it.detail.as_deref()) {
             lines.push(self.text(b, d, "caption"));
         }
-        let Some(a) = it.action.as_ref().and_then(event) else {
+        let Some(a) = it.action.as_ref().and_then(|a| self.event(a)) else {
             return self.column(b, lines);
         };
         // A separate control at the end of the row, or the row itself.
@@ -582,9 +626,18 @@ impl Builder {
     }
 
     fn chip_row(&mut self, b: &mut Block, chips: &[Chip]) -> Option<String> {
-        let buttons: Vec<String> = chips
+        let actions: Vec<(&Chip, Value)> = chips
             .iter()
-            .filter_map(|c| Some((c, send(&c.message)?)))
+            .filter_map(|c| {
+                let a = match &c.rerun {
+                    Some(args) => self.rerun_event(args, &c.message),
+                    None => send(&c.message),
+                };
+                Some((c, a?))
+            })
+            .collect();
+        let buttons: Vec<String> = actions
+            .into_iter()
             .map(|(c, a)| {
                 let label = self.text(b, &c.label, "body");
                 self.button(b, label, a, "default")
@@ -610,7 +663,7 @@ impl Builder {
             line.push_str(&format!(" \u{2014} {}", counts.join(" \u{b7} ")));
         }
         let text = self.text(b, &line, if level == 1 { "body" } else { "caption" });
-        let a = n.action.as_ref().and_then(event);
+        let a = n.action.as_ref().and_then(|a| self.event(a));
         let head = self.maybe_button(b, text, a);
         match self.chip_row(b, &n.chips) {
             Some(chips) => self.column(b, vec![head, chips]),
@@ -880,5 +933,80 @@ impl TreeBudget {
                 self.walk(&n.children, level + 1, f);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn events(c: &BasicCard) -> Vec<Value> {
+        c.messages
+            .iter()
+            .filter_map(|m| m["updateComponents"]["components"].as_array())
+            .flatten()
+            .filter_map(|c| c["action"].get("event").cloned())
+            .collect()
+    }
+
+    fn paged() -> Value {
+        json!({ "surface": { "components": [
+            { "kind": "header", "title": "Planned agents", "context": "page 1 of 3" },
+            { "kind": "list", "items": [ { "label": "A" }, { "label": "B" } ] },
+            { "kind": "chips", "chips": [
+                { "label": "High risk", "message": "Show only high-risk planned agents",
+                  "rerun": { "filter": "high" } },
+                { "label": "Drafts", "message": "Show the drafts" } ] },
+            { "kind": "button", "label": "Next",
+              "action": { "type": "rerun", "args": { "page": 2 },
+                          "fallback": "Show page 2 of the planned agents" } }
+        ] } })
+    }
+
+    /// Signed: a rerun is an in-card event with its token and its fallback;
+    /// a plain chip stays a message.
+    #[test]
+    fn a_signed_rerun_is_an_in_card_event_with_its_fallback() {
+        let sign = |args: &Map<String, Value>| Some(format!("tok:{}", Value::Object(args.clone())));
+        let c = project_with(&paged(), Some(&sign)).unwrap();
+        let ev = events(&c);
+        assert!(ev.contains(&json!({ "name": in_card::EVENT, "context": {
+            "token": "tok:{\"filter\":\"high\"}", "fallback": "Show only high-risk planned agents" } })), "{ev:#?}");
+        assert!(
+            ev.contains(&json!({ "name": in_card::EVENT, "context": {
+            "token": "tok:{\"page\":2}", "fallback": "Show page 2 of the planned agents" } })),
+            "{ev:#?}"
+        );
+        assert!(
+            ev.contains(&json!({ "name": SEND_MESSAGE, "context": { "text": "Show the drafts" } }))
+        );
+    }
+
+    /// Unsigned (no in-card tool, or a token over its cap): the fallback
+    /// message, exactly as every other channel sends it.
+    #[test]
+    fn an_unsigned_rerun_is_its_fallback_message() {
+        for c in [
+            project(&paged()).unwrap(),
+            project_with(&paged(), Some(&|_: &Map<String, Value>| None)).unwrap(),
+        ] {
+            let ev = events(&c);
+            assert!(ev.iter().all(|e| e["name"] == SEND_MESSAGE), "{ev:#?}");
+            assert!(ev.contains(&json!({ "name": SEND_MESSAGE,
+                "context": { "text": "Show page 2 of the planned agents" } })));
+        }
+    }
+
+    /// A rerun whose fallback could not be sent is no control at all: the
+    /// widget must always have a turn to fall back to.
+    #[test]
+    fn a_rerun_without_a_sendable_fallback_is_no_control() {
+        let sign = |_: &Map<String, Value>| Some("tok".to_string());
+        let r = json!({ "surface": { "components": [
+            { "kind": "header", "title": "T" },
+            { "kind": "button", "label": "Next",
+              "action": { "type": "rerun", "args": { "page": 2 }, "fallback": "  " } }
+        ] } });
+        assert!(events(&project_with(&r, Some(&sign)).unwrap()).is_empty());
     }
 }

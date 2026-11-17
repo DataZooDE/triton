@@ -20,6 +20,16 @@ messages a `tools/call` result carries in `_meta["triton/a2ui"]`
   `triton.send_message` (`{text}`, or a form's `{parts, v:<field>…}` filled by
   `src/fill.js` exactly as the server's `fill_template` would) as `ui/message`,
   and `triton.open_url` (`{url}`, https only) as `ui/open-link`.
+- **In-card actions (#369).** `triton.in_card` (`{token, fallback}`) on
+  Triton's card, and a producer surface's `triton.in_card:<name>` events (with
+  the result's `_meta["triton/in_card"]` token), call the app-only tool
+  `triton_ui_event` (`tools/call` over the bridge when the host reports
+  `serverTools`, else ChatGPT's `window.openai.callTool`). The result replaces
+  the card in place and its text goes to the model with
+  `ui/update-model-context` (ChatGPT without the bridge: `setWidgetState`).
+  On any failure (refusal, error, a 15 s timeout, an answer the renderer
+  takes none of) a Triton control's `fallback` is sent as `ui/message`; a
+  producer event has no fallback.
 - **Tests.** `npm test` runs `src/fill.js` against the shared vectors
   (`crates/triton-tests/fixtures/conversation/fill_vectors.parts.json`, pinned
   by the Rust test). The browser flows run in

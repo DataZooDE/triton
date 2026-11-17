@@ -519,6 +519,27 @@ requires `Clone`).
 > itself, `triton.send_message` (`ui/message`) and `triton.open_url`
 > (`ui/open-link`); the model-visible `card_text` is built from the
 > projection's `CardSummary`.
+>
+> **In-card actions (2026-11, #369).** A `rerun` action (or a chip's `rerun`,
+> or a producer's `triton.in_card:<name>` event) re-runs the producing tool
+> through the app-only MCP tool `triton_ui_event` (`_meta.ui.visibility:
+> ["app"]`, listed only to a client that declared the MCP Apps extension and
+> only while some tool is in-card capable). The adapter signs each control
+> with the A2UI action key over `(tool, scope, args)` (a producer token also
+> names the answer's in-card event names and surfaces), bound to tenant,
+> `sub`, issuer and expiry (`a2ui::in_card`), and only for a tool that is
+> ready (declared and read-only); `Dispatcher::invoke_in_card` verifies the
+> token, requires the tool to be declared in-card capable (`adapter.yaml`
+> `tools.<name>.in_card`, or `Dispatcher::with_in_card_tools` for an
+> embedding host) **and** annotated `readOnlyHint`, applies a per-principal
+> rate limit, dispatches on the `mcp` channel with `_triton.client.in_card`
+> (and, for a producer event, `_triton.client.a2ui_events`), and writes the
+> one audit line with its `in_card` part. The result is projected like any
+> card host's; the widget replaces the card and sends
+> `ui/update-model-context` with the card text. Where the host lacks
+> `serverTools`, or the call fails, the widget sends the control's `fallback`
+> as `ui/message`; every other face renders a rerun as `send_message` with the
+> fallback. Contract: `doc/upstream-agent-contract.md` §4a.
 > Inbound client events reach tools as `_triton.client.a2ui_events` on both A2A
 > bindings (client-asserted, never Triton-authored). Contract:
 > `doc/upstream-agent-contract.md`.
