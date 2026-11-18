@@ -153,12 +153,7 @@ pub fn card_text(s: &CardSummary, note: &str) -> Option<String> {
     if names.is_empty() {
         return None;
     }
-    let title = s
-        .title
-        .as_deref()
-        .or(s.block_title.as_deref())
-        .map(|t| t.trim().trim_end_matches(['.', ':', ';']).trim_end())
-        .filter(|t| !t.is_empty());
+    let title = summary_title(s);
     let context = s
         .context
         .as_deref()
@@ -185,6 +180,29 @@ pub fn card_text(s: &CardSummary, note: &str) -> Option<String> {
         line.push_str(note);
     }
     Some(line)
+}
+
+/// The model-visible typed result on a card host whose card shows every
+/// row, in place of the envelope: the card's title and row count, and that
+/// the rows are in the card. No row, no paging state: a model that reads
+/// `structuredContent` (ChatGPT) would otherwise page the tool itself and
+/// repeat the rows the person already sees.
+pub fn card_structured(s: &CardSummary) -> serde_json::Value {
+    let mut card = serde_json::json!({ "rows": s.names.len(), "shown_in_card": true });
+    if let Some(t) = summary_title(s) {
+        card["title"] = serde_json::json!(t);
+    }
+    card
+}
+
+/// The card's title as the model reads it: the header's, else the first row
+/// block's, without trailing punctuation.
+fn summary_title(s: &CardSummary) -> Option<&str> {
+    s.title
+        .as_deref()
+        .or(s.block_title.as_deref())
+        .map(|t| t.trim().trim_end_matches(['.', ':', ';']).trim_end())
+        .filter(|t| !t.is_empty())
 }
 
 /// A row's name in the card text: the first part of a label that packs

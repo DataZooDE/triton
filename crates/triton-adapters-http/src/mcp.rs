@@ -933,12 +933,21 @@ fn answer(
     // and row names) and a note instead, followed by what the card
     // does not show (narration, charts, sources). Every other client,
     // and a card without rows, keeps the full text.
-    let reply_text = match widget
+    let card_summary = widget
         .as_ref()
         .filter(|_| card_host)
-        .and_then(|w| w.summary.as_ref())
-        .and_then(|s| mcp_app::card_text(s, &state.card_note))
-    {
+        .and_then(|w| w.summary.as_ref());
+    let card_line = card_summary.and_then(|s| mcp_app::card_text(s, &state.card_note));
+    // The same condition decides the typed result: ChatGPT also shows
+    // `structuredContent` to its model, and with the rows (and the paging)
+    // there the model pages the tool itself and prints every row under the
+    // card (observed 2026-11-17). So when the card shows every row, the model
+    // gets a summary of it instead of the envelope.
+    let card_structured = card_line
+        .as_ref()
+        .and(card_summary)
+        .map(mcp_app::card_structured);
+    let reply_text = match card_line {
         Some(line) => match companions {
             Some(rest) => format!("{line}\n\n{rest}"),
             None => line,
@@ -952,8 +961,16 @@ fn answer(
     // for UI display) and `structuredContent` (typed value).
     // `content` is the flattened prose+chart+sources (above);
     // `structuredContent` is the canonical typed envelope, the
-    // same dict REST/A2A get.
-    let env_v = envelope(&d);
+    // same dict REST/A2A get, except on a card host whose card shows
+    // every row: there it is the card's summary (see `card_structured`).
+    let env_v = match card_structured {
+        Some(card) => json!({
+            "card": card,
+            "trace_id": d.trace_id,
+            "latency_ms": d.latency_ms,
+        }),
+        None => envelope(&d),
+    };
     let mut meta = json!({ "trace_id": trace_id });
     // The card's messages ride the result `_meta`: the host hands
     // them to the widget (MCP Apps `ui/notifications/tool-result`,

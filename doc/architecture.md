@@ -507,7 +507,10 @@ requires `Clone`).
 > A2UI) and the MCP Apps widget, `mcp_app::card` (basic-catalog surfaces only,
 > #368: the widget bundles the official `@a2ui/lit` renderer, which ships the
 > basic catalog). The typed vocabulary below never sees it, and on MCP it is
-> stripped from `structuredContent` (the model reads that).
+> stripped from `structuredContent` (the model reads that). On a card host
+> whose card shows every row, `structuredContent` is only a summary of the
+> card (`{card: {title, rows, shown_in_card}, trace_id, latency_ms}`), since
+> ChatGPT's model reads it and would otherwise page and repeat the rows.
 >
 > **MCP Apps widget (2026-11, #368).** The widget page is built from
 > `packages/mcp-widget` (vite, single file, committed and `include_str!`-ed;
