@@ -674,7 +674,22 @@ a trap the next developer should not have to step in.
   fresh ports + brief backoff. A proper fix would have the binary
   bind `127.0.0.1:0` and report the bound ports on stdout — deferred
   until we have a use case (PR 9 upstream router stubs may need it).
-  Discovered in PR 5.
+  Discovered in PR 5. **Update (2026-11-18):** the retries were not enough
+  under a heavily loaded machine (load ~175), and the ephemeral range is
+  also where the kernel puts every outgoing connection. `free_tcp_port`
+  now hands out ports from 20000–32767, below Linux's ephemeral range
+  (32768–60999), through one pid-seeded counter per process with a bind
+  check; the retry loop stays as the backstop.
+- **A test that sets process environment variables leaks them into every
+  triton the same test binary spawns (2026-11-18).** `embedded_denylist`
+  must prove that an embedded host reads `TRITON_DENIED_PRINCIPALS` with no
+  wiring, so it calls `set_var`. While it ran, other tests in the one
+  consolidated `it` binary spawned triton children that inherited a revoked
+  principal or a pairing restriction, and failed at random (`mcp_era`,
+  `twilio_whatsapp_template`, …). It is now its own `[[test]]` binary, and
+  its tests share a tokio mutex (each `#[tokio::test]` has its own runtime,
+  and a std guard across `.await` trips clippy's `await_holding_lock`). Any
+  future env-mutating test belongs in a separate binary too.
 
 - **For chat webhooks, never put the body parse (axum's `Json<T>`,
   `Form<T>`, etc.) ahead of the signature check.** Axum extractors

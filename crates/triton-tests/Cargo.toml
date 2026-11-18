@@ -17,6 +17,13 @@ autotests = false
 name = "it"
 path = "tests/it/main.rs"
 
+# Its own process: these tests set TRITON_DENIED_PRINCIPALS and friends in the
+# process environment (an embedded host must pick them up with no wiring), and
+# every triton the `it` binary spawns would otherwise inherit them.
+[[test]]
+name = "embedded_denylist"
+path = "tests/embedded_denylist.rs"
+
 [dependencies]
 tokio = { workspace = true }
 reqwest = { workspace = true }
