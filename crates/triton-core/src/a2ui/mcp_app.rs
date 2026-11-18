@@ -141,6 +141,27 @@ pub const CARD_NOTE: &str =
 /// the full text stays, because the card does not show everything the text
 /// says.
 pub fn card_text(s: &CardSummary, note: &str) -> Option<String> {
+    model_view(s, note).map(|v| v.text)
+}
+
+/// What a card host's model gets for an answer whose card shows every row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CardModelView {
+    /// The text content: the card's title and row names, then the note.
+    pub text: String,
+    /// `structuredContent.card`: the card's title and row count, and that
+    /// the rows are in the card. No row and no paging state: a model that
+    /// reads `structuredContent` (ChatGPT) would otherwise page the tool
+    /// itself and repeat the rows the person already sees.
+    pub structured: serde_json::Value,
+}
+
+/// The one rule for a card host's model-visible outputs: when the card shows
+/// every row (not cut by a budget, and at least one named row), the text is
+/// the card text and the typed result a summary of the card; otherwise
+/// `None`, and the full text and envelope stay, because the card does not
+/// show everything the text says.
+pub fn model_view(s: &CardSummary, note: &str) -> Option<CardModelView> {
     if s.cut {
         return None;
     }
@@ -154,6 +175,10 @@ pub fn card_text(s: &CardSummary, note: &str) -> Option<String> {
         return None;
     }
     let title = summary_title(s);
+    let mut structured = serde_json::json!({ "rows": names.len(), "shown_in_card": true });
+    if let Some(t) = title {
+        structured["title"] = serde_json::json!(t);
+    }
     let context = s
         .context
         .as_deref()
@@ -179,20 +204,10 @@ pub fn card_text(s: &CardSummary, note: &str) -> Option<String> {
         line.push('\n');
         line.push_str(note);
     }
-    Some(line)
-}
-
-/// The model-visible typed result on a card host whose card shows every
-/// row, in place of the envelope: the card's title and row count, and that
-/// the rows are in the card. No row, no paging state: a model that reads
-/// `structuredContent` (ChatGPT) would otherwise page the tool itself and
-/// repeat the rows the person already sees.
-pub fn card_structured(s: &CardSummary) -> serde_json::Value {
-    let mut card = serde_json::json!({ "rows": s.names.len(), "shown_in_card": true });
-    if let Some(t) = summary_title(s) {
-        card["title"] = serde_json::json!(t);
-    }
-    card
+    Some(CardModelView {
+        text: line,
+        structured,
+    })
 }
 
 /// The card's title as the model reads it: the header's, else the first row
@@ -354,6 +369,56 @@ mod tests {
         let mut d = table_card(&["A"]);
         d.cut = true;
         assert_eq!(card_text(&d, CARD_NOTE), None);
+    }
+
+    /// One rule decides both model-visible outputs: the summary counts the
+    /// rows the card text names (a blank label is none), takes the header's
+    /// title or else the first row block's, without trailing punctuation,
+    /// and leaves the title out when there is none.
+    #[test]
+    fn the_model_view_counts_named_rows_and_titles_like_the_card_text() {
+        let s = CardSummary {
+            title: None,
+            context: None,
+            block_title: Some("Open drafts:".into()),
+            names: vec!["A".into(), "  ".into(), "B".into()],
+            cut: false,
+        };
+        let v = model_view(&s, "").expect("rows shown");
+        assert_eq!(v.text, "Open drafts: A, B \u{2014} shown in the card.");
+        assert_eq!(
+            v.structured,
+            json!({ "title": "Open drafts", "rows": 2, "shown_in_card": true })
+        );
+        let untitled = CardSummary {
+            block_title: None,
+            ..s.clone()
+        };
+        assert!(
+            model_view(&untitled, "")
+                .unwrap()
+                .structured
+                .get("title")
+                .is_none()
+        );
+        assert!(
+            model_view(
+                &CardSummary {
+                    cut: true,
+                    ..s.clone()
+                },
+                ""
+            )
+            .is_none()
+        );
+        let blank = CardSummary {
+            names: vec![" ".into()],
+            ..s
+        };
+        assert!(
+            model_view(&blank, "").is_none(),
+            "no named row, no card view"
+        );
     }
 
     /// Only basic-catalog producer surfaces reach the widget (its renderer

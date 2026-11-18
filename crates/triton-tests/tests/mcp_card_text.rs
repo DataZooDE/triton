@@ -135,12 +135,30 @@ async fn a_client_that_renders_the_card_gets_the_card_text() {
         json!({ "title": "6 planned Agents", "rows": 6, "shown_in_card": true }),
         "{res}"
     );
-    assert!(res["structuredContent"].get("result").is_none(), "{res}");
-    assert!(res["structuredContent"]["trace_id"].is_string(), "{res}");
+    let mut keys: Vec<&String> = res["structuredContent"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["card", "latency_ms", "trace_id"],
+        "nothing beside the summary: {res}"
+    );
     // A card without rows (a receipt's facts) keeps the full text, and
     // the full typed result.
     let res = call(&r, Some(&session), "receipt", None).await;
     assert_eq!(text(&res), "full text of 3e", "{res}");
+    assert!(
+        res["structuredContent"]["result"]["surface"].is_object(),
+        "{res}"
+    );
+    assert!(res["structuredContent"].get("card").is_none(), "{res}");
+    // A card cut by its row budget does not show every row: the full text
+    // and the full typed result stay.
+    let res = call(&r, Some(&session), "cut_list", None).await;
+    assert!(text(&res).contains("full text of the cut list"), "{res}");
     assert!(
         res["structuredContent"]["result"]["surface"].is_object(),
         "{res}"

@@ -319,6 +319,16 @@ pub(crate) async fn rig() -> Rig {
     .await;
     upstreams.push(format!("narrated={}", narrated.host_port()));
     agents.push(narrated);
+    // A card cut by its row budget (60 rows, the card shows 50): the card
+    // does not show everything, so the full text and envelope stay.
+    let items: Vec<Value> = (1..=60)
+        .map(|i| json!({ "label": format!("Row {i}") }))
+        .collect();
+    let cut = FakeAgent::start_returning(json!({ "text": "full text of the cut list",
+        "surface": { "components": [ { "kind": "list", "title": "Many rows", "items": items } ] } }))
+    .await;
+    upstreams.push(format!("cut_list={}", cut.host_port()));
+    agents.push(cut);
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_ENTRA_AUDIENCE".to_string(), ENTRA_AUD.to_string()),
