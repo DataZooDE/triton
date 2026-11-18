@@ -367,6 +367,21 @@ async fn a_page_turn_and_a_filter_update_the_card_in_place() {
         line.starts_with("Planned agents (Page 2 of 3): Agent 2-1, Agent 2-2"),
         "{line}"
     );
+    // And no rows or paging state in the model-visible typed result: a
+    // summary of the card instead (a model that reads it would page itself).
+    assert_eq!(
+        page2["structuredContent"]["card"]["shown_in_card"], true,
+        "{page2}"
+    );
+    // The header's context line, as the text says it: which page is shown.
+    assert_eq!(
+        page2["structuredContent"]["card"]["context"], "Page 2 of 3",
+        "{page2}"
+    );
+    assert!(
+        page2["structuredContent"].get("result").is_none(),
+        "{page2}"
+    );
     let body = r.agent.bodies_seen().last().cloned().unwrap();
     assert_eq!(body["page"], 2);
     assert_eq!(body["q"], "planned");

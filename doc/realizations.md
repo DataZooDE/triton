@@ -420,6 +420,22 @@ production deployment can avoid by knowing about it.
 Items discovered while building the production Rust port; each is
 a trap the next developer should not have to step in.
 
+- **A short card text is not enough for ChatGPT: slim `structuredContent`
+  too (2026-11-18).** Live on the Nidorel demo, ChatGPT declared MCP Apps
+  (`card_host: true` in the per-call log line) and so received the one-line
+  card text, yet its model called `list_agents` twice more on its own and
+  printed all 30 rows under a card that showed the last page. The reason:
+  ChatGPT shows `structuredContent` to its model, and that was the full
+  envelope, with every row and the paging state. Claude, given the same
+  answer, called once. Now, whenever the card text applies (card host and a
+  card that shows every row), `structuredContent` is
+  `{card: {title, context, rows, shown_in_card: true}, trace_id, latency_ms}`
+  instead of the envelope; a cut card, a card-less answer and every
+  non-card client keep the envelope. Finding the cause took the demo VM's
+  `control` service log (substrate `operator-vm` `service-logs`; delete the
+  run afterwards): Triton logs the card-host decision per `tools/call`, but
+  not the arguments, so "how many calls" is visible and "which page" is not.
+
 - **The MCP widget on the official A2UI renderer (2026-11-14, #368).** Four
   traps. (1) The basic catalog's `openUrl` function calls `window.open`,
   which a host frame blocks; Triton's card therefore uses its own events

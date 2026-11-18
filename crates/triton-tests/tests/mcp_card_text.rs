@@ -126,10 +126,44 @@ async fn a_client_that_renders_the_card_gets_the_card_text() {
     assert_eq!(text(&res), short_3a(), "{res}");
     assert!(!text(&res).contains("full text of 3a"));
     assert_eq!(res["_meta"][mcp_app::META_KEY], read_json(&golden("3a")));
-    assert!(res["structuredContent"]["result"]["surface"].is_object());
-    // A card without rows (a receipt's facts) keeps the full text.
+    // The model-visible typed result does not carry the rows either:
+    // ChatGPT shows `structuredContent` to its model, which otherwise pages
+    // the tool itself and prints every row under the card. One summary of
+    // the card instead, beside the trace id.
+    assert_eq!(
+        res["structuredContent"]["card"],
+        json!({ "title": "6 planned Agents", "rows": 6, "shown_in_card": true }),
+        "{res}"
+    );
+    let mut keys: Vec<&String> = res["structuredContent"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        ["card", "latency_ms", "trace_id"],
+        "nothing beside the summary: {res}"
+    );
+    // A card without rows (a receipt's facts) keeps the full text, and
+    // the full typed result.
     let res = call(&r, Some(&session), "receipt", None).await;
     assert_eq!(text(&res), "full text of 3e", "{res}");
+    assert!(
+        res["structuredContent"]["result"]["surface"].is_object(),
+        "{res}"
+    );
+    assert!(res["structuredContent"].get("card").is_none(), "{res}");
+    // A card cut by its row budget does not show every row: the full text
+    // and the full typed result stay.
+    let res = call(&r, Some(&session), "cut_list", None).await;
+    assert!(text(&res).contains("full text of the cut list"), "{res}");
+    assert!(
+        res["structuredContent"]["result"]["surface"].is_object(),
+        "{res}"
+    );
+    assert!(res["structuredContent"].get("card").is_none(), "{res}");
     // Prose the card does not show stays: the narration, the chart and the
     // sources follow the card text; the text rendering of the rows does not.
     let res = call(&r, Some(&session), "narrated", None).await;
@@ -158,6 +192,7 @@ async fn a_client_that_renders_the_card_gets_the_card_text() {
     };
     let res = call(&r, None, "list_agents", Some(modern(ui_capabilities()))).await;
     assert_eq!(text(&res), short_3a(), "{res}");
+    assert!(res["structuredContent"].get("result").is_none(), "{res}");
     // Per request means per request: a 2026-07-28 request without the
     // extension gets the full text, whatever session header it carries.
     let res = call(&r, Some(&session), "list_agents", Some(modern(json!({})))).await;
@@ -174,6 +209,10 @@ async fn a_client_that_does_not_render_the_card_keeps_the_full_text() {
     let res = call(&r, None, "list_agents", None).await;
     assert_eq!(text(&res), "full text of 3a", "{res}");
     assert_eq!(res["_meta"][mcp_app::META_KEY], read_json(&golden("3a")));
+    assert!(
+        res["structuredContent"]["result"]["surface"].is_object(),
+        "a client that does not render the card keeps the full typed result: {res}"
+    );
 
     // The extension without the HTML profile is not this card.
     let other = json!({ "extensions": { UI: { "mimeTypes": ["text/plain"] } } });
