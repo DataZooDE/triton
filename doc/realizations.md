@@ -420,6 +420,21 @@ production deployment can avoid by knowing about it.
 Items discovered while building the production Rust port; each is
 a trap the next developer should not have to step in.
 
+- **A system Flutter upgrade can block every push; the Flutter steps use the
+  pinned SDK when one is installed (2026-11-18).** The machine's Flutter went
+  to 3.50, whose analyzer flags `package:flutter/material.dart` as deprecated
+  (Material moved to the pub package `material_ui`), so `flutter analyze`
+  failed in the pre-push gate while CI (3.44.4) was green. Moving to
+  `material_ui` is blocked by the ecosystem: even `google_fonts` 8.2.1 still
+  builds on the SDK's Material, and `material_ui`'s classes are distinct
+  types (a google_fonts `TextTheme` is not a material_ui one). And the
+  explorer image's build base, `ghcr.io/cirruslabs/flutter`, publishes
+  nothing newer than 3.44.0. So `scripts/check.sh` now puts
+  `$TRITON_FLUTTER_HOME`, else `~/.local/share/flutter-<pin>`, first on PATH
+  for the Flutter steps (install line in the script); revisit the 3.50 move
+  when google_fonts and co. support `material_ui`, with a self-installed
+  Flutter in the explorer image.
+
 - **A short card text is not enough for ChatGPT: slim `structuredContent`
   too (2026-11-18).** Live on the Nidorel demo, ChatGPT declared MCP Apps
   (`card_host: true` in the per-call log line) and so received the one-line

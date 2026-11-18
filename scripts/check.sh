@@ -50,7 +50,22 @@ step_capture() {
 
 FLUTTER_PIN=3.44.4 # keep in step with ci.yml's flutter-version
 
+# The Flutter steps run on the CI-pinned SDK when one is installed, so a newer
+# system Flutter (whose analyzer may flag what the pin does not) never blocks a
+# push: $TRITON_FLUTTER_HOME, else ~/.local/share/flutter-$FLUTTER_PIN, else
+# the `flutter` on PATH (with the note below). Install the pin once with
+#   git clone --depth 1 --branch "$FLUTTER_PIN" https://github.com/flutter/flutter.git \
+#     ~/.local/share/flutter-"$FLUTTER_PIN"
+use_pinned_flutter() {
+  local home="${TRITON_FLUTTER_HOME:-$HOME/.local/share/flutter-$FLUTTER_PIN}"
+  if [ -x "$home/bin/flutter" ]; then
+    PATH="$home/bin:$PATH"
+    export PATH
+  fi
+}
+
 flutter_version_note() {
+  use_pinned_flutter
   local v
   v="$(flutter --version 2>/dev/null | awk 'NR==1 {print $2}')"
   if [ "$v" != "$FLUTTER_PIN" ]; then
@@ -100,6 +115,7 @@ step_flutter_explorer() {
 
 # `--no-wasm-dry-run`: skips the extra wasm compile that OOMs the CI runner.
 step_flutter_web() {
+  use_pinned_flutter
   (cd apps/explorer && flutter build web --release --no-wasm-dry-run)
 }
 
