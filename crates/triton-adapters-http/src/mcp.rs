@@ -908,12 +908,15 @@ fn answer(
     let companions = crate::a2a_spec::card_companions(&d.result);
     // The answer card's A2UI v0.9 messages, from the canonical
     // surface and the producer's basic-catalog passthrough surfaces
-    // (before the A2UI wrap). A result that brings its own MCP App
-    // (`_meta.ui`) keeps it; there is no card to draw then.
+    // (before the A2UI wrap), for a client that renders the card only:
+    // one that cannot show it does not get the card's data (a producer's
+    // data_model included) in its result `_meta` either. Both reference
+    // hosts (Claude, ChatGPT) declare MCP Apps. A result that brings its own
+    // MCP App (`_meta.ui`) keeps it; there is no card to draw then.
     let sign =
         |overlay: &serde_json::Map<String, Value>| origin.and_then(|o| o.sign_rerun(overlay));
     let rerun: Option<triton_core::a2ui::basic::Rerun<'_>> = origin.map(|_| &sign as _);
-    let widget = (state.widget && ui_meta.is_none())
+    let widget = (state.widget && card_host && ui_meta.is_none())
         .then(|| mcp_app::card_with(&d.result, rerun))
         .flatten();
     // A producer surface's in-card events repeat this call.

@@ -548,7 +548,8 @@ async fn an_in_process_upstream_behaves_like_a_static_upstream_on_every_face() {
             &format!("{base}/mcp"),
             tok,
             "tools/call",
-            json!({ "name": "answer", "arguments": { "message": "Who leads?" } }),
+            json!({ "name": "answer", "arguments": { "message": "Who leads?" },
+                    "_meta": crate::mcp_app_widget::card_host_meta() }),
         )
         .await;
         calls.push(scrub(&r));

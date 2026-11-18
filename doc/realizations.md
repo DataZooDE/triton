@@ -420,6 +420,17 @@ production deployment can avoid by knowing about it.
 Items discovered while building the production Rust port; each is
 a trap the next developer should not have to step in.
 
+- **The card's messages go to card hosts only (2026-11-18).** #368 sent
+  `_meta["triton/a2ui"]` (Triton's card plus a producer's basic surfaces and
+  their `data_model`) to every MCP client while the widget was on, because it
+  was not known whether ChatGPT declares MCP Apps. The demo's per-call log
+  lines settled it: ChatGPT (`openai-mcp/1.0.0 (Codex)`) and Claude
+  (`Claude-User`) both declare `io.modelcontextprotocol/ui`. So the card's
+  data now goes only to a client that can render it, the same per-request
+  card-host rule as the card text (#364), the slim `structuredContent`
+  (#376) and the in-card tokens (#374). A host that renders MCP Apps without
+  declaring them would show no card; none is known.
+
 - **A system Flutter upgrade can block every push; the Flutter steps use the
   pinned SDK when one is installed (2026-11-18).** The machine's Flutter went
   to 3.50, whose analyzer flags `package:flutter/material.dart` as deprecated

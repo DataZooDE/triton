@@ -307,14 +307,15 @@ async fn card_controls_are_signed_for_card_hosts_and_fallbacks_elsewhere() {
         res["_meta"]
     );
 
-    // Not a card host: the fallbacks, no tokens.
+    // Not a card host: no card at all (its data stays with clients that
+    // render it), so no control and no token either.
     let plain = call(&r, ALICE, None, "list_planned", json!({})).await;
-    let ev = card_events(&plain);
-    assert!(ev.iter().all(|(n, _)| n != in_card::EVENT), "{ev:#?}");
+    assert!(card_events(&plain).is_empty(), "{plain}");
     assert!(
-        ev.iter()
-            .any(|(n, c)| n == basic::SEND_MESSAGE
-                && c["text"] == "Show page 2 of the planned agents")
+        plain["_meta"]
+            .get(triton_core::a2ui::mcp_app::META_KEY)
+            .is_none(),
+        "{plain}"
     );
     assert!(plain["_meta"].get(in_card::META_KEY).is_none());
 

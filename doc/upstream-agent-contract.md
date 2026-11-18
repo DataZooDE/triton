@@ -334,8 +334,10 @@ Notes for agent authors:
   `triton.` are reserved for Triton's own card: a surface whose control fires
   one is dropped (`reason="reserved_event"`), except the in-card marker
   `triton.in_card:<name>`. On MCP a producer's basic
-  surfaces (and their `data_model`) reach every client's result `_meta` while
-  the widget is on, whether or not it negotiated anything; the widget's
+  surfaces (and their `data_model`) go into the result `_meta` only for a
+  client that declared MCP Apps (`io.modelcontextprotocol/ui` with
+  `text/html;profile=mcp-app`, as Claude and ChatGPT do); every other client
+  gets neither them nor Triton's card. The widget's
   producer surfaces are capped at 64 KiB in all (trailing ones dropped). A click on a producer's button comes back as a
   client event (§2b); the producer handles it. Schema validity is not a
   security review: passthrough is still for upstreams the operator trusts like its own
