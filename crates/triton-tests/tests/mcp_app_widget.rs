@@ -566,7 +566,7 @@ async fn a_card_host_gets_producer_surfaces_and_the_card_as_v09_messages() {
             { "id": "b", "component": "Button", "child": "bl",
               "action": { "event": { "name": "apply", "context": { "pick": { "path": "/pick" } } } } }
         ],
-        "data_model": { "pick": "a" }
+        "data_model": { "pick": "a", "note": "dm-marker-7f3a" }
     });
     let agent = FakeAgent::start_returning(json!({ "surface": {
         "components": [
@@ -661,6 +661,29 @@ async fn a_card_host_gets_producer_surfaces_and_the_card_as_v09_messages() {
             mcp_app::CARD_NOTE
         ),
         "{res}"
+    );
+
+    // A client that does not declare MCP Apps calls the same tool: the
+    // producer's data_model reaches it nowhere (not in `content`,
+    // `structuredContent` or `_meta`).
+    let plain: Value = reqwest::Client::new()
+        .post(triton.rest_url("/mcp"))
+        .header("accept", "application/json, text/event-stream")
+        .bearer_auth("dev-token")
+        .json(
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "close_calls", "arguments": { "message": "Which claims are close?" } } }),
+        )
+        .send()
+        .await
+        .expect("POST /mcp")
+        .json()
+        .await
+        .expect("json");
+    assert!(plain["result"]["content"].is_array(), "{plain}");
+    assert!(
+        !plain.to_string().contains("dm-marker-7f3a"),
+        "producer data reached a non-card client: {plain}"
     );
 }
 

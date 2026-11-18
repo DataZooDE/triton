@@ -329,6 +329,50 @@ async fn card_controls_are_signed_for_card_hosts_and_fallbacks_elsewhere() {
     assert!(undeclared["_meta"].get(in_card::META_KEY).is_none());
 }
 
+/// A valid in-card token replayed by a request that does not declare MCP
+/// Apps (here: no card session) gets the answer as any non-card client does:
+/// the full text and envelope, no card messages, no fresh in-card token. The
+/// card host rule is decided per request on the rerun path too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_token_replayed_without_declaring_mcp_apps_gets_no_card() {
+    let r = rig().await;
+    let session = card_session(&r, ALICE).await;
+    let page1 = call(
+        &r,
+        ALICE,
+        Some(&session),
+        "list_planned",
+        json!({ "q": "planned" }),
+    )
+    .await;
+    let next = token_for(&page1, "Show page 2 of the planned agents");
+    let replay = call(
+        &r,
+        ALICE,
+        None,
+        in_card::TOOL_NAME,
+        ui_event(
+            &next,
+            in_card::EVENT,
+            basic::SURFACE_ID,
+            json!({ "fallback": "x" }),
+        ),
+    )
+    .await;
+    assert_eq!(replay["isError"], false, "{replay}");
+    assert!(
+        replay["_meta"]
+            .get(triton_core::a2ui::mcp_app::META_KEY)
+            .is_none(),
+        "{replay}"
+    );
+    assert!(replay["_meta"].get(in_card::META_KEY).is_none(), "{replay}");
+    assert!(
+        replay["structuredContent"]["result"].is_object(),
+        "the full envelope: {replay}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_page_turn_and_a_filter_update_the_card_in_place() {
     let r = rig().await;
