@@ -509,7 +509,7 @@ requires `Clone`).
 > basic catalog). The typed vocabulary below never sees it, and on MCP it is
 > stripped from `structuredContent` (the model reads that). On a card host
 > whose card shows every row, `structuredContent` is only a summary of the
-> card (`{card: {title, rows, shown_in_card}, trace_id, latency_ms}`), since
+> card (`{card: {title, context, rows, shown_in_card}, trace_id, latency_ms}`), since
 > ChatGPT's model reads it and would otherwise page and repeat the rows. A
 > client that wants the full envelope does not declare the MCP Apps extension.
 >

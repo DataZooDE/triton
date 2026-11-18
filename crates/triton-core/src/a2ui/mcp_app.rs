@@ -149,8 +149,9 @@ pub fn card_text(s: &CardSummary, note: &str) -> Option<String> {
 pub struct CardModelView {
     /// The text content: the card's title and row names, then the note.
     pub text: String,
-    /// `structuredContent.card`: the card's title and row count, and that
-    /// the rows are in the card. No row and no paging state: a model that
+    /// `structuredContent.card`: the card's title, its context line (e.g.
+    /// "Page 2 of 3") and row count, and that the rows are in the card. No
+    /// row and no cursor: a model that
     /// reads `structuredContent` (ChatGPT) would otherwise page the tool
     /// itself and repeat the rows the person already sees.
     pub structured: serde_json::Value,
@@ -184,6 +185,11 @@ pub fn model_view(s: &CardSummary, note: &str) -> Option<CardModelView> {
         .as_deref()
         .map(str::trim)
         .filter(|c| !c.is_empty());
+    // The header's context line (e.g. which page is shown), as the text
+    // says it: the two model-visible outputs agree.
+    if let Some(c) = context {
+        structured["context"] = serde_json::json!(c);
+    }
     let more = names.len().saturating_sub(SUMMARY_NAMES);
     names.truncate(SUMMARY_NAMES);
     let mut line = String::new();
@@ -389,6 +395,17 @@ mod tests {
         assert_eq!(
             v.structured,
             json!({ "title": "Open drafts", "rows": 2, "shown_in_card": true })
+        );
+        let paged = CardSummary {
+            context: Some(" Page 2 of 3 ".into()),
+            ..s.clone()
+        };
+        let v = model_view(&paged, "").unwrap();
+        assert_eq!(v.structured["context"], "Page 2 of 3");
+        assert!(
+            v.text.starts_with("Open drafts (Page 2 of 3): A, B"),
+            "{}",
+            v.text
         );
         let untitled = CardSummary {
             block_title: None,

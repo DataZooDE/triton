@@ -429,7 +429,7 @@ a trap the next developer should not have to step in.
   envelope, with every row and the paging state. Claude, given the same
   answer, called once. Now, whenever the card text applies (card host and a
   card that shows every row), `structuredContent` is
-  `{card: {title, rows, shown_in_card: true}, trace_id, latency_ms}`
+  `{card: {title, context, rows, shown_in_card: true}, trace_id, latency_ms}`
   instead of the envelope; a cut card, a card-less answer and every
   non-card client keep the envelope. Finding the cause took the demo VM's
   `control` service log (substrate `operator-vm` `service-logs`; delete the

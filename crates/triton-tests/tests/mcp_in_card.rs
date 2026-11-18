@@ -373,6 +373,11 @@ async fn a_page_turn_and_a_filter_update_the_card_in_place() {
         page2["structuredContent"]["card"]["shown_in_card"], true,
         "{page2}"
     );
+    // The header's context line, as the text says it: which page is shown.
+    assert_eq!(
+        page2["structuredContent"]["card"]["context"], "Page 2 of 3",
+        "{page2}"
+    );
     assert!(
         page2["structuredContent"].get("result").is_none(),
         "{page2}"
