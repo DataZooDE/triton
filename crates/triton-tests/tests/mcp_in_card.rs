@@ -307,14 +307,15 @@ async fn card_controls_are_signed_for_card_hosts_and_fallbacks_elsewhere() {
         res["_meta"]
     );
 
-    // Not a card host: the fallbacks, no tokens.
+    // Not a card host: no card at all (its data stays with clients that
+    // render it), so no control and no token either.
     let plain = call(&r, ALICE, None, "list_planned", json!({})).await;
-    let ev = card_events(&plain);
-    assert!(ev.iter().all(|(n, _)| n != in_card::EVENT), "{ev:#?}");
+    assert!(card_events(&plain).is_empty(), "{plain}");
     assert!(
-        ev.iter()
-            .any(|(n, c)| n == basic::SEND_MESSAGE
-                && c["text"] == "Show page 2 of the planned agents")
+        plain["_meta"]
+            .get(triton_core::a2ui::mcp_app::META_KEY)
+            .is_none(),
+        "{plain}"
     );
     assert!(plain["_meta"].get(in_card::META_KEY).is_none());
 
@@ -326,6 +327,50 @@ async fn card_controls_are_signed_for_card_hosts_and_fallbacks_elsewhere() {
             .all(|(n, _)| n != in_card::EVENT)
     );
     assert!(undeclared["_meta"].get(in_card::META_KEY).is_none());
+}
+
+/// A valid in-card token replayed by a request that does not declare MCP
+/// Apps (here: no card session) gets the answer as any non-card client does:
+/// the full text and envelope, no card messages, no fresh in-card token. The
+/// card host rule is decided per request on the rerun path too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_token_replayed_without_declaring_mcp_apps_gets_no_card() {
+    let r = rig().await;
+    let session = card_session(&r, ALICE).await;
+    let page1 = call(
+        &r,
+        ALICE,
+        Some(&session),
+        "list_planned",
+        json!({ "q": "planned" }),
+    )
+    .await;
+    let next = token_for(&page1, "Show page 2 of the planned agents");
+    let replay = call(
+        &r,
+        ALICE,
+        None,
+        in_card::TOOL_NAME,
+        ui_event(
+            &next,
+            in_card::EVENT,
+            basic::SURFACE_ID,
+            json!({ "fallback": "x" }),
+        ),
+    )
+    .await;
+    assert_eq!(replay["isError"], false, "{replay}");
+    assert!(
+        replay["_meta"]
+            .get(triton_core::a2ui::mcp_app::META_KEY)
+            .is_none(),
+        "{replay}"
+    );
+    assert!(replay["_meta"].get(in_card::META_KEY).is_none(), "{replay}");
+    assert!(
+        replay["structuredContent"]["result"].is_object(),
+        "the full envelope: {replay}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

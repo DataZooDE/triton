@@ -204,11 +204,13 @@ async fn a_client_that_does_not_render_the_card_keeps_the_full_text() {
     let r = rig().await;
 
     // No extension declared (Copilot Studio, a plain MCP client): no
-    // session id, the full text, and the card's messages as before.
+    // session id, the full text, and no card messages: a client that cannot
+    // render the card does not get the card's data (incl. a producer's
+    // data_model) in its result `_meta` either.
     assert_eq!(initialize(&r, json!({})).await, None);
     let res = call(&r, None, "list_agents", None).await;
     assert_eq!(text(&res), "full text of 3a", "{res}");
-    assert_eq!(res["_meta"][mcp_app::META_KEY], read_json(&golden("3a")));
+    assert!(res["_meta"].get(mcp_app::META_KEY).is_none(), "{res}");
     assert!(
         res["structuredContent"]["result"]["surface"].is_object(),
         "a client that does not render the card keeps the full typed result: {res}"

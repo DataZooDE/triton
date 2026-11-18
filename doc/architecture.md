@@ -516,7 +516,8 @@ requires `Clone`).
 > **MCP Apps widget (2026-11, #368).** The widget page is built from
 > `packages/mcp-widget` (vite, single file, committed and `include_str!`-ed;
 > `scripts/check.sh mcp-widget` rebuilds it and fails on a difference). Each
-> `tools/call` result carries A2UI v0.9 messages in `_meta["triton/a2ui"]`:
+> `tools/call` result for a card host (a client that declared MCP Apps; no
+> one else) carries A2UI v0.9 messages in `_meta["triton/a2ui"]`:
 > the producer's basic-catalog surfaces, then the canonical card projected
 > onto the basic catalog (`a2ui::basic`, one more builder file beside `ge.rs`
 > and the Teams card). Its controls are two Triton events the widget handles

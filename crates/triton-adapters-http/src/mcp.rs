@@ -753,7 +753,7 @@ async fn tools_call(
 
     // #369: a card control re-running its tool in place.
     if tool_name == in_card::TOOL_NAME {
-        return in_card_call(id, &args, principal, requested, state).await;
+        return in_card_call(id, &args, principal, requested, state, card_host).await;
     }
     // The card's in-card controls repeat this call, for this principal:
     // only on a host that renders the card, for a tool declared in-card
@@ -819,6 +819,7 @@ async fn in_card_call(
     principal: triton_core::Principal,
     requested: Option<A2uiVersion>,
     state: &McpState,
+    card_host: bool,
 ) -> Response {
     let caller = principal.clone();
     match state
@@ -832,7 +833,12 @@ async fn in_card_call(
                 args: &ic.args,
                 holder: Holder::of(&caller),
             };
-            answer(id, ic.dispatch, true, requested, state, Some(&origin))
+            // The card-host rule is decided per request here too: a valid
+            // token replayed by a request that does not declare MCP Apps
+            // gets the answer as any non-card client does (no card, no
+            // fresh controls). The reference hosts declare on widget calls.
+            let origin = card_host.then_some(&origin);
+            answer(id, ic.dispatch, card_host, requested, state, origin)
         }
         Err(e) => {
             let text = match e {
@@ -889,6 +895,9 @@ fn answer(
     // exactly like `ui` (and captured before the A2UI wrap rewrites
     // `d.result`). Only a structured array is reflected; a scalar/
     // object blob is ignored, so an upstream can't bloat the response.
+    // Unlike the card, it goes to every client, card host or not
+    // (decided 2026-11-18): it is an opt-in debug sidecar any client may
+    // show, so an upstream attaches only what the caller may see.
     let tool_trace = d
         .result
         .get("_meta")
@@ -908,12 +917,15 @@ fn answer(
     let companions = crate::a2a_spec::card_companions(&d.result);
     // The answer card's A2UI v0.9 messages, from the canonical
     // surface and the producer's basic-catalog passthrough surfaces
-    // (before the A2UI wrap). A result that brings its own MCP App
-    // (`_meta.ui`) keeps it; there is no card to draw then.
+    // (before the A2UI wrap), for a client that renders the card only:
+    // one that cannot show it does not get the card's data (a producer's
+    // data_model included) in its result `_meta` either. Both reference
+    // hosts (Claude, ChatGPT) declare MCP Apps. A result that brings its own
+    // MCP App (`_meta.ui`) keeps it; there is no card to draw then.
     let sign =
         |overlay: &serde_json::Map<String, Value>| origin.and_then(|o| o.sign_rerun(overlay));
     let rerun: Option<triton_core::a2ui::basic::Rerun<'_>> = origin.map(|_| &sign as _);
-    let widget = (state.widget && ui_meta.is_none())
+    let widget = (state.widget && card_host && ui_meta.is_none())
         .then(|| mcp_app::card_with(&d.result, rerun))
         .flatten();
     // A producer surface's in-card events repeat this call.
@@ -940,7 +952,6 @@ fn answer(
     // and prints every row under the card (observed 2026-11-17).
     let view = widget
         .as_ref()
-        .filter(|_| card_host)
         .and_then(|w| w.summary.as_ref())
         .and_then(|s| mcp_app::model_view(s, &state.card_note));
     let (card_line, card_structured) = match view {

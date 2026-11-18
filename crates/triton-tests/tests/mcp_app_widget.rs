@@ -486,22 +486,34 @@ async fn a_customer_mcp_path_serves_the_answer_card_widget() {
     assert_eq!(html, mcp_app::widget_html());
     assert_self_contained(html);
 
-    // tools/call (a plain client): the card's v0.9 messages ride the result
-    // `_meta`, which the host hands the widget but not the model; nothing
-    // A2UI reaches `content` or `structuredContent`.
+    // tools/call from a card host (a 2026-07-28 client declaring MCP Apps):
+    // the card's v0.9 messages ride the result `_meta`, which the host hands
+    // the widget but not the model; nothing A2UI reaches `content` or
+    // `structuredContent`.
     for (tool, name) in SHAPES {
-        let res = rpc(&r, "tools/call", json!({ "name": tool, "arguments": {} })).await;
+        let res = rpc(
+            &r,
+            "tools/call",
+            json!({ "name": tool, "arguments": {}, "_meta": card_host_meta() }),
+        )
+        .await;
         let want = read_json(&golden(name));
         assert_eq!(res["_meta"][mcp_app::META_KEY], want, "{tool}");
         assert!(res["_meta"].get("triton/widget").is_none(), "{tool}");
         assert_no_a2ui_for_the_model(&res);
+        // A plain client (no MCP Apps declared) gets no card messages.
+        let plain = rpc(&r, "tools/call", json!({ "name": tool, "arguments": {} })).await;
+        assert!(
+            plain["_meta"].get(mcp_app::META_KEY).is_none(),
+            "{tool}: {plain}"
+        );
         assert_eq!(
-            res["content"][0]["text"],
+            plain["content"][0]["text"],
             format!("full text of {name}"),
             "{tool}: text unchanged"
         );
         assert!(
-            res["structuredContent"]["result"]["surface"]["components"].is_array(),
+            plain["structuredContent"]["result"]["surface"]["components"].is_array(),
             "{tool}: envelope unchanged"
         );
     }
@@ -513,6 +525,16 @@ async fn a_customer_mcp_path_serves_the_answer_card_widget() {
     .await;
     assert_eq!(res["content"][0]["text"], "just prose");
     assert!(res["_meta"].get(mcp_app::META_KEY).is_none(), "{res}");
+}
+
+/// The per-request `_meta` of a 2026-07-28 client that renders MCP Apps.
+pub(crate) fn card_host_meta() -> Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": "card-host-test", "version": "1.0.0" },
+        "io.modelcontextprotocol/clientCapabilities": { "extensions": {
+            "io.modelcontextprotocol/ui": { "mimeTypes": [mcp_app::MIME_TYPE] } } }
+    })
 }
 
 /// What the model reads (`content`, `structuredContent`) never carries A2UI
@@ -544,7 +566,7 @@ async fn a_card_host_gets_producer_surfaces_and_the_card_as_v09_messages() {
             { "id": "b", "component": "Button", "child": "bl",
               "action": { "event": { "name": "apply", "context": { "pick": { "path": "/pick" } } } } }
         ],
-        "data_model": { "pick": "a" }
+        "data_model": { "pick": "a", "note": "dm-marker-7f3a" }
     });
     let agent = FakeAgent::start_returning(json!({ "surface": {
         "components": [
@@ -639,6 +661,29 @@ async fn a_card_host_gets_producer_surfaces_and_the_card_as_v09_messages() {
             mcp_app::CARD_NOTE
         ),
         "{res}"
+    );
+
+    // A client that does not declare MCP Apps calls the same tool: the
+    // producer's data_model reaches it nowhere (not in `content`,
+    // `structuredContent` or `_meta`).
+    let plain: Value = reqwest::Client::new()
+        .post(triton.rest_url("/mcp"))
+        .header("accept", "application/json, text/event-stream")
+        .bearer_auth("dev-token")
+        .json(
+            &json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+            "name": "close_calls", "arguments": { "message": "Which claims are close?" } } }),
+        )
+        .send()
+        .await
+        .expect("POST /mcp")
+        .json()
+        .await
+        .expect("json");
+    assert!(plain["result"]["content"].is_array(), "{plain}");
+    assert!(
+        !plain.to_string().contains("dm-marker-7f3a"),
+        "producer data reached a non-card client: {plain}"
     );
 }
 
