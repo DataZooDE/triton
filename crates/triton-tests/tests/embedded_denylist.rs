@@ -28,6 +28,18 @@ use triton_core::error::TritonError;
 use triton_core::principal::{Principal, ToolPrincipal};
 use triton_core::{Dispatcher, Tool, ToolRegistry};
 
+/// These tests set and remove process environment variables, and the test
+/// harness runs them on parallel threads: one test's `remove_var` would undo
+/// another's `set_var` mid-test. Every test holds this lock for its whole
+/// body, so the environment changes one at a time. (The binary is its own
+/// process, so nothing outside it sees them.)
+async fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+    // Async-aware: the guard is held across `.await`s, and each test has its
+    // own runtime (tokio's mutex works across runtimes).
+    static ENV: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    ENV.lock().await
+}
+
 /// Deliberately unique: `Dispatcher::new` reads the process environment,
 /// and these tests share a process with several hundred others. A tenant
 /// and subject nobody else uses cannot deny anyone else's principal.
@@ -71,6 +83,7 @@ fn registry() -> ToolRegistry {
 /// exists only for a binary nobody runs in production.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_embedded_host_revokes_without_wiring_anything() {
+    let _env = env_lock().await;
     unsafe {
         std::env::set_var(
             "TRITON_DENIED_PRINCIPALS",
@@ -140,6 +153,7 @@ async fn an_embedded_host_revokes_without_wiring_anything() {
 /// on one alone is no check — and an embedded A2A host uses this one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_embedded_streaming_entry_point_revokes_too() {
+    let _env = env_lock().await;
     unsafe {
         std::env::set_var(
             "TRITON_DENIED_PRINCIPALS",
@@ -206,6 +220,7 @@ fn pairing_principal() -> Principal {
 /// one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_embedded_host_honours_the_pairing_restriction() {
+    let _env = env_lock().await;
     unsafe {
         std::env::set_var("TRITON_PAIRING_TOOLS", "pair");
     }
@@ -245,6 +260,7 @@ async fn an_embedded_host_honours_the_pairing_restriction() {
 /// surface is the one exposed to the public internet.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_embedded_host_can_set_the_rejection_window() {
+    let _env = env_lock().await;
     unsafe {
         std::env::set_var("TRITON_AUDIT_REJECT_WINDOW_SECS", "0");
     }
@@ -296,6 +312,7 @@ async fn an_embedded_host_can_set_the_rejection_window() {
 /// engaged when a typo dropped every entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_active_denylist_announces_itself() {
+    let _env = env_lock().await;
     let bin = {
         let mut here = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         loop {
@@ -379,6 +396,7 @@ async fn an_active_denylist_announces_itself() {
 /// revoke MORE.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn denylist_sources_compose_by_revoking_more_never_less() {
+    let _env = env_lock().await;
     let controls = DispatchControls::unenforced()
         .extend_denied_principals("env-tenant/env-sub")
         .extend_denied_principals("code-tenant/code-sub");
@@ -401,6 +419,7 @@ async fn denylist_sources_compose_by_revoking_more_never_less() {
 /// reaches, which is why `restrict_scope` REPLACES and says so.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_scope_restriction_replaces_rather_than_widening() {
+    let _env = env_lock().await;
     let controls = DispatchControls::unenforced()
         .replace_scope_restriction("pairing", ["stale_env_tool".to_string()])
         .replace_scope_restriction("pairing", ["echo".to_string()]);

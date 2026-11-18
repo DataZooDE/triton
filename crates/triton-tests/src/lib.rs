@@ -428,9 +428,35 @@ fn _assert_pipe_types() {
 /// directly — `TritonProcess::chat_webhook_addr` in that case reports the
 /// harness's original (unused) pick, not the override, so don't rely on
 /// it when you've overridden the port yourself.
+/// First port of the range tests take their listener ports from.
+pub const PORT_RANGE_START: u16 = 20_000;
+/// End (exclusive) of that range: Linux's default ephemeral range starts at
+/// 32768, so no outgoing connection is ever handed one of these ports.
+pub const PORT_RANGE_END: u16 = 32_768;
+
+/// A port for a test listener (a spawned triton, a fake upstream).
+///
+/// Not an ephemeral port: probing `127.0.0.1:0` and releasing it raced under
+/// load, because the kernel hands the same range to outgoing connections
+/// and the child binds only later. Ports come from
+/// [`PORT_RANGE_START`]..[`PORT_RANGE_END`] instead, through one counter per
+/// process (seeded from the pid, so two test binaries start far apart), not
+/// again in a process until the range wraps, and only when a bind check
+/// passes. The spawn retry
+/// loop stays as the backstop for a collision with another process.
 pub fn free_tcp_port() -> u16 {
-    let l = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    l.local_addr().unwrap().port()
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: std::sync::OnceLock<AtomicU32> = std::sync::OnceLock::new();
+    let span = u32::from(PORT_RANGE_END - PORT_RANGE_START);
+    let next = NEXT.get_or_init(|| AtomicU32::new((std::process::id().wrapping_mul(7919)) % span));
+    for _ in 0..span {
+        let offset = next.fetch_add(1, Ordering::Relaxed) % span;
+        let port = PORT_RANGE_START + offset as u16;
+        if TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
+    panic!("no free test port in {PORT_RANGE_START}..{PORT_RANGE_END}");
 }
 
 /// Heuristic match for "child exited because TCP bind raced with a
@@ -702,5 +728,26 @@ fn newest_source_mtime(dir: &std::path::Path, newest: &mut Option<std::time::Sys
         {
             *newest = Some(mtime);
         }
+    }
+}
+
+#[cfg(test)]
+mod port_tests {
+    use super::*;
+
+    /// A test's ports never come from the kernel's ephemeral range (where an
+    /// outgoing connection can take one between the probe and the child's
+    /// bind) and are never handed out twice in one process.
+    #[test]
+    fn ports_come_from_outside_the_ephemeral_range_and_never_repeat() {
+        let ports: Vec<u16> = (0..300).map(|_| free_tcp_port()).collect();
+        assert!(
+            ports
+                .iter()
+                .all(|p| (PORT_RANGE_START..PORT_RANGE_END).contains(p)),
+            "{ports:?}"
+        );
+        let unique: std::collections::BTreeSet<u16> = ports.iter().copied().collect();
+        assert_eq!(unique.len(), ports.len(), "a port was handed out twice");
     }
 }
