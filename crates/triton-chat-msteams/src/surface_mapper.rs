@@ -21,7 +21,9 @@
 //! `TextBlock`s render their content as-is.
 
 use serde_json::{Value, json};
-use triton_core::a2ui::{Action, Component, FormFieldKind, SourceItem, Surface, extract_surface};
+use triton_core::a2ui::{
+    Component, FormFieldKind, SourceItem, Stateless, Surface, extract_surface,
+};
 use triton_core::surface::{Charts, Markdown, SurfaceProfile, Tables};
 use triton_correlation::message::{SEND_MESSAGE_TOOL, text_args};
 
@@ -547,20 +549,18 @@ pub fn interactive_from_result(result: &Value) -> Vec<InteractiveSpec> {
             // message; the callback turns it into a new user turn.
             Component::Button {
                 label,
-                action: Some(Action::SendMessage { text } | Action::Rerun { fallback: text, .. }),
+                action: Some(a),
                 ..
-            } => Some(InteractiveSpec::Button {
-                label: label.clone(),
-                tool: SEND_MESSAGE_TOOL.to_string(),
-                args: text_args(text),
-            }),
-            Component::Button {
-                label,
-                action: Some(Action::OpenUrl { url }),
-                ..
-            } => Some(InteractiveSpec::OpenUrl {
-                label: label.clone(),
-                url: url.clone(),
+            } => Some(match a.stateless() {
+                Stateless::Send(text) => InteractiveSpec::Button {
+                    label: label.clone(),
+                    tool: SEND_MESSAGE_TOOL.to_string(),
+                    args: text_args(text),
+                },
+                Stateless::Open(url) => InteractiveSpec::OpenUrl {
+                    label: label.clone(),
+                    url: url.to_string(),
+                },
             }),
             Component::Button {
                 label, tool, args, ..

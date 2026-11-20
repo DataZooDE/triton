@@ -264,12 +264,13 @@ fn vet_one(s: &Value) -> Result<Value, Rejection> {
     Ok(out)
 }
 
-/// The v0.9 messages for vetted surfaces written for one of `catalogs`:
-/// `createSurface` (declaring `catalog_id`, the catalog the face's renderer
-/// knows) + `updateComponents` (+ `updateDataModel`) each. A surface with no
-/// `root` or an unknown catalog is skipped, so an unvetted value (a task
-/// record stored before vetting existed) can still never go out broken.
-pub fn messages(vetted: Option<&Value>, catalogs: &[Catalog], catalog_id: &str) -> Vec<Value> {
+/// The v0.9 messages for vetted surfaces written for one of `catalogs`, one
+/// group per surface: `createSurface` (declaring `catalog_id`, the catalog
+/// the face's renderer knows) + `updateComponents` (+ `updateDataModel`). A
+/// surface with no `root` or an unknown catalog is skipped, so an unvetted
+/// value (a task record stored before vetting existed) can still never go
+/// out broken. A face with a per-surface budget keeps or drops whole groups.
+pub fn surfaces(vetted: Option<&Value>, catalogs: &[Catalog], catalog_id: &str) -> Vec<Vec<Value>> {
     let Some(list) = vetted.and_then(Value::as_array) else {
         return Vec::new();
     };
@@ -280,8 +281,13 @@ pub fn messages(vetted: Option<&Value>, catalogs: &[Catalog], catalog_id: &str) 
                     .and_then(Value::as_array)
                     .is_some_and(|c| has_root(c))
         })
-        .flat_map(|s| surface_messages(s, catalog_id))
+        .map(|s| surface_messages(s, catalog_id))
         .collect()
+}
+
+/// [`surfaces`], flattened into one message list.
+pub fn messages(vetted: Option<&Value>, catalogs: &[Catalog], catalog_id: &str) -> Vec<Value> {
+    surfaces(vetted, catalogs, catalog_id).concat()
 }
 
 fn surface_messages(s: &Value, catalog_id: &str) -> Vec<Value> {

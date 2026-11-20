@@ -1871,51 +1871,15 @@ async fn message_stream(
         .into_response()
 }
 
-/// Deep-search a `render_report` result for a Vega-Lite chart spec
-/// (deprecated by the neutral `_meta.chart`, #375). Peacock
-/// exposes the composed specs at `_meta.vega_specs` (an array); older/other
-/// shapes carry a `{"kind":"vega","spec":{…}}` component. Search recursively for
-/// either — the same deep-search shape as googlechat's `png_base64` finder.
-fn find_vega_spec(v: &Value) -> Option<Value> {
-    match v {
-        Value::Object(m) => {
-            if m.get("kind").and_then(Value::as_str) == Some("vega")
-                && let Some(spec) = m.get("spec").filter(|s| s.is_object())
-            {
-                return Some(spec.clone());
-            }
-            // Peacock's `_meta.vega_specs`: first non-empty object spec.
-            if let Some(spec) = m
-                .get("vega_specs")
-                .and_then(Value::as_array)
-                .and_then(|a| a.iter().find(|s| s.is_object()))
-            {
-                return Some(spec.clone());
-            }
-            m.values().find_map(find_vega_spec)
-        }
-        Value::Array(a) => a.iter().find_map(find_vega_spec),
-        // MCP tool results carry the surface as a JSON STRING in
-        // `content[].text`; descend into anything that parses as JSON.
-        Value::String(s) if s.trim_start().starts_with(['{', '[']) => {
-            serde_json::from_str::<Value>(s)
-                .ok()
-                .and_then(|parsed| find_vega_spec(&parsed))
-        }
-        _ => None,
-    }
-}
-
-/// The Vega-Lite spec for a `render_report` result: derived from the neutral
-/// `_meta.chart` summary when the upstream sends one (#375), else the
-/// deprecated `_meta.vega_specs`. A malformed summary is logged and ignored.
+/// The Vega-Lite spec for a `render_report` result
+/// ([`triton_core::chart_summary::resolve`]): derived from the neutral
+/// `_meta.chart` summary (#375), else the deprecated legacy spec.
 fn report_vega_spec(result: &Value) -> Option<Value> {
-    match triton_core::chart_summary::find(result) {
-        Some(Ok(summary)) => return Some(summary.to_vega_lite()),
-        Some(Err(e)) => tracing::warn!(error = %e, "a2a: ignoring the upstream's chart summary"),
-        None => {}
+    use triton_core::chart_summary::{ChartSource, resolve};
+    match resolve(result, "a2a")? {
+        ChartSource::Summary(summary) => Some(summary.to_vega_lite()),
+        ChartSource::LegacyVega(spec) => Some(spec),
     }
-    find_vega_spec(result)
 }
 
 /// If `result`'s surface has a `report` component, dispatch `render_report` to

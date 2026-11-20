@@ -810,17 +810,28 @@ async fn tools_call(
                 origin.as_ref(),
             )
         }
-        Err(e) => {
-            // An agent-side fault reaches the client (and through its model,
-            // a person) as the neutral notice; the cause — possibly the
-            // upstream's own status line — stays in the log.
-            if matches!(e, TritonError::Tool(_) | TritonError::Provider(_)) {
-                tracing::warn!(tool = %tool_name, error = %e, "mcp tools/call failed");
-                rpc_error(id, code_for(&e), e.user_notice())
-            } else {
-                rpc_error(id, code_for(&e), &e.to_string())
-            }
-        }
+        Err(e) => rpc_error(id, code_for(&e), &failure_text(&e, &tool_name, true)),
+    }
+}
+
+/// Log a failed `tools/call` and pick the text its client gets. An
+/// agent-side fault (`tool`, `provider`) is logged at `warn` with its cause
+/// (possibly the upstream's own status line) and reaches the client, and
+/// through its model a person, as the class's neutral notice
+/// ([`TritonError::user_notice`]). A caller fault is logged at `debug`; with
+/// `caller_detail` the client gets its message (it names what the caller
+/// sent wrong), else the notice too.
+fn failure_text(e: &TritonError, tool: &str, caller_detail: bool) -> String {
+    let agent_fault = matches!(e, TritonError::Tool(_) | TritonError::Provider(_));
+    if agent_fault {
+        tracing::warn!(tool, error = %e, "mcp tools/call failed");
+    } else {
+        tracing::debug!(tool, error = %e, "mcp tools/call refused");
+    }
+    if agent_fault || !caller_detail {
+        e.user_notice().to_string()
+    } else {
+        e.to_string()
     }
 }
 
@@ -836,8 +847,14 @@ fn may_carry_card(result: &Value) -> bool {
 
 /// #369: an in-card call. The dispatcher checks and audits it; the answer
 /// is projected like any card host's (the widget replaces the card with
-/// it). A refusal is a tool error result (`isError`), on which the widget
-/// sends the control's fallback as a new turn.
+/// it).
+///
+/// A refusal is a tool *result* with `isError: true`, not a JSON-RPC error:
+/// MCP Apps hands a tool result to the widget's `callServerTool`, which then
+/// sends the control's fallback as a new turn, while a JSON-RPC error may be
+/// surfaced by the host itself. Its text is the class's neutral notice for
+/// every class (the widget never shows it as an answer, and the cause is in
+/// the log and the audit line); `structuredContent.error` is the class.
 async fn in_card_call(
     id: Value,
     args: &Value,
@@ -874,10 +891,7 @@ async fn in_card_call(
             )
         }
         Err(e) => {
-            let text = match e {
-                TritonError::Tool(_) | TritonError::Provider(_) => e.user_notice().to_string(),
-                _ => e.to_string(),
-            };
+            let text = failure_text(&e, in_card::TOOL_NAME, false);
             rpc_ok(
                 id,
                 json!({

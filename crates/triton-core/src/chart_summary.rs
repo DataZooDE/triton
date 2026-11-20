@@ -335,23 +335,17 @@ impl ChartSummary {
     }
 }
 
-/// Find `_meta.chart` in a tool result, in the places an upstream puts it
-/// and nowhere else: the result's own `_meta`, its `structuredContent`'s
-/// `_meta`, and, for an MCP result carried as a JSON string, the same two
-/// places of each `content[].text` up to [`MAX_TEXT_BYTES`] (parsed once,
-/// strings inside it are not parsed again). Data the upstream merely relays
-/// (a document, a tool trace, a user's text) therefore cannot plant a chart,
-/// and the cost is bounded by the cap. `None` when no summary is present;
-/// `Some(Err)` when one is present but invalid.
-pub fn find(result: &Value) -> Option<Result<ChartSummary, ChartSummaryError>> {
-    fn at(v: &Value) -> Option<&Value> {
-        v.get("_meta")?.as_object()?.get(META_KEY)
-    }
-    fn own(v: &Value) -> Option<&Value> {
-        at(v).or_else(|| v.get("structuredContent").and_then(at))
-    }
-    if let Some(chart) = own(result) {
-        return Some(ChartSummary::parse(chart));
+/// Apply `f` to the places of a tool result where an upstream puts its
+/// chart data, first hit wins: the result itself, its `structuredContent`,
+/// and, for an MCP result carried as a JSON string, the same two places of
+/// each `content[].text` up to [`MAX_TEXT_BYTES`] (parsed once; strings
+/// inside it are not parsed again). Data the upstream merely relays (a
+/// document, a tool trace, a user's text) is never searched, so it cannot
+/// plant a chart, and the cost is bounded by the cap.
+fn in_known_places<T>(result: &Value, f: impl Fn(&Value) -> Option<T>) -> Option<T> {
+    let own = |v: &Value| f(v).or_else(|| v.get("structuredContent").and_then(&f));
+    if let Some(hit) = own(result) {
+        return Some(hit);
     }
     result
         .get("content")?
@@ -359,10 +353,64 @@ pub fn find(result: &Value) -> Option<Result<ChartSummary, ChartSummaryError>> {
         .iter()
         .filter_map(|c| c.get("text").and_then(Value::as_str))
         .filter(|t| t.len() <= MAX_TEXT_BYTES && t.trim_start().starts_with('{'))
-        .find_map(|t| {
-            let parsed = serde_json::from_str::<Value>(t).ok()?;
-            own(&parsed).map(ChartSummary::parse)
-        })
+        .find_map(|t| own(&serde_json::from_str::<Value>(t).ok()?))
+}
+
+/// Find `_meta.chart` in a tool result ([`in_known_places`]). `None` when no
+/// summary is present; `Some(Err)` when one is present but invalid.
+pub fn find(result: &Value) -> Option<Result<ChartSummary, ChartSummaryError>> {
+    in_known_places(result, |v| {
+        v.get("_meta")?
+            .as_object()?
+            .get(META_KEY)
+            .map(ChartSummary::parse)
+    })
+}
+
+/// Where a result's chart comes from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChartSource {
+    /// The neutral summary (`_meta.chart`).
+    Summary(ChartSummary),
+    /// A Vega-Lite spec, the first object of the deprecated
+    /// `_meta.vega_specs` or a `{kind: "vega", spec}` surface component.
+    /// Read only without a valid summary; removed one release after
+    /// upstreams emit the summary (#382).
+    LegacyVega(Value),
+}
+
+/// The chart of a tool result, the one lookup every channel uses: a valid
+/// summary wins; a malformed one is logged (with `channel`) and ignored, and
+/// the deprecated Vega-Lite spec is read instead. Both are looked for in the
+/// known places only ([`in_known_places`]).
+pub fn resolve(result: &Value, channel: &str) -> Option<ChartSource> {
+    match find(result) {
+        Some(Ok(summary)) => return Some(ChartSource::Summary(summary)),
+        Some(Err(e)) => {
+            tracing::warn!(channel, error = %e, "ignoring the upstream's chart summary")
+        }
+        None => {}
+    }
+    in_known_places(result, legacy_vega).map(ChartSource::LegacyVega)
+}
+
+/// The deprecated Vega-Lite spec at one place: `_meta.vega_specs[first
+/// object]`, else a `{kind: "vega", spec: {...}}` among `surface.components`.
+fn legacy_vega(v: &Value) -> Option<Value> {
+    let from_meta = v
+        .get("_meta")
+        .and_then(|m| m.get("vega_specs"))
+        .and_then(Value::as_array)
+        .and_then(|a| a.iter().find(|s| s.is_object()));
+    let from_component = || {
+        v.get("surface")?
+            .get("components")?
+            .as_array()?
+            .iter()
+            .filter(|c| c.get("kind").and_then(Value::as_str) == Some("vega"))
+            .find_map(|c| c.get("spec").filter(|s| s.is_object()))
+    };
+    from_meta.or_else(from_component).cloned()
 }
 
 #[cfg(test)]
@@ -585,6 +633,34 @@ mod tests {
         ] {
             assert!(find(&v).is_none(), "{v}");
         }
+    }
+
+    #[test]
+    fn resolve_prefers_the_summary_then_the_legacy_spec() {
+        let legacy = json!({ "mark": "bar" });
+        let both = json!({ "_meta": { "chart": bar(), "vega_specs": [ legacy ] } });
+        assert!(matches!(resolve(&both, "t"), Some(ChartSource::Summary(_))));
+        let bad = json!({ "_meta": { "chart": { "kind": "radar" }, "vega_specs": [ 1, legacy ] } });
+        assert_eq!(
+            resolve(&bad, "t"),
+            Some(ChartSource::LegacyVega(legacy.clone()))
+        );
+        let component = json!({ "surface": { "components": [
+            { "kind": "text", "value": "x" }, { "kind": "vega", "spec": legacy } ] } });
+        assert_eq!(
+            resolve(&component, "t"),
+            Some(ChartSource::LegacyVega(legacy.clone()))
+        );
+        let as_text = json!({ "content": [ { "type": "text",
+            "text": json!({ "_meta": { "vega_specs": [ legacy ] } }).to_string() } ] });
+        assert_eq!(
+            resolve(&as_text, "t"),
+            Some(ChartSource::LegacyVega(legacy))
+        );
+        // Relayed data plants no legacy spec either.
+        let planted = json!({ "_meta": { "tool_trace": [ { "data":
+            json!({ "_meta": { "vega_specs": [ { "mark": "x" } ] } }).to_string() } ] } });
+        assert_eq!(resolve(&planted, "t"), None);
     }
 
     /// A text over the cap is not parsed at all (the cost of a lookup is
