@@ -33,7 +33,7 @@ use serde_json::{Value, json};
 
 use super::{Dispatch, Dispatcher};
 use crate::a2ui::ge::ActionSigner;
-use crate::a2ui::in_card::{self as card, EVENT, Holder, Kind, Scope, TOOL_NAME};
+use crate::a2ui::in_card::{self as card, EVENT, Holder, Scope, TOOL_NAME};
 use crate::audit::InCardAudit;
 use crate::dispatch_context::ContextOverrides;
 use crate::error::TritonError;
@@ -66,8 +66,6 @@ struct ReadOnly {
 #[derive(Debug)]
 pub(crate) struct InCardPolicy {
     tools: HashSet<String>,
-    per_sec: u32,
-    burst: u32,
     buckets: PerTenantBuckets,
     /// Per declared tool, the last read-only answer of its own endpoint.
     /// Entries outlive their TTL, so a repeated "no" is told apart from a
@@ -80,20 +78,18 @@ pub(crate) struct InCardPolicy {
 
 impl Default for InCardPolicy {
     fn default() -> Self {
-        Self::new(HashSet::new(), IN_CARD_PER_SEC, IN_CARD_BURST)
+        Self {
+            tools: HashSet::new(),
+            buckets: Self::buckets(IN_CARD_PER_SEC, IN_CARD_BURST),
+            read_only: Mutex::new(HashMap::new()),
+            fills: Mutex::new(HashMap::new()),
+        }
     }
 }
 
 impl InCardPolicy {
-    fn new(tools: HashSet<String>, per_sec: u32, burst: u32) -> Self {
-        Self {
-            tools,
-            per_sec,
-            burst,
-            buckets: PerTenantBuckets::new(per_sec.max(1), burst.max(1)),
-            read_only: Mutex::new(HashMap::new()),
-            fills: Mutex::new(HashMap::new()),
-        }
+    fn buckets(per_sec: u32, burst: u32) -> PerTenantBuckets {
+        PerTenantBuckets::new(per_sec.max(1), burst.max(1))
     }
 
     /// The cached answer for `tool`, if still believed.
@@ -148,7 +144,6 @@ pub struct InCardEvent {
 #[derive(Debug)]
 pub struct InCardDispatch {
     pub tool: String,
-    pub kind: Kind,
     pub args: Value,
     pub dispatch: Dispatch,
 }
@@ -175,23 +170,18 @@ impl InCardEvent {
 impl Dispatcher {
     /// Declare the tools a card may call in place (#369; the operator's
     /// manifest `tools.<name>.in_card: true`). Each must also be annotated
-    /// `readOnlyHint: true`, checked per call. Replaces any earlier set and
-    /// keeps the rate.
+    /// `readOnlyHint: true`, checked per call. Replaces any earlier set;
+    /// the rate stays.
     pub fn with_in_card_tools(mut self, tools: impl IntoIterator<Item = String>) -> Self {
-        let (per_sec, burst) = (self.in_card.per_sec, self.in_card.burst);
-        self.in_card = InCardPolicy::new(
-            tools.into_iter().filter(|t| !t.trim().is_empty()).collect(),
-            per_sec,
-            burst,
-        );
+        self.in_card.tools = tools.into_iter().filter(|t| !t.trim().is_empty()).collect();
+        self.in_card.read_only.get_mut().expect("poisoned").clear();
         self
     }
 
     /// The per-principal in-card rate (default [`IN_CARD_PER_SEC`],
-    /// [`IN_CARD_BURST`]); keeps the declared tools.
+    /// [`IN_CARD_BURST`]); the declared tools stay.
     pub fn with_in_card_rate(mut self, per_sec: u32, burst: u32) -> Self {
-        let tools = std::mem::take(&mut self.in_card.tools);
-        self.in_card = InCardPolicy::new(tools, per_sec, burst);
+        self.in_card.buckets = InCardPolicy::buckets(per_sec, burst);
         self
     }
 
@@ -305,7 +295,7 @@ impl Dispatcher {
             }
         };
         audit.token = "verified";
-        audit.kind = signed.scope.kind().as_str();
+        audit.kind = signed.scope.label();
         let tool = signed.tool.clone();
         let fits = match &signed.scope {
             Scope::Rerun => ev.name == EVENT,
@@ -322,7 +312,7 @@ impl Dispatcher {
                     "event `{}` on `{}` is not one this card's {} token allows",
                     ev.name,
                     ev.surface_id,
-                    signed.scope.kind().as_str()
+                    signed.scope.label()
                 )
             };
             return Err(refuse(&tool, &audit, TritonError::Validation(why)));
@@ -342,7 +332,7 @@ impl Dispatcher {
         }
 
         let mut client = json!({ "in_card": true });
-        if signed.scope.kind() == Kind::Event {
+        if matches!(signed.scope, Scope::Event { .. }) {
             client["a2ui_events"] = json!([{
                 "version": "v0.9",
                 "action": {
@@ -368,7 +358,6 @@ impl Dispatcher {
             .await?;
         Ok(InCardDispatch {
             tool,
-            kind: signed.scope.kind(),
             args: signed.args,
             dispatch,
         })

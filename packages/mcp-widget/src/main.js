@@ -175,10 +175,11 @@ function safeLink(u) {
   }
 }
 
-// `triton.*` events come from Triton's own card only, whose controls passed
-// Triton's checks (basic.rs); a producer surface cannot fire them (the
-// dispatcher also drops such surfaces). A producer's own events are not
-// handled in this widget yet (#369).
+// Triton's own events (send message, open link, rerun in place) are honoured
+// on Triton's card only, whose controls passed Triton's checks (basic.rs); a
+// producer surface cannot fire them (the dispatcher also drops such surfaces).
+// A producer surface may fire `triton.in_card:<name>` events, which go to the
+// app-only tool with the answer's token (#369).
 async function onAction(a) {
   if (a.surfaceId === CARD_SURFACE && a.name === SEND_MESSAGE) return sendMessage(a.context || {});
   if (a.surfaceId === CARD_SURFACE && a.name === OPEN_URL) return openUrl(a.context?.url);

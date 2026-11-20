@@ -1019,12 +1019,7 @@ pub fn chart_from_summary(
             } else {
                 "Chart.Donut"
             };
-            let mut el = json!({ "type": ty, "colorSet": "categorical", "data": data,
-                                 "fallback": fallback });
-            if let Some(t) = &c.title {
-                el["title"] = json!(t);
-            }
-            return Some(el);
+            (ty, data)
         }
         ChartKind::Line | ChartKind::Area => ("Chart.Line", series()),
         ChartKind::Bar => match (c.series.is_some(), c.orientation, c.stacked) {
@@ -1057,7 +1052,10 @@ pub fn chart_from_summary(
     if let Some(t) = &c.title {
         el["title"] = json!(t);
     }
-    if ty != "Chart.HorizontalBar.Stacked" {
+    // A pie has no axes; a stacked horizontal bar carries its own titles.
+    let axes =
+        !matches!(c.kind, ChartKind::Pie | ChartKind::Donut) && ty != "Chart.HorizontalBar.Stacked";
+    if axes {
         if let Some(t) = &c.x_title {
             el["xAxisTitle"] = json!(t);
         }

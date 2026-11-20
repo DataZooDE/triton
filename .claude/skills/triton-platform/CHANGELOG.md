@@ -4,6 +4,12 @@ The skill version tracks the consumer-facing contract, not the Triton
 binary version. The Triton repo's checked-out git ref is the true
 version pin (see `SKILL.md` → "How this skill is installed").
 
+## 0.6.2 — chart summary data cap
+
+- `01`: a `_meta.chart` summary carries at most 32 KiB of charted values
+  (`x`, `y`, `series`); a larger one is rejected as a whole. A row's other
+  keys are ignored and no longer copied into the derived Vega-Lite data.
+
 ## 0.6.1 — upstream `_meta` on MCP is an allow-list
 
 - `01`: only listed `_meta` keys pass: `ui` and `tool_trace` to every

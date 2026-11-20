@@ -228,7 +228,7 @@ dispatches to you instead of its in-tree sidecar.
 **Chart summary and other `_meta` keys (#375):** describe a rendered
 chart at `_meta.chart`, a neutral summary that does not depend on any
 renderer:
-`{kind: bar|line|area|pie|donut|scatter, x, y, series?, rows (≤200), title?, x_title?, y_title?, unit?, orientation?, stacked?}`.
+`{kind: bar|line|area|pie|donut|scatter, x, y, series?, rows (≤200, ≤32 KiB of charted values), title?, x_title?, y_title?, unit?, orientation?, stacked?}`.
 Triton maps it to Teams `Chart.*` and to the Vega-Lite spec for Gemini
 Enterprise's `VegaChart`, and falls back to your PNG. `_meta.vega_specs` is
 deprecated: it is read only when no valid summary is present, and for one

@@ -16,12 +16,12 @@
 //! admits in-card calls to read-only tools alone
 //! (`Dispatcher::invoke_in_card`); a write must stay a visible new turn.
 //!
-//! Two kinds:
+//! Two scopes:
 //!
-//! * [`Kind::Rerun`]: a control on Triton's own card ([`super::Action::Rerun`],
+//! * [`Scope::Rerun`]: a control on Triton's own card ([`super::Action::Rerun`],
 //!   a chip's `rerun`). The token carries the complete arguments of the
 //!   repeat call (the original call's, with the control's laid over them).
-//! * [`Kind::Event`]: an event on a producer's own surface whose name starts
+//! * [`Scope::Event`]: an event on a producer's own surface whose name starts
 //!   with [`EVENT_PREFIX`]. The token is the result's, carried in result
 //!   `_meta[`[`META_KEY`]`]`, and names the original call and each
 //!   `(surface, event)` pair the answer carried. The event itself reaches
@@ -47,33 +47,15 @@ pub const TOKEN_TTL_SECS: u64 = 23 * 3600;
 /// Binding platform: an in-card token is never a GE or chat token.
 const PLATFORM: &str = "mcp-app";
 
-/// What an in-card token re-invokes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Kind {
-    /// Triton's card: call the tool with the signed arguments.
-    Rerun,
-    /// A producer surface's event: call the tool with the signed arguments
-    /// and hand it the event.
-    Event,
-}
-
-impl Kind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Kind::Rerun => "rerun",
-            Kind::Event => "event",
-        }
-    }
-}
-
-/// What a token allows beyond `(tool, args)`.
+/// What a token allows beyond `(tool, args)`: the tool is called with the
+/// signed arguments either way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Scope {
     /// A Triton card control: no event.
     Rerun,
-    /// A producer surface's events: exactly these `(surface id, event
-    /// name)` pairs (each name starting with [`EVENT_PREFIX`]), as the
-    /// vetted answer carried them. A client cannot invent another event the
+    /// A producer surface's event, handed to the tool: exactly these
+    /// `(surface id, event name)` pairs (each name starting with
+    /// [`EVENT_PREFIX`]), as the vetted answer carried them. A client cannot invent another event the
     /// upstream might act on, nor fire one surface's event on another.
     Event { pairs: Vec<(String, String)> },
 }
@@ -87,10 +69,11 @@ impl Scope {
         }
     }
 
-    pub fn kind(&self) -> Kind {
+    /// The scope's name in the audit line: `rerun` or `event`.
+    pub fn label(&self) -> &'static str {
         match self {
-            Scope::Rerun => Kind::Rerun,
-            Scope::Event { .. } => Kind::Event,
+            Scope::Rerun => "rerun",
+            Scope::Event { .. } => "event",
         }
     }
 }
@@ -167,20 +150,23 @@ pub fn sign(
     args: &Value,
     holder: Holder<'_>,
 ) -> Option<String> {
-    let sender = holder.sender();
-    triton_correlation::encode_bound(
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    sign_at(
+        signer,
         tool,
-        &body(scope, args)?,
-        signer.ring().signing(),
-        TOKEN_CAP,
-        binding(holder.tenant, &sender),
-        Some(TOKEN_TTL_SECS),
+        scope,
+        args,
+        holder,
+        now.saturating_add(TOKEN_TTL_SECS),
     )
-    .ok()
 }
 
-/// [`sign`] with an absolute expiry (unix seconds): lets a test present a
-/// stale token to a running binary.
+/// [`sign`] with an absolute expiry (unix seconds). Production mints with
+/// [`sign`]; this exists so a test can present a stale token to a running
+/// binary.
 pub fn sign_at(
     signer: &ActionSigner,
     tool: &str,
@@ -367,6 +353,12 @@ mod tests {
             assert!(!sc.allows_event("C", "triton.in_card:refresh"));
         }
         assert!(!Scope::Rerun.allows_event("A", "triton.in_card:refresh"));
+    }
+
+    #[test]
+    fn a_scope_names_itself_for_the_audit_line() {
+        assert_eq!(Scope::Rerun.label(), "rerun");
+        assert_eq!(refresh().label(), "event");
     }
 
     #[test]
