@@ -1788,3 +1788,41 @@ async fn a_streamed_turn_forwards_files() {
     );
     assert_eq!(body["_triton"]["client"]["files"][0]["size"], 8);
 }
+
+/// #375: the report's chart reaches Gemini Enterprise as a native
+/// `VegaChart` derived from the upstream's neutral `_meta.chart` summary, with
+/// no `_meta.vega_specs` in the render.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chart_summary_becomes_a_native_vega_chart_for_ge() {
+    // One upstream answers both the turn and the `render_report`
+    // re-dispatch, so the body carries the report and the chart summary.
+    let agent = triton_tests::upstream_fixture::FakeAgent::start_returning(json!({
+        "surface": { "components": [
+            { "kind": "text", "value": "Sales are up." },
+            { "kind": "report", "report_id": "sales", "args": { "params": {} } }
+        ] },
+        "_meta": { "chart": { "kind": "line", "x": "month", "y": "sales_eur",
+            "rows": [ { "month": "Jan", "sales_eur": 1 }, { "month": "Feb", "sales_eur": 2 } ] } }
+    }))
+    .await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let body: Value = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .header("X-A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI)
+        .json(&send("sales please"))
+        .send()
+        .await
+        .expect("POST")
+        .json()
+        .await
+        .expect("decode");
+    let text = body.to_string();
+    assert!(text.contains("VegaChart"), "native chart expected: {body}");
+    assert!(
+        text.contains("sales_eur"),
+        "spec carries the summary's field: {body}"
+    );
+}

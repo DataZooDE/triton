@@ -426,6 +426,72 @@ high"`). Drill-downs ("Show agent X") change the topic: keep them
   event, source_component_id, token, context_keys, context_bytes}`: key
   names and sizes of the context, never values.
 
+### 4b. Result `_meta`: the chart summary and MCP pass-through (#375)
+
+**Chart summary (`_meta.chart`, v1).** A tool that renders a chart (a
+`render_report` upstream) describes its primary chart at the top-level
+`_meta.chart` of its result. The description does not depend on any renderer.
+Triton maps it to each channel's native chart, so the upstream does not have
+to emit Vega-Lite for Triton to read back:
+
+```json
+"_meta": { "chart": {
+  "kind": "bar", "title": "Revenue by region",
+  "x": "region", "y": "revenue", "series": "year",
+  "x_title": "Region", "y_title": "Revenue", "unit": "EUR",
+  "orientation": "vertical", "stacked": false,
+  "rows": [ { "region": "North", "revenue": 120.5, "year": "2025" } ] } }
+```
+
+| key | required | meaning |
+|---|---|---|
+| `kind` | yes | `bar` \| `line` \| `area` \| `pie` \| `donut` \| `scatter` |
+| `x` | yes | row field: the category (bar/pie/donut) or the x position (line/area/scatter) |
+| `y` | yes | row field: the numeric value |
+| `series` | no | row field: one series per distinct value, in first-seen order; not for pie/donut |
+| `rows` | yes | 1 to 200 objects. The `x` and `series` values are strings, numbers or booleans (scatter: `x` is a number). `y` is a finite number. Nulls are not allowed: drop missing points |
+| `title`, `x_title`, `y_title` | no | strings |
+| `unit` | no | unit of `y`, shown as `y_title (unit)` |
+| `orientation` | no | `vertical` (default) or `horizontal`; bar only |
+| `stacked` | no | bar with `series` only |
+
+Triton ignores unknown keys. If a summary breaks any rule, Triton rejects all
+of it and logs a `warn` (`ignoring the upstream's chart summary`). It then
+reads the deprecated `_meta.vega_specs` (the first object in the array) and,
+failing that, uses the PNG image. A valid summary always takes precedence
+over `vega_specs`. `vega_specs` is read for one more release; after that,
+only the summary and the image are used.
+
+| channel | mapping |
+|---|---|
+| Teams | `bar` → `Chart.VerticalBar`; with `series` → `Chart.VerticalBar.Grouped` (`stacked` passed on); horizontal → `Chart.HorizontalBar`; horizontal stacked series → `Chart.HorizontalBar.Stacked`; horizontal unstacked series → `Chart.VerticalBar.Grouped` (Teams has no grouped horizontal bar). `line`, `area` → `Chart.Line`. `pie` → `Chart.Pie`, `donut` → `Chart.Donut`. `scatter` → no native chart, the PNG image. Every chart element carries the PNG as its `fallback`. |
+| A2A (Gemini Enterprise) | Triton derives a Vega-Lite v5 spec from the summary for the native `VegaChart` |
+| Google Chat, others | the PNG image (unchanged) |
+
+**Upstream `_meta` on MCP.** An MCP `tools/call` result keeps the
+upstream's own top-level `_meta` keys: `png_base64`, `svgs`, `chart`, and
+whatever an upstream MCP App widget reads. Triton adds them to its own
+`_meta` at the top level, so a widget behind Triton gets the same keys it
+gets when called directly. The pass-through follows these rules:
+
+- **Protected keys.** An upstream never sets `trace_id`, any `triton/` key
+  (`triton/a2ui`, `triton/in_card`, later ones), or a key whose prefix
+  contains the label `modelcontextprotocol` or `mcp`
+  (`io.modelcontextprotocol/related-task`; the MCP specification reserves
+  these). Such keys are dropped. `ui` and `tool_trace` keep their own
+  checks: they are reflected only when `ui` is an object and `tool_trace`
+  is an array.
+- **Size budget.** Passed-through keys may use 4 MiB of serialized JSON in
+  total, taken in the upstream's key order. A key that would exceed the
+  budget is dropped and logged (`warn`). The keys before it still pass, and
+  the call still succeeds.
+- Only a top-level `_meta` object is read. Any other `_meta` passes nothing.
+- REST returns the dispatch result unchanged, and the chat and A2A adapters
+  read the dispatch result, so none of these rules apply there.
+
+`_meta` is not shown to the model, but every MCP client receives it, card
+host or not. As with surfaces, nothing the caller must not see belongs there.
+
 ## 5. The `upstream` identity-resolution strategy (FR-I-7)
 
 For senders the adapter cannot resolve locally, FR-I-7's `upstream`

@@ -2579,6 +2579,10 @@ fn render_card_content(
 /// Deep-search a `render_report` result for a Vega-Lite spec (peacock exposes
 /// them at `_meta.vega_specs`; also handles a `{kind:vega,spec}` component and
 /// JSON-string-wrapped MCP content).
+///
+/// Deprecated (#375): read only when the result carries no valid neutral
+/// `_meta.chart` summary ([`chart_for_render`]); removed one release after
+/// upstreams emit the summary.
 fn find_vega_spec(v: &Value) -> Option<Value> {
     match v {
         Value::Object(m) => {
@@ -2629,7 +2633,25 @@ async fn report_vega_chart(
         .invoke("render_report", rargs, principal.clone(), PROTOCOL)
         .await
         .ok()?;
-    let spec = find_vega_spec(&rep.result)?;
+    chart_for_render(&rep.result, fallback_image_url)
+}
+
+/// The native Teams chart for a `render_report` result. The neutral
+/// `_meta.chart` summary (#375) wins; a valid summary Teams cannot draw
+/// natively (`scatter`) yields `None`, so the card shows the PNG rather than
+/// a misdrawn bar chart. A malformed summary is logged and ignored, and the
+/// deprecated `_meta.vega_specs` is read instead.
+fn chart_for_render(result: &Value, fallback_image_url: Option<&str>) -> Option<Value> {
+    match triton_core::chart_summary::find(result) {
+        Some(Ok(summary)) => {
+            return surface_mapper::chart_from_summary(&summary, fallback_image_url);
+        }
+        Some(Err(e)) => {
+            tracing::warn!(error = %e, "msteams: ignoring the upstream's chart summary");
+        }
+        None => {}
+    }
+    let spec = find_vega_spec(result)?;
     surface_mapper::chart_from_vega(&spec, fallback_image_url)
 }
 
@@ -4515,6 +4537,51 @@ fn record_rejection(adapter: &MsTeamsAdapter, sub: &str, tenant: &str, e: Triton
 
 #[cfg(test)]
 mod tests {
+    use super::chart_for_render;
+
+    fn vega_bar() -> serde_json::Value {
+        serde_json::json!({ "mark": "bar",
+            "data": { "values": [ { "k": "old", "v": 1 } ] },
+            "encoding": { "x": { "field": "k" }, "y": { "field": "v" } } })
+    }
+
+    #[test]
+    fn chart_summary_wins_over_vega_specs() {
+        let r = serde_json::json!({ "_meta": {
+            "chart": { "kind": "pie", "x": "k", "y": "v", "rows": [ { "k": "new", "v": 2 } ] },
+            "vega_specs": [ vega_bar() ] } });
+        let c = chart_for_render(&r, None).expect("chart");
+        assert_eq!(c["type"], "Chart.Pie");
+        assert_eq!(c["data"][0]["legend"], "new");
+    }
+
+    #[test]
+    fn malformed_summary_falls_back_to_vega_specs() {
+        let r = serde_json::json!({ "_meta": {
+            "chart": { "kind": "pie", "x": "k", "y": "v", "rows": [ { "k": "new", "v": "two" } ] },
+            "vega_specs": [ vega_bar() ] } });
+        let c = chart_for_render(&r, None).expect("vega fallback");
+        assert_eq!(c["type"], "Chart.VerticalBar");
+        assert_eq!(c["data"][0]["x"], "old");
+    }
+
+    #[test]
+    fn vega_specs_alone_still_map() {
+        let r = serde_json::json!({ "_meta": { "vega_specs": [ vega_bar() ] } });
+        assert_eq!(
+            chart_for_render(&r, None).expect("chart")["type"],
+            "Chart.VerticalBar"
+        );
+    }
+
+    #[test]
+    fn a_valid_scatter_summary_does_not_fall_back_to_vega() {
+        let r = serde_json::json!({ "_meta": {
+            "chart": { "kind": "scatter", "x": "a", "y": "b", "rows": [ { "a": 1, "b": 2 } ] },
+            "vega_specs": [ vega_bar() ] } });
+        assert!(chart_for_render(&r, Some("https://x/img/t")).is_none());
+    }
+
     use super::*;
 
     #[test]
