@@ -51,19 +51,10 @@ pub const EXTENSION_URI: &str = "https://a2ui.org/a2a-extension/a2ui/v0.9";
 /// perfectly-formed card shows as text). Verified against the a2ui SDK
 /// (`create_a2ui_part`) and Google's own GE integration notes.
 pub const MIME: &str = "application/json+a2ui";
-/// The catalog id declared in the card and in `createSurface`.
-///
-/// Gemini Enterprise's own **composite catalog** (Material Design components +
-/// the basic primitives + GE-native ones), NOT the design-agnostic a2ui.org
-/// `basic` catalog. Using it lets the card render as real Material — themed
-/// `MaterialButton`/`MaterialText`/`MaterialCard` instead of plain primitives.
-/// (Authoritative id per Google's GE A2UI reference + the a2ui-project GE
-/// sample catalog's own `$id`.)
-pub const GE_COMPOSITE_CATALOG: &str = passthrough::GE_COMPOSITE_CATALOG_ID;
-/// Surface theme `primaryColor` (`^#[0-9a-fA-F]{6}$`) sent in `createSurface`.
-/// Gemini brand blue — the same `--pk-brand` the peacock `gemini.css` host theme
-/// gives the charts — so the Material card's primary accents match the chart.
-const THEME_PRIMARY_COLOR: &str = "#1a73e8";
+/// The catalog id declared in the card and in `createSurface`: Gemini
+/// Enterprise's composite catalog ([`passthrough::GE_COMPOSITE_CATALOG_ID`]).
+use passthrough::GE_COMPOSITE_CATALOG_ID as GE_COMPOSITE_CATALOG;
+use passthrough::{DEFAULT_DISPLAY_NAME, DEFAULT_PRIMARY_COLOR};
 
 /// The in-band form [`question_for`] hands the A2A layer for an open-doc
 /// click, which detects it via [`open_doc`] and replies with the document
@@ -1249,8 +1240,8 @@ fn surface_pair(flat: Vec<Value>) -> Vec<Value> {
                 // applies — GE uses `primaryColor` for primary buttons and
                 // active borders. Renderers ignore fields they don't use.
                 "theme": {
-                    "primaryColor": THEME_PRIMARY_COLOR,
-                    "agentDisplayName": "DataZoo Agent",
+                    "primaryColor": DEFAULT_PRIMARY_COLOR,
+                    "agentDisplayName": DEFAULT_DISPLAY_NAME,
                 },
             },
         }),
@@ -1508,8 +1499,8 @@ pub fn build_document_canvas(url: &str, title: &str) -> Vec<Value> {
                 "surfaceId": surface_id,
                 "catalogId": GE_COMPOSITE_CATALOG,
                 "theme": {
-                    "primaryColor": THEME_PRIMARY_COLOR,
-                    "agentDisplayName": "DataZoo Agent",
+                    "primaryColor": DEFAULT_PRIMARY_COLOR,
+                    "agentDisplayName": DEFAULT_DISPLAY_NAME,
                 },
             },
         }),
@@ -1648,8 +1639,8 @@ pub fn build_document_material(structured: &Value, title: &str) -> Vec<Value> {
                 "surfaceId": surface_id,
                 "catalogId": GE_COMPOSITE_CATALOG,
                 "theme": {
-                    "primaryColor": THEME_PRIMARY_COLOR,
-                    "agentDisplayName": "DataZoo Agent",
+                    "primaryColor": DEFAULT_PRIMARY_COLOR,
+                    "agentDisplayName": DEFAULT_DISPLAY_NAME,
                 },
             },
         }),
@@ -1866,7 +1857,7 @@ mod tests {
         let msgs = build_messages(&result).expect("messages");
         let theme = &msgs[0]["createSurface"]["theme"];
         assert_eq!(theme["agentDisplayName"], "DataZoo Agent");
-        assert_eq!(theme["primaryColor"], THEME_PRIMARY_COLOR);
+        assert_eq!(theme["primaryColor"], DEFAULT_PRIMARY_COLOR);
         assert!(theme.get("logoUrl").is_none());
     }
 
@@ -1949,7 +1940,7 @@ mod tests {
         // primary accents) with the brand color.
         assert_eq!(
             msgs[0]["createSurface"]["theme"]["primaryColor"],
-            THEME_PRIMARY_COLOR
+            DEFAULT_PRIMARY_COLOR
         );
         let comps = msgs[1]["updateComponents"]["components"]
             .as_array()

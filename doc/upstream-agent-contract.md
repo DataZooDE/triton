@@ -456,7 +456,7 @@ to emit Vega-Lite for Triton to read back:
 | `x` | yes | row field: the category (bar/pie/donut) or the x position (line/area/scatter) |
 | `y` | yes | row field: the numeric value |
 | `series` | no | row field: one series per distinct value, in first-seen order; not for pie/donut |
-| `rows` | yes | 1 to 200 objects. The `x` and `series` values are strings, numbers or booleans (scatter: `x` is a number). `y` is a finite number. Nulls are not allowed: drop missing points |
+| `rows` | yes | 1 to 200 objects, with at most 32 KiB of charted values (`x`, `y`, `series`) in total; other keys of a row are ignored and not passed on. The `x` and `series` values are strings, numbers or booleans (scatter: `x` is a number). `y` is a finite number. Nulls are not allowed: drop missing points |
 | `title`, `x_title`, `y_title` | no | strings |
 | `unit` | no | unit of `y`, shown as `y_title (unit)` |
 | `orientation` | no | `vertical` (default) or `horizontal`; bar only |

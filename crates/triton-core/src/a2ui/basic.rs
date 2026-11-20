@@ -301,18 +301,13 @@ impl Builder<'_> {
         }))
     }
 
-    /// A table row: every cell takes an equal share of the width, so the
-    /// columns of all rows line up (`weight` is flex-grow on a Row child).
-    fn table_row(&mut self, b: &mut Block, cells: Vec<String>) -> String {
-        for c in b.comps.iter_mut() {
-            if c["id"]
-                .as_str()
-                .is_some_and(|id| cells.iter().any(|x| x == id))
-            {
-                c["weight"] = json!(1);
-            }
+    /// Make the component just pushed a table cell: it takes an equal share
+    /// of the row's width, so the columns of all rows line up (`weight` is
+    /// flex-grow on a Row child).
+    fn weigh_last(b: &mut Block) {
+        if let Some(c) = b.comps.last_mut() {
+            c["weight"] = json!(1);
         }
-        self.row(b, cells)
     }
 
     /// `child` as a borderless button when there is an action, else as is.
@@ -380,9 +375,13 @@ impl Builder<'_> {
                 let mut b = Block::default();
                 let heads: Vec<String> = columns
                     .iter()
-                    .map(|c| self.text(&mut b, &c.label, "h5"))
+                    .map(|c| {
+                        let id = self.text(&mut b, &c.label, "h5");
+                        Self::weigh_last(&mut b);
+                        id
+                    })
                     .collect();
-                let mut lines = vec![self.table_row(&mut b, heads)];
+                let mut lines = vec![self.row(&mut b, heads)];
                 for r in rows.iter().take(MAX_ROWS) {
                     let cells: Vec<String> = columns
                         .iter()
@@ -390,13 +389,21 @@ impl Builder<'_> {
                         .collect();
                     b.names
                         .push(cap(cells.first().map(String::as_str).unwrap_or("")));
-                    let mut ids: Vec<String> =
-                        cells.iter().map(|t| self.text(&mut b, t, "body")).collect();
-                    if let Some(first) = ids.first_mut() {
-                        let a = r.action.as_ref().and_then(|a| self.event(a));
-                        *first = self.maybe_button(&mut b, first.clone(), a);
+                    // The first cell is the row's button when it has an
+                    // action: then the button is the cell, not its text.
+                    let a = r.action.as_ref().and_then(|a| self.event(a));
+                    let mut ids: Vec<String> = Vec::with_capacity(cells.len());
+                    for (i, t) in cells.iter().enumerate() {
+                        ids.push(self.text(&mut b, t, "body"));
+                        if i > 0 || a.is_none() {
+                            Self::weigh_last(&mut b);
+                        }
                     }
-                    lines.push(self.table_row(&mut b, ids));
+                    if let (Some(first), Some(a)) = (ids.first_mut(), a) {
+                        *first = self.button(&mut b, first.clone(), a, "borderless");
+                        Self::weigh_last(&mut b);
+                    }
+                    lines.push(self.row(&mut b, ids));
                 }
                 let more = rows.len().saturating_sub(MAX_ROWS);
                 self.push_block(b, title.as_deref(), lines, more);

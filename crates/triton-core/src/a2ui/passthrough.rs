@@ -30,8 +30,13 @@ pub const MAX_SURFACES: usize = 8;
 const MAX_DISPLAY_NAME_CHARS: usize = 64;
 /// Producer-built surfaces get their own id prefix.
 pub const SURFACE_PREFIX: &str = "triton-a2ui-";
-const DEFAULT_PRIMARY_COLOR: &str = "#1a73e8";
-const DEFAULT_DISPLAY_NAME: &str = "DataZoo Agent";
+/// Surface theme `primaryColor` (`^#[0-9a-fA-F]{6}$`) of every surface
+/// Triton sends unless a producer sets its own: Gemini brand blue, the same
+/// `--pk-brand` the peacock `gemini.css` host theme gives the charts, so a
+/// Material card's accents match the chart.
+pub(crate) const DEFAULT_PRIMARY_COLOR: &str = "#1a73e8";
+/// Surface theme `agentDisplayName` unless a producer sets its own.
+pub(crate) const DEFAULT_DISPLAY_NAME: &str = "DataZoo Agent";
 
 /// A catalog Triton vendors the schema of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

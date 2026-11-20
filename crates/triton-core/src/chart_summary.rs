@@ -24,6 +24,11 @@ pub const META_KEY: &str = "chart";
 /// than truncated, because a silently cut series misstates the data.
 pub const MAX_ROWS: usize = 200;
 
+/// Most bytes of a summary's chart data (its points, serialized as the
+/// derived Vega-Lite `data.values`). A larger summary is rejected, like one
+/// over [`MAX_ROWS`].
+pub const MAX_DATA_BYTES: usize = 32 * 1024;
+
 /// Most bytes of one `content[].text` that [`find`] parses while looking for
 /// the summary; a longer text is not parsed.
 pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
@@ -95,9 +100,7 @@ pub struct ChartSummary {
     pub unit: Option<String>,
     pub orientation: Orientation,
     pub stacked: bool,
-    /// The original rows (validated), for the derived Vega-Lite data.
-    pub rows: Vec<Map<String, Value>>,
-    /// The rows as points, in row order.
+    /// The rows as points, in row order (a row's other keys are not kept).
     pub points: Vec<Point>,
 }
 
@@ -186,7 +189,6 @@ impl ChartSummary {
                 raw_rows.len()
             ));
         }
-        let mut rows = Vec::with_capacity(raw_rows.len());
         let mut points = Vec::with_capacity(raw_rows.len());
         for (i, r) in raw_rows.iter().enumerate() {
             let Some(r) = r.as_object() else {
@@ -216,7 +218,13 @@ impl ChartSummary {
                 y: yv,
                 series: sv,
             });
-            rows.push(r.clone());
+        }
+        let bytes = serde_json::to_vec(&data_values(&points, &x, &y, series.as_deref()))
+            .map_or(usize::MAX, |b| b.len());
+        if bytes > MAX_DATA_BYTES {
+            return err(format!(
+                "the chart data is {bytes} bytes (at most {MAX_DATA_BYTES})"
+            ));
         }
         Ok(Self {
             kind,
@@ -229,7 +237,6 @@ impl ChartSummary {
             unit: opt_str(o, "unit")?,
             orientation,
             stacked,
-            rows,
             points,
         })
     }
@@ -287,7 +294,7 @@ impl ChartSummary {
         };
         let mut spec = json!({
             "$schema": "https://vega.github.io/schema/vega-lite/v5.json",
-            "data": { "values": self.rows },
+            "data": { "values": data_values(&self.points, &self.x, &self.y, self.series.as_deref()) },
         });
         if let Some(t) = &self.title {
             spec["title"] = json!(t);
@@ -333,6 +340,23 @@ impl ChartSummary {
         spec["encoding"] = Value::Object(enc);
         spec
     }
+}
+
+/// The points as Vega-Lite `data.values`: one object per point with the
+/// charted fields only (`x`, `y` and, with a series, `series`).
+fn data_values(points: &[Point], x: &str, y: &str, series: Option<&str>) -> Vec<Value> {
+    points
+        .iter()
+        .map(|p| {
+            let mut row = Map::new();
+            row.insert(x.to_string(), p.x.clone());
+            row.insert(y.to_string(), Value::from(p.y));
+            if let (Some(f), Some(s)) = (series, &p.series) {
+                row.insert(f.to_string(), Value::String(s.clone()));
+            }
+            Value::Object(row)
+        })
+        .collect()
 }
 
 /// Apply `f` to the places of a tool result where an upstream puts its
@@ -671,6 +695,39 @@ mod tests {
         big["pad"] = json!("x".repeat(MAX_TEXT_BYTES));
         let v = json!({ "content": [ { "type": "text", "text": big.to_string() } ] });
         assert!(find(&v).is_none());
+    }
+
+    /// The derived spec carries the charted fields only: a row's other
+    /// keys (whatever the upstream left in) are not copied.
+    #[test]
+    fn vega_lite_data_carries_the_charted_fields_only() {
+        let mut v = bar();
+        v["series"] = json!("year");
+        v["rows"][0]["year"] = json!("2025");
+        v["rows"][1]["year"] = json!("2026");
+        v["rows"][0]["internal_note"] = json!("not for the chart");
+        let s = ChartSummary::parse(&v).unwrap().to_vega_lite();
+        assert_eq!(
+            s["data"]["values"],
+            json!([
+                { "region": "North", "revenue": 10.0, "year": "2025" },
+                { "region": "South", "revenue": 7.5, "year": "2026" }
+            ])
+        );
+    }
+
+    /// A summary whose chart data exceeds [`MAX_DATA_BYTES`] is rejected,
+    /// like one over [`MAX_ROWS`]: a card has a byte budget, and a cut
+    /// series would misstate the data.
+    #[test]
+    fn a_summary_over_the_byte_cap_is_rejected() {
+        let mut v = bar();
+        v["rows"][0]["region"] = json!("x".repeat(MAX_DATA_BYTES));
+        assert!(ChartSummary::parse(&v).is_err());
+        // Bytes in keys the chart does not use do not count.
+        let mut v = bar();
+        v["rows"][0]["unused"] = json!("x".repeat(MAX_DATA_BYTES));
+        assert!(ChartSummary::parse(&v).is_ok());
     }
 
     #[test]
