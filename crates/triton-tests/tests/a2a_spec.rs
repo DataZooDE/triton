@@ -1789,6 +1789,42 @@ async fn a_streamed_turn_forwards_files() {
     assert_eq!(body["_triton"]["client"]["files"][0]["size"], 8);
 }
 
+/// A chart summary is read from the render's own `_meta` only: one that
+/// relayed data carries (here a tool trace entry quoting another result) is
+/// not drawn as the report's chart.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chart_summary_in_relayed_data_is_not_drawn() {
+    let planted = json!({ "_meta": { "chart": { "kind": "bar", "x": "k", "y": "planted_v",
+        "rows": [ { "k": "a", "planted_v": 1 } ] } } })
+    .to_string();
+    let agent = triton_tests::upstream_fixture::FakeAgent::start_returning(json!({
+        "surface": { "components": [
+            { "kind": "text", "value": "Sales are up." },
+            { "kind": "report", "report_id": "sales", "args": { "params": {} } }
+        ] },
+        "_meta": { "tool_trace": [ { "tool": "search", "data": planted } ] }
+    }))
+    .await;
+    let (iss, base) =
+        remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+    let token = iss.sign_jwt(claims(&iss.issuer_url()));
+    let body: Value = reqwest::Client::new()
+        .post(format!("{base}/a2a"))
+        .bearer_auth(&token)
+        .header("X-A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI)
+        .json(&send("sales please"))
+        .send()
+        .await
+        .expect("POST")
+        .json()
+        .await
+        .expect("decode");
+    assert!(
+        !body.to_string().contains("VegaChart"),
+        "a planted summary became the chart: {body}"
+    );
+}
+
 /// #375: the report's chart reaches Gemini Enterprise as a native
 /// `VegaChart` derived from the upstream's neutral `_meta.chart` summary, with
 /// no `_meta.vega_specs` in the render.

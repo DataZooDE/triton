@@ -547,12 +547,13 @@ requires `Clone`).
 > ["app"]`, listed only to a client that declared the MCP Apps extension and
 > only while some tool is in-card capable). The adapter signs each control
 > with the A2UI action key over `(tool, scope, args)` (a producer token also
-> names the answer's in-card event names and surfaces), bound to tenant,
+> names the answer's in-card events, each with its surface), bound to tenant,
 > `sub`, issuer and expiry (`a2ui::in_card`), and only for a tool that is
 > ready (declared and read-only); `Dispatcher::invoke_in_card` verifies the
 > token, requires the tool to be declared in-card capable (`adapter.yaml`
 > `tools.<name>.in_card`, or `Dispatcher::with_in_card_tools` for an
-> embedding host) **and** annotated `readOnlyHint`, applies a per-principal
+> embedding host) **and** annotated `readOnlyHint` by the endpoint that
+> executes it (`UpstreamDispatch::tool_info`), applies a per-principal
 > rate limit, dispatches on the `mcp` channel with `_triton.client.in_card`
 > (and, for a producer event, `_triton.client.a2ui_events`), and writes the
 > one audit line with its `in_card` part. The result is projected like any

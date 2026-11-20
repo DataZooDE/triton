@@ -1803,6 +1803,16 @@ confirmed turn anyway. Visibility (`_meta.ui.visibility: ["app"]`) is not
 access control either; any bearer can call the tool, and the token is what
 binds it.
 
+The annotation must come from the endpoint that executes the tool. The static
+map routes by tool name, but `tools/list` answers are per endpoint, and two
+endpoints may advertise the same name. Merging every endpoint's list into one
+map by name (last writer wins, in `HashSet` order) let a decoy endpoint's
+`readOnlyHint: true` stand for a writing tool routed elsewhere, and which
+endpoint won changed from call to call. `StaticUpstream` now keeps a tool's
+description from its routed endpoint only, and the gate asks that endpoint
+alone (`UpstreamDispatch::tool_info`). The same rule holds for any future
+upstream router: describe a tool by the thing that runs it.
+
 Future note: an in-place re-render of a card with the SAME height left the
 host frame collapsed. The widget measured its height synchronously after
 emptying the page; the renderer then drew a page of the old size within the

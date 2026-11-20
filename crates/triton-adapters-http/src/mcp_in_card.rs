@@ -82,27 +82,27 @@ impl Origin<'_> {
     }
 
     /// The token for the producer surfaces' in-card events among `messages`
-    /// (the widget's): this call, and exactly those event names on exactly
-    /// those surfaces. `None` when no producer surface fires one.
+    /// (the widget's): this call, and each event name on the surface that
+    /// fires it. `None` when no producer surface fires one.
     pub fn sign_events(&self, messages: &[Value]) -> Option<String> {
-        let (names, surfaces) = producer_events(messages);
-        if names.is_empty() {
+        let pairs = producer_events(messages);
+        if pairs.is_empty() {
             return None;
         }
         in_card::sign(
             ActionSigner::global(),
             self.tool,
-            &Scope::Event { names, surfaces },
+            &Scope::Event { pairs },
             &in_card::merge_args(self.args, &Map::new())?,
             self.holder,
         )
     }
 }
 
-/// The in-card event names on producer surfaces (not Triton's card), and
-/// the ids of the surfaces that fire them.
-fn producer_events(messages: &[Value]) -> (Vec<String>, Vec<String>) {
-    let (mut names, mut surfaces) = (Vec::<String>::new(), Vec::<String>::new());
+/// The in-card events on producer surfaces (not Triton's card), as
+/// `(surface id, event name)` pairs in first-seen order.
+fn producer_events(messages: &[Value]) -> Vec<(String, String)> {
+    let mut pairs = Vec::<(String, String)>::new();
     for m in messages {
         let Some(u) = m.get("updateComponents") else {
             continue;
@@ -113,18 +113,12 @@ fn producer_events(messages: &[Value]) -> (Vec<String>, Vec<String>) {
         if id == triton_core::a2ui::basic::SURFACE_ID {
             continue;
         }
-        let found = in_card::event_names(u.get("components").unwrap_or(&Value::Null));
-        if found.is_empty() {
-            continue;
-        }
-        if !surfaces.iter().any(|s| s == id) {
-            surfaces.push(id.to_string());
-        }
-        for n in found {
-            if !names.contains(&n) {
-                names.push(n);
+        for n in in_card::event_names(u.get("components").unwrap_or(&Value::Null)) {
+            let p = (id.to_string(), n);
+            if !pairs.contains(&p) {
+                pairs.push(p);
             }
         }
     }
-    (names, surfaces)
+    pairs
 }

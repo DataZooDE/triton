@@ -26,6 +26,7 @@ pub struct Metrics {
     dispatch: Mutex<BTreeMap<DispatchKey, u64>>,
     audit: Mutex<BTreeMap<String, u64>>,
     passthrough_dropped: Mutex<BTreeMap<&'static str, u64>>,
+    in_card_throttle_saturated: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -85,6 +86,14 @@ impl Metrics {
         *g.entry(reason).or_insert(0) += count as u64;
     }
 
+    /// Record one in-card call refused because the in-card throttle's bucket
+    /// map was full (a flood of distinct principals), as opposed to the
+    /// caller's own bucket being empty.
+    pub fn record_in_card_throttle_saturated(&self) {
+        self.in_card_throttle_saturated
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Render the current state in Prometheus text exposition.
     pub fn render(&self) -> String {
         let mut out = String::new();
@@ -129,6 +138,18 @@ impl Metrics {
                 "triton_a2ui_passthrough_dropped_total{{reason=\"{reason}\"}} {v}\n"
             ));
         }
+        drop(dropped);
+
+        out.push_str(
+            "# HELP triton_in_card_throttle_saturated_total In-card calls refused because the \
+             in-card throttle tracked too many principals.\n",
+        );
+        out.push_str("# TYPE triton_in_card_throttle_saturated_total counter\n");
+        out.push_str(&format!(
+            "triton_in_card_throttle_saturated_total {}\n",
+            self.in_card_throttle_saturated
+                .load(std::sync::atomic::Ordering::Relaxed)
+        ));
         out
     }
 }

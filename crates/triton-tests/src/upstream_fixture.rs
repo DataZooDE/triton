@@ -56,6 +56,11 @@ struct FakeAgentState {
     /// (#164: live-LLM turns outlast Google Chat's ~30s webhook
     /// deadline; tests use ~2s to prove the ack doesn't wait).
     delay: Option<Duration>,
+    /// A `tools/list` answer that replaces the mode's own
+    /// ([`FakeAgent::set_tools_list`]).
+    tools_list: Mutex<Option<Value>>,
+    /// How many `tools/list` probes this agent answered.
+    tools_list_probes: Mutex<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -210,6 +215,8 @@ impl FakeAgent {
             failures_remaining: Mutex::new(fail_first),
             fixed_response,
             delay,
+            tools_list: Mutex::new(None),
+            tools_list_probes: Mutex::new(0),
         });
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind 0");
         let addr = listener.local_addr().unwrap();
@@ -279,6 +286,18 @@ impl FakeAgent {
     pub fn reset_hits(&self) {
         *self.state.hits.lock().unwrap() = 0;
     }
+
+    /// Answer `tools/list` probes with `tools` (`{ "tools": [...] }`)
+    /// instead of the mode's own answer, whatever the mode.
+    pub fn set_tools_list(&self, tools: Value) {
+        *self.state.tools_list.lock().unwrap() = Some(tools);
+    }
+
+    /// How many `tools/list` probes this agent answered (they are not
+    /// counted in [`Self::hits`]).
+    pub fn tools_list_probes(&self) -> u32 {
+        *self.state.tools_list_probes.lock().unwrap()
+    }
 }
 
 async fn handler(
@@ -297,6 +316,10 @@ async fn handler(
     // an MCP-Apps agent advertises a schema; others 404 so the introspection
     // best-effort path falls back to an empty schema.
     if mcp_verb.as_deref() == Some("tools/list") {
+        *state.tools_list_probes.lock().unwrap() += 1;
+        if let Some(tools) = state.tools_list.lock().unwrap().clone() {
+            return Json(tools).into_response();
+        }
         return match *state.mode.lock().unwrap() {
             AgentMode::McpApps => Json(json!({
                 "tools": [{
