@@ -232,9 +232,12 @@ renderer:
 Triton maps it to Teams `Chart.*` and to the Vega-Lite spec for Gemini
 Enterprise's `VegaChart`, and falls back to your PNG. `_meta.vega_specs` is
 deprecated: it is read only when no valid summary is present, and for one
-more release. On MCP `tools/call`, your other top-level `_meta` keys
-(`png_base64`, `svgs`, ...) reach the host next to Triton's. You cannot set
-`trace_id`, `triton/*` or MCP-reserved keys, and the passed-through keys
+more release. On MCP `tools/call`, your top-level `_meta` keys pass by an
+allow-list: `ui` and `tool_trace` to every client; `chart`, `png_base64`,
+`svgs` and `vega_specs` to clients that render the answer card (MCP Apps
+hosts); any other key only when the operator lists it for your tool in
+`adapter.yaml` (`tools.<name>.meta: { key: all | card_host | off }`). You
+cannot set `trace_id`, `triton/*` or MCP-reserved keys, and the passed keys
 share a 4 MiB budget. The full rules are in the Triton repo,
 `doc/upstream-agent-contract.md` §4b.
 

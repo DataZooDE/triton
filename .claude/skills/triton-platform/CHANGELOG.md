@@ -4,6 +4,13 @@ The skill version tracks the consumer-facing contract, not the Triton
 binary version. The Triton repo's checked-out git ref is the true
 version pin (see `SKILL.md` → "How this skill is installed").
 
+## 0.6.1 — upstream `_meta` on MCP is an allow-list
+
+- `01`: only listed `_meta` keys pass: `ui` and `tool_trace` to every
+  client; `chart`, `png_base64`, `svgs`, `vega_specs` to card hosts only;
+  other keys when the operator lists them per tool
+  (`tools.<name>.meta`). Unlisted keys (vendor keys included) are dropped.
+
 ## 0.6.0 — neutral chart summary; upstream `_meta` on MCP (#375)
 
 - `01`: a chart-rendering upstream describes its chart as `_meta.chart`,

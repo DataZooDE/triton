@@ -153,6 +153,9 @@ pub struct McpState {
     /// card ([`mcp_app::card_text`]); `TRITON_MCP_CARD_NOTE`, default
     /// [`mcp_app::CARD_NOTE`].
     pub card_note: Arc<str>,
+    /// Which upstream `_meta` keys a result passes through, to whom
+    /// ([`crate::mcp_meta`]).
+    pub meta: Arc<crate::mcp_meta::MetaPolicy>,
 }
 
 pub fn router(state: McpState) -> Router {
@@ -797,7 +800,15 @@ async fn tools_call(
                     args,
                     holder: Holder::of(p),
                 });
-            answer(id, d, card_host, requested, state, origin.as_ref())
+            answer(
+                id,
+                &tool_name,
+                d,
+                card_host,
+                requested,
+                state,
+                origin.as_ref(),
+            )
         }
         Err(e) => {
             // An agent-side fault reaches the client (and through its model,
@@ -852,7 +863,15 @@ async fn in_card_call(
             // gets the answer as any non-card client does (no card, no
             // fresh controls). The reference hosts declare on widget calls.
             let origin = card_host.then_some(&origin);
-            answer(id, ic.dispatch, card_host, requested, state, origin)
+            answer(
+                id,
+                &ic.tool,
+                ic.dispatch,
+                card_host,
+                requested,
+                state,
+                origin,
+            )
         }
         Err(e) => {
             let text = match e {
@@ -876,6 +895,7 @@ async fn in_card_call(
 /// their fallback messages.
 fn answer(
     id: Value,
+    tool: &str,
     mut d: triton_core::Dispatch,
     card_host: bool,
     requested: Option<A2uiVersion>,
@@ -883,45 +903,16 @@ fn answer(
     origin: Option<&Origin<'_>>,
 ) -> Response {
     let trace_id = d.trace_id.clone();
-    // Issue #143 (A): an MCP-Apps upstream (e.g. peacock's
-    // `render_report`) returns its UI resource link under the
-    // result's `_meta.ui.*`. Capture it before any A2UI wrap
-    // rewrites `d.result`, so it can be surfaced on the
-    // `tools/call` response `_meta` for the host to render.
-    // Unknown `ui.*` siblings are preserved verbatim, but only a
-    // structured object is reflected (#143 review, [MEDIUM]):
-    // refuse to mirror an arbitrary scalar/array blob a hostile
-    // upstream might stuff under `_meta.ui` to bloat the response.
-    // (The cross-upstream `resourceUri` confused-deputy surface
-    // noted in review is bounded by the trust model — every
-    // upstream is operator-registered in TRITON_STATIC_UPSTREAMS
-    // and any caller can already reach any registered tool — and
-    // documented in realizations.md §7.)
-    let ui_meta = d
+    // The upstream's own `_meta` keys this client gets (the allow-list,
+    // [`crate::mcp_meta`]), captured before the A2UI wrap rewrites
+    // `d.result`. A result that brings its own MCP App (`_meta.ui`, #143)
+    // keeps it; there is no card to draw then.
+    let passthrough = state.meta.select(tool, &d.result, card_host);
+    let own_app = d
         .result
         .get("_meta")
         .and_then(|m| m.get("ui"))
-        .filter(|ui| ui.is_object())
-        .cloned();
-    // An upstream agent may attach a per-turn tool trace under
-    // `_meta.tool_trace` (which tools ran + the data they touched) —
-    // a host-render debug sidecar, mirrored to the response `_meta`
-    // exactly like `ui` (and captured before the A2UI wrap rewrites
-    // `d.result`). Only a structured array is reflected; a scalar/
-    // object blob is ignored, so an upstream can't bloat the response.
-    // Unlike the card, it goes to every client, card host or not
-    // (decided 2026-11-18): it is an opt-in debug sidecar any client may
-    // show, so an upstream attaches only what the caller may see.
-    let tool_trace = d
-        .result
-        .get("_meta")
-        .and_then(|m| m.get("tool_trace"))
-        .filter(|t| t.is_array())
-        .cloned();
-    // The upstream's other `_meta` keys (a chart image, the neutral chart
-    // summary, an upstream MCP App's data) pass through next to Triton's
-    // own (#375), captured before the A2UI wrap rewrites `d.result`.
-    let passthrough = upstream_meta(&d.result);
+        .is_some_and(Value::is_object);
     // Flatten the tool's A2UI surface to human-readable Markdown
     // BEFORE the A2UI wrap rewrites `d.result` — the same prose the
     // spec-A2A face serves (prose + `![chart](image_url)` + clickable
@@ -943,7 +934,7 @@ fn answer(
     let sign =
         |overlay: &serde_json::Map<String, Value>| origin.and_then(|o| o.sign_rerun(overlay));
     let rerun: Option<triton_core::a2ui::basic::Rerun<'_>> = origin.map(|_| &sign as _);
-    let widget = (state.widget && card_host && ui_meta.is_none())
+    let widget = (state.widget && card_host && !own_app)
         .then(|| mcp_app::card_with(&d.result, rerun))
         .flatten();
     // A producer surface's in-card events repeat this call.
@@ -1007,12 +998,6 @@ fn answer(
     if let Some(t) = event_token {
         meta[in_card::META_KEY] = Value::String(t);
     }
-    if let Some(ui) = ui_meta {
-        meta["ui"] = ui;
-    }
-    if let Some(trace) = tool_trace {
-        meta["tool_trace"] = trace;
-    }
     if let Some(m) = meta.as_object_mut() {
         for (k, v) in passthrough {
             m.entry(k).or_insert(v);
@@ -1027,60 +1012,6 @@ fn answer(
             "_meta": meta
         }),
     )
-}
-
-/// Combined serialized size of the upstream `_meta` keys an MCP result
-/// passes through ([`upstream_meta`]). A key that would exceed it is dropped
-/// (and logged); the keys before it still pass.
-const UPSTREAM_META_BUDGET: usize = 4 * 1024 * 1024;
-
-/// Upstream `_meta` keys Triton handles itself: `trace_id` is Triton's;
-/// `ui` and `tool_trace` are reflected through their own shape checks.
-const UPSTREAM_META_HANDLED: &[&str] = &["trace_id", "ui", "tool_trace"];
-
-/// Whether an upstream may set `_meta` key `k` on an MCP result. Triton owns
-/// `trace_id` and the whole `triton/` namespace (`triton/a2ui`,
-/// `triton/in_card`, later keys); a key whose prefix names
-/// `modelcontextprotocol` or `mcp` is reserved by the MCP specification, and
-/// an upstream's value (its own task id, say) would mean nothing to the host.
-fn upstream_meta_key_allowed(k: &str) -> bool {
-    if k.is_empty() || UPSTREAM_META_HANDLED.contains(&k) || k.starts_with("triton/") {
-        return false;
-    }
-    match k.split_once('/') {
-        Some((prefix, _)) => !prefix
-            .split('.')
-            .any(|label| label == "modelcontextprotocol" || label == "mcp"),
-        None => true,
-    }
-}
-
-/// The upstream result's own top-level `_meta` keys to pass through on an
-/// MCP `tools/call` result (#375): every allowed key
-/// ([`upstream_meta_key_allowed`]), in the upstream's order, within
-/// [`UPSTREAM_META_BUDGET`]. A non-object `_meta` passes nothing.
-fn upstream_meta(result: &Value) -> serde_json::Map<String, Value> {
-    let mut out = serde_json::Map::new();
-    let Some(meta) = result.get("_meta").and_then(Value::as_object) else {
-        return out;
-    };
-    let mut used = 0usize;
-    for (k, v) in meta {
-        if !upstream_meta_key_allowed(k) {
-            if !UPSTREAM_META_HANDLED.contains(&k.as_str()) {
-                tracing::debug!(key = %k, "mcp: upstream _meta key is reserved; not passed through");
-            }
-            continue;
-        }
-        let size = k.len() + serde_json::to_string(v).map_or(usize::MAX, |s| s.len());
-        if used.saturating_add(size) > UPSTREAM_META_BUDGET {
-            tracing::warn!(key = %k, bytes = size, "mcp: upstream _meta key over the size budget; dropped");
-            continue;
-        }
-        used += size;
-        out.insert(k.clone(), v.clone());
-    }
-    out
 }
 
 /// A card host's `structuredContent` when its card shows every row: the
@@ -1442,55 +1373,4 @@ fn rpc_error_with_data(id: Value, code: i32, message: &str, data: Option<Value>)
         }),
     )
         .into_response()
-}
-
-#[cfg(test)]
-mod upstream_meta_tests {
-    use super::{UPSTREAM_META_BUDGET, upstream_meta, upstream_meta_key_allowed};
-    use serde_json::json;
-
-    #[test]
-    fn protected_and_reserved_keys_are_refused() {
-        for k in [
-            "trace_id",
-            "ui",
-            "tool_trace",
-            "triton/a2ui",
-            "triton/in_card",
-            "triton/anything",
-            "io.modelcontextprotocol/related-task",
-            "modelcontextprotocol.io/x",
-            "tools.mcp.com/x",
-            "",
-        ] {
-            assert!(!upstream_meta_key_allowed(k), "{k}");
-        }
-        for k in [
-            "png_base64",
-            "svgs",
-            "chart",
-            "vega_specs",
-            "openai/widgetAccessible",
-            "com.example/x",
-            "tritonish",
-        ] {
-            assert!(upstream_meta_key_allowed(k), "{k}");
-        }
-    }
-
-    #[test]
-    fn budget_drops_only_the_key_that_overflows() {
-        let big = "x".repeat(UPSTREAM_META_BUDGET);
-        let r = json!({ "_meta": { "a": 1, "big": big, "z": "ok" } });
-        let m = upstream_meta(&r);
-        assert_eq!(m.get("a"), Some(&json!(1)));
-        assert!(m.get("big").is_none());
-        assert_eq!(m.get("z"), Some(&json!("ok")));
-    }
-
-    #[test]
-    fn non_object_meta_passes_nothing() {
-        assert!(upstream_meta(&json!({ "_meta": [1, 2] })).is_empty());
-        assert!(upstream_meta(&json!({})).is_empty());
-    }
 }

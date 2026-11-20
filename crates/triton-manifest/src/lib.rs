@@ -164,9 +164,53 @@ pub struct ToolDecl {
     /// on its `tools/list`; a tool that writes must stay a visible turn.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub in_card: bool,
+    /// Upstream result `_meta` keys of this tool that an MCP `tools/call`
+    /// result passes through beyond the built-in allow-list, or a built-in
+    /// key with another audience (`off` drops it). A Triton-owned or
+    /// MCP-reserved key ([`upstream_meta_key_reserved`]) is refused.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub meta: BTreeMap<String, MetaAudience>,
+}
+
+/// Who gets an upstream `_meta` key on an MCP result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetaAudience {
+    /// Every client.
+    All,
+    /// A client that declared the MCP Apps extension (it can render a card
+    /// or an upstream's app).
+    CardHost,
+    /// No client.
+    Off,
+}
+
+/// Whether an upstream may never set result `_meta` key `k` on MCP: Triton
+/// owns `trace_id` and the whole `triton/` namespace; a key whose prefix
+/// names `modelcontextprotocol` or `mcp` is reserved by the MCP
+/// specification (an upstream's value would mean nothing to the host).
+pub fn upstream_meta_key_reserved(k: &str) -> bool {
+    if k.is_empty() || k == "trace_id" || k.starts_with("triton/") {
+        return true;
+    }
+    match k.split_once('/') {
+        Some((prefix, _)) => prefix
+            .split('.')
+            .any(|label| label == "modelcontextprotocol" || label == "mcp"),
+        None => false,
+    }
 }
 
 impl Manifest {
+    /// Per tool, its `meta` pass-through entries (only tools that have any).
+    pub fn meta_passthrough(&self) -> BTreeMap<String, BTreeMap<String, MetaAudience>> {
+        self.tools
+            .iter()
+            .filter(|(_, t)| !t.meta.is_empty())
+            .map(|(n, t)| (n.clone(), t.meta.clone()))
+            .collect()
+    }
+
     /// The tools declared in-card capable (#369).
     pub fn in_card_tools(&self) -> Vec<String> {
         self.tools
@@ -566,6 +610,12 @@ pub enum ManifestError {
         #[source]
         source: std::io::Error,
     },
+    /// `tools.<name>.meta` names a key Triton or MCP reserves.
+    #[error(
+        "tools.{tool}.meta: `{key}` is reserved (trace_id, triton/*, MCP-reserved prefixes) \
+         and cannot be passed through from an upstream"
+    )]
+    ReservedMetaKey { tool: String, key: String },
     #[error("parse {path}: {source}")]
     Parse {
         path: String,
@@ -718,6 +768,16 @@ impl Manifest {
                         max: MAX_SURFACE_GUIDANCE_CHARS,
                     });
                 }
+            }
+        }
+
+        // An upstream never sets a Triton-owned or MCP-reserved `_meta` key.
+        for (tool, decl) in &self.tools {
+            if let Some(key) = decl.meta.keys().find(|k| upstream_meta_key_reserved(k)) {
+                return Err(ManifestError::ReservedMetaKey {
+                    tool: tool.clone(),
+                    key: key.clone(),
+                });
             }
         }
 

@@ -644,6 +644,13 @@ async fn main() -> std::io::Result<()> {
         // switches it off.
         widget: ingress::widget_from_env(),
         card_note: ingress::card_note(Some(&settings.ingress)),
+        // The operator's per-tool additions to the `_meta` allow-list.
+        meta: Arc::new(triton_adapters_http::mcp_meta::MetaPolicy::new(
+            manifest
+                .as_ref()
+                .map(triton_manifest::Manifest::meta_passthrough)
+                .unwrap_or_default(),
+        )),
     };
 
     // v0.2 chat-channel adapters. Each manifest-declared adapter
