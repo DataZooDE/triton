@@ -619,6 +619,9 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
             .or_else(|| opts.ingress.as_ref().and_then(|c| c.widget))
             .unwrap_or(true),
         card_note: ingress::card_note(opts.ingress.as_ref()),
+        // The built-in `_meta` allow-list (an embedding host has no
+        // `adapter.yaml` tool section).
+        meta: Arc::new(triton_adapters_http::mcp_meta::MetaPolicy::default()),
     };
     // One MCP endpoint per customer (`/mcp/<slug>` + RFC 9728 metadata),
     // at absolute paths; empty without `TRITON_MCP_TENANTS`.

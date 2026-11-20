@@ -1813,6 +1813,17 @@ description from its routed endpoint only, and the gate asks that endpoint
 alone (`UpstreamDispatch::tool_info`). The same rule holds for any future
 upstream router: describe a tool by the thing that runs it.
 
+### Upstream `_meta` passes by an allow-list, not a denylist (2026-11-20)
+
+#375 first passed every upstream `_meta` key except a few reserved ones. That
+contradicted the card-host rule of #379 (a client that cannot render the
+card gets no card data): chart rows, PNGs and host-interpreted vendor keys
+such as `openai/*` reached every MCP client, and `ui`, `tool_trace` and the
+generic pass-through were three code paths with three rules. One table
+(`mcp_meta::MetaPolicy`) now names each key with its shape and audience,
+and the operator extends it per tool. When an upstream needs a new key, add
+it to the table (or the tool's `meta`) on purpose; do not reopen a denylist.
+
 Future note: an in-place re-render of a card with the SAME height left the
 host frame collapsed. The widget measured its height synchronously after
 emptying the page; the renderer then drew a page of the old size within the

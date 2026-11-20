@@ -480,29 +480,55 @@ only the summary and the image are used.
 | A2A (Gemini Enterprise) | Triton derives a Vega-Lite v5 spec from the summary for the native `VegaChart` |
 | Google Chat, others | the PNG image (unchanged) |
 
-**Upstream `_meta` on MCP.** An MCP `tools/call` result keeps the
-upstream's own top-level `_meta` keys: `png_base64`, `svgs`, `chart`, and
-whatever an upstream MCP App widget reads. Triton adds them to its own
-`_meta` at the top level, so a widget behind Triton gets the same keys it
-gets when called directly. The pass-through follows these rules:
+**Upstream `_meta` on MCP: an allow-list.** An MCP `tools/call` result
+carries the upstream's top-level `_meta` keys that the allow-list names, next
+to Triton's own keys. Every other key is dropped:
+
+| key | shape | who gets it |
+|---|---|---|
+| `ui` | object | every client: your MCP App's resource link (#143); the host decides whether to render it |
+| `tool_trace` | array | every client: an opt-in debug sidecar |
+| `chart` | object | card hosts |
+| `png_base64` | string | card hosts |
+| `svgs` | array | card hosts |
+| `vega_specs` | array | card hosts (deprecated, see above) |
+
+A card host is a client that renders the answer card: it declared the MCP
+Apps extension and the deployment serves the widget. Chart data goes to card
+hosts only, like the card itself; a client that cannot show it does not get
+it. A key with the wrong shape is dropped.
+
+The operator adds keys for one tool, or gives a listed key another audience,
+in `adapter.yaml`:
+
+```yaml
+tools:
+  render_report:
+    meta:
+      openai/outputTemplate: card_host   # an added key, any JSON value
+      png_base64: all                    # a listed key, widened
+      vega_specs: "off"                  # a listed key, dropped
+```
+
+The rules:
 
 - **Protected keys.** An upstream never sets `trace_id`, any `triton/` key
   (`triton/a2ui`, `triton/in_card`, later ones), or a key whose prefix
   contains the label `modelcontextprotocol` or `mcp`
   (`io.modelcontextprotocol/related-task`; the MCP specification reserves
-  these). Such keys are dropped. `ui` and `tool_trace` keep their own
-  checks: they are reflected only when `ui` is an object and `tool_trace`
-  is an array.
-- **Size budget.** Passed-through keys may use 4 MiB of serialized JSON in
-  total, taken in the upstream's key order. A key that would exceed the
-  budget is dropped and logged (`warn`). The keys before it still pass, and
-  the call still succeeds.
+  these). They are not on the list, and a manifest that lists one does not
+  boot.
+- **Size budget.** Passed keys may use 4 MiB of serialized JSON in total,
+  taken in list order (the table above, then the operator's keys). A key
+  that would exceed the budget is dropped and logged (`warn`). The keys
+  before it still pass, and the call still succeeds.
 - Only a top-level `_meta` object is read. Any other `_meta` passes nothing.
 - REST returns the dispatch result unchanged, and the chat and A2A adapters
   read the dispatch result, so none of these rules apply there.
 
-`_meta` is not shown to the model, but every MCP client receives it, card
-host or not. As with surfaces, nothing the caller must not see belongs there.
+`_meta` is not shown to the model. `ui` and `tool_trace` reach every MCP
+client, card host or not: as with surfaces, nothing the caller must not see
+belongs there.
 
 ## 5. The `upstream` identity-resolution strategy (FR-I-7)
 

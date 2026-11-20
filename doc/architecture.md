@@ -535,11 +535,13 @@ requires `Clone`).
 > (`ChartSummary::to_vega_lite`). The deprecated `_meta.vega_specs` is read
 > only when no valid summary is present, and the PNG image is the last
 > fallback. On MCP, `answer` adds the upstream's top-level `_meta` keys to
-> its own (`mcp::upstream_meta`). It never takes `trace_id`, a `triton/*`
-> key or an MCP-reserved key from an upstream. `ui` and `tool_trace` keep
-> their shape checks. The passed-through keys share a 4 MiB budget. An
-> upstream MCP App therefore gets the same keys behind Triton as when it is
-> called directly.
+> its own by one allow-list (`mcp_meta::MetaPolicy`): each listed key has a
+> shape check and an audience (`ui`, `tool_trace`: every client; `chart`,
+> `png_base64`, `svgs`, `vega_specs`: card hosts only, like the card, #379),
+> and the operator adds keys or changes an audience per tool
+> (`tools.<name>.meta`). Every other key is dropped. It never takes
+> `trace_id`, a `triton/*` key or an MCP-reserved key from an upstream; the
+> manifest refuses to list one. The passed keys share a 4 MiB budget.
 >
 > **In-card actions (2026-11, #369).** A `rerun` action (or a chip's `rerun`,
 > or a producer's `triton.in_card:<name>` event) re-runs the producing tool
