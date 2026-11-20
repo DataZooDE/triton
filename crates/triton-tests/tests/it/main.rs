@@ -52,6 +52,8 @@ mod bearer_challenge;
 mod consumer_smoke;
 #[path = "../correlation_sender_binding.rs"]
 mod correlation_sender_binding;
+#[path = "../upstream_tool_ownership.rs"]
+mod upstream_tool_ownership;
 
 #[path = "../chat_identity.rs"]
 mod chat_identity;

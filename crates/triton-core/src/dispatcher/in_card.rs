@@ -15,8 +15,9 @@
 //!    surfaces) and its fields fit their limits;
 //! 5. the principal may invoke the tool at all ([`Dispatcher::can_invoke`]);
 //! 6. the tool is declared in-card capable by the operator AND annotated
-//!    `readOnlyHint: true` (on the upstream's `tools/list`): replaying a
-//!    read is harmless, a write must stay a visible new turn.
+//!    `readOnlyHint: true` on the `tools/list` of the endpoint that executes
+//!    it (no other endpoint's word counts): replaying a read is harmless, a
+//!    write must stay a visible new turn.
 //!
 //! Exactly one audit line per call, refused or not, with the in-card part
 //! ([`InCardAudit`]): key names and sizes of the context, never values.
@@ -24,8 +25,8 @@
 //! The dispatch is buffered (no `text/event-stream` offered), so an upstream
 //! cannot turn an in-card call into an asynchronous task.
 
-use std::collections::HashSet;
-use std::sync::Mutex;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -47,12 +48,19 @@ pub const IN_CARD_BURST: u32 = 10;
 pub const MAX_CONTEXT_BYTES: usize = 8 * 1024;
 /// Characters of the event name, surface id and component id.
 pub const MAX_ID_CHARS: usize = 256;
-/// How long a successful read of the tool list's annotations is reused.
+/// How long a tool found read-only is believed.
 const READ_ONLY_TTL: Duration = Duration::from_secs(60);
-/// How long a tool found not read-only is believed before the list is read
-/// again (an upstream that did not answer looks the same as one that says
-/// no).
+/// How long a tool found not read-only is believed before its endpoint is
+/// asked again (an endpoint that did not answer looks the same as one that
+/// says no).
 const NOT_READ_ONLY_TTL: Duration = Duration::from_secs(5);
+
+/// The last answer for one declared tool.
+#[derive(Debug, Clone, Copy)]
+struct ReadOnly {
+    at: Instant,
+    yes: bool,
+}
 
 /// Which tools a card may call in place, and how often.
 #[derive(Debug)]
@@ -61,10 +69,13 @@ pub(crate) struct InCardPolicy {
     per_sec: u32,
     burst: u32,
     buckets: PerTenantBuckets,
-    /// The last read of the tool list: the read-only tools and when.
-    read_only: Mutex<Option<(Instant, HashSet<String>)>>,
-    /// One read of the tool list at a time (single flight).
-    fill: tokio::sync::Mutex<()>,
+    /// Per declared tool, the last read-only answer of its own endpoint.
+    /// Entries outlive their TTL, so a repeated "no" is told apart from a
+    /// change. Bounded by the declared tools.
+    read_only: Mutex<HashMap<String, ReadOnly>>,
+    /// One read per tool at a time (single flight per tool: a slow endpoint
+    /// delays only the checks of its own tools).
+    fills: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Default for InCardPolicy {
@@ -80,22 +91,43 @@ impl InCardPolicy {
             per_sec,
             burst,
             buckets: PerTenantBuckets::new(per_sec.max(1), burst.max(1)),
-            read_only: Mutex::new(None),
-            fill: tokio::sync::Mutex::new(()),
+            read_only: Mutex::new(HashMap::new()),
+            fills: Mutex::new(HashMap::new()),
         }
     }
 
     /// The cached answer for `tool`, if still believed.
     fn cached(&self, tool: &str) -> Option<bool> {
-        let guard = self.read_only.lock().expect("poisoned");
-        let (at, set) = guard.as_ref()?;
-        let hit = set.contains(tool);
-        let ttl = if hit {
+        let r = *self.read_only.lock().expect("poisoned").get(tool)?;
+        let ttl = if r.yes {
             READ_ONLY_TTL
         } else {
             NOT_READ_ONLY_TTL
         };
-        (at.elapsed() < ttl).then_some(hit)
+        (r.at.elapsed() < ttl).then_some(r.yes)
+    }
+
+    /// Record `yes` for `tool`; whether it differs from the last answer
+    /// (the first answer counts as a change).
+    fn store(&self, tool: &str, yes: bool) -> bool {
+        let last = self.read_only.lock().expect("poisoned").insert(
+            tool.to_string(),
+            ReadOnly {
+                at: Instant::now(),
+                yes,
+            },
+        );
+        last.is_none_or(|l| l.yes != yes)
+    }
+
+    /// The single-flight lock of `tool`'s read.
+    fn fill(&self, tool: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.fills
+            .lock()
+            .expect("poisoned")
+            .entry(tool.to_string())
+            .or_default()
+            .clone()
     }
 }
 
@@ -181,41 +213,39 @@ impl Dispatcher {
         !self.in_card.tools.is_empty()
     }
 
-    /// Whether `tool` is annotated `readOnlyHint: true`. One read of the
-    /// tool list at a time; a yes is reused for [`READ_ONLY_TTL`], a no for
-    /// [`NOT_READ_ONLY_TTL`]. A tool the list does not annotate is not
-    /// read-only.
+    /// Whether declared `tool` is annotated `readOnlyHint: true` by the
+    /// endpoint that executes it ([`super::UpstreamDispatch::tool_info`]; an
+    /// in-process tool carries no annotations, so it is not). One read per
+    /// tool at a time; a yes is reused for [`READ_ONLY_TTL`], a no for
+    /// [`NOT_READ_ONLY_TTL`]. A "no" is logged when the answer changes to
+    /// it, not on every read.
     async fn read_only(&self, tool: &str) -> bool {
         if let Some(hit) = self.in_card.cached(tool) {
             return hit;
         }
-        let _fill = self.in_card.fill.lock().await;
-        // Another call may have read the list while this one waited.
+        let fill = self.in_card.fill(tool);
+        let _fill = fill.lock().await;
+        // Another call may have read it while this one waited.
         if let Some(hit) = self.in_card.cached(tool) {
             return hit;
         }
-        let set: HashSet<String> = self
-            .descriptors_all()
-            .await
-            .into_iter()
-            .filter(|d| {
-                d.annotations
-                    .as_ref()
-                    .and_then(|a| a.get("readOnlyHint"))
-                    .and_then(Value::as_bool)
+        let hit = match &self.upstream {
+            Some(up) if !self.is_in_process(tool) => {
+                up.tool_info(tool)
+                    .await
+                    .and_then(|i| i.annotations)
+                    .and_then(|a| a.get("readOnlyHint").and_then(Value::as_bool))
                     == Some(true)
-            })
-            .map(|d| d.name)
-            .collect();
-        let hit = set.contains(tool);
-        if !hit && self.in_card_capable(tool) {
+            }
+            _ => false,
+        };
+        if self.in_card.store(tool, hit) && !hit {
             tracing::warn!(
                 tool,
                 "tool declared in-card capable is not annotated readOnlyHint (or its \
                  upstream did not answer tools/list): its card controls stay new turns"
             );
         }
-        *self.in_card.read_only.lock().expect("poisoned") = Some((Instant::now(), set));
         hit
     }
 
@@ -242,10 +272,17 @@ impl Dispatcher {
                 )),
             ));
         }
-        // The bucket key is a pair, joined by a separator neither part
-        // carries in practice; a collision would only share a throttle.
-        let key = format!("{}\u{1f}{}", principal.tenant, principal.sub);
+        // The bucket is the token's holder: tenant, issuer and subject (two
+        // issuers on one route may hand out equal subjects), joined by a
+        // separator none of them carries in practice; a collision would only
+        // share a throttle.
+        let h = Holder::of(&principal);
+        let key = format!("{}\u{1f}{}\u{1f}{}", h.tenant, h.issuer, h.sub);
+        let saturated = self.in_card.buckets.map_full_refusals();
         if let Err(retry) = self.in_card.buckets.try_take(&key) {
+            if self.in_card.buckets.map_full_refusals() > saturated {
+                self.metrics.record_in_card_throttle_saturated();
+            }
             return Err(refuse(
                 TOOL_NAME,
                 &audit,
@@ -272,9 +309,7 @@ impl Dispatcher {
         let tool = signed.tool.clone();
         let fits = match &signed.scope {
             Scope::Rerun => ev.name == EVENT,
-            Scope::Event { names, surfaces } => {
-                names.contains(&ev.name) && surfaces.contains(&ev.surface_id)
-            }
+            scope => scope.allows_event(&ev.surface_id, &ev.name),
         };
         let too_long = [&ev.name, &ev.surface_id, &ev.source_component_id]
             .iter()
@@ -435,8 +470,7 @@ mod tests {
 
     fn refresh() -> Scope {
         Scope::Event {
-            names: vec!["triton.in_card:refresh".into()],
-            surfaces: vec!["triton-a2ui-0".into()],
+            pairs: vec![("triton-a2ui-0".into(), "triton.in_card:refresh".into())],
         }
     }
 
@@ -689,5 +723,49 @@ mod tests {
         assert_eq!(line("ic-r3").result, "error:ratelimit");
         // Another principal has its own bucket.
         assert!(go("bob", "ic-r4".into()).await.is_ok());
+    }
+
+    /// The throttle is keyed like the token: the same `sub` vouched for by
+    /// another issuer is another principal.
+    #[tokio::test]
+    async fn the_rate_limit_is_per_issuer_and_subject() {
+        let d = dispatcher().with_in_card_rate(1, 1);
+        let with_issuer = |iss: &str, trace: &str| {
+            let mut p = principal("alice", trace);
+            p.idp = Some(crate::principal::IdpIdentity {
+                issuer: Some(iss.to_string()),
+                ..Default::default()
+            });
+            p
+        };
+        for (trace, iss) in [
+            ("ic-i1", "https://a.example"),
+            ("ic-i2", "https://b.example"),
+        ] {
+            let p = with_issuer(iss, trace);
+            let t = sign(
+                ActionSigner::global(),
+                "pages",
+                &Scope::Rerun,
+                &json!({}),
+                Holder::of(&p),
+            )
+            .unwrap();
+            assert!(
+                d.invoke_in_card(rerun(t), p).await.is_ok(),
+                "{iss}: its own bucket"
+            );
+        }
+        let p = with_issuer("https://a.example", "ic-i3");
+        let t = sign(
+            ActionSigner::global(),
+            "pages",
+            &Scope::Rerun,
+            &json!({}),
+            Holder::of(&p),
+        )
+        .unwrap();
+        let e = d.invoke_in_card(rerun(t), p).await.unwrap_err();
+        assert!(matches!(e, TritonError::RateLimited(_)), "{e}");
     }
 }

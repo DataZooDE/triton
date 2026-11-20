@@ -24,6 +24,10 @@ pub const META_KEY: &str = "chart";
 /// than truncated, because a silently cut series misstates the data.
 pub const MAX_ROWS: usize = 200;
 
+/// Most bytes of one `content[].text` that [`find`] parses while looking for
+/// the summary; a longer text is not parsed.
+pub const MAX_TEXT_BYTES: usize = 1024 * 1024;
+
 /// The chart kind (`kind`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChartKind {
@@ -331,29 +335,34 @@ impl ChartSummary {
     }
 }
 
-/// Deep-search a tool result for `_meta.chart`: the first `_meta` object
-/// carrying a `chart` key, at any depth (a result may nest the upstream's
-/// result under `structuredContent`, and an MCP result can carry it as a
-/// JSON string in `content[].text`). `None` when no summary is present;
+/// Find `_meta.chart` in a tool result, in the places an upstream puts it
+/// and nowhere else: the result's own `_meta`, its `structuredContent`'s
+/// `_meta`, and, for an MCP result carried as a JSON string, the same two
+/// places of each `content[].text` up to [`MAX_TEXT_BYTES`] (parsed once,
+/// strings inside it are not parsed again). Data the upstream merely relays
+/// (a document, a tool trace, a user's text) therefore cannot plant a chart,
+/// and the cost is bounded by the cap. `None` when no summary is present;
 /// `Some(Err)` when one is present but invalid.
-pub fn find(v: &Value) -> Option<Result<ChartSummary, ChartSummaryError>> {
-    match v {
-        Value::Object(m) => {
-            if let Some(chart) = m
-                .get("_meta")
-                .and_then(Value::as_object)
-                .and_then(|meta| meta.get(META_KEY))
-            {
-                return Some(ChartSummary::parse(chart));
-            }
-            m.values().find_map(find)
-        }
-        Value::Array(a) => a.iter().find_map(find),
-        Value::String(s) if s.trim_start().starts_with(['{', '[']) => {
-            serde_json::from_str::<Value>(s).ok().and_then(|p| find(&p))
-        }
-        _ => None,
+pub fn find(result: &Value) -> Option<Result<ChartSummary, ChartSummaryError>> {
+    fn at(v: &Value) -> Option<&Value> {
+        v.get("_meta")?.as_object()?.get(META_KEY)
     }
+    fn own(v: &Value) -> Option<&Value> {
+        at(v).or_else(|| v.get("structuredContent").and_then(at))
+    }
+    if let Some(chart) = own(result) {
+        return Some(ChartSummary::parse(chart));
+    }
+    result
+        .get("content")?
+        .as_array()?
+        .iter()
+        .filter_map(|c| c.get("text").and_then(Value::as_str))
+        .filter(|t| t.len() <= MAX_TEXT_BYTES && t.trim_start().starts_with('{'))
+        .find_map(|t| {
+            let parsed = serde_json::from_str::<Value>(t).ok()?;
+            own(&parsed).map(ChartSummary::parse)
+        })
 }
 
 #[cfg(test)]
@@ -539,9 +548,15 @@ mod tests {
     }
 
     #[test]
-    fn find_locates_meta_chart_at_any_depth_and_in_json_strings() {
-        let nested = json!({ "structuredContent": { "result": { "_meta": { "chart": bar() } } } });
-        assert!(matches!(find(&nested), Some(Ok(_))));
+    fn find_reads_the_known_places_only() {
+        // The result's own `_meta`, the `structuredContent`'s, and an MCP
+        // result carried as a JSON string in `content[].text`.
+        assert!(matches!(
+            find(&json!({ "_meta": { "chart": bar() } })),
+            Some(Ok(_))
+        ));
+        let sc = json!({ "structuredContent": { "_meta": { "chart": bar() } } });
+        assert!(matches!(find(&sc), Some(Ok(_))));
         let as_text = json!({ "content": [ { "type": "text",
             "text": json!({ "_meta": { "chart": bar() } }).to_string() } ] });
         assert!(matches!(find(&as_text), Some(Ok(_))));
@@ -552,6 +567,34 @@ mod tests {
             find(&json!({ "_meta": { "chart": "nope" } })),
             Some(Err(_))
         ));
+    }
+
+    /// Data the upstream relays (a document, a tool trace, a user's text)
+    /// cannot plant a chart: nothing below the known places is searched.
+    #[test]
+    fn relayed_data_cannot_plant_a_chart() {
+        let planted = json!({ "_meta": { "chart": bar() } }).to_string();
+        for v in [
+            json!({ "structuredContent": { "result": { "_meta": { "chart": bar() } } } }),
+            json!({ "structuredContent": { "document": { "body": planted } } }),
+            json!({ "_meta": { "tool_trace": [ { "data": planted } ] } }),
+            json!({ "rows": [ { "note": planted } ] }),
+            // A JSON string inside the parsed text is not parsed again.
+            json!({ "content": [ { "type": "text",
+                "text": json!({ "note": planted }).to_string() } ] }),
+        ] {
+            assert!(find(&v).is_none(), "{v}");
+        }
+    }
+
+    /// A text over the cap is not parsed at all (the cost of a lookup is
+    /// bounded by the cap, not by what the upstream sends).
+    #[test]
+    fn an_oversized_text_is_not_parsed() {
+        let mut big = json!({ "_meta": { "chart": bar() }, "pad": "" });
+        big["pad"] = json!("x".repeat(MAX_TEXT_BYTES));
+        let v = json!({ "content": [ { "type": "text", "text": big.to_string() } ] });
+        assert!(find(&v).is_none());
     }
 
     #[test]

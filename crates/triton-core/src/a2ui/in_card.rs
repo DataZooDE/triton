@@ -23,8 +23,9 @@
 //!   repeat call (the original call's, with the control's laid over them).
 //! * [`Kind::Event`]: an event on a producer's own surface whose name starts
 //!   with [`EVENT_PREFIX`]. The token is the result's, carried in result
-//!   `_meta[`[`META_KEY`]`]`, and names the original call. The event itself
-//!   reaches the upstream under `_triton.client.a2ui_events`, as on A2A.
+//!   `_meta[`[`META_KEY`]`]`, and names the original call and each
+//!   `(surface, event)` pair the answer carried. The event itself reaches
+//!   the upstream under `_triton.client.a2ui_events`, as on A2A.
 
 use serde_json::{Map, Value, json};
 
@@ -70,17 +71,22 @@ impl Kind {
 pub enum Scope {
     /// A Triton card control: no event.
     Rerun,
-    /// A producer surface's events: only these names (each starting with
-    /// [`EVENT_PREFIX`]), only on these surfaces, as the vetted answer
-    /// carried them. A client cannot invent another event the upstream
-    /// might act on.
-    Event {
-        names: Vec<String>,
-        surfaces: Vec<String>,
-    },
+    /// A producer surface's events: exactly these `(surface id, event
+    /// name)` pairs (each name starting with [`EVENT_PREFIX`]), as the
+    /// vetted answer carried them. A client cannot invent another event the
+    /// upstream might act on, nor fire one surface's event on another.
+    Event { pairs: Vec<(String, String)> },
 }
 
 impl Scope {
+    /// Whether this scope admits event `name` fired on `surface_id`.
+    pub fn allows_event(&self, surface_id: &str, name: &str) -> bool {
+        match self {
+            Scope::Rerun => false,
+            Scope::Event { pairs } => pairs.iter().any(|(s, n)| s == surface_id && n == name),
+        }
+    }
+
     pub fn kind(&self) -> Kind {
         match self {
             Scope::Rerun => Kind::Rerun,
@@ -141,11 +147,11 @@ fn body(scope: &Scope, args: &Value) -> Option<Value> {
     }
     Some(match scope {
         Scope::Rerun => json!({ "k": "rerun", "a": args }),
-        Scope::Event { names, surfaces } => {
-            if names.is_empty() || names.iter().any(|n| !n.starts_with(EVENT_PREFIX)) {
+        Scope::Event { pairs } => {
+            if pairs.is_empty() || pairs.iter().any(|(_, n)| !n.starts_with(EVENT_PREFIX)) {
                 return None;
             }
-            json!({ "k": "event", "a": args, "e": names, "s": surfaces })
+            json!({ "k": "event", "a": args, "p": pairs })
         }
     })
 }
@@ -217,18 +223,20 @@ pub fn open(
         DecodeError::Body(m) if m.contains("expired") => "expired",
         DecodeError::Body(_) => "malformed",
     })?;
-    let strings = |k: &str| -> Option<Vec<String>> {
-        body.get(k)?
+    let pairs = || -> Option<Vec<(String, String)>> {
+        body.get("p")?
             .as_array()?
             .iter()
-            .map(|v| v.as_str().map(str::to_string))
+            .map(|p| match p.as_array()?.as_slice() {
+                [s, n] => Some((s.as_str()?.to_string(), n.as_str()?.to_string())),
+                _ => None,
+            })
             .collect()
     };
     let scope = match body.get("k").and_then(Value::as_str) {
         Some("rerun") => Scope::Rerun,
         Some("event") => Scope::Event {
-            names: strings("e").ok_or("malformed")?,
-            surfaces: strings("s").ok_or("malformed")?,
+            pairs: pairs().ok_or("malformed")?,
         },
         _ => return Err("malformed"),
     };
@@ -296,10 +304,13 @@ mod tests {
         issuer: "https://idp.example",
     };
 
+    fn pair(surface: &str, name: &str) -> (String, String) {
+        (surface.to_string(), name.to_string())
+    }
+
     fn refresh() -> Scope {
         Scope::Event {
-            names: vec!["triton.in_card:refresh".into()],
-            surfaces: vec!["triton-a2ui-1".into()],
+            pairs: vec![pair("triton-a2ui-1", "triton.in_card:refresh")],
         }
     }
 
@@ -325,16 +336,37 @@ mod tests {
         let s = signer();
         assert!(sign(&s, "t", &Scope::Rerun, &json!("text"), ALICE).is_none());
         assert!(sign(&s, "t", &Scope::Rerun, &json!([1]), ALICE).is_none());
-        let none = Scope::Event {
-            names: vec![],
-            surfaces: vec!["x".into()],
-        };
+        let none = Scope::Event { pairs: vec![] };
         assert!(sign(&s, "t", &none, &json!({}), ALICE).is_none());
         let foreign = Scope::Event {
-            names: vec!["approve".into()],
-            surfaces: vec!["x".into()],
+            pairs: vec![pair("x", "approve")],
         };
         assert!(sign(&s, "t", &foreign, &json!({}), ALICE).is_none());
+    }
+
+    /// Each event is allowed on the surface that carried it only: with
+    /// `refresh` on A and `next` on B, `next` on A and `refresh` on B are
+    /// not allowed, before or after a round trip through the token.
+    #[test]
+    fn an_event_scope_binds_each_event_to_its_surface() {
+        let s = signer();
+        let scope = Scope::Event {
+            pairs: vec![
+                pair("A", "triton.in_card:refresh"),
+                pair("B", "triton.in_card:next"),
+            ],
+        };
+        let t = sign(&s, "list_agents", &scope, &json!({}), ALICE).unwrap();
+        let opened = open(&s, &t, ALICE).unwrap().scope;
+        assert_eq!(opened, scope);
+        for sc in [&scope, &opened] {
+            assert!(sc.allows_event("A", "triton.in_card:refresh"));
+            assert!(sc.allows_event("B", "triton.in_card:next"));
+            assert!(!sc.allows_event("A", "triton.in_card:next"));
+            assert!(!sc.allows_event("B", "triton.in_card:refresh"));
+            assert!(!sc.allows_event("C", "triton.in_card:refresh"));
+        }
+        assert!(!Scope::Rerun.allows_event("A", "triton.in_card:refresh"));
     }
 
     #[test]

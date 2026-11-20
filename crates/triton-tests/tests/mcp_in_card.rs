@@ -39,17 +39,62 @@ struct Rig {
     triton: TritonProcess,
     entra: TestIssuer,
     agent: FakeAgent,
+    /// Advertises the cards agent's tool names with the opposite
+    /// annotations; routed only `decoy_tool`.
+    decoy: FakeAgent,
+    /// Echoes (no card); routed `plain_reads`, declared in-card capable.
+    echo: FakeAgent,
+    /// Two producer surfaces with one in-card event each; `two_panels`.
+    panels: FakeAgent,
+}
+
+/// The body of `two_panels`: surface 0 fires `triton.in_card:refresh`,
+/// surface 1 `triton.in_card:next`.
+fn two_panels() -> Value {
+    let panel = |event: &str| {
+        json!({
+            "catalogId": "https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json",
+            "components": [
+                { "id": "root", "component": "Column", "children": ["b"] },
+                { "id": "bl", "component": "Text", "text": event },
+                { "id": "b", "component": "Button", "child": "bl",
+                  "action": { "event": { "name": event } } }
+            ]
+        })
+    };
+    json!({
+        "text": "Two panels",
+        "surface": {
+            "components": [ { "kind": "text", "value": "Two panels" } ],
+            "a2ui": [ panel("triton.in_card:refresh"), panel("triton.in_card:next") ]
+        }
+    })
 }
 
 async fn rig() -> Rig {
     let entra = TestIssuer::start().await;
     let agent = FakeAgent::start_cards().await;
+    let decoy = FakeAgent::start_echoing().await;
+    decoy.set_tools_list(json!({ "tools": [
+        { "name": "file_change", "annotations": { "readOnlyHint": true } },
+        { "name": "list_planned", "annotations": { "readOnlyHint": false } },
+        { "name": "decoy_tool", "annotations": { "readOnlyHint": true } }
+    ] }));
+    let echo = FakeAgent::start_echoing().await;
+    echo.set_tools_list(json!({ "tools": [
+        { "name": "plain_reads", "annotations": { "readOnlyHint": true } }
+    ] }));
+    let panels = FakeAgent::start_returning(two_panels()).await;
+    panels.set_tools_list(json!({ "tools": [
+        { "name": "two_panels", "annotations": { "readOnlyHint": true } }
+    ] }));
     let manifest = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
         .join(format!("in-card-{}.yaml", triton_tests::free_tcp_port()));
     std::fs::write(
         &manifest,
         "version: \"0.2\"\nadapters: {}\ntools:\n  list_planned:\n    in_card: true\n  \
-         file_change:\n    in_card: true\n",
+         file_change:\n    in_card: true\n  plain_reads:\n    in_card: true\n  \
+         two_panels:\n    in_card: true\n  decoy_tool:\n    in_card: true\n",
     )
     .unwrap();
     let hp = agent.host_port();
@@ -71,7 +116,13 @@ async fn rig() -> Rig {
         // `list_plain` is the same agent, not declared in-card capable.
         (
             "TRITON_STATIC_UPSTREAMS".to_string(),
-            format!("list_planned={hp},file_change={hp},list_plain={hp}"),
+            format!(
+                "list_planned={hp},file_change={hp},list_plain={hp},decoy_tool={},\
+                 plain_reads={},two_panels={}",
+                decoy.host_port(),
+                echo.host_port(),
+                panels.host_port()
+            ),
         ),
         ("TRITON_SINGLE_PORT".to_string(), "true".to_string()),
         ("TRITON_A2UI_ACTION_KEY".to_string(), KEY.to_string()),
@@ -85,6 +136,9 @@ async fn rig() -> Rig {
         triton,
         entra,
         agent,
+        decoy,
+        echo,
+        panels,
     }
 }
 
@@ -741,5 +795,118 @@ fn the_in_card_goldens_are_pinned() {
             produced,
             "{path:?} differs from golden"
         );
+    }
+}
+
+/// The producer surface ids of a card, in the order the widget gets them.
+fn producer_surfaces(res: &Value) -> Vec<String> {
+    res["_meta"][mcp_app::META_KEY]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["createSurface"]["surfaceId"].as_str())
+        .filter(|s| *s != basic::SURFACE_ID)
+        .map(str::to_string)
+        .collect()
+}
+
+/// Another endpoint advertising a tool's name with other annotations
+/// changes nothing: the read-only gate reads the annotations of the
+/// endpoint that executes the tool, and asks that endpoint only.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_read_only_gate_reads_the_endpoint_that_runs_the_tool() {
+    let r = rig().await;
+    let session = card_session(&r, ALICE).await;
+    let decoy_probes = r.decoy.tools_list_probes();
+    for _ in 0..3 {
+        let w = call(&r, ALICE, Some(&session), "file_change", json!({})).await;
+        assert!(
+            card_events(&w).iter().all(|(n, _)| n != in_card::EVENT),
+            "a writing tool got in-card controls: {w}"
+        );
+        let ro = call(&r, ALICE, Some(&session), "list_planned", json!({})).await;
+        assert!(
+            card_events(&ro).iter().any(|(n, _)| n == in_card::EVENT),
+            "a read-only tool lost its in-card controls: {ro}"
+        );
+    }
+    assert_eq!(
+        r.decoy.tools_list_probes(),
+        decoy_probes,
+        "an endpoint that runs neither tool was asked about them"
+    );
+}
+
+/// The check runs only for an answer that has a card to sign; a tool found
+/// not read-only is logged once, not on every cache expiry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_read_only_check_is_lazy_and_warns_once() {
+    let r = rig().await;
+    let session = card_session(&r, ALICE).await;
+    let probes = r.echo.tools_list_probes();
+    let out = call(&r, ALICE, Some(&session), "plain_reads", json!({})).await;
+    assert_eq!(out["isError"], false, "{out}");
+    assert_eq!(
+        r.echo.tools_list_probes(),
+        probes,
+        "an answer without a card needs no read-only check"
+    );
+
+    call(&r, ALICE, Some(&session), "file_change", json!({})).await;
+    // Past the "not read-only" cache lifetime: the list is read again, the
+    // answer is the same, so there is nothing new to say.
+    tokio::time::sleep(Duration::from_millis(5_500)).await;
+    call(&r, ALICE, Some(&session), "file_change", json!({})).await;
+    let warnings = r
+        .triton
+        .stdout_snapshot()
+        .iter()
+        .filter(|l| l.contains("not annotated readOnlyHint") && l.contains("file_change"))
+        .count();
+    assert_eq!(warnings, 1, "one warning per change of state");
+}
+
+/// A producer token allows each event on the surface that carried it: an
+/// event of one surface fired on another is refused.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_producer_event_is_allowed_on_its_own_surface_only() {
+    let r = rig().await;
+    let session = card_session(&r, ALICE).await;
+    let res = call(&r, ALICE, Some(&session), "two_panels", json!({})).await;
+    let token = res["_meta"][in_card::META_KEY]
+        .as_str()
+        .unwrap_or_else(|| panic!("no producer token: {res}"))
+        .to_string();
+    let s = producer_surfaces(&res);
+    assert_eq!(s.len(), 2, "{res}");
+    let hits = r.panels.hits();
+    for (name, surface) in [
+        ("triton.in_card:next", &s[0]),
+        ("triton.in_card:refresh", &s[1]),
+    ] {
+        let out = call(
+            &r,
+            ALICE,
+            Some(&session),
+            in_card::TOOL_NAME,
+            ui_event(&token, name, surface, json!({})),
+        )
+        .await;
+        refused(&out, "validation");
+    }
+    assert_eq!(r.panels.hits(), hits, "a refused event reaches no upstream");
+    for (name, surface) in [
+        ("triton.in_card:refresh", &s[0]),
+        ("triton.in_card:next", &s[1]),
+    ] {
+        let out = call(
+            &r,
+            ALICE,
+            Some(&session),
+            in_card::TOOL_NAME,
+            ui_event(&token, name, surface, json!({})),
+        )
+        .await;
+        assert_eq!(out["isError"], false, "{name} on its own surface: {out}");
     }
 }

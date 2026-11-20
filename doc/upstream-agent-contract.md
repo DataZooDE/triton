@@ -385,9 +385,10 @@ widget whenever the in-card call fails. A rerun without a sendable fallback is
 no control. On a producer's own basic-catalog surface (§4), name the event
 `triton.in_card:<name>`; it arrives as one entry of
 `_triton.client.a2ui_events` (§2b) on a re-run of the call that produced the
-surface, with the event's resolved `context`. Triton signs exactly the
-in-card event names and surfaces of that answer into the result's token, so
-a client cannot invent another name; the `context` stays client-asserted.
+surface, with the event's resolved `context`. Triton signs each in-card
+event name of that answer together with the surface that fires it into the
+result's token, so a client can neither invent another name nor fire one
+surface's event on another; the `context` stays client-asserted.
 An in-card event must not have a side effect, whatever its name. A producer
 event has no fallback turn: if the host cannot call in place, or the call is
 refused, the click does nothing (the widget never sends a producer's text as
@@ -409,19 +410,25 @@ high"`). Drill-downs ("Show agent X") change the topic: keep them
 - The operator declares the tool in-card capable in `adapter.yaml`
   (`tools.<name>.in_card: true`), **and** your `tools/list` (§2a) annotates
   it `readOnlyHint: true`. Replaying a read is harmless; a write must stay a
-  visible turn the user confirms. A declared tool that is not annotated
-  read-only (or whose `tools/list` did not answer) gets no in-card controls,
-  only their fallbacks, and Triton logs a warning; a token for it is refused
-  (`forbidden`) before it reaches you. A yes is cached for 60 s, a no for 5 s.
+  visible turn the user confirms. Only the `tools/list` of the endpoint
+  `TRITON_STATIC_UPSTREAMS` routes the tool to counts; another endpoint that
+  advertises the same name neither describes nor gates it. A declared tool
+  that is not annotated read-only (or whose `tools/list` did not answer) gets
+  no in-card controls, only their fallbacks, and Triton logs a warning when
+  the answer changes to "no"; a token for it is refused (`forbidden`) before
+  it reaches you. Triton asks only when an answer has a card to sign. A yes
+  is cached for 60 s, a no for 5 s, per tool.
 - Each control carries a token signed with `TRITON_A2UI_ACTION_KEY` over
-  `(tool, args)` (and, for producer events, the allowed names and surfaces),
+  `(tool, args)` (and, for producer events, the allowed `(surface, event)`
+  pairs),
   bound to the tenant, the principal's `sub` and the issuer that verified it,
   valid for at most 24 h. A client cannot change the tool or the arguments, and another
   user cannot use a leaked card. There is no nonce store: a replay by the
   same principal within the expiry re-reads what that principal may read.
 - Authorization is the dispatcher's, as for any call (revocation, scope
   restrictions), with your bearer minted for the same principal.
-- A per-principal rate limit (10 in a burst, 2/s sustained).
+- A per-principal rate limit (10 in a burst, 2/s sustained), keyed like the
+  token: tenant, issuer and `sub`.
 - One audit line per call, with `in_card: {ingress: "mcp-app-event", kind,
   event, source_component_id, token, context_keys, context_bytes}`: key
   names and sizes of the context, never values.
@@ -454,6 +461,11 @@ to emit Vega-Lite for Triton to read back:
 | `unit` | no | unit of `y`, shown as `y_title (unit)` |
 | `orientation` | no | `vertical` (default) or `horizontal`; bar only |
 | `stacked` | no | bar with `series` only |
+
+Triton reads the summary from the result's own `_meta`, from
+`structuredContent._meta`, or from the same two places of a `content[].text`
+that holds the result as JSON (up to 1 MiB). A `_meta.chart` deeper inside the
+result, for example in data the tool relays, is not the summary.
 
 Triton ignores unknown keys. If a summary breaks any rule, Triton rejects all
 of it and logs a `warn` (`ignoring the upstream's chart summary`). It then

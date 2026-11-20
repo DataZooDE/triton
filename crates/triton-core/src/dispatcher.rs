@@ -158,6 +158,15 @@ pub trait UpstreamDispatch: Send + Sync {
     async fn agent_tools(&self) -> std::collections::HashMap<String, UpstreamToolInfo> {
         std::collections::HashMap::new()
     }
+
+    /// [`Self::agent_tools`] for one tool: what the endpoint that executes
+    /// `tool` says about it, `None` when it does not answer or does not
+    /// describe it. An implementation that routes tools to several
+    /// endpoints asks the owning one only, so an unrelated endpoint (down,
+    /// slow or advertising the same name) neither delays nor decides it.
+    async fn tool_info(&self, tool: &str) -> Option<UpstreamToolInfo> {
+        self.agent_tools().await.remove(tool)
+    }
 }
 
 /// What an upstream's `tools/list` answer says about one tool, as

@@ -758,12 +758,10 @@ async fn tools_call(
     // The card's in-card controls repeat this call, for this principal:
     // only on a host that renders the card, for a tool declared in-card
     // capable and annotated read-only (checked again when a control is
-    // used). Everywhere else they are their fallback messages.
-    let origin_of = if card_host && state.dispatcher.in_card_ready(&tool_name).await {
-        Some((args.clone(), principal.clone()))
-    } else {
-        None
-    };
+    // used). Everywhere else they are their fallback messages. The
+    // read-only check waits for an answer that has a card to sign.
+    let origin_of = (card_host && state.widget && state.dispatcher.in_card_capable(&tool_name))
+        .then(|| (args.clone(), principal.clone()));
 
     let outcome = match &state.tasks {
         Some(runner)
@@ -788,11 +786,17 @@ async fn tools_call(
     };
     match outcome {
         Ok(d) => {
-            let origin = origin_of.as_ref().map(|(args, p)| Origin {
-                tool: &tool_name,
-                args,
-                holder: Holder::of(p),
-            });
+            let signs = origin_of.is_some()
+                && may_carry_card(&d.result)
+                && state.dispatcher.in_card_ready(&tool_name).await;
+            let origin = origin_of
+                .as_ref()
+                .filter(|_| signs)
+                .map(|(args, p)| Origin {
+                    tool: &tool_name,
+                    args,
+                    holder: Holder::of(p),
+                });
             answer(id, d, card_host, requested, state, origin.as_ref())
         }
         Err(e) => {
@@ -807,6 +811,16 @@ async fn tools_call(
             }
         }
     }
+}
+
+/// Whether `answer` may draw a card for `result` (so its controls need
+/// signing): it has a surface and brings no MCP App of its own.
+fn may_carry_card(result: &Value) -> bool {
+    result.get("surface").is_some_and(Value::is_object)
+        && !result
+            .get("_meta")
+            .and_then(|m| m.get("ui"))
+            .is_some_and(Value::is_object)
 }
 
 /// #369: an in-card call. The dispatcher checks and audits it; the answer

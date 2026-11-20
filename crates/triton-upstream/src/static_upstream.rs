@@ -824,8 +824,46 @@ impl UpstreamDispatch for StaticUpstream {
     }
 
     async fn agent_tools(&self) -> HashMap<String, UpstreamToolInfo> {
-        // One bearer for all probes; a synthetic principal (there is no real
-        // caller at listing time). Without a signer this is the static token.
+        let Some(bearer) = self.introspection_bearer() else {
+            return HashMap::new();
+        };
+        // Probe each unique endpoint once (a multi-tool agent serves several
+        // tool names from one endpoint), in a fixed order. Each tool is
+        // described by the endpoint the map routes it to and by no other:
+        // another endpoint advertising the same name (with other
+        // annotations, say `readOnlyHint`) does not execute it, so it does
+        // not get to describe it.
+        let mut endpoints: Vec<&String> = self.map.values().collect();
+        endpoints.sort();
+        endpoints.dedup();
+        let mut out = HashMap::new();
+        for ep in endpoints {
+            if let Some(tools) = self.do_list_tools(ep, &bearer).await {
+                for (name, info) in tools {
+                    if self.map.get(&name) == Some(ep) {
+                        out.entry(name).or_insert(info);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    async fn tool_info(&self, tool: &str) -> Option<UpstreamToolInfo> {
+        let ep = self.map.get(tool)?;
+        let bearer = self.introspection_bearer()?;
+        self.do_list_tools(ep, &bearer)
+            .await?
+            .into_iter()
+            .find_map(|(name, info)| (name == tool).then_some(info))
+    }
+}
+
+impl StaticUpstream {
+    /// The bearer for `tools/list` probes: one for all probes, minted for a
+    /// synthetic principal (there is no real caller at listing time).
+    /// Without a signer this is the static token.
+    fn introspection_bearer(&self) -> Option<String> {
         let principal = Principal {
             sub: "triton-introspect".to_string(),
             scopes: Vec::new(),
@@ -837,26 +875,9 @@ impl UpstreamDispatch for StaticUpstream {
             conversation_ref: None,
             idp: None,
         };
-        let bearer = match self.bearer(&principal) {
-            Ok(b) => b,
-            Err(_) => return HashMap::new(),
-        };
-        // Probe each unique endpoint once — a multi-tool agent serves several
-        // tool names from one endpoint.
-        let endpoints: HashSet<&String> = self.map.values().collect();
-        let mut out = HashMap::new();
-        for ep in endpoints {
-            if let Some(tools) = self.do_list_tools(ep, &bearer).await {
-                for (name, info) in tools {
-                    out.insert(name, info);
-                }
-            }
-        }
-        out
+        self.bearer(&principal).ok()
     }
-}
 
-impl StaticUpstream {
     /// The streaming request shared by a new call and a task resume.
     async fn open_stream(
         &self,
