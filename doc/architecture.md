@@ -525,6 +525,22 @@ requires `Clone`).
 > (`ui/open-link`); the model-visible `card_text` is built from the
 > projection's `CardSummary`.
 >
+> **Upstream chart data and `_meta` (2026-11, #375).** A chart-rendering
+> upstream describes its chart as a neutral summary, `_meta.chart`
+> (`triton_core::chart_summary`, contract §4b), instead of Vega-Lite. The
+> summary is parsed strictly: a summary that breaks a rule is rejected whole.
+> Each channel maps it in its own builder. Teams maps it to `Chart.*` with
+> the PNG as `fallback` (`surface_mapper::chart_from_summary`). A2A derives
+> a Vega-Lite spec for Gemini Enterprise's `VegaChart`
+> (`ChartSummary::to_vega_lite`). The deprecated `_meta.vega_specs` is read
+> only when no valid summary is present, and the PNG image is the last
+> fallback. On MCP, `answer` adds the upstream's top-level `_meta` keys to
+> its own (`mcp::upstream_meta`). It never takes `trace_id`, a `triton/*`
+> key or an MCP-reserved key from an upstream. `ui` and `tool_trace` keep
+> their shape checks. The passed-through keys share a 4 MiB budget. An
+> upstream MCP App therefore gets the same keys behind Triton as when it is
+> called directly.
+>
 > **In-card actions (2026-11, #369).** A `rerun` action (or a chip's `rerun`,
 > or a producer's `triton.in_card:<name>` event) re-runs the producing tool
 > through the app-only MCP tool `triton_ui_event` (`_meta.ui.visibility:

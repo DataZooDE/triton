@@ -15,6 +15,7 @@ use serde::Serialize;
 
 pub mod a2ui;
 pub mod audit;
+pub mod chart_summary;
 pub mod dispatch_context;
 pub mod dispatcher;
 pub mod error;

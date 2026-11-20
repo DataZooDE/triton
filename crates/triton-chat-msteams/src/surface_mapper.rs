@@ -983,6 +983,94 @@ pub fn chart_from_vega(spec: &Value, fallback_image_url: Option<&str>) -> Option
     }
 }
 
+/// Map a neutral chart summary (`_meta.chart`, #375) to a Teams native
+/// Adaptive Card chart element, with the PNG as `fallback`. `None` for a kind
+/// Teams cannot draw natively (`scatter`): the card then shows the image.
+pub fn chart_from_summary(
+    c: &triton_core::chart_summary::ChartSummary,
+    fallback_image_url: Option<&str>,
+) -> Option<Value> {
+    use triton_core::chart_summary::{ChartKind, Orientation};
+    let fallback = fallback_image_url
+        .map(|u| json!({ "type": "Image", "url": u, "altText": "chart" }))
+        .unwrap_or_else(|| json!("drop"));
+    let xy = |ps: &[&triton_core::chart_summary::Point]| -> Vec<Value> {
+        ps.iter()
+            .map(|p| json!({ "x": p.x_label(), "y": p.y }))
+            .collect()
+    };
+    let series = || -> Vec<Value> {
+        c.series_groups()
+            .into_iter()
+            .map(|(legend, ps)| json!({ "legend": legend, "values": xy(&ps) }))
+            .collect()
+    };
+    let all: Vec<_> = c.points.iter().collect();
+    let (ty, data) = match c.kind {
+        ChartKind::Scatter => return None,
+        ChartKind::Pie | ChartKind::Donut => {
+            let data: Vec<Value> = c
+                .points
+                .iter()
+                .map(|p| json!({ "legend": p.x_label(), "value": p.y }))
+                .collect();
+            let ty = if c.kind == ChartKind::Pie {
+                "Chart.Pie"
+            } else {
+                "Chart.Donut"
+            };
+            let mut el = json!({ "type": ty, "colorSet": "categorical", "data": data,
+                                 "fallback": fallback });
+            if let Some(t) = &c.title {
+                el["title"] = json!(t);
+            }
+            return Some(el);
+        }
+        ChartKind::Line | ChartKind::Area => ("Chart.Line", series()),
+        ChartKind::Bar => match (c.series.is_some(), c.orientation, c.stacked) {
+            (false, Orientation::Vertical, _) => ("Chart.VerticalBar", xy(&all)),
+            (false, Orientation::Horizontal, _) => ("Chart.HorizontalBar", xy(&all)),
+            (true, Orientation::Horizontal, true) => {
+                // One stacked bar per category, one segment per series.
+                let mut bars: Vec<(String, Vec<Value>)> = Vec::new();
+                for p in &c.points {
+                    let seg = json!({ "legend": p.series.clone().unwrap_or_default(),
+                                      "value": p.y });
+                    let label = p.x_label();
+                    match bars.iter_mut().find(|(k, _)| *k == label) {
+                        Some((_, segs)) => segs.push(seg),
+                        None => bars.push((label, vec![seg])),
+                    }
+                }
+                let data = bars
+                    .into_iter()
+                    .map(|(title, data)| json!({ "title": title, "data": data }))
+                    .collect();
+                ("Chart.HorizontalBar.Stacked", data)
+            }
+            // Teams has no grouped horizontal bar: draw it vertical.
+            (true, _, _) => ("Chart.VerticalBar.Grouped", series()),
+        },
+    };
+    let mut el = json!({ "type": ty, "colorSet": "categorical", "data": data,
+                         "fallback": fallback });
+    if let Some(t) = &c.title {
+        el["title"] = json!(t);
+    }
+    if ty != "Chart.HorizontalBar.Stacked" {
+        if let Some(t) = &c.x_title {
+            el["xAxisTitle"] = json!(t);
+        }
+        if let Some(t) = c.y_axis_title() {
+            el["yAxisTitle"] = json!(t);
+        }
+    }
+    if c.stacked && ty == "Chart.VerticalBar.Grouped" {
+        el["stacked"] = json!(true);
+    }
+    Some(el)
+}
+
 /// Build the agent-chooser Adaptive Card: a lead prompt plus one
 /// `Action.Execute` per candidate agent. Each `(title, token)` carries a
 /// signed `triton_chat_routing::USE_AGENT_TOOL` token (`{id, msg}`); tapping it re-enters
@@ -1611,6 +1699,172 @@ mod tests {
         assert_eq!(card["body"][0]["type"], "Container");
         assert_eq!(card["body"][1]["type"], "Image");
         assert_eq!(card["body"][1]["url"], "https://x/img/t");
+    }
+
+    fn summary(v: Value) -> triton_core::chart_summary::ChartSummary {
+        triton_core::chart_summary::ChartSummary::parse(&v).expect("valid summary")
+    }
+
+    fn sales_rows() -> Value {
+        json!([
+            { "m": "Jan", "rev": 10, "line": "Widgets" },
+            { "m": "Jan", "rev": 4, "line": "Services" },
+            { "m": "Feb", "rev": 12, "line": "Widgets" },
+        ])
+    }
+
+    #[test]
+    fn summary_bar_maps_to_vertical_bar_with_axis_titles() {
+        let c = chart_from_summary(
+            &summary(
+                json!({ "kind": "bar", "title": "Revenue", "x": "m", "y": "rev",
+                "x_title": "Month", "y_title": "Revenue", "unit": "EUR",
+                "rows": [ { "m": "Jan", "rev": 10 }, { "m": "Feb", "rev": 12.5 } ] }),
+            ),
+            Some("https://x/img/t"),
+        )
+        .expect("chart");
+        assert_eq!(c["type"], "Chart.VerticalBar");
+        assert_eq!(c["title"], "Revenue");
+        assert_eq!(c["xAxisTitle"], "Month");
+        assert_eq!(c["yAxisTitle"], "Revenue (EUR)");
+        assert_eq!(
+            c["data"],
+            json!([ { "x": "Jan", "y": 10.0 }, { "x": "Feb", "y": 12.5 } ])
+        );
+        assert_eq!(c["fallback"]["type"], "Image");
+        assert_eq!(c["fallback"]["url"], "https://x/img/t");
+    }
+
+    #[test]
+    fn summary_bar_with_series_maps_to_grouped_and_stacked() {
+        let g = chart_from_summary(
+            &summary(
+                json!({ "kind": "bar", "x": "m", "y": "rev", "series": "line",
+                "rows": sales_rows() }),
+            ),
+            None,
+        )
+        .expect("grouped");
+        assert_eq!(g["type"], "Chart.VerticalBar.Grouped");
+        assert_eq!(g["data"][0]["legend"], "Widgets");
+        assert_eq!(
+            g["data"][0]["values"],
+            json!([ { "x": "Jan", "y": 10.0 }, { "x": "Feb", "y": 12.0 } ])
+        );
+        assert_eq!(g["data"][1]["legend"], "Services");
+        assert!(g.get("stacked").is_none());
+        assert_eq!(g["fallback"], "drop");
+
+        let s = chart_from_summary(
+            &summary(
+                json!({ "kind": "bar", "x": "m", "y": "rev", "series": "line",
+                "stacked": true, "rows": sales_rows() }),
+            ),
+            None,
+        )
+        .expect("stacked");
+        assert_eq!(s["type"], "Chart.VerticalBar.Grouped");
+        assert_eq!(s["stacked"], true);
+    }
+
+    #[test]
+    fn summary_horizontal_bar_maps_to_horizontal_and_stacked_horizontal() {
+        let h = chart_from_summary(
+            &summary(
+                json!({ "kind": "bar", "orientation": "horizontal", "x": "m", "y": "rev",
+                "rows": [ { "m": "Jan", "rev": 10 } ] }),
+            ),
+            None,
+        )
+        .expect("horizontal");
+        assert_eq!(h["type"], "Chart.HorizontalBar");
+        assert_eq!(h["data"], json!([ { "x": "Jan", "y": 10.0 } ]));
+
+        let hs = chart_from_summary(
+            &summary(
+                json!({ "kind": "bar", "orientation": "horizontal", "stacked": true,
+                "x": "m", "y": "rev", "series": "line", "rows": sales_rows() }),
+            ),
+            None,
+        )
+        .expect("stacked horizontal");
+        assert_eq!(hs["type"], "Chart.HorizontalBar.Stacked");
+        assert_eq!(hs["data"][0]["title"], "Jan");
+        assert_eq!(
+            hs["data"][0]["data"],
+            json!([ { "legend": "Widgets", "value": 10.0 }, { "legend": "Services", "value": 4.0 } ])
+        );
+        assert_eq!(hs["data"][1]["title"], "Feb");
+
+        // Teams has no grouped horizontal bar: an unstacked series is drawn
+        // as vertical grouped bars rather than dropping a series.
+        let hg = chart_from_summary(
+            &summary(
+                json!({ "kind": "bar", "orientation": "horizontal", "x": "m", "y": "rev",
+                "series": "line", "rows": sales_rows() }),
+            ),
+            None,
+        )
+        .expect("grouped");
+        assert_eq!(hg["type"], "Chart.VerticalBar.Grouped");
+    }
+
+    #[test]
+    fn summary_line_and_area_map_to_chart_line() {
+        for kind in ["line", "area"] {
+            let l = chart_from_summary(
+                &summary(
+                    json!({ "kind": kind, "x": "m", "y": "rev", "series": "line",
+                    "rows": sales_rows() }),
+                ),
+                None,
+            )
+            .expect("line");
+            assert_eq!(l["type"], "Chart.Line", "{kind}");
+            assert_eq!(l["data"][0]["legend"], "Widgets");
+            assert_eq!(l["data"][0]["values"][1], json!({ "x": "Feb", "y": 12.0 }));
+        }
+        // Without a series the one line is named after the value.
+        let single = chart_from_summary(
+            &summary(
+                json!({ "kind": "line", "x": "m", "y": "rev", "y_title": "Revenue",
+                "rows": [ { "m": "Jan", "rev": 1 }, { "m": "Feb", "rev": 2 } ] }),
+            ),
+            None,
+        )
+        .expect("line");
+        assert_eq!(single["data"][0]["legend"], "Revenue");
+        assert_eq!(single["data"][0]["values"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn summary_pie_and_donut_map_to_legend_value_pairs() {
+        for (kind, ty) in [("pie", "Chart.Pie"), ("donut", "Chart.Donut")] {
+            let p = chart_from_summary(
+                &summary(
+                    json!({ "kind": kind, "title": "Share", "x": "m", "y": "rev",
+                    "rows": [ { "m": "A", "rev": 3 }, { "m": "B", "rev": 1 } ] }),
+                ),
+                Some("https://x/img/t"),
+            )
+            .expect("radial");
+            assert_eq!(p["type"], ty);
+            assert_eq!(p["title"], "Share");
+            assert_eq!(
+                p["data"],
+                json!([ { "legend": "A", "value": 3.0 }, { "legend": "B", "value": 1.0 } ])
+            );
+            assert!(p.get("xAxisTitle").is_none());
+            assert_eq!(p["fallback"]["type"], "Image");
+        }
+    }
+
+    #[test]
+    fn summary_scatter_has_no_native_teams_chart() {
+        let c = summary(json!({ "kind": "scatter", "x": "a", "y": "b",
+            "rows": [ { "a": 1, "b": 2 } ] }));
+        assert!(chart_from_summary(&c, Some("https://x/img/t")).is_none());
     }
 
     #[test]

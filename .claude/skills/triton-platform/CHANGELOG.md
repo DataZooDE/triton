@@ -4,6 +4,18 @@ The skill version tracks the consumer-facing contract, not the Triton
 binary version. The Triton repo's checked-out git ref is the true
 version pin (see `SKILL.md` → "How this skill is installed").
 
+## 0.6.0 — neutral chart summary; upstream `_meta` on MCP (#375)
+
+- `01`: a chart-rendering upstream describes its chart as `_meta.chart`,
+  a neutral summary (kind, x, y, series, rows, titles, unit). Teams draws it
+  as native `Chart.*`, and Gemini Enterprise as `VegaChart`. `_meta.vega_specs`
+  is deprecated: it is read only without a valid summary, for one more
+  release.
+- `01`: an MCP `tools/call` result now carries the upstream's own top-level
+  `_meta` keys (`png_base64`, `svgs`, ...) next to Triton's. `trace_id`,
+  `triton/*` and MCP-reserved keys stay Triton's, and the passed-through
+  keys share a 4 MiB budget.
+
 ## 0.5.0 — the current surface: markdown text, resource buttons, report, sources; theming moved to peacock
 
 - `02`: the component vocabulary catches up — `text` carries light

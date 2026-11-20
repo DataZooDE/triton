@@ -225,6 +225,19 @@ tool that takes the dashboard spec `{title, tiles}` and returns
 `TRITON_RASTERIZE_UPSTREAM=render_a2ui_to_png`; Triton's chat surface then
 dispatches to you instead of its in-tree sidecar.
 
+**Chart summary and other `_meta` keys (#375):** describe a rendered
+chart at `_meta.chart`, a neutral summary that does not depend on any
+renderer:
+`{kind: bar|line|area|pie|donut|scatter, x, y, series?, rows (≤200), title?, x_title?, y_title?, unit?, orientation?, stacked?}`.
+Triton maps it to Teams `Chart.*` and to the Vega-Lite spec for Gemini
+Enterprise's `VegaChart`, and falls back to your PNG. `_meta.vega_specs` is
+deprecated: it is read only when no valid summary is present, and for one
+more release. On MCP `tools/call`, your other top-level `_meta` keys
+(`png_base64`, `svgs`, ...) reach the host next to Triton's. You cannot set
+`trace_id`, `triton/*` or MCP-reserved keys, and the passed-through keys
+share a 4 MiB budget. The full rules are in the Triton repo,
+`doc/upstream-agent-contract.md` §4b.
+
 ## A minimal conformant agent
 
 `templates/upstream-agent-axum/` is a working skeleton: one axum

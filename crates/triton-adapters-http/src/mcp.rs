@@ -904,6 +904,10 @@ fn answer(
         .and_then(|m| m.get("tool_trace"))
         .filter(|t| t.is_array())
         .cloned();
+    // The upstream's other `_meta` keys (a chart image, the neutral chart
+    // summary, an upstream MCP App's data) pass through next to Triton's
+    // own (#375), captured before the A2UI wrap rewrites `d.result`.
+    let passthrough = upstream_meta(&d.result);
     // Flatten the tool's A2UI surface to human-readable Markdown
     // BEFORE the A2UI wrap rewrites `d.result` — the same prose the
     // spec-A2A face serves (prose + `![chart](image_url)` + clickable
@@ -995,6 +999,11 @@ fn answer(
     if let Some(trace) = tool_trace {
         meta["tool_trace"] = trace;
     }
+    if let Some(m) = meta.as_object_mut() {
+        for (k, v) in passthrough {
+            m.entry(k).or_insert(v);
+        }
+    }
     rpc_ok(
         id,
         json!({
@@ -1004,6 +1013,60 @@ fn answer(
             "_meta": meta
         }),
     )
+}
+
+/// Combined serialized size of the upstream `_meta` keys an MCP result
+/// passes through ([`upstream_meta`]). A key that would exceed it is dropped
+/// (and logged); the keys before it still pass.
+const UPSTREAM_META_BUDGET: usize = 4 * 1024 * 1024;
+
+/// Upstream `_meta` keys Triton handles itself: `trace_id` is Triton's;
+/// `ui` and `tool_trace` are reflected through their own shape checks.
+const UPSTREAM_META_HANDLED: &[&str] = &["trace_id", "ui", "tool_trace"];
+
+/// Whether an upstream may set `_meta` key `k` on an MCP result. Triton owns
+/// `trace_id` and the whole `triton/` namespace (`triton/a2ui`,
+/// `triton/in_card`, later keys); a key whose prefix names
+/// `modelcontextprotocol` or `mcp` is reserved by the MCP specification, and
+/// an upstream's value (its own task id, say) would mean nothing to the host.
+fn upstream_meta_key_allowed(k: &str) -> bool {
+    if k.is_empty() || UPSTREAM_META_HANDLED.contains(&k) || k.starts_with("triton/") {
+        return false;
+    }
+    match k.split_once('/') {
+        Some((prefix, _)) => !prefix
+            .split('.')
+            .any(|label| label == "modelcontextprotocol" || label == "mcp"),
+        None => true,
+    }
+}
+
+/// The upstream result's own top-level `_meta` keys to pass through on an
+/// MCP `tools/call` result (#375): every allowed key
+/// ([`upstream_meta_key_allowed`]), in the upstream's order, within
+/// [`UPSTREAM_META_BUDGET`]. A non-object `_meta` passes nothing.
+fn upstream_meta(result: &Value) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    let Some(meta) = result.get("_meta").and_then(Value::as_object) else {
+        return out;
+    };
+    let mut used = 0usize;
+    for (k, v) in meta {
+        if !upstream_meta_key_allowed(k) {
+            if !UPSTREAM_META_HANDLED.contains(&k.as_str()) {
+                tracing::debug!(key = %k, "mcp: upstream _meta key is reserved; not passed through");
+            }
+            continue;
+        }
+        let size = k.len() + serde_json::to_string(v).map_or(usize::MAX, |s| s.len());
+        if used.saturating_add(size) > UPSTREAM_META_BUDGET {
+            tracing::warn!(key = %k, bytes = size, "mcp: upstream _meta key over the size budget; dropped");
+            continue;
+        }
+        used += size;
+        out.insert(k.clone(), v.clone());
+    }
+    out
 }
 
 /// A card host's `structuredContent` when its card shows every row: the
@@ -1365,4 +1428,55 @@ fn rpc_error_with_data(id: Value, code: i32, message: &str, data: Option<Value>)
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod upstream_meta_tests {
+    use super::{UPSTREAM_META_BUDGET, upstream_meta, upstream_meta_key_allowed};
+    use serde_json::json;
+
+    #[test]
+    fn protected_and_reserved_keys_are_refused() {
+        for k in [
+            "trace_id",
+            "ui",
+            "tool_trace",
+            "triton/a2ui",
+            "triton/in_card",
+            "triton/anything",
+            "io.modelcontextprotocol/related-task",
+            "modelcontextprotocol.io/x",
+            "tools.mcp.com/x",
+            "",
+        ] {
+            assert!(!upstream_meta_key_allowed(k), "{k}");
+        }
+        for k in [
+            "png_base64",
+            "svgs",
+            "chart",
+            "vega_specs",
+            "openai/widgetAccessible",
+            "com.example/x",
+            "tritonish",
+        ] {
+            assert!(upstream_meta_key_allowed(k), "{k}");
+        }
+    }
+
+    #[test]
+    fn budget_drops_only_the_key_that_overflows() {
+        let big = "x".repeat(UPSTREAM_META_BUDGET);
+        let r = json!({ "_meta": { "a": 1, "big": big, "z": "ok" } });
+        let m = upstream_meta(&r);
+        assert_eq!(m.get("a"), Some(&json!(1)));
+        assert!(m.get("big").is_none());
+        assert_eq!(m.get("z"), Some(&json!("ok")));
+    }
+
+    #[test]
+    fn non_object_meta_passes_nothing() {
+        assert!(upstream_meta(&json!({ "_meta": [1, 2] })).is_empty());
+        assert!(upstream_meta(&json!({})).is_empty());
+    }
 }

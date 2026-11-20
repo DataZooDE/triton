@@ -1871,7 +1871,8 @@ async fn message_stream(
         .into_response()
 }
 
-/// Deep-search a `render_report` result for a Vega-Lite chart spec. Peacock
+/// Deep-search a `render_report` result for a Vega-Lite chart spec
+/// (deprecated by the neutral `_meta.chart`, #375). Peacock
 /// exposes the composed specs at `_meta.vega_specs` (an array); older/other
 /// shapes carry a `{"kind":"vega","spec":{…}}` component. Search recursively for
 /// either — the same deep-search shape as googlechat's `png_base64` finder.
@@ -1903,6 +1904,18 @@ fn find_vega_spec(v: &Value) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+/// The Vega-Lite spec for a `render_report` result: derived from the neutral
+/// `_meta.chart` summary when the upstream sends one (#375), else the
+/// deprecated `_meta.vega_specs`. A malformed summary is logged and ignored.
+fn report_vega_spec(result: &Value) -> Option<Value> {
+    match triton_core::chart_summary::find(result) {
+        Some(Ok(summary)) => return Some(summary.to_vega_lite()),
+        Some(Err(e)) => tracing::warn!(error = %e, "a2a: ignoring the upstream's chart summary"),
+        None => {}
+    }
+    find_vega_spec(result)
 }
 
 /// If `result`'s surface has a `report` component, dispatch `render_report` to
@@ -1953,7 +1966,7 @@ async fn inject_report_vega(
     else {
         return;
     };
-    let Some(spec) = find_vega_spec(&rep.result) else {
+    let Some(spec) = report_vega_spec(&rep.result) else {
         return;
     };
     if let Some(comp) = result
@@ -2358,6 +2371,34 @@ mod reply_text_tests {
         assert_eq!(found["document"]["id"], "beverages");
         // A result with neither key yields None.
         assert!(find_document_structured(&serde_json::json!({ "rows": [] })).is_none());
+    }
+}
+
+#[cfg(test)]
+mod report_vega_spec_tests {
+    use super::report_vega_spec;
+    use serde_json::json;
+
+    fn legacy() -> serde_json::Value {
+        json!({ "mark": "bar", "data": { "values": [] }, "legacy": true })
+    }
+
+    #[test]
+    fn a_chart_summary_is_turned_into_vega_lite() {
+        let r = json!({ "_meta": { "vega_specs": [ legacy() ],
+            "chart": { "kind": "line", "x": "m", "y": "v", "rows": [ { "m": "Jan", "v": 1 } ] } } });
+        let spec = report_vega_spec(&r).expect("spec");
+        assert_eq!(spec["mark"], "line");
+        assert_eq!(spec["encoding"]["x"]["field"], "m");
+        assert!(spec.get("legacy").is_none());
+    }
+
+    #[test]
+    fn without_a_valid_summary_the_vega_specs_are_used() {
+        let r = json!({ "_meta": { "vega_specs": [ legacy() ] } });
+        assert_eq!(report_vega_spec(&r).expect("spec")["legacy"], true);
+        let bad = json!({ "_meta": { "vega_specs": [ legacy() ], "chart": { "kind": "radar" } } });
+        assert_eq!(report_vega_spec(&bad).expect("spec")["legacy"], true);
     }
 }
 

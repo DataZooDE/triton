@@ -125,6 +125,8 @@ mod mcp_in_card;
 mod mcp_protected_resource;
 #[path = "../mcp_schema.rs"]
 mod mcp_schema;
+#[path = "../mcp_upstream_meta.rs"]
+mod mcp_upstream_meta;
 #[path = "../metrics.rs"]
 mod metrics;
 #[path = "../metrics_endpoint.rs"]
@@ -139,6 +141,8 @@ mod msteams_callback;
 mod msteams_channel_transport;
 #[path = "../msteams_channels.rs"]
 mod msteams_channels;
+#[path = "../msteams_chart_summary.rs"]
+mod msteams_chart_summary;
 #[path = "../msteams_courier.rs"]
 mod msteams_courier;
 #[path = "../msteams_federated.rs"]
