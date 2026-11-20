@@ -369,6 +369,22 @@ pub struct Chip {
     pub rerun: Option<serde_json::Map<String, Value>>,
 }
 
+impl Chip {
+    /// The chip's click as an [`Action`]: a rerun with `message` as its
+    /// fallback when it has `rerun`, else sending `message`.
+    pub fn action(&self) -> Action {
+        match &self.rerun {
+            Some(args) => Action::Rerun {
+                args: args.clone(),
+                fallback: self.message.clone(),
+            },
+            None => Action::SendMessage {
+                text: self.message.clone(),
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TreeCount {
     pub label: String,
@@ -598,7 +614,25 @@ pub fn extract_surface(result: &Value) -> Result<Surface, String> {
     })
 }
 
+/// An [`Action`] as a channel without in-card calls carries it: a message
+/// to send as a new turn, or a link to open. A rerun is its fallback
+/// message; only the MCP answer card ([`basic`]) can run one in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stateless<'a> {
+    Send(&'a str),
+    Open(&'a str),
+}
+
 impl Action {
+    /// This action on a channel without in-card calls (see [`Stateless`]).
+    pub fn stateless(&self) -> Stateless<'_> {
+        match self {
+            Action::SendMessage { text } => Stateless::Send(text),
+            Action::Rerun { fallback, .. } => Stateless::Send(fallback),
+            Action::OpenUrl { url } => Stateless::Open(url),
+        }
+    }
+
     /// Only `https://` deep links are actionable (F6). The producer is
     /// LLM-driven, so a prompt-injected `javascript:`/`file:`/`ms-…:` link
     /// must never become a one-tap action on any channel. (A local-only
@@ -878,6 +912,47 @@ fn v09_node_to_component(node: &Value) -> Option<Component> {
         _ => return None,
     }
     serde_json::from_value(Value::Object(obj)).ok()
+}
+
+#[cfg(test)]
+mod stateless_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_rerun_is_its_fallback_where_it_cannot_run_in_place() {
+        let rerun = Action::Rerun {
+            args: serde_json::Map::new(),
+            fallback: "Show page 2".into(),
+        };
+        assert_eq!(rerun.stateless(), Stateless::Send("Show page 2"));
+        let send = Action::SendMessage { text: "Hi".into() };
+        assert_eq!(send.stateless(), Stateless::Send("Hi"));
+        let open = Action::OpenUrl {
+            url: "https://example.com".into(),
+        };
+        assert_eq!(open.stateless(), Stateless::Open("https://example.com"));
+    }
+
+    #[test]
+    fn a_chip_is_one_action() {
+        let mut args = serde_json::Map::new();
+        args.insert("filter".into(), json!("high"));
+        let chip = Chip {
+            label: "High".into(),
+            message: "Only high".into(),
+            rerun: Some(args.clone()),
+        };
+        assert!(matches!(
+            chip.action(),
+            Action::Rerun { args: a, fallback } if a == args && fallback == "Only high"
+        ));
+        let plain = Chip {
+            rerun: None,
+            ..chip
+        };
+        assert!(matches!(plain.action(), Action::SendMessage { text } if text == "Only high"));
+    }
 }
 
 #[cfg(test)]

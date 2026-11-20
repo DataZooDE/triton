@@ -2576,40 +2576,6 @@ fn render_card_content(
     conversation_card::card_for_result(result, image_url, chart, chrome, &mut sign)
 }
 
-/// Deep-search a `render_report` result for a Vega-Lite spec (peacock exposes
-/// them at `_meta.vega_specs`; also handles a `{kind:vega,spec}` component and
-/// JSON-string-wrapped MCP content).
-///
-/// Deprecated (#375): read only when the result carries no valid neutral
-/// `_meta.chart` summary ([`chart_for_render`]); removed one release after
-/// upstreams emit the summary.
-fn find_vega_spec(v: &Value) -> Option<Value> {
-    match v {
-        Value::Object(m) => {
-            if m.get("kind").and_then(Value::as_str) == Some("vega")
-                && let Some(spec) = m.get("spec").filter(|s| s.is_object())
-            {
-                return Some(spec.clone());
-            }
-            if let Some(spec) = m
-                .get("vega_specs")
-                .and_then(Value::as_array)
-                .and_then(|a| a.iter().find(|s| s.is_object()))
-            {
-                return Some(spec.clone());
-            }
-            m.values().find_map(find_vega_spec)
-        }
-        Value::Array(a) => a.iter().find_map(find_vega_spec),
-        Value::String(s) if s.trim_start().starts_with(['{', '[']) => {
-            serde_json::from_str::<Value>(s)
-                .ok()
-                .and_then(|p| find_vega_spec(&p))
-        }
-        _ => None,
-    }
-}
-
 /// Build a native Teams Adaptive Card chart element for a result's inline
 /// report: dispatch `render_report` to peacock, extract its Vega-Lite spec, and
 /// map it to a `Chart.*` element (with the PNG as `fallback`). `None` when there
@@ -2636,23 +2602,18 @@ async fn report_vega_chart(
     chart_for_render(&rep.result, fallback_image_url)
 }
 
-/// The native Teams chart for a `render_report` result. The neutral
-/// `_meta.chart` summary (#375) wins; a valid summary Teams cannot draw
-/// natively (`scatter`) yields `None`, so the card shows the PNG rather than
-/// a misdrawn bar chart. A malformed summary is logged and ignored, and the
-/// deprecated `_meta.vega_specs` is read instead.
+/// The native Teams chart for a `render_report` result
+/// ([`triton_core::chart_summary::resolve`]). A valid summary Teams cannot
+/// draw natively (`scatter`) yields `None`, so the card shows the PNG rather
+/// than a misdrawn bar chart.
 fn chart_for_render(result: &Value, fallback_image_url: Option<&str>) -> Option<Value> {
-    match triton_core::chart_summary::find(result) {
-        Some(Ok(summary)) => {
-            return surface_mapper::chart_from_summary(&summary, fallback_image_url);
+    use triton_core::chart_summary::{ChartSource, resolve};
+    match resolve(result, "msteams")? {
+        ChartSource::Summary(summary) => {
+            surface_mapper::chart_from_summary(&summary, fallback_image_url)
         }
-        Some(Err(e)) => {
-            tracing::warn!(error = %e, "msteams: ignoring the upstream's chart summary");
-        }
-        None => {}
+        ChartSource::LegacyVega(spec) => surface_mapper::chart_from_vega(&spec, fallback_image_url),
     }
-    let spec = find_vega_spec(result)?;
-    surface_mapper::chart_from_vega(&spec, fallback_image_url)
 }
 
 /// Render a non-interactive result to the plain-text [`RenderedMessage`]

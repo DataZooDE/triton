@@ -34,7 +34,9 @@
 use serde_json::{Value, json};
 
 use super::passthrough;
-use super::{Action, Component, FormField, FormFieldKind, FormGroup, StepState, Tone, TreeNode};
+use super::{
+    Action, Component, FormField, FormFieldKind, FormGroup, Stateless, StepState, Tone, TreeNode,
+};
 
 /// The A2UI v0.9 A2A-extension URI (agent-card advertisement + activation).
 pub const EXTENSION_URI: &str = "https://a2ui.org/a2a-extension/a2ui/v0.9";
@@ -755,11 +757,9 @@ impl Card<'_> {
     }
 
     fn action_button(&mut self, label: &str, a: &Action, variant: &str) -> Option<String> {
-        match a {
-            Action::SendMessage { text } | Action::Rerun { fallback: text, .. } => {
-                self.send_button(label, text, variant)
-            }
-            Action::OpenUrl { url } => self.url_button(label, url),
+        match a.stateless() {
+            Stateless::Send(text) => self.send_button(label, text, variant),
+            Stateless::Open(url) => self.url_button(label, url),
         }
     }
 

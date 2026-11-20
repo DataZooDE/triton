@@ -93,19 +93,11 @@ pub const MAX_PRODUCER_BYTES: usize = basic::MAX_BYTES;
 /// The producer's basic-catalog surfaces, whole surfaces only, within
 /// [`MAX_PRODUCER_BYTES`]: past it, the trailing surfaces go (logged).
 fn producer_messages(result: &Value) -> Vec<Value> {
-    let all = passthrough::messages(
+    let surfaces = passthrough::surfaces(
         result.get("surface").and_then(|s| s.get("a2ui")),
         &[Catalog::Basic],
         passthrough::BASIC_CATALOG_ID,
     );
-    // Group by surface: each starts with its createSurface.
-    let mut surfaces: Vec<Vec<Value>> = Vec::new();
-    for m in all {
-        if m.get("createSurface").is_some() || surfaces.is_empty() {
-            surfaces.push(Vec::new());
-        }
-        surfaces.last_mut().expect("a group").push(m);
-    }
     let total = surfaces.len();
     let mut used = 0;
     let mut out = Vec::new();

@@ -17,7 +17,7 @@
 use serde_json::{Value, json};
 use triton_core::a2ui::{
     Action, Chip, Component, FormField, FormFieldKind, FormGroup, KeyValuePair, ListItem,
-    ProgressStep, StepState, Surface, TableColumn, TableRow, Tone, TreeNode,
+    ProgressStep, Stateless, StepState, Surface, TableColumn, TableRow, Tone, TreeNode,
 };
 use triton_correlation::message::{
     SEND_MESSAGE_TOOL, preview_template, rename_placeholders, required_placeholders, template_args,
@@ -199,11 +199,9 @@ impl Builder<'_, '_> {
 
     /// The card action for a stateless [`Action`].
     fn action(&mut self, title: &str, a: &Action) -> Option<Value> {
-        match a {
-            Action::SendMessage { text } | Action::Rerun { fallback: text, .. } => {
-                self.send_action(title, text)
-            }
-            Action::OpenUrl { url } => Some(json!({
+        match a.stateless() {
+            Stateless::Send(text) => self.send_action(title, text),
+            Stateless::Open(url) => Some(json!({
                 "type": "Action.OpenUrl", "title": title, "url": url,
             })),
         }

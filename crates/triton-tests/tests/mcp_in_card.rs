@@ -601,9 +601,22 @@ async fn a_producer_event_reaches_the_upstream_as_an_a2ui_event() {
 }
 
 fn refused(res: &Value, class: &str) {
+    use triton_core::TritonError as E;
     assert_eq!(res["isError"], true, "{res}");
     assert_eq!(res["structuredContent"]["error"], class, "{res}");
     assert!(res["_meta"].get(mcp_app::META_KEY).is_none());
+    // The client gets the class's neutral notice, never the cause (that is
+    // in the log and the audit line).
+    let notice = match class {
+        "auth" => E::Auth(String::new()),
+        "forbidden" => E::Forbidden(String::new()),
+        "validation" => E::Validation(String::new()),
+        "ratelimit" => E::RateLimited(String::new()),
+        "tool" => E::Tool(String::new()),
+        other => panic!("unexpected class {other}"),
+    }
+    .user_notice();
+    assert_eq!(res["content"][0]["text"], notice, "{res}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -753,7 +766,7 @@ async fn a_burst_of_in_card_calls_is_rate_limited_per_principal() {
     let mut limited = 0;
     for out in outs {
         if out["isError"] == true {
-            assert_eq!(out["structuredContent"]["error"], "ratelimit", "{out}");
+            refused(&out, "ratelimit");
             limited += 1;
         }
     }

@@ -36,7 +36,7 @@ use super::in_card;
 use super::passthrough::BASIC_CATALOG_ID;
 use super::{
     Action, Chip, Component, FormField, FormFieldKind, KeyValuePair, ListItem, SelectionStyle,
-    StepState, Tone, TreeNode,
+    Stateless, StepState, Tone, TreeNode,
 };
 use triton_correlation::message::{placeholders, template_parts};
 
@@ -173,25 +173,18 @@ fn openable(u: &str) -> bool {
 }
 
 /// A stateless action as a v0.9 event, or `None` when it is no control (a
-/// message or link the widget could not send or open whole). A rerun needs
-/// the builder's signer: see [`Builder::event`].
-fn event(a: &Action) -> Option<Value> {
+/// message or link the widget could not send or open whole). A rerun that
+/// can run in place needs the builder's signer: see [`Builder::event`].
+fn stateless_event(a: Stateless<'_>) -> Option<Value> {
     match a {
-        Action::SendMessage { text } if sendable(text) => {
+        Stateless::Send(text) if sendable(text) => {
             Some(json!({ "event": { "name": SEND_MESSAGE, "context": { "text": text } } }))
         }
-        Action::OpenUrl { url } if openable(url) => {
+        Stateless::Open(url) if openable(url) => {
             Some(json!({ "event": { "name": OPEN_URL, "context": { "url": url } } }))
         }
-        Action::Rerun { fallback, .. } => send(fallback),
         _ => None,
     }
-}
-
-fn send(text: &str) -> Option<Value> {
-    event(&Action::SendMessage {
-        text: text.to_string(),
-    })
 }
 
 /// A shown text within [`MAX_TEXT`], cut with an ellipsis.
@@ -259,24 +252,19 @@ impl Block {
 }
 
 impl Builder<'_> {
-    /// [`event`], with a rerun as an in-card call where it can be signed. Its
-    /// fallback must be sendable either way: the widget falls back to it.
+    /// An action as a v0.9 event: a rerun as an in-card call where it can
+    /// be signed (the one place a rerun is more than its fallback), anything
+    /// else [`stateless_event`]. A rerun's fallback must be sendable either
+    /// way: the widget falls back to it.
     fn event(&self, a: &Action) -> Option<Value> {
-        match a {
-            Action::Rerun { args, fallback } => self.rerun_event(args, fallback),
-            other => event(other),
+        if let Action::Rerun { args, fallback } = a
+            && sendable(fallback)
+            && let Some(token) = self.rerun.and_then(|sign| sign(args))
+        {
+            return Some(json!({ "event": { "name": in_card::EVENT,
+                "context": { "token": token, "fallback": fallback } } }));
         }
-    }
-
-    fn rerun_event(&self, args: &Map<String, Value>, fallback: &str) -> Option<Value> {
-        if !sendable(fallback) {
-            return None;
-        }
-        match self.rerun.and_then(|sign| sign(args)) {
-            Some(token) => Some(json!({ "event": { "name": in_card::EVENT,
-                "context": { "token": token, "fallback": fallback } } })),
-            None => send(fallback),
-        }
+        stateless_event(a.stateless())
     }
 
     fn push_body(&mut self, b: Block) {
@@ -579,7 +567,7 @@ impl Builder<'_> {
                 ..
             } => {
                 self.component(fallback);
-                if let Some(a) = event(&Action::OpenUrl { url: url.clone() }) {
+                if let Some(a) = stateless_event(Stateless::Open(url)) {
                     self.actions.push((false, title.clone(), a));
                 }
             }
@@ -628,13 +616,7 @@ impl Builder<'_> {
     fn chip_row(&mut self, b: &mut Block, chips: &[Chip]) -> Option<String> {
         let actions: Vec<(&Chip, Value)> = chips
             .iter()
-            .filter_map(|c| {
-                let a = match &c.rerun {
-                    Some(args) => self.rerun_event(args, &c.message),
-                    None => send(&c.message),
-                };
-                Some((c, a?))
-            })
+            .filter_map(|c| Some((c, self.event(&c.action())?)))
             .collect();
         let buttons: Vec<String> = actions
             .into_iter()
