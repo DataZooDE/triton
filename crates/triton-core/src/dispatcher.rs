@@ -179,6 +179,8 @@ pub struct UpstreamToolInfo {
     pub description: Option<String>,
     /// `annotations`, when it is an object.
     pub annotations: Option<Value>,
+    /// `_meta`, when it is an object (an upstream's own MCP App: `ui`).
+    pub meta: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -655,6 +657,7 @@ impl Dispatcher {
                         upstream: true,
                         description: info.description,
                         annotations: info.annotations,
+                        meta: info.meta,
                     });
                 }
             }

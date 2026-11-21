@@ -714,9 +714,13 @@ async fn tools_list_response(id: Value, state: &McpState, card_host: bool) -> Re
             if let Some(annotations) = d.annotations {
                 tool["annotations"] = annotations;
             }
-            // A tool that answers with a surface names the answer-card
-            // widget, so an MCP Apps host (Claude, ChatGPT) renders it.
-            if state.widget && d.upstream && d.returns_a2ui {
+            // An upstream that brings its own MCP App names it on the
+            // descriptor (`_meta.ui`), and that wins. Every other tool that
+            // answers with a surface names the answer-card widget, so an
+            // MCP Apps host (Claude, ChatGPT) renders it.
+            if let Some(own) = d.meta.as_ref().and_then(own_app_tool_meta) {
+                tool["_meta"] = own;
+            } else if state.widget && d.upstream && d.returns_a2ui {
                 tool["_meta"] = widget_tool_meta();
             }
             tool
@@ -1212,6 +1216,20 @@ fn widget_tool_meta() -> Value {
         "ui": { "resourceUri": uri },
         "openai/outputTemplate": uri,
     })
+}
+
+/// An upstream descriptor's own MCP App: its `ui` object and its ChatGPT
+/// Apps SDK aliases (`openai/*`), verbatim; `None` when it declares no `ui`
+/// object. No other upstream descriptor key reaches the client.
+fn own_app_tool_meta(meta: &Value) -> Option<Value> {
+    let meta = meta.as_object()?;
+    meta.get("ui").filter(|ui| ui.is_object())?;
+    let kept: serde_json::Map<String, Value> = meta
+        .iter()
+        .filter(|(k, _)| *k == "ui" || k.starts_with("openai/"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    Some(Value::Object(kept))
 }
 
 /// The resource `_meta`: no network at all (inline CSS and JS). The card

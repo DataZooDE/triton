@@ -417,6 +417,7 @@ mod tests {
                 input_schema: json!({ "type": "object" }),
                 description: None,
                 annotations: Some(json!({ "readOnlyHint": ro })),
+                meta: None,
             };
             HashMap::from([
                 ("pages".to_string(), info(true)),

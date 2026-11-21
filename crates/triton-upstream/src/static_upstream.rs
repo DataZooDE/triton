@@ -579,12 +579,14 @@ impl StaticUpstream {
                     .and_then(Value::as_str)
                     .map(str::to_string);
                 let annotations = t.get("annotations").filter(|a| a.is_object()).cloned();
+                let meta = t.get("_meta").filter(|m| m.is_object()).cloned();
                 out.push((
                     name.to_string(),
                     UpstreamToolInfo {
                         input_schema,
                         description,
                         annotations,
+                        meta,
                     },
                 ));
             }

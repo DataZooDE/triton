@@ -206,6 +206,29 @@ schema, never data), and an agent that doesn't implement it simply keeps the
 empty schema (clients fall back to a free-text composer). Optional but
 recommended — it's a few lines: return your `Tool::input_schema()`.
 
+**Your own MCP App.** A tool whose results your own MCP App renders declares
+it in the descriptor's `_meta` (MCP Apps 2026-01-26, Resource Discovery):
+
+```json
+{ "name": "render_report", "_meta": {
+    "ui": { "resourceUri": "ui://<authority>/views" },
+    "openai/outputTemplate": "ui://<authority>/views" } }
+{ "name": "report_refresh", "_meta": {
+    "ui": { "resourceUri": "ui://<authority>/views", "visibility": ["app"] },
+    "openai/visibility": "private" } }
+```
+
+A descriptor with a `ui` object keeps it, and its `openai/*` keys, verbatim
+on MCP `tools/list`, and Triton writes no answer-card widget into it; any
+other `_meta` key of yours is dropped there. A tool without its own `ui`
+keeps the widget. The host loads `ui://<authority>/...` through Triton's
+`resources/read` proxy from the upstream that owns the authority (§8:
+`read_resource`). Visibility is the host's business: an app-only tool stays
+listed, the host keeps it from its model, and Triton dispatches it like any
+other tool. The data your app needs rides the result `_meta` under a key the
+operator lists per tool (§4b); an embedding host lists it with
+`EmbedOpts::upstream_meta`.
+
 ## 3. Sender-identity carriage: the bearer, and only the bearer
 
 In signed static-upstream mode (the substrate default — the Consul
@@ -523,6 +546,8 @@ The rules:
   that would exceed the budget is dropped and logged (`warn`). The keys
   before it still pass, and the call still succeeds.
 - Only a top-level `_meta` object is read. Any other `_meta` passes nothing.
+- An embedding host has no `adapter.yaml`: it lists the same per-tool keys
+  and audiences with `triton_embed::EmbedOpts::upstream_meta`.
 - REST returns the dispatch result unchanged, and the chat and A2A adapters
   read the dispatch result, so none of these rules apply there.
 
