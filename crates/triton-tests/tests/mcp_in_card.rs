@@ -959,16 +959,33 @@ async fn the_widget_reports_how_the_host_took_its_model_context() {
         json!(["none", "accepted", "rejected", "pending", "widget_state"])
     );
 
-    let page1 = call(&r, ALICE, Some(&session), "list_planned", json!({ "q": "planned" })).await;
+    let page1 = call(
+        &r,
+        ALICE,
+        Some(&session),
+        "list_planned",
+        json!({ "q": "planned" }),
+    )
+    .await;
     let next = token_for(&page1, "Show page 2 of the planned agents");
-    let mut args = ui_event(&next, in_card::EVENT, basic::SURFACE_ID, json!({ "fallback": "x" }));
+    let mut args = ui_event(
+        &next,
+        in_card::EVENT,
+        basic::SURFACE_ID,
+        json!({ "fallback": "x" }),
+    );
     args["hostContext"] = json!({ "advertised": false, "last": "pending" });
     let page2 = call(&r, ALICE, Some(&session), in_card::TOOL_NAME, args).await;
     assert_eq!(page2["isError"], false, "{page2}");
 
     // A value outside the set is `other`; the client's text never reaches the log.
     let back = token_for(&page2, "Show page 3 of the planned agents");
-    let mut args = ui_event(&back, in_card::EVENT, basic::SURFACE_ID, json!({ "fallback": "x" }));
+    let mut args = ui_event(
+        &back,
+        in_card::EVENT,
+        basic::SURFACE_ID,
+        json!({ "fallback": "x" }),
+    );
     args["hostContext"] = json!({ "advertised": "yes", "last": "s3cr3t-hc" });
     call(&r, ALICE, Some(&session), in_card::TOOL_NAME, args).await;
 
@@ -979,7 +996,12 @@ async fn the_widget_reports_how_the_host_took_its_model_context() {
         ALICE,
         Some(&session),
         in_card::TOOL_NAME,
-        ui_event(&again, in_card::EVENT, basic::SURFACE_ID, json!({ "fallback": "x" })),
+        ui_event(
+            &again,
+            in_card::EVENT,
+            basic::SURFACE_ID,
+            json!({ "fallback": "x" }),
+        ),
     )
     .await;
 
@@ -991,7 +1013,10 @@ async fn the_widget_reports_how_the_host_took_its_model_context() {
     assert_eq!(lines[1]["advertised"], "unknown");
     assert_eq!(lines[1]["last"], "other");
     assert!(
-        r.triton.stdout_snapshot().iter().all(|l| !l.contains("s3cr3t-hc")),
+        r.triton
+            .stdout_snapshot()
+            .iter()
+            .all(|l| !l.contains("s3cr3t-hc")),
         "a client value reached the log"
     );
 }
