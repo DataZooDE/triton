@@ -216,9 +216,10 @@ pub fn model_view(s: &CardSummary, note: &str) -> Option<CardModelView> {
 /// (MCP Apps: `structuredContent` is "not added to model context"), and on
 /// such a host the text is the card text, the row names. Without this the
 /// model cannot name a row it was shown in a follow-up call. The MCP face
-/// takes it out of the result and appends it to the text content for
-/// every client, card host or not; it never reaches the card or the typed
-/// result.
+/// takes it out of the result and, on a card host, appends it to the text
+/// content; it never reaches the card or the typed result. Other MCP clients
+/// keep the upstream's text (a host may show it to the person) and the
+/// typed result.
 pub const MODEL_CONTEXT_KEY: &str = "model_context";
 
 /// Bytes of [`MODEL_CONTEXT_KEY`] the text keeps; the rest is cut at a

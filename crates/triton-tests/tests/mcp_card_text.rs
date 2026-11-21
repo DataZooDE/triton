@@ -229,10 +229,12 @@ async fn a_client_that_does_not_render_the_card_keeps_the_full_text() {
 /// calling model only. A card host's model reads the text content only
 /// (MCP Apps: `structuredContent` is not added to model context), and its
 /// text is the card text, the row names: without the model context it could
-/// not name a row in a follow-up call. Every client gets it after the text;
-/// neither the card nor the typed result carries it.
+/// not name a row in a follow-up call. A card host gets it after the card
+/// text; neither the card nor the typed result carries it. Another client
+/// keeps the upstream's text (a host may show it to the person) and reads
+/// the rows from the typed result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_model_context_reaches_every_model_and_never_the_card() {
+async fn the_model_context_reaches_a_card_hosts_model_and_never_the_card() {
     let r = rig().await;
     let refs = "Ids for follow-up calls: Alpha = thing t-alpha; Beta = thing t-beta";
 
@@ -254,14 +256,10 @@ async fn the_model_context_reaches_every_model_and_never_the_card() {
         "{res}"
     );
 
-    // A plain client: the full text, then the same context; the typed
-    // result keeps everything else.
+    // A plain client: the upstream's text as it is; the typed result keeps
+    // everything else.
     let res = call(&r, None, "refs_list", None).await;
-    assert_eq!(
-        text(&res),
-        format!("full text of the refs list\n\n{refs}"),
-        "{res}"
-    );
+    assert_eq!(text(&res), "full text of the refs list", "{res}");
     assert!(
         res["structuredContent"]["result"]
             .get("model_context")

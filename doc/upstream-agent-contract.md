@@ -315,10 +315,13 @@ Notes for agent authors:
   card gives its model only the text content (MCP Apps: `structuredContent`
   is not added to model context), and that text is then the card text, the
   row names; without `model_context` such a model cannot chain an id-based
-  tool. On MCP, Triton takes it out of the result and appends it to the
-  text content for every client, card host or not, after a blank line; it
-  never reaches the card, the typed result or another face. At most 8 KiB
-  are kept (cut at a character, marked `…`); a non-string value is dropped.
+  tool. On MCP, Triton takes it out of the result and, for a card host,
+  appends it to the text content after a blank line; it never reaches the
+  card or the MCP typed result. Another MCP client keeps your `text` as it
+  is (a host may show it to the person) and reads your rows from the typed
+  result. The other faces (REST, A2A) pass the field through in the result
+  unchanged. At most 8 KiB are kept (cut at a character, marked `…`); a
+  non-string value is dropped.
   It is not access control: write nothing the calling principal must not
   read.
 - A card reads best in one anatomy: a `header` (title, one `context` line,

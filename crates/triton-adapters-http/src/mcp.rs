@@ -936,9 +936,11 @@ fn answer(
         .is_some_and(Value::is_object);
     // What the upstream addresses to the calling model only (the ids of the
     // rows it showed, say): out of the result, so neither the card nor the
-    // typed result carries it, and after the text content for every client.
-    // A card host's model reads the text content only.
-    let model_context = mcp_app::take_model_context(&mut d.result);
+    // typed result carries it. A card host's model reads the text content
+    // only, and that text is the card text, so it gets the context after it.
+    // Every other client keeps the upstream's text as it is: some show it to
+    // the person (Copilot Studio), and the typed result has the rows.
+    let model_context = mcp_app::take_model_context(&mut d.result).filter(|_| card_host);
     // Flatten the tool's A2UI surface to human-readable Markdown
     // BEFORE the A2UI wrap rewrites `d.result` — the same prose the
     // spec-A2A face serves (prose + `![chart](image_url)` + clickable
