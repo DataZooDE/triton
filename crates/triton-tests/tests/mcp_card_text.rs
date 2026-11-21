@@ -224,3 +224,54 @@ async fn a_client_that_does_not_render_the_card_keeps_the_full_text() {
     let res = call(&r, Some("not-a-triton-session"), "list_agents", None).await;
     assert_eq!(text(&res), "full text of 3a", "{res}");
 }
+
+/// An upstream's `model_context` (the ids of the rows it showed) is for the
+/// calling model only. A card host's model reads the text content only
+/// (MCP Apps: `structuredContent` is not added to model context), and its
+/// text is the card text, the row names: without the model context it could
+/// not name a row in a follow-up call. A card host gets it after the card
+/// text; neither the card nor the typed result carries it. Another client
+/// keeps the upstream's text (a host may show it to the person) and reads
+/// the rows from the typed result.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_model_context_reaches_a_card_hosts_model_and_never_the_card() {
+    let r = rig().await;
+    let refs = "Ids for follow-up calls: Alpha = thing t-alpha; Beta = thing t-beta";
+
+    let session = initialize(&r, ui_capabilities()).await.expect("card host");
+    let res = call(&r, Some(&session), "refs_list", None).await;
+    assert_eq!(
+        text(&res),
+        format!(
+            "2 Things: Alpha, Beta \u{2014} shown in the card.\n{}\n\n{refs}",
+            mcp_app::CARD_NOTE
+        ),
+        "{res}"
+    );
+    let card = res["_meta"][mcp_app::META_KEY].to_string();
+    assert!(card.contains("Alpha"), "the card shows the rows: {card}");
+    assert!(!card.contains("t-alpha"), "never the ids: {card}");
+    assert!(
+        !res["structuredContent"].to_string().contains("t-alpha"),
+        "{res}"
+    );
+
+    // A plain client: the upstream's text as it is; the typed result keeps
+    // everything else.
+    let res = call(&r, None, "refs_list", None).await;
+    assert_eq!(text(&res), "full text of the refs list", "{res}");
+    assert!(
+        res["structuredContent"]["result"]
+            .get("model_context")
+            .is_none(),
+        "{res}"
+    );
+    assert!(
+        res["structuredContent"]["result"]["surface"].is_object(),
+        "{res}"
+    );
+
+    // Without one, nothing changes.
+    let res = call(&r, Some(&session), "list_agents", None).await;
+    assert_eq!(text(&res), short_3a(), "{res}");
+}

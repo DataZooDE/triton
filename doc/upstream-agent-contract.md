@@ -223,7 +223,9 @@ on MCP `tools/list`, and Triton writes no answer-card widget into it; any
 other `_meta` key of yours is dropped there. A tool without its own `ui`
 keeps the widget. The host loads `ui://<authority>/...` through Triton's
 `resources/read` proxy from the upstream that owns the authority (§8:
-`read_resource`). Visibility is the host's business: an app-only tool stays
+`read_resource`); `resources/list` names each such URI once, with the MCP
+Apps mime type, for a host that reviews or prefetches resources at connection
+time. Visibility is the host's business: an app-only tool stays
 listed, the host keeps it from its model, and Triton dispatches it like any
 other tool. The data your app needs rides the result `_meta` under a key the
 operator lists per tool (§4b); an embedding host lists it with
@@ -306,6 +308,22 @@ Notes for agent authors:
   Enterprise), the text part beside it is `summary`, so rows, choices and
   facts appear once, in the components. Without `summary` the text part is
   `text` (or the surface's prose).
+- Optional top-level `model_context` (string): text for the **calling
+  model only**, typically the identifiers of the rows the answer shows, so
+  the model can name one in its next call (`get_item {id}`) while neither
+  the person nor the card ever shows them. A host that renders the answer
+  card gives its model only the text content (MCP Apps: `structuredContent`
+  is not added to model context), and that text is then the card text, the
+  row names; without `model_context` such a model cannot chain an id-based
+  tool. On MCP, Triton takes it out of the result and, for a card host,
+  appends it to the text content after a blank line; it never reaches the
+  card or the MCP typed result. Another MCP client keeps your `text` as it
+  is (a host may show it to the person) and reads your rows from the typed
+  result. The other faces (REST, A2A) pass the field through in the result
+  unchanged. At most 8 KiB are kept (cut at a character, marked `…`); a
+  non-string value is dropped.
+  It is not access control: write nothing the calling principal must not
+  read.
 - A card reads best in one anatomy: a `header` (title, one `context` line,
   a short `stamp`), one body component (table, key/value, form or
   `form_groups`), then one `primary` button and at most two others.
