@@ -992,6 +992,13 @@ fn answer(
         },
         None => reply_text,
     };
+    // The upstream's own `_meta` is for the host and its app, never the
+    // model: its allowed keys ride the result `_meta` (`passthrough`,
+    // captured above), and none of it stays in the envelope, which ChatGPT
+    // shows to its model. That includes the keys the allow-list drops.
+    if let Some(r) = d.result.as_object_mut() {
+        r.remove("_meta");
+    }
     if let Err(e) = wrap_a2ui_if_requested(&mut d, requested) {
         return rpc_error(id, code_for(&e), &e.to_string());
     }

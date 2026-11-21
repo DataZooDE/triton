@@ -283,3 +283,29 @@ async fn a_non_object_upstream_meta_is_ignored() {
     assert!(meta.contains_key("trace_id"));
     assert_eq!(meta.len(), 1, "only Triton's key: {meta:?}");
 }
+
+/// The upstream's `_meta` is for the host and its app, never the model:
+/// its allowed keys ride the result `_meta`, and none of it stays in
+/// `structuredContent` (which ChatGPT shows to its model), for a card host
+/// and for a plain client alike.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn upstream_meta_never_rides_the_structured_content() {
+    let agent = FakeAgent::start_returning(full_meta()).await;
+    let proc = spawn_for(&agent).await;
+    let session = card_session(&proc).await;
+    for mcp in [call(&proc).await, call_as(&proc, Some(&session)).await] {
+        let structured = mcp["result"]["structuredContent"].to_string();
+        for needle in [
+            "iVBORw0KGgo=",
+            "ui://render_report/revenue",
+            "\"custom\"",
+            "tool_trace",
+        ] {
+            assert!(
+                !structured.contains(needle),
+                "{needle} in structuredContent: {structured}"
+            );
+        }
+        assert_eq!(mcp["result"]["_meta"]["tool_trace"][0]["tool"], "query");
+    }
+}
