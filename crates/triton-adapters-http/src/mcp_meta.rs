@@ -25,7 +25,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde_json::{Map, Value};
-use triton_manifest::{MetaAudience, upstream_meta_key_reserved};
+pub use triton_manifest::MetaAudience;
+use triton_manifest::upstream_meta_key_reserved;
 
 /// Combined serialized size of the passed keys. A key that would exceed it
 /// is dropped (and logged); the keys before it still pass.

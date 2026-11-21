@@ -26,8 +26,11 @@
 //! `surfaces::registry`). doc/upstream-agent-contract.md §8 describes the
 //! in-process upstream such a host dispatches to.
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
+
+pub use triton_adapters_http::mcp_meta::MetaAudience;
 
 #[cfg(feature = "chat")]
 pub mod chat;
@@ -140,6 +143,12 @@ pub struct EmbedOpts {
     /// process environment's `TRITON_A2UI_ACTION_KEY`. Set it with
     /// [`EmbedOpts::action_key`]. Not printed (no `Debug` on this struct).
     pub action_key: Option<String>,
+    /// The upstream result `_meta` keys an MCP client gets per tool, beyond
+    /// the built-in allow-list: the `tools.<name>.meta` section of the
+    /// binary's `adapter.yaml`, which an embedding host does not have (an
+    /// upstream MCP App's own data, say). A reserved key is ignored. Set
+    /// with [`EmbedOpts::upstream_meta`].
+    pub upstream_meta: BTreeMap<String, BTreeMap<String, MetaAudience>>,
 }
 
 impl Default for EmbedOpts {
@@ -164,6 +173,7 @@ impl Default for EmbedOpts {
             widget: None,
             dev_token: None,
             action_key: None,
+            upstream_meta: BTreeMap::new(),
         }
     }
 }
@@ -229,6 +239,16 @@ impl EmbedOpts {
     /// [`router_parts`]' error (the environment variable's too).
     pub fn action_key(mut self, key: impl Into<String>) -> Self {
         self.action_key = Some(key.into());
+        self
+    }
+
+    /// The per-tool result `_meta` keys an MCP client gets (see the field),
+    /// as `tool -> key -> audience`.
+    pub fn upstream_meta(
+        mut self,
+        per_tool: BTreeMap<String, BTreeMap<String, MetaAudience>>,
+    ) -> Self {
+        self.upstream_meta = per_tool;
         self
     }
 
@@ -619,9 +639,11 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
             .or_else(|| opts.ingress.as_ref().and_then(|c| c.widget))
             .unwrap_or(true),
         card_note: ingress::card_note(opts.ingress.as_ref()),
-        // The built-in `_meta` allow-list (an embedding host has no
-        // `adapter.yaml` tool section).
-        meta: Arc::new(triton_adapters_http::mcp_meta::MetaPolicy::default()),
+        // The built-in `_meta` allow-list and the host's per-tool keys (an
+        // embedding host has no `adapter.yaml` tool section).
+        meta: Arc::new(triton_adapters_http::mcp_meta::MetaPolicy::new(
+            opts.upstream_meta.clone(),
+        )),
     };
     // One MCP endpoint per customer (`/mcp/<slug>` + RFC 9728 metadata),
     // at absolute paths; empty without `TRITON_MCP_TENANTS`.

@@ -134,6 +134,12 @@ pub struct ToolDescriptor {
     /// passed through verbatim when it is an object.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Value>,
+    /// The upstream's MCP tool `_meta`, when it is an object: an upstream
+    /// that brings its own MCP App names it here (`ui.resourceUri`,
+    /// `ui.visibility`). MCP `tools/list` passes its `ui` and `openai/*`
+    /// keys; in-process tools carry none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<Value>,
 }
 
 /// Registry of tools the dispatcher knows about. Sorted by name so
@@ -175,6 +181,7 @@ impl ToolRegistry {
                 upstream: false,
                 description: None,
                 annotations: None,
+                meta: None,
             })
             .collect()
     }

@@ -129,6 +129,8 @@ mod mcp_protected_resource;
 mod mcp_schema;
 #[path = "../mcp_upstream_meta.rs"]
 mod mcp_upstream_meta;
+#[path = "../mcp_upstream_tool_ui.rs"]
+mod mcp_upstream_tool_ui;
 #[path = "../metrics.rs"]
 mod metrics;
 #[path = "../metrics_endpoint.rs"]
