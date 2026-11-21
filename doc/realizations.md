@@ -2644,4 +2644,6 @@ one lock across get/change/put, terminal re-check inside it).
   host: page a card twice, then read the control service's log
   (`operator-vm service-logs`). `advertised: no, last: accepted` means the
   host takes the update without promising it reaches the model;
-  `last: pending` means it never answers.
+  `last: pending` means it had not answered by the next click, so leave a
+  few seconds between the page turns. `widget_state` names ChatGPT's
+  `setWidgetState` path, not an outcome.

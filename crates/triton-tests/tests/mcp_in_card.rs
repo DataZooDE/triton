@@ -1005,11 +1005,18 @@ async fn the_widget_reports_how_the_host_took_its_model_context() {
     )
     .await;
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let lines = host_context_lines(&r);
+    let mut lines = host_context_lines(&r);
+    for _ in 0..50 {
+        if lines.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        lines = host_context_lines(&r);
+    }
     assert_eq!(lines.len(), 2, "{lines:#?}");
     assert_eq!(lines[0]["advertised"], "no");
     assert_eq!(lines[0]["last"], "pending");
+    assert!(lines[0]["client"].is_string(), "the line names the client");
     assert_eq!(lines[1]["advertised"], "unknown");
     assert_eq!(lines[1]["last"], "other");
     assert!(
