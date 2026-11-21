@@ -17,6 +17,7 @@ import { MessageProcessor } from '@a2ui/web_core/v0_9';
 import { injectBasicCatalogStyles } from '@a2ui/web_core/v0_9/basic_catalog';
 import { basicCatalog } from '@a2ui/lit/v0_9';
 import { fill, inputs } from './fill.js';
+import { hostContext } from './host-context.js';
 
 const META_KEY = 'triton/a2ui';
 const SEND_MESSAGE = 'triton.send_message';
@@ -43,6 +44,8 @@ function say(text, error) {
 let bridge = false;
 let openLinks = false;
 let serverTools = false;
+// How the host takes `ui/update-model-context`, reported with in-card calls.
+const modelContext = hostContext();
 let nextId = 1;
 const pending = new Map();
 
@@ -206,7 +209,8 @@ async function onAction(a) {
 
 // ── in-card calls (#369) ────────────────────────────────────────────────
 /** Call the app-only tool; the result, or null when the host cannot. */
-async function callInCard(args) {
+async function callInCard(event) {
+  const args = { ...event, hostContext: modelContext.report() };
   if (bridge && serverTools) {
     return request('tools/call', { name: IN_CARD_TOOL, arguments: args }, IN_CARD_TIMEOUT_MS);
   }
@@ -270,8 +274,9 @@ function updateModelContext(res) {
   const content = (res.content || []).filter((c) => c && c.type === 'text' && typeof c.text === 'string');
   if (!content.length) return;
   if (bridge) {
-    request('ui/update-model-context', { content }).catch(() => {});
+    modelContext.track(request('ui/update-model-context', { content }));
   } else if (window.openai?.setWidgetState) {
+    modelContext.widgetState();
     // ChatGPT without the MCP Apps bridge: widget state is what its model
     // sees of the widget.
     Promise.resolve(window.openai.setWidgetState({ card: content.map((c) => c.text).join('\n') }))
@@ -396,6 +401,7 @@ request('ui/initialize', {
     openLinks = !res?.hostCapabilities || !!res.hostCapabilities.openLinks;
     // In-card calls need the host to relay tools/call (MCP Apps `serverTools`).
     serverTools = !!res?.hostCapabilities?.serverTools;
+    modelContext.advertised(res?.hostCapabilities);
     applyContext(res?.hostContext);
     notify('ui/notifications/initialized', {});
     resize(true);

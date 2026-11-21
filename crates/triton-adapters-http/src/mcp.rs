@@ -468,6 +468,19 @@ fn log_card_host(parts: &Parts, params: &Value, modern: bool, card_host: bool, s
         card_host,
         "mcp tools/call card host"
     );
+    // Whether the host applies `ui/update-model-context` is visible only in
+    // the widget's sandbox; the widget reports it with an in-card call.
+    if params.get("name").and_then(Value::as_str) == Some(in_card::TOOL_NAME)
+        && let Some((advertised, last)) =
+            params.get("arguments").and_then(mcp_in_card::host_context)
+    {
+        tracing::info!(
+            client = user_agent(parts),
+            advertised,
+            last,
+            "mcp in-card host context"
+        );
+    }
 }
 
 fn user_agent(parts: &Parts) -> &str {
