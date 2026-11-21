@@ -208,6 +208,51 @@ pub fn model_view(s: &CardSummary, note: &str) -> Option<CardModelView> {
     })
 }
 
+/// The result key an upstream addresses to the calling model only: plain
+/// text the model needs for its next call (the identifiers of the rows it
+/// was shown, say), which neither the person nor the card should see.
+///
+/// A host that renders the card hands its model only the text content
+/// (MCP Apps: `structuredContent` is "not added to model context"), and on
+/// such a host the text is the card text, the row names. Without this the
+/// model cannot name a row it was shown in a follow-up call. The MCP face
+/// takes it out of the result and appends it to the text content for
+/// every client, card host or not; it never reaches the card or the typed
+/// result.
+pub const MODEL_CONTEXT_KEY: &str = "model_context";
+
+/// Bytes of [`MODEL_CONTEXT_KEY`] the text keeps; the rest is cut at a
+/// character boundary and marked with an ellipsis.
+pub const MODEL_CONTEXT_MAX_BYTES: usize = 8 * 1024;
+
+/// Takes [`MODEL_CONTEXT_KEY`] out of a tool result: its text, trimmed and
+/// within [`MODEL_CONTEXT_MAX_BYTES`], or `None` when absent, empty or not
+/// a string (a non-string value is removed too).
+pub fn take_model_context(result: &mut Value) -> Option<String> {
+    let value = result.as_object_mut()?.remove(MODEL_CONTEXT_KEY)?;
+    let text = value.as_str()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    if text.len() <= MODEL_CONTEXT_MAX_BYTES {
+        return Some(text.to_string());
+    }
+    let mut end = MODEL_CONTEXT_MAX_BYTES - '\u{2026}'.len_utf8();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Some(format!("{}\u{2026}", &text[..end]))
+}
+
+/// The text content with the model context after it, on its own paragraph.
+pub fn with_model_context(text: String, context: Option<&str>) -> String {
+    match context {
+        Some(c) if text.is_empty() => c.to_string(),
+        Some(c) => format!("{text}\n\n{c}"),
+        None => text,
+    }
+}
+
 /// The card's title as the model reads it: the header's, else the first row
 /// block's, without trailing punctuation.
 fn summary_title(s: &CardSummary) -> Option<&str> {
@@ -237,6 +282,28 @@ mod tests {
 
     fn summary(result: Value) -> CardSummary {
         card(&result).expect("card").summary.expect("own card")
+    }
+
+    #[test]
+    fn the_model_context_is_taken_out_bounded_and_appended() {
+        let mut r = json!({ "text": "t", "model_context": "  ids: a = x-1  " });
+        assert_eq!(take_model_context(&mut r).as_deref(), Some("ids: a = x-1"));
+        assert!(r.get(MODEL_CONTEXT_KEY).is_none());
+        for v in [json!(""), json!(3), json!({ "a": 1 })] {
+            let mut r = json!({ "model_context": v });
+            assert_eq!(take_model_context(&mut r), None);
+            assert!(
+                r.get(MODEL_CONTEXT_KEY).is_none(),
+                "removed whatever it was"
+            );
+        }
+        assert_eq!(take_model_context(&mut json!({ "text": "t" })), None);
+        let long = "\u{e4}".repeat(MODEL_CONTEXT_MAX_BYTES);
+        let cut = take_model_context(&mut json!({ "model_context": long })).unwrap();
+        assert!(cut.len() <= MODEL_CONTEXT_MAX_BYTES && cut.ends_with('\u{2026}'));
+        assert_eq!(with_model_context("a".into(), Some("b")), "a\n\nb");
+        assert_eq!(with_model_context(String::new(), Some("b")), "b");
+        assert_eq!(with_model_context("a".into(), None), "a");
     }
 
     #[test]

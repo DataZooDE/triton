@@ -175,6 +175,26 @@ async fn an_upstreams_own_app_wins_on_its_tool_descriptors() {
     )
     .await;
     assert_eq!(read["result"]["contents"][0]["uri"], APP, "{read}");
+    // And listed once, by the URI its descriptors name, with the MCP Apps
+    // mime type, beside Triton's own widget: a host that prefetches or
+    // reviews resources at connection time finds it.
+    let listed = rpc_json(&url, Some(&session), "resources/list", json!({})).await;
+    let apps: Vec<&Value> = listed["result"]["resources"]
+        .as_array()
+        .expect("resources")
+        .iter()
+        .filter(|r| r["uri"] == APP)
+        .collect();
+    assert_eq!(apps.len(), 1, "{listed}");
+    assert_eq!(apps[0]["mimeType"], "text/html;profile=mcp-app", "{listed}");
+    assert!(
+        listed["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["name"] == "answer-card"),
+        "{listed}"
+    );
 
     // The app-only tool is callable (the host, not Triton, keeps it from
     // its model), and its result brings the app's link, not the card.

@@ -329,6 +329,17 @@ pub(crate) async fn rig() -> Rig {
     .await;
     upstreams.push(format!("cut_list={}", cut.host_port()));
     agents.push(cut);
+    // A card with rows and what the upstream addresses to the model only:
+    // the rows' identifiers, which the card never shows.
+    let refs = FakeAgent::start_returning(json!({ "text": "full text of the refs list",
+        "model_context": "Ids for follow-up calls: Alpha = thing t-alpha; Beta = thing t-beta",
+        "surface": { "components": [
+            { "kind": "header", "title": "2 Things" },
+            { "kind": "list", "items": [ { "label": "Alpha" }, { "label": "Beta" } ] }
+        ] } }))
+    .await;
+    upstreams.push(format!("refs_list={}", refs.host_port()));
+    agents.push(refs);
     let env = HashMap::from([
         ("TRITON_ENV".to_string(), "local".to_string()),
         ("TRITON_ENTRA_AUDIENCE".to_string(), ENTRA_AUD.to_string()),

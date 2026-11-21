@@ -379,7 +379,10 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
             let response = tools_call(id.clone(), params, principal, card_host, &state).await;
             maybe_respond(id_present, id, |_| response)
         }
-        "resources/list" => maybe_respond(id_present, id, |id| resources_list(id, &state)),
+        "resources/list" => {
+            let response = resources_list(id.clone(), &state).await;
+            maybe_respond(id_present, id, |_| response)
+        }
         "resources/read" => {
             let response = resources_read(id.clone(), &params, principal, &state).await;
             maybe_respond(id_present, id, |_| response)
@@ -931,6 +934,11 @@ fn answer(
         .get("_meta")
         .and_then(|m| m.get("ui"))
         .is_some_and(Value::is_object);
+    // What the upstream addresses to the calling model only (the ids of the
+    // rows it showed, say): out of the result, so neither the card nor the
+    // typed result carries it, and after the text content for every client.
+    // A card host's model reads the text content only.
+    let model_context = mcp_app::take_model_context(&mut d.result);
     // Flatten the tool's A2UI surface to human-readable Markdown
     // BEFORE the A2UI wrap rewrites `d.result` — the same prose the
     // spec-A2A face serves (prose + `![chart](image_url)` + clickable
@@ -992,6 +1000,7 @@ fn answer(
         },
         None => reply_text,
     };
+    let reply_text = mcp_app::with_model_context(reply_text, model_context.as_deref());
     // The upstream's own `_meta` is for the host and its app, never the
     // model: its allowed keys ride the result `_meta` (`passthrough`,
     // captured above), and none of it stays in the envelope, which ChatGPT
@@ -1176,9 +1185,12 @@ async fn run_as_task(
 /// Minimal `resources/list` (#143 review, [NIT]): `initialize` advertises
 /// a `resources` capability, so the method must exist rather than 404.
 /// Only the local runtime stub is enumerable; upstream-owned `ui://`
-/// resources are loaded on demand via `resources/read` (#143 B), not
-/// listed here (upstream enumeration is optional in v1).
-fn resources_list(id: Value, state: &McpState) -> Response {
+/// resources are loaded on demand via `resources/read` (#143 B). The ones
+/// an upstream tool descriptor names as its own MCP App (`_meta.ui
+/// .resourceUri`, #386) are listed too, by URI only: MCP Apps lets a server
+/// leave UI resources out of the list, but a host that reviews or prefetches
+/// resources at connection time finds them there.
+async fn resources_list(id: Value, state: &McpState) -> Response {
     let mut resources = vec![json!({
         "uri": "ui://triton/runtime.html",
         "name": "triton-runtime",
@@ -1194,7 +1206,30 @@ fn resources_list(id: Value, state: &McpState) -> Response {
             "_meta": widget_resource_meta(),
         }));
     }
+    for uri in upstream_app_uris(state).await {
+        let name = uri.trim_start_matches("ui://").replace('/', "-");
+        resources.push(json!({ "uri": uri, "name": name, "mimeType": mcp_app::MIME_TYPE }));
+    }
     rpc_ok(id, json!({ "resources": resources }))
+}
+
+/// The `ui://` resources upstream tool descriptors name as their own MCP
+/// App, once each, in descriptor order; never Triton's own.
+async fn upstream_app_uris(state: &McpState) -> Vec<String> {
+    let mut uris: Vec<String> = Vec::new();
+    for d in state.dispatcher.descriptors_all().await {
+        let uri = d.meta.as_ref().and_then(own_app_tool_meta).and_then(|m| {
+            m.pointer("/ui/resourceUri")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+        if let Some(uri) = uri.filter(|u| u.starts_with("ui://") && !u.starts_with("ui://triton/"))
+            && !uris.contains(&uri)
+        {
+            uris.push(uri);
+        }
+    }
+    uris
 }
 
 const WIDGET_DESCRIPTION: &str = "Shows the answer as a card: a table, facts, a map or a form, \
