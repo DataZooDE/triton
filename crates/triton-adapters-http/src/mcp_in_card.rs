@@ -24,7 +24,16 @@ pub fn descriptor() -> Value {
                 "name": { "type": "string" },
                 "sourceComponentId": { "type": "string" },
                 "context": { "type": "object" },
-                "token": { "type": "string" }
+                "token": { "type": "string" },
+                "hostContext": {
+                    "type": "object",
+                    "description": "Diagnostics: whether the host advertised \
+                                    ui/update-model-context and how the widget's last update ended.",
+                    "properties": {
+                        "advertised": { "type": "boolean" },
+                        "last": { "type": "string", "enum": HOST_CONTEXT_LAST }
+                    }
+                }
             }
         },
         "annotations": { "readOnlyHint": true, "openWorldHint": false },
@@ -34,6 +43,30 @@ pub fn descriptor() -> Value {
             "openai/visibility": "private"
         }
     })
+}
+
+/// How the widget's last `ui/update-model-context` ended: none sent yet,
+/// acknowledged, refused, never answered, or ChatGPT's `setWidgetState` (no
+/// MCP Apps bridge).
+const HOST_CONTEXT_LAST: [&str; 5] = ["none", "accepted", "rejected", "pending", "widget_state"];
+
+/// The widget's `hostContext` report, as log values: `(advertised, last)`,
+/// each from a closed set (`yes`/`no`/`unknown`, [`HOST_CONTEXT_LAST`] or
+/// `other`), so nothing the client chose reaches the log. `None` when the
+/// call carries no report (an older widget).
+pub fn host_context(args: &Value) -> Option<(&'static str, &'static str)> {
+    let hc = args.get("hostContext")?;
+    let advertised = match hc.get("advertised").and_then(Value::as_bool) {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    };
+    let last = hc
+        .get("last")
+        .and_then(Value::as_str)
+        .and_then(|l| HOST_CONTEXT_LAST.iter().find(|k| **k == l).copied())
+        .unwrap_or("other");
+    Some((advertised, last))
 }
 
 /// The widget's arguments as an [`InCardEvent`]. Missing strings are empty

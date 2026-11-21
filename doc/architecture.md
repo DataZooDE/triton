@@ -560,7 +560,10 @@ requires `Clone`).
 > (and, for a producer event, `_triton.client.a2ui_events`), and writes the
 > one audit line with its `in_card` part. The result is projected like any
 > card host's; the widget replaces the card and sends
-> `ui/update-model-context` with the card text. Where the host lacks
+> `ui/update-model-context` with the card text. The next in-card call reports
+> in its `hostContext` argument whether the host advertised that capability
+> and how the last update ended; Triton logs the closed values as
+> `mcp in-card host context`. Where the host lacks
 > `serverTools`, or the call fails, the widget sends the control's `fallback`
 > as `ui/message`; every other face renders a rerun as `send_message` with the
 > fallback. Contract: `doc/upstream-agent-contract.md` §4a.

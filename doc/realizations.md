@@ -2631,3 +2631,17 @@ one lock across get/change/put, terminal re-check inside it).
   `IFrameSrcdoc` creates no frame at all, inline or in a Canvas. One click was
   once delivered twice during a slow turn: producers should treat a repeated
   click as idempotent.
+- **Whether a host applies in-card state to its model is invisible from
+  outside; the widget reports it.** In the 2026-11-21 live check, ChatGPT's
+  model answered "page 2 of 3" after an in-card page turn, while Claude's
+  model still described page 1. The widget sends the same
+  `ui/update-model-context` to both, but it runs in a cross-origin sandbox
+  frame, so neither the browser extension nor the server could see whether
+  Claude advertised, rejected or ignored it. The widget now sends
+  `hostContext: {advertised, last}` with its next `triton_ui_event` call
+  (`last`: none, pending, accepted, rejected or widget_state), and Triton
+  logs `mcp in-card host context` with closed values only. To diagnose a
+  host: page a card twice, then read the control service's log
+  (`operator-vm service-logs`). `advertised: no, last: accepted` means the
+  host takes the update without promising it reaches the model;
+  `last: pending` means it never answers.

@@ -923,3 +923,75 @@ async fn a_producer_event_is_allowed_on_its_own_surface_only() {
         assert_eq!(out["isError"], false, "{name} on its own surface: {out}");
     }
 }
+
+/// The host-context lines on Triton's stdout (`mcp in-card host context`).
+fn host_context_lines(r: &Rig) -> Vec<Value> {
+    r.triton
+        .stdout_snapshot()
+        .iter()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["fields"]["message"] == "mcp in-card host context")
+        .map(|v| v["fields"].clone())
+        .collect()
+}
+
+/// Whether a host applies `ui/update-model-context` is visible only inside
+/// the widget's sandbox. The widget reports, on its next in-card call,
+/// whether the host advertised the capability and how its last update
+/// ended; Triton logs the closed set of values, never anything else the
+/// client sent.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_widget_reports_how_the_host_took_its_model_context() {
+    let r = rig().await;
+    let session = card_session(&r, ALICE).await;
+    let (_, listed) = post(&r, ALICE, Some(&session), "tools/list", json!({})).await;
+    let tool = listed["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == in_card::TOOL_NAME)
+        .cloned()
+        .unwrap();
+    let schema = &tool["inputSchema"]["properties"]["hostContext"];
+    assert_eq!(schema["type"], "object", "{tool}");
+    assert_eq!(
+        schema["properties"]["last"]["enum"],
+        json!(["none", "accepted", "rejected", "pending", "widget_state"])
+    );
+
+    let page1 = call(&r, ALICE, Some(&session), "list_planned", json!({ "q": "planned" })).await;
+    let next = token_for(&page1, "Show page 2 of the planned agents");
+    let mut args = ui_event(&next, in_card::EVENT, basic::SURFACE_ID, json!({ "fallback": "x" }));
+    args["hostContext"] = json!({ "advertised": false, "last": "pending" });
+    let page2 = call(&r, ALICE, Some(&session), in_card::TOOL_NAME, args).await;
+    assert_eq!(page2["isError"], false, "{page2}");
+
+    // A value outside the set is `other`; the client's text never reaches the log.
+    let back = token_for(&page2, "Show page 3 of the planned agents");
+    let mut args = ui_event(&back, in_card::EVENT, basic::SURFACE_ID, json!({ "fallback": "x" }));
+    args["hostContext"] = json!({ "advertised": "yes", "last": "s3cr3t-hc" });
+    call(&r, ALICE, Some(&session), in_card::TOOL_NAME, args).await;
+
+    // Without the field (an older widget): no line.
+    let again = token_for(&page2, "Show only the high-risk planned agents");
+    call(
+        &r,
+        ALICE,
+        Some(&session),
+        in_card::TOOL_NAME,
+        ui_event(&again, in_card::EVENT, basic::SURFACE_ID, json!({ "fallback": "x" })),
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let lines = host_context_lines(&r);
+    assert_eq!(lines.len(), 2, "{lines:#?}");
+    assert_eq!(lines[0]["advertised"], "no");
+    assert_eq!(lines[0]["last"], "pending");
+    assert_eq!(lines[1]["advertised"], "unknown");
+    assert_eq!(lines[1]["last"], "other");
+    assert!(
+        r.triton.stdout_snapshot().iter().all(|l| !l.contains("s3cr3t-hc")),
+        "a client value reached the log"
+    );
+}

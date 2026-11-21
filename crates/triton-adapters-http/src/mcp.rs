@@ -870,6 +870,11 @@ async fn in_card_call(
     state: &McpState,
     card_host: bool,
 ) -> Response {
+    // Whether the host applies `ui/update-model-context` is visible only in
+    // the widget's sandbox; the widget reports it here (names only).
+    if let Some((advertised, last)) = mcp_in_card::host_context(args) {
+        tracing::info!(advertised, last, "mcp in-card host context");
+    }
     let caller = principal.clone();
     match state
         .dispatcher

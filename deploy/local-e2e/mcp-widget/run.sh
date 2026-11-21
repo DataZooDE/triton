@@ -131,6 +131,7 @@ check "in-card: Next is a control" "$($R js "window.clickText('Next')")" "ok"
 $R sleep 0.8 >/dev/null
 check "in-card: one tools/call" "$(sent tools/call)" "1"
 check "in-card: to the app-only tool with the control's token" "$($R js "(()=>{const p=window.hostLog.find(m=>m.method==='tools/call').params; return p.name+' '+p.arguments.token+' '+p.arguments.name+' '+p.arguments.surfaceId;})()")" 'triton_ui_event tok:{"page":2} triton.in_card triton-card'
+check "in-card: reports the host's model context (nothing sent yet)" "$($R js "JSON.stringify(window.hostLog.find(m=>m.method==='tools/call').params.arguments.hostContext)")" '{"advertised":false,"last":"none"}'
 check "in-card: no ui/message" "$(sent ui/message)" "0"
 check "in-card: the card shows page 2" "$(has 'Page 2 of 3')" "yes"
 check "in-card: page 1 is gone" "$(has 'Agent 1-1')" "no"
@@ -142,6 +143,7 @@ $R screenshot "$OUT/in-card-after.png" >/dev/null
 check "in-card: a producer's refresh" "$($R js "window.clickText('Refresh')")" "ok"
 $R sleep 0.8 >/dev/null
 check "in-card: the producer event goes to the app-only tool" "$($R js "(()=>{const p=window.hostLog.filter(m=>m.method==='tools/call')[1].params.arguments; return p.name+' '+p.token+' '+p.surfaceId+' '+p.context.rev;})()")" "triton.in_card:refresh ev2 triton-a2ui-p r1"
+check "in-card: reports the accepted update with the next call" "$($R js "JSON.stringify(window.hostLog.filter(m=>m.method==='tools/call')[1].params.arguments.hostContext)")" '{"advertised":false,"last":"accepted"}'
 # A refused or failed call: the control's fallback, as one new turn.
 load in-card-1
 $R js "window.toolReply={content:[{type:'text',text:'forbidden'}],structuredContent:{error:'forbidden'},isError:true}" >/dev/null
