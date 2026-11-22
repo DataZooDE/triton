@@ -779,3 +779,61 @@ where
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// `TRITON_MCP_SERVER_NAME`, `_TITLE` and `TRITON_MCP_INSTRUCTIONS` name the server
+/// and give a client's model its guidance, in `initialize` and in the
+/// stateless `server/discover`; unset, the name is "triton" and the
+/// instructions are left out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn initialize_and_discover_carry_the_configured_name_and_instructions() {
+    let default = TritonProcess::spawn_with_env(Duration::from_secs(5), HashMap::new()).await;
+    let init = json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-06-18" } });
+    let (_, body) = rpc_request(&default, init.clone(), Some("dev-token")).await;
+    assert_eq!(body["result"]["serverInfo"]["name"], "triton", "{body}");
+    assert!(body["result"].get("instructions").is_none(), "{body}");
+    drop(default);
+
+    let env = HashMap::from([
+        (
+            "TRITON_MCP_SERVER_NAME".to_string(),
+            "portfolio".to_string(),
+        ),
+        (
+            "TRITON_MCP_SERVER_TITLE".to_string(),
+            "Portfolio".to_string(),
+        ),
+        (
+            "TRITON_MCP_INSTRUCTIONS".to_string(),
+            "Use list_items for lists.\r\nUse ask for anything else.".to_string(),
+        ),
+    ]);
+    let proc = TritonProcess::spawn_with_env(Duration::from_secs(5), env).await;
+    let (status, body) = rpc_request(&proc, init, Some("dev-token")).await;
+    assert!(status.is_success(), "{body}");
+    assert_eq!(body["result"]["serverInfo"]["name"], "portfolio", "{body}");
+    assert_eq!(body["result"]["serverInfo"]["title"], "Portfolio", "{body}");
+    assert_eq!(
+        body["result"]["instructions"], "Use list_items for lists.\nUse ask for anything else.",
+        "{body}"
+    );
+
+    let resp = reqwest::Client::new()
+        .post(mcp_url(&proc))
+        .header("mcp-protocol-version", "2026-07-28")
+        .header("mcp-method", "server/discover")
+        .bearer_auth("dev-token")
+        .json(&json!({ "jsonrpc": "2.0", "id": 2, "method": "server/discover", "params": {} }))
+        .send()
+        .await
+        .expect("POST discover");
+    let body: Value = resp.json().await.expect("discover body");
+    let result = &body["result"];
+    let info = &result["_meta"]["io.modelcontextprotocol/serverInfo"];
+    assert_eq!(info["name"], "portfolio", "{body}");
+    assert_eq!(info["title"], "Portfolio", "{body}");
+    assert_eq!(
+        result["instructions"], "Use list_items for lists.\nUse ask for anything else.",
+        "{body}"
+    );
+}

@@ -70,6 +70,19 @@ async fn main() -> std::io::Result<()> {
         }
     }
 
+    // The MCP server identity and the default A2UI surface name: pure
+    // configuration checks, so they fail boot closed before anything else.
+    let server_identity = match ingress::server_identity(Some(&settings.ingress))
+        .and_then(|identity| ingress::install_a2ui_display_name(&identity).map(|()| identity))
+    {
+        Ok(identity) => identity,
+        Err(e) => {
+            tracing::error!(error = %e, "invalid server identity; refusing to start");
+            eprintln!("triton: {e}");
+            std::process::exit(2);
+        }
+    };
+
     // #370: compile the vendored A2UI schemas the passthrough vetting uses
     // off the boot path (≈1 s in a debug build), so startup stays fast (G-4)
     // and the first producer answer rarely waits. That they compile at all is
@@ -651,6 +664,10 @@ async fn main() -> std::io::Result<()> {
                 .map(triton_manifest::Manifest::meta_passthrough)
                 .unwrap_or_default(),
         )),
+
+        server_name: server_identity.mcp_name.clone(),
+        server_title: server_identity.mcp_title.clone(),
+        instructions: server_identity.mcp_instructions.clone(),
     };
 
     // v0.2 chat-channel adapters. Each manifest-declared adapter

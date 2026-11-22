@@ -28,6 +28,16 @@
 //! | `TRITON_MCP_ASYNC_WAIT_SECS` | MCP wait for an async upstream before "filed" (20). |
 //! | `TRITON_MCP_CHECK_AFTER_SECS` | default `check_after_seconds` of a filed result (30). |
 //! | `TRITON_MCP_CARD_NOTE` | on a host that renders the answer card (MCP Apps declared), the note to the model after the one-line card text; unset = "The card shows these rows to the user; …"; empty = no note. |
+//! | `TRITON_MCP_SERVER_NAME` | the MCP `serverInfo.name` (an identifier) of `initialize` and `server/discover` ("triton"); 1–64 characters, no control characters. |
+//! | `TRITON_MCP_SERVER_TITLE` | the MCP `serverInfo.title` (the display name a client may show beside or instead of the name); unset = left out; as the name. |
+//! | `TRITON_MCP_INSTRUCTIONS` | the MCP `instructions` of `initialize` and `server/discover`, guidance a client may give its model on which tool to use; unset or empty = left out. At most 4000 characters; tab and newline are the only control characters allowed (`\r\n` is read as `\n`). |
+//! | `TRITON_A2UI_AGENT_DISPLAY_NAME` | the A2UI surface theme `agentDisplayName` when a producer sets none ("DataZoo Agent"); 1–64 characters, no control characters. Process-wide, installed once at boot. |
+//!
+//! Three names, three faces: `TRITON_A2A_AGENT_NAME` is the A2A agent card's
+//! name, `TRITON_MCP_SERVER_NAME`/`_TITLE` what an MCP client lists, and
+//! `TRITON_A2UI_AGENT_DISPLAY_NAME` what a rendered A2UI surface (Gemini
+//! Enterprise) shows. They are independent; surrounding whitespace of each is
+//! stripped. A malformed value of any of them refuses to start.
 //! | `TRITON_MCP_TENANTS` | `slug=data-tenant:tid,…` — one MCP endpoint per customer at `/mcp/<slug>`, an RFC 9728 protected resource whose authorization server is that Entra tenant. Needs Entra and the origin. |
 //! | `TRITON_MCP_PUBLIC_ORIGIN` | `https://host[:port]` as clients reach Triton; the metadata `resource` is `<origin>/mcp/<slug>`. |
 //! | `TRITON_ENTRA_SCOPES` | the Entra API's delegated scope(s), space- or comma-separated; default `<Entra API>/access_as_user`. Every Entra token must carry one in `scp` (by its last path segment) on every face, else 403 `insufficient_scope`; MCP metadata and challenges advertise them. |
@@ -110,6 +120,22 @@ pub struct IngressConfig {
     /// the answer card. Unset = a neutral note; empty = no note.
     #[arg(long, env = "TRITON_MCP_CARD_NOTE")]
     pub mcp_card_note: Option<String>,
+    /// The MCP `serverInfo.name` ([`server_identity`]).
+    #[arg(long, env = "TRITON_MCP_SERVER_NAME", default_value = triton_adapters_http::mcp::DEFAULT_SERVER_NAME)]
+    pub mcp_server_name: String,
+    /// The MCP `serverInfo.title`, a display name beside the identifier
+    /// ([`server_identity`]); unset = left out.
+    #[arg(long, env = "TRITON_MCP_SERVER_TITLE")]
+    pub mcp_server_title: Option<String>,
+    /// The MCP server `instructions` ([`server_identity`]); unset or
+    /// empty = none.
+    #[arg(long, env = "TRITON_MCP_INSTRUCTIONS")]
+    pub mcp_instructions: Option<String>,
+    /// The default A2UI surface `agentDisplayName`
+    /// ([`server_identity`], [`install_a2ui_display_name`]); unset =
+    /// "DataZoo Agent".
+    #[arg(long, env = "TRITON_A2UI_AGENT_DISPLAY_NAME")]
+    pub a2ui_agent_display_name: Option<String>,
     /// Per-customer MCP endpoints: `slug=data-tenant:entra-tid`, comma-separated.
     #[arg(long, env = "TRITON_MCP_TENANTS", default_value = "")]
     pub mcp_tenants: String,
@@ -201,6 +227,111 @@ pub fn card_note(args: Option<&IngressConfig>) -> Arc<str> {
     args.and_then(|a| a.mcp_card_note.as_deref())
         .unwrap_or(triton_core::a2ui::mcp_app::CARD_NOTE)
         .into()
+}
+
+/// Most characters of `TRITON_MCP_SERVER_NAME` and `TRITON_MCP_SERVER_TITLE`.
+pub const MCP_SERVER_NAME_MAX_CHARS: usize = 64;
+/// Most characters of `TRITON_MCP_INSTRUCTIONS`.
+pub const MCP_INSTRUCTIONS_MAX_CHARS: usize = 4000;
+
+/// How the server names itself to clients, checked
+/// ([`server_identity`]): the MCP `serverInfo` name and title, the MCP
+/// `instructions`, and the default A2UI surface `agentDisplayName`.
+#[derive(Debug, Clone)]
+pub struct ServerIdentity {
+    /// `serverInfo.name` (`TRITON_MCP_SERVER_NAME`, "triton").
+    pub mcp_name: Arc<str>,
+    /// `serverInfo.title` (`TRITON_MCP_SERVER_TITLE`), left out when unset.
+    pub mcp_title: Option<Arc<str>>,
+    /// `instructions` (`TRITON_MCP_INSTRUCTIONS`), left out when unset or empty.
+    pub mcp_instructions: Option<Arc<str>>,
+    /// The default surface `agentDisplayName`
+    /// (`TRITON_A2UI_AGENT_DISPLAY_NAME`); `None` = Triton's default.
+    pub a2ui_display_name: Option<String>,
+}
+
+fn label(var: &str, raw: &str, max: usize) -> Result<Arc<str>, BootError> {
+    triton_core::a2ui::passthrough::well_formed_label(raw, max)
+        .map(Arc::from)
+        .ok_or_else(|| {
+            BootError(format!(
+                "{var} must be 1 to {max} characters without control characters"
+            ))
+        })
+}
+
+/// Check the identity variables, without installing anything: a name and
+/// title of 1–64 characters without control characters; instructions of at
+/// most 4000 characters whose only control characters are tab and newline;
+/// a display name of 1–64 characters without control characters.
+/// Surrounding whitespace, line breaks included, is stripped first, and
+/// `\r\n` in the instructions is read as `\n`. A value outside that is
+/// refused rather than clipped, so a client never shows a name or guidance
+/// nobody wrote. Without a config: "triton", nothing else.
+pub fn server_identity(args: Option<&IngressConfig>) -> Result<ServerIdentity, BootError> {
+    let Some(args) = args else {
+        return Ok(ServerIdentity {
+            mcp_name: triton_adapters_http::mcp::DEFAULT_SERVER_NAME.into(),
+            mcp_title: None,
+            mcp_instructions: None,
+            a2ui_display_name: None,
+        });
+    };
+    let mcp_name = label(
+        "TRITON_MCP_SERVER_NAME",
+        &args.mcp_server_name,
+        MCP_SERVER_NAME_MAX_CHARS,
+    )?;
+    let mcp_title = args
+        .mcp_server_title
+        .as_deref()
+        .map(|raw| label("TRITON_MCP_SERVER_TITLE", raw, MCP_SERVER_NAME_MAX_CHARS))
+        .transpose()?;
+    let mcp_instructions = match args.mcp_instructions.as_deref() {
+        None => None,
+        Some(raw) => {
+            let text = raw.replace("\r\n", "\n");
+            let text = text.trim();
+            if text.chars().count() > MCP_INSTRUCTIONS_MAX_CHARS
+                || text
+                    .chars()
+                    .any(|c| c.is_control() && c != '\n' && c != '\t')
+            {
+                return Err(BootError(format!(
+                    "TRITON_MCP_INSTRUCTIONS must be at most {MCP_INSTRUCTIONS_MAX_CHARS} characters \
+                     with no control characters other than tab and newline"
+                )));
+            }
+            (!text.is_empty()).then(|| Arc::from(text))
+        }
+    };
+    let a2ui_display_name = args
+        .a2ui_agent_display_name
+        .as_deref()
+        .map(|raw| {
+            label(
+                "TRITON_A2UI_AGENT_DISPLAY_NAME",
+                raw,
+                triton_core::a2ui::passthrough::MAX_DISPLAY_NAME_CHARS,
+            )
+            .map(|name| name.to_string())
+        })
+        .transpose()?;
+    Ok(ServerIdentity {
+        mcp_name,
+        mcp_title,
+        mcp_instructions,
+        a2ui_display_name,
+    })
+}
+
+/// Install the checked default A2UI surface `agentDisplayName` for the
+/// process ([`triton_core::a2ui::passthrough::configure_display_name`]).
+/// Call after every check of the configuration passed: the first installed
+/// name stands for the process.
+pub fn install_a2ui_display_name(identity: &ServerIdentity) -> Result<(), BootError> {
+    triton_core::a2ui::passthrough::configure_display_name(identity.a2ui_display_name.as_deref())
+        .map_err(|e| BootError(format!("TRITON_A2UI_AGENT_DISPLAY_NAME {e}")))
 }
 
 /// The task store: SQLite at `TRITON_TASK_DB`, else process memory.
@@ -624,6 +755,72 @@ pub fn mcp_routes(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    fn with(vars: &[(&str, &str)]) -> IngressConfig {
+        let mut argv = vec!["triton".to_string()];
+        for (k, v) in vars {
+            argv.push(format!("--{k}={v}"));
+        }
+        IngressConfig::try_parse_from(argv).expect("parse")
+    }
+
+    #[test]
+    fn the_server_identity_defaults_and_is_checked() {
+        for identity in [
+            server_identity(None).unwrap(),
+            server_identity(Some(&with(&[]))).unwrap(),
+        ] {
+            assert_eq!(&*identity.mcp_name, "triton");
+            assert!(identity.mcp_title.is_none());
+            assert!(identity.mcp_instructions.is_none());
+            assert!(identity.a2ui_display_name.is_none());
+        }
+
+        let cfg = with(&[
+            ("mcp-server-name", " portfolio\n"),
+            ("mcp-server-title", "Portfolio"),
+            ("mcp-instructions", "One.\r\n\tTwo.\n"),
+            ("a2ui-agent-display-name", " Portfolio Agent "),
+        ]);
+        let identity = server_identity(Some(&cfg)).unwrap();
+        assert_eq!(&*identity.mcp_name, "portfolio");
+        assert_eq!(identity.mcp_title.as_deref(), Some("Portfolio"));
+        assert_eq!(identity.mcp_instructions.as_deref(), Some("One.\n\tTwo."));
+        assert_eq!(
+            identity.a2ui_display_name.as_deref(),
+            Some("Portfolio Agent")
+        );
+        // Empty instructions are none.
+        let cfg = with(&[("mcp-instructions", "  ")]);
+        assert!(
+            server_identity(Some(&cfg))
+                .unwrap()
+                .mcp_instructions
+                .is_none()
+        );
+
+        let long_name = "x".repeat(MCP_SERVER_NAME_MAX_CHARS + 1);
+        for key in [
+            "mcp-server-name",
+            "mcp-server-title",
+            "a2ui-agent-display-name",
+        ] {
+            for bad in ["", " \r\n", "a\u{1b}b", "a\rb", long_name.as_str()] {
+                let cfg = with(&[(key, bad)]);
+                let err = server_identity(Some(&cfg)).expect_err(bad);
+                assert!(err.0.starts_with("TRITON_"), "{err}");
+            }
+        }
+        let long = "x".repeat(MCP_INSTRUCTIONS_MAX_CHARS + 1);
+        for bad in ["a\u{7}b", "a\rb", "a\u{b}b", long.as_str()] {
+            let cfg = with(&[("mcp-instructions", bad)]);
+            assert!(server_identity(Some(&cfg)).is_err(), "{bad:?}");
+        }
+        let ok = "x".repeat(MCP_INSTRUCTIONS_MAX_CHARS);
+        assert!(server_identity(Some(&with(&[("mcp-instructions", ok.as_str())]))).is_ok());
+    }
+
     use super::parse_map;
 
     #[test]

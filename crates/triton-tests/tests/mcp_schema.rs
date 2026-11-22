@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use triton_core::a2ui::mcp_app;
 
-use crate::mcp_app_widget::{Rig, rig, token};
+use crate::mcp_app_widget::{Rig, rig_with, token};
 
 const MCP_2025_06_18: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -169,7 +169,14 @@ impl Client<'_> {
 /// MCP Apps schema.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn every_era_gets_schema_valid_results_for_the_answer_card() {
-    let r = rig().await;
+    // With every optional identity field set, so `serverInfo.title` and
+    // `instructions` are checked against each revision's schema too.
+    let r = rig_with(&[
+        ("TRITON_MCP_SERVER_NAME", "schema-test-server"),
+        ("TRITON_MCP_SERVER_TITLE", "Schema Test Server"),
+        ("TRITON_MCP_INSTRUCTIONS", "Use list_agents for lists."),
+    ])
+    .await;
     let uri = mcp_app::resource_uri();
     let mut failures: Vec<String> = Vec::new();
     let mut check = |revision: &str, name: &str, value: &Value| {
@@ -183,6 +190,7 @@ async fn every_era_gets_schema_valid_results_for_the_answer_card() {
         let c = Client { rig: &r, revision };
         if c.modern() {
             let d = c.result("server/discover", json!({})).await;
+            assert_eq!(d["instructions"], "Use list_agents for lists.", "{d}");
             check(revision, "DiscoverResult", &d);
         } else {
             let init = c
@@ -195,6 +203,7 @@ async fn every_era_gets_schema_valid_results_for_the_answer_card() {
                     }),
                 )
                 .await;
+            assert_eq!(init["serverInfo"]["title"], "Schema Test Server", "{init}");
             check(revision, "InitializeResult", &init);
         }
 

@@ -27,7 +27,6 @@ pub const GE_COMPOSITE_CATALOG_ID: &str =
 
 /// Upper bound on producer surfaces in one answer.
 pub const MAX_SURFACES: usize = 8;
-const MAX_DISPLAY_NAME_CHARS: usize = 64;
 /// Producer-built surfaces get their own id prefix.
 pub const SURFACE_PREFIX: &str = "triton-a2ui-";
 /// Surface theme `primaryColor` (`^#[0-9a-fA-F]{6}$`) of every surface
@@ -35,8 +34,50 @@ pub const SURFACE_PREFIX: &str = "triton-a2ui-";
 /// `--pk-brand` the peacock `gemini.css` host theme gives the charts, so a
 /// Material card's accents match the chart.
 pub(crate) const DEFAULT_PRIMARY_COLOR: &str = "#1a73e8";
-/// Surface theme `agentDisplayName` unless a producer sets its own.
-pub(crate) const DEFAULT_DISPLAY_NAME: &str = "DataZoo Agent";
+/// Surface theme `agentDisplayName` unless a producer sets its own, and
+/// unless the deployment set another with [`configure_display_name`].
+pub const DEFAULT_DISPLAY_NAME: &str = "DataZoo Agent";
+
+static DISPLAY_NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// A well-formed label (a display name, a server name): trimmed, not
+/// empty, at most `max` characters, no control characters. Surrounding
+/// whitespace, line breaks included, is stripped before the check, so a
+/// value read from a file with a trailing newline is fine.
+pub fn well_formed_label(raw: &str, max: usize) -> Option<&str> {
+    let label = raw.trim();
+    (!label.is_empty() && label.chars().count() <= max && !label.chars().any(char::is_control))
+        .then_some(label)
+}
+
+/// Most characters of an `agentDisplayName`.
+pub const MAX_DISPLAY_NAME_CHARS: usize = 64;
+
+/// Install the deployment's default surface `agentDisplayName`. Call once
+/// at boot, after every other check of the configuration passed, before any
+/// surface renders; `None` keeps [`DEFAULT_DISPLAY_NAME`]. `Err` is a
+/// malformed name (see [`well_formed_label`], at most
+/// [`MAX_DISPLAY_NAME_CHARS`]); nothing is installed then. Process-wide like
+/// the action key: the first installed name stands, a later call with
+/// another valid name changes nothing.
+pub fn configure_display_name(raw: Option<&str>) -> Result<(), String> {
+    let Some(raw) = raw else {
+        return Ok(());
+    };
+    let name = well_formed_label(raw, MAX_DISPLAY_NAME_CHARS).ok_or_else(|| {
+        format!("must be 1 to {MAX_DISPLAY_NAME_CHARS} characters without control characters")
+    })?;
+    let _ = DISPLAY_NAME.set(name.to_owned());
+    Ok(())
+}
+
+/// The surface theme `agentDisplayName` Triton sends when a producer sets
+/// none: the configured one, else [`DEFAULT_DISPLAY_NAME`].
+pub(crate) fn display_name() -> &'static str {
+    DISPLAY_NAME
+        .get()
+        .map_or(DEFAULT_DISPLAY_NAME, String::as_str)
+}
 
 /// A catalog Triton vendors the schema of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -319,17 +360,14 @@ fn surface_messages(s: &Value, catalog_id: &str) -> Vec<Value> {
 /// `primaryColor` applied when they are well-formed; other keys are ignored.
 fn theme(spec: Option<&Value>) -> Value {
     let mut theme =
-        json!({ "primaryColor": DEFAULT_PRIMARY_COLOR, "agentDisplayName": DEFAULT_DISPLAY_NAME });
+        json!({ "primaryColor": DEFAULT_PRIMARY_COLOR, "agentDisplayName": display_name() });
     let Some(over) = spec.and_then(Value::as_object) else {
         return theme;
     };
     if let Some(name) = over
         .get("agentDisplayName")
         .and_then(Value::as_str)
-        .map(str::trim)
-        && !name.is_empty()
-        && name.chars().count() <= MAX_DISPLAY_NAME_CHARS
-        && !name.chars().any(char::is_control)
+        .and_then(|name| well_formed_label(name, MAX_DISPLAY_NAME_CHARS))
     {
         theme["agentDisplayName"] = json!(name);
     }

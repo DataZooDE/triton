@@ -291,6 +291,11 @@ pub(crate) struct Rig {
 }
 
 pub(crate) async fn rig() -> Rig {
+    rig_with(&[]).await
+}
+
+/// [`rig`] with more Triton variables.
+pub(crate) async fn rig_with(extra: &[(&str, &str)]) -> Rig {
     let entra = TestIssuer::start().await;
     let mut agents = Vec::new();
     let mut upstreams = Vec::new();
@@ -358,6 +363,8 @@ pub(crate) async fn rig() -> Rig {
         ("TRITON_STATIC_UPSTREAMS".to_string(), upstreams.join(",")),
         ("TRITON_SINGLE_PORT".to_string(), "true".to_string()),
     ]);
+    let mut env = env;
+    env.extend(extra.iter().map(|(k, v)| (k.to_string(), v.to_string())));
     let triton = TritonProcess::spawn_with_env(Duration::from_secs(10), env).await;
     Rig {
         triton,
