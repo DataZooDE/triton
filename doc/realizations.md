@@ -2646,4 +2646,11 @@ one lock across get/change/put, terminal re-check inside it).
   host takes the update without promising it reaches the model;
   `last: pending` means it had not answered by the next click, so leave a
   few seconds between the page turns. `widget_state` names ChatGPT's
-  `setWidgetState` path, not an outcome.
+  `setWidgetState` path, not an outcome. Measured on the demo on 2026-11-22
+  (Triton f2fd205): ChatGPT (`openai-mcp/1.0.0`) and Claude (`Claude-User`)
+  both log `advertised: yes`, then `last: accepted`. ChatGPT's model then
+  names the shown page; Claude's model, asked on the next user turn after
+  paging to page 3, still describes page 1. Claude acknowledges the update
+  but does not hand it to its model, so a host fix is needed, not a Triton
+  one. Until then, Claude's model re-reads the card with a tool call when
+  asked about it.
