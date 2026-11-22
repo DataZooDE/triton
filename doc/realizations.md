@@ -2654,3 +2654,10 @@ one lock across get/change/put, terminal re-check inside it).
   but does not hand it to its model, so a host fix is needed, not a Triton
   one. Until then, Claude's model re-reads the card with a tool call when
   asked about it.
+- **A "no deadlock" test must not assert speed.** `rasterizer::concurrent_requests_dont_deadlock`
+  once required 20 parallel renders to return 200 within 10 s. Under a
+  loaded machine (8 parallel copies plus busy loops), every copy failed with
+  504: the sidecar's designed `RENDER_TIMEOUT` (2 s, including the wait for a
+  blocking-pool thread) sheds slow renders. The test now requires an answer
+  (200 or 504) for every request within a generous deadline; a hang fails it.
+  Test speed and liveness separately.
