@@ -173,7 +173,7 @@ pub const SURFACE: SurfaceProfile = SurfaceProfile {
 pub const MSTEAMS_TEXT_MAX_BYTES: usize = SURFACE.text_cap();
 
 /// Sentinel appended when we truncate to fit [`MSTEAMS_TEXT_MAX_BYTES`].
-const TRUNCATION_SENTINEL: &str =
+pub(crate) const TRUNCATION_SENTINEL: &str =
     "\n\n*(Content truncated for chat display. View full report for complete details.)*";
 
 /// Rendered plain-text Teams Activity body. The interactive projection

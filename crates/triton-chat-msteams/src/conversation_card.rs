@@ -102,32 +102,47 @@ pub fn card_for_result(
     Some(card)
 }
 
-/// The text components the card shows as prose: everything
-/// `surface_mapper::render` turns into text (Text, Narration, Sources, Diff).
+/// The components `surface_mapper::render` turns into the card's prose.
 fn is_prose(c: &Component) -> bool {
-    !c.is_conversation()
-        && !matches!(
-            c,
-            Component::Report { .. } | Component::Dashboard { .. } | Component::Button { .. }
-        )
+    matches!(
+        c,
+        Component::Text { .. }
+            | Component::Narration { .. }
+            | Component::Sources { .. }
+            | Component::Diff { .. }
+    )
 }
+
+/// What one in-place prose block costs beyond its text (the TextBlock's JSON),
+/// charged so many tiny texts cannot inflate the card past the text cap.
+const BLOCK_OVERHEAD: usize = 64;
 
 /// The card body in surface order: `(lead, elements, has_table)`. Prose
 /// before the first conversation component is the lead (the card's text, as
-/// before); prose after it renders in place, as `md_card` blocks, between the
-/// elements around it, so a note written under a table stays under it. A
-/// surface without conversation components keeps all its prose as the lead.
-/// In-place prose shares the text cap (`MSTEAMS_TEXT_MAX_BYTES`) with the
-/// lead; past it, further prose is left out (the fallback text still has it).
+/// before); each later run of prose renders in place, as `md_card` blocks,
+/// between the elements around it, so a note written under a table stays
+/// under it. A surface without conversation components keeps all its prose
+/// as the lead. Lead and in-place prose share one budget
+/// (`MSTEAMS_TEXT_MAX_BYTES`, separators and a per-block overhead counted):
+/// at the first run that does not fit, the truncation note takes its place
+/// and later prose is left out; the conversation components still follow.
 fn elements_in_place(surface: &Surface, sign: &mut Sign<'_>) -> (String, Vec<Value>, bool) {
-    let render_text =
-        |components: Vec<Component>| match surface_mapper::render(&Surface { components }) {
-            Ok(r) => r.text,
-            Err(_) => String::new(),
-        };
-    let first = surface.components.iter().position(is_conversation);
-    let split = first.unwrap_or(surface.components.len());
-    let lead = render_text(surface.components[..split].to_vec());
+    let render = |components: &[Component]| {
+        surface_mapper::render(&Surface {
+            components: components.to_vec(),
+        })
+        .ok()
+    };
+    let split = surface
+        .components
+        .iter()
+        .position(is_conversation)
+        .unwrap_or(surface.components.len());
+    let lead = render(&surface.components[..split]);
+    let mut exhausted = lead.as_ref().is_some_and(|r| r.truncated);
+    let lead = lead.map(|r| r.text).unwrap_or_default();
+    let budget = surface_mapper::MSTEAMS_TEXT_MAX_BYTES - surface_mapper::TRUNCATION_SENTINEL.len();
+    let mut used = lead.len();
     let mut b = Builder {
         sign,
         n: 0,
@@ -135,22 +150,40 @@ fn elements_in_place(surface: &Surface, sign: &mut Sign<'_>) -> (String, Vec<Val
     };
     let mut out = Vec::new();
     let mut has_table = false;
-    let mut used = lead.len();
+    let mut run: Vec<Component> = Vec::new();
+    let mut flush = |run: &mut Vec<Component>, out: &mut Vec<Value>, has_table: &mut bool| {
+        if run.is_empty() {
+            return;
+        }
+        let rendered = render(run);
+        run.clear();
+        if exhausted {
+            return;
+        }
+        let Some(r) = rendered.filter(|r| !r.text.trim().is_empty()) else {
+            return;
+        };
+        let body = crate::md_card::markdown_to_body(&r.text);
+        let cost = r.text.len() + 2 + BLOCK_OVERHEAD * body.elements.len();
+        if r.truncated || used + cost > budget {
+            exhausted = true;
+            out.push(json!({ "type": "TextBlock", "wrap": true,
+                "text": surface_mapper::TRUNCATION_SENTINEL.trim() }));
+            return;
+        }
+        used += cost;
+        *has_table |= body.has_table;
+        out.extend(body.elements);
+    };
     for c in &surface.components[split..] {
-        if is_conversation(c) {
+        if is_prose(c) {
+            run.push(c.clone());
+        } else if is_conversation(c) {
+            flush(&mut run, &mut out, &mut has_table);
             out.extend(b.component(c));
-        } else if is_prose(c) {
-            let text = render_text(vec![c.clone()]);
-            if text.trim().is_empty() || used + text.len() > surface_mapper::MSTEAMS_TEXT_MAX_BYTES
-            {
-                continue;
-            }
-            used += text.len();
-            let body = crate::md_card::markdown_to_body(&text);
-            has_table |= body.has_table;
-            out.extend(body.elements);
         }
     }
+    flush(&mut run, &mut out, &mut has_table);
     (lead, out, has_table)
 }
 
@@ -924,6 +957,62 @@ mod tests {
             fallback.contains("| 1 | 2 |") && fallback.contains("Footnote."),
             "{fallback}"
         );
+    }
+
+    /// Past the shared cap the truncation note takes the place of the run
+    /// that does not fit, and later prose is left out; elements still follow.
+    #[test]
+    fn prose_past_the_cap_is_cut_once_with_the_note_in_place() {
+        let big = "x".repeat(surface_mapper::MSTEAMS_TEXT_MAX_BYTES - 200);
+        let c = card(json!([
+            { "kind": "header", "title": "Title" },
+            { "kind": "text", "value": big },
+            { "kind": "list", "items": [{ "label": "Item" }] },
+            { "kind": "text", "value": "y".repeat(400) },
+            { "kind": "list", "items": [{ "label": "Later" }] },
+            { "kind": "text", "value": "Small tail." }
+        ]));
+        let body = c["body"].to_string();
+        let note = surface_mapper::TRUNCATION_SENTINEL.trim();
+        assert_eq!(body.matches(note).count(), 1, "{body}");
+        assert!(body.find("\"Item\"").unwrap() < body.find(note).unwrap());
+        assert!(body.contains("\"Later\""), "elements still follow");
+        assert!(!body.contains("Small tail."), "no prose after the cut");
+        assert!(!body.contains(&"y".repeat(400)));
+    }
+
+    /// Many tiny texts cannot inflate the card: each block is charged.
+    #[test]
+    fn many_tiny_texts_stay_within_a_bound() {
+        let mut components = vec![json!({ "kind": "header", "title": "Title" })];
+        for n in 0..4000 {
+            components.push(json!({ "kind": "list", "items": [{ "label": format!("i{n}") }] }));
+            components.push(json!({ "kind": "text", "value": "a" }));
+        }
+        let c = card(Value::Array(components));
+        let texts = c["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["type"] == "TextBlock" && e["text"] == "a")
+            .count();
+        assert!(
+            texts * BLOCK_OVERHEAD <= surface_mapper::MSTEAMS_TEXT_MAX_BYTES,
+            "{texts} blocks"
+        );
+    }
+
+    /// Consecutive prose is one run: Text and Narration render together, in
+    /// place, joined as `render` joins them.
+    #[test]
+    fn a_run_of_prose_renders_as_one() {
+        let c = card(json!([
+            { "kind": "header", "title": "Title" },
+            { "kind": "text", "value": "One." },
+            { "kind": "narration", "text": "two" }
+        ]));
+        let body = c["body"].to_string();
+        assert!(body.contains("One.\\n\\n_two_"), "{body}");
     }
 
     /// Prose before the first conversation component stays the lead.
