@@ -341,3 +341,78 @@ async fn a_plain_rest_answer_is_vetted() {
         "{m}"
     );
 }
+
+/// `TRITON_A2UI_AGENT_DISPLAY_NAME` names Triton's own card on a Gemini
+/// Enterprise answer; a producer surface keeps the name it set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_configured_display_name_names_tritons_card_and_a_producer_name_wins() {
+    let agent = FakeAgent::start_returning(answer(Vec::new())).await;
+    let mut env = a2a_env(&agent, true);
+    env.insert(
+        "TRITON_A2UI_AGENT_DISPLAY_NAME".to_string(),
+        "Portfolio Agent".to_string(),
+    );
+    let triton = TritonProcess::spawn_with_env(Duration::from_secs(10), env).await;
+    let reply: Value = post(&triton, "message/send")
+        .await
+        .json()
+        .await
+        .expect("json");
+    let mut msgs = Vec::new();
+    a2ui_messages(&reply["result"], &mut msgs);
+    let names: Vec<(bool, String)> = msgs
+        .iter()
+        .filter_map(|m| {
+            let create = m.get("createSurface")?;
+            let producer = create["surfaceId"].as_str()?.starts_with("triton-a2ui-");
+            Some((
+                producer,
+                create["theme"]["agentDisplayName"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            (true, "Coverage Matching".to_string()),
+            (false, "Portfolio Agent".to_string())
+        ],
+        "{msgs:#?}"
+    );
+}
+
+/// A malformed identity variable refuses to start (exit 2), naming it.
+#[test]
+fn a_malformed_identity_variable_refuses_to_start() {
+    let too_long = "x".repeat(65);
+    for (var, value) in [
+        ("TRITON_MCP_SERVER_NAME", " "),
+        ("TRITON_MCP_SERVER_TITLE", too_long.as_str()),
+        ("TRITON_MCP_INSTRUCTIONS", "use\u{7}this"),
+        ("TRITON_A2UI_AGENT_DISPLAY_NAME", too_long.as_str()),
+    ] {
+        let out = std::process::Command::new(triton_tests::locate_triton_binary())
+            .env("TRITON_ENV", "local")
+            .env("TRITON_SINGLE_PORT", "true")
+            .env("TRITON_REST_PORT", "0")
+            .env("TRITON_MCP_PORT", "0")
+            .env("TRITON_A2A_PORT", "0")
+            .env("TRITON_METRICS_PORT", "0")
+            .env(var, value)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .expect("spawn triton");
+        let log = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{var}: must refuse boot;\n{log}"
+        );
+        assert!(log.contains(var), "{var}: the refusal names it;\n{log}");
+    }
+}

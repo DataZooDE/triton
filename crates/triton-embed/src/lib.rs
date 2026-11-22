@@ -468,6 +468,10 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
     // Which shape the primary config has: `EmbedOpts::spec_a2a` names the
     // origin (its path is `/a2a`), the ingress names the endpoint itself.
     let mut spec_a2a_from_ingress = false;
+    // The MCP server identity and the A2UI display name: checked here with
+    // the rest, installed only once everything passed.
+    let server_identity =
+        ingress::server_identity(opts.ingress.as_ref()).map_err(|e| anyhow::Error::msg(e.0))?;
     let (task_store, task_settings) = match &opts.ingress {
         None => (InMemoryTaskStore::new(), TaskSettings::default()),
         Some(cfg) => {
@@ -523,6 +527,10 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
         )
         .clone()
         .map_err(anyhow::Error::msg)?;
+    // The default A2UI surface name (TRITON_A2UI_AGENT_DISPLAY_NAME),
+    // checked with the other identity variables above; installed once per
+    // process like the action key, the first router's name standing.
+    ingress::install_a2ui_display_name(&server_identity).map_err(|e| anyhow::Error::msg(e.0))?;
     // #306 crew F7: `router` is a public entry point — an embedding host
     // that merges its own routes (dz-agent-template does) calls this and
     // never `serve_dispatcher`, so announcing only there left exactly the
@@ -644,6 +652,10 @@ pub fn router_parts(dispatcher: Arc<Dispatcher>, opts: &EmbedOpts) -> anyhow::Re
         meta: Arc::new(triton_adapters_http::mcp_meta::MetaPolicy::new(
             opts.upstream_meta.clone(),
         )),
+
+        server_name: server_identity.mcp_name.clone(),
+        server_title: server_identity.mcp_title.clone(),
+        instructions: server_identity.mcp_instructions.clone(),
     };
     // One MCP endpoint per customer (`/mcp/<slug>` + RFC 9728 metadata),
     // at absolute paths; empty without `TRITON_MCP_TENANTS`.

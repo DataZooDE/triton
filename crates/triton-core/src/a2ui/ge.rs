@@ -51,10 +51,10 @@ pub const EXTENSION_URI: &str = "https://a2ui.org/a2a-extension/a2ui/v0.9";
 /// perfectly-formed card shows as text). Verified against the a2ui SDK
 /// (`create_a2ui_part`) and Google's own GE integration notes.
 pub const MIME: &str = "application/json+a2ui";
+use passthrough::DEFAULT_PRIMARY_COLOR;
 /// The catalog id declared in the card and in `createSurface`: Gemini
 /// Enterprise's composite catalog ([`passthrough::GE_COMPOSITE_CATALOG_ID`]).
 use passthrough::GE_COMPOSITE_CATALOG_ID as GE_COMPOSITE_CATALOG;
-use passthrough::{DEFAULT_DISPLAY_NAME, DEFAULT_PRIMARY_COLOR};
 
 /// The in-band form [`question_for`] hands the A2A layer for an open-doc
 /// click, which detects it via [`open_doc`] and replies with the document
@@ -1241,7 +1241,7 @@ fn surface_pair(flat: Vec<Value>) -> Vec<Value> {
                 // active borders. Renderers ignore fields they don't use.
                 "theme": {
                     "primaryColor": DEFAULT_PRIMARY_COLOR,
-                    "agentDisplayName": DEFAULT_DISPLAY_NAME,
+                    "agentDisplayName": passthrough::display_name(),
                 },
             },
         }),
@@ -1500,7 +1500,7 @@ pub fn build_document_canvas(url: &str, title: &str) -> Vec<Value> {
                 "catalogId": GE_COMPOSITE_CATALOG,
                 "theme": {
                     "primaryColor": DEFAULT_PRIMARY_COLOR,
-                    "agentDisplayName": DEFAULT_DISPLAY_NAME,
+                    "agentDisplayName": passthrough::display_name(),
                 },
             },
         }),
@@ -1640,7 +1640,7 @@ pub fn build_document_material(structured: &Value, title: &str) -> Vec<Value> {
                 "catalogId": GE_COMPOSITE_CATALOG,
                 "theme": {
                     "primaryColor": DEFAULT_PRIMARY_COLOR,
-                    "agentDisplayName": DEFAULT_DISPLAY_NAME,
+                    "agentDisplayName": passthrough::display_name(),
                 },
             },
         }),

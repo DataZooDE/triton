@@ -156,7 +156,20 @@ pub struct McpState {
     /// Which upstream `_meta` keys a result passes through, to whom
     /// ([`crate::mcp_meta`]).
     pub meta: Arc<crate::mcp_meta::MetaPolicy>,
+    /// `serverInfo.name` of `initialize` and `server/discover`;
+    /// `TRITON_MCP_SERVER_NAME`, default [`DEFAULT_SERVER_NAME`].
+    pub server_name: Arc<str>,
+    /// `serverInfo.title`, the display name beside the identifier;
+    /// `TRITON_MCP_SERVER_TITLE`. `None` leaves the field out.
+    pub server_title: Option<Arc<str>>,
+    /// The optional `instructions` of `initialize` and `server/discover`
+    /// (guidance a client may give its model); `TRITON_MCP_INSTRUCTIONS`.
+    /// `None` leaves the field out.
+    pub instructions: Option<Arc<str>>,
 }
+
+/// `serverInfo.name` unless the deployment names the server.
+pub const DEFAULT_SERVER_NAME: &str = "triton";
 
 pub fn router(state: McpState) -> Router {
     Router::new()
@@ -367,7 +380,7 @@ pub(crate) async fn rpc(State(state): State<McpState>, parts: Parts, body: Bytes
         log_card_host(&parts, &params, modern, card_host, &state);
     }
     let response = match method.as_str() {
-        "server/discover" => maybe_respond(id_present, id, discover_response),
+        "server/discover" => maybe_respond(id_present, id, |id| discover_response(id, &state)),
         "initialize" => maybe_respond(id_present, id, |id| {
             initialize_response(id, &params, &state)
         }),
@@ -572,30 +585,44 @@ fn supported_versions() -> Vec<&'static str> {
         .collect()
 }
 
+/// The MCP `Implementation` Triton names itself with: the configured name
+/// and, when set, title.
+fn server_info(state: &McpState) -> Value {
+    let mut info = json!({ "name": &*state.server_name, "version": env!("CARGO_PKG_VERSION") });
+    if let Some(title) = &state.server_title {
+        info["title"] = json!(&**title);
+    }
+    info
+}
+
+/// The configured `instructions`, on an `initialize` or `server/discover`
+/// result.
+fn with_instructions(result: &mut Value, state: &McpState) {
+    if let Some(instructions) = &state.instructions {
+        result["instructions"] = json!(&**instructions);
+    }
+}
+
 /// `server/discover` (MCP 2026-07-28): supported versions, capabilities
 /// and identity in one stateless result. The capabilities are those
 /// `initialize` advertises. Cache scope is private: the endpoint is
 /// authenticated and per customer.
-fn discover_response(id: Value) -> Response {
-    rpc_ok(
-        id,
-        json!({
-            "resultType": "complete",
-            "supportedVersions": supported_versions(),
-            "capabilities": {
-                "tools": {},
-                "resources": {}
-            },
-            "_meta": {
-                "io.modelcontextprotocol/serverInfo": {
-                    "name": "triton",
-                    "version": env!("CARGO_PKG_VERSION"),
-                }
-            },
-            "ttlMs": DISCOVER_TTL_MS,
-            "cacheScope": "private"
-        }),
-    )
+fn discover_response(id: Value, state: &McpState) -> Response {
+    let mut result = json!({
+        "resultType": "complete",
+        "supportedVersions": supported_versions(),
+        "capabilities": {
+            "tools": {},
+            "resources": {}
+        },
+        "_meta": {
+            "io.modelcontextprotocol/serverInfo": server_info(state)
+        },
+        "ttlMs": DISCOVER_TTL_MS,
+        "cacheScope": "private"
+    });
+    with_instructions(&mut result, state);
+    rpc_ok(id, result)
 }
 
 /// A 2026-07-28 result names its `resultType`, and a list or resource-read
@@ -686,20 +713,16 @@ fn initialize_response(id: Value, params: &Value, state: &McpState) -> Response 
         widget = state.widget,
         "mcp initialize"
     );
-    let mut response = rpc_ok(
-        id,
-        json!({
-            "protocolVersion": version,
-            "capabilities": {
-                "tools": {},
-                "resources": {}
-            },
-            "serverInfo": {
-                "name": "triton",
-                "version": env!("CARGO_PKG_VERSION"),
-            }
-        }),
-    );
+    let mut result = json!({
+        "protocolVersion": version,
+        "capabilities": {
+            "tools": {},
+            "resources": {}
+        },
+        "serverInfo": server_info(state)
+    });
+    with_instructions(&mut result, state);
+    let mut response = rpc_ok(id, result);
     if card && let Ok(v) = axum::http::HeaderValue::from_str(&state.sessions.open_card_session()) {
         response.headers_mut().insert(SESSION_HEADER, v);
     }

@@ -347,7 +347,9 @@ Notes for agent authors:
   `updateComponents` (+ `updateDataModel`) ahead of Triton's own card;
   `components` must contain `root`; `data_model` (any JSON) becomes the
   `updateDataModel` value; `theme` may set `agentDisplayName` and
-  `primaryColor` (`#rrggbb`). `catalogId` names the catalog the components
+  `primaryColor` (`#rrggbb`). Without the producer's name a surface carries
+  the deployment's (`TRITON_A2UI_AGENT_DISPLAY_NAME`, default "DataZoo
+  Agent"). `catalogId` names the catalog the components
   are written for: `https://a2ui.org/specification/v0_9/catalogs/basic/catalog.json`
   (basic) or the GE composite id
   (`https://www.gstatic.com/vertexaisearch/a2ui/v0_9/gemini_enterprise_composite_catalog.json`,
@@ -759,7 +761,10 @@ REST/MCP/A2A routes, and with `EmbedOpts::ingress(IngressConfig::from_env()?)`
 the same ingress — Entra multi-tenant with required scopes, opaque Google
 access tokens, `/mcp/<slug>` with its RFC 9728 metadata, spec A2A from
 `TRITON_A2A_*`, the task store and timing from `TRITON_TASK_*` /
-`TRITON_MCP_*` (including `TRITON_MCP_CARD_NOTE`), and `TRITON_DEV_TOKEN`
+`TRITON_MCP_*` (including `TRITON_MCP_CARD_NOTE`, and the server's
+`serverInfo` name and title and `instructions` from `TRITON_MCP_SERVER_NAME`, `TRITON_MCP_SERVER_TITLE` and
+`TRITON_MCP_INSTRUCTIONS`), the default A2UI `agentDisplayName` from
+`TRITON_A2UI_AGENT_DISPLAY_NAME`, and `TRITON_DEV_TOKEN`
 and `TRITON_MCP_APP_WIDGET`. The
 variables, defaults and refusals are the ones in the table at the top of
 `crates/triton-embed/src/ingress.rs`; the binary flattens the same clap

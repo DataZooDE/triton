@@ -24,6 +24,11 @@ path = "tests/it/main.rs"
 name = "embedded_denylist"
 path = "tests/embedded_denylist.rs"
 
+# Its own process: the default A2UI display name is process-wide.
+[[test]]
+name = "embedded_identity"
+path = "tests/embedded_identity.rs"
+
 [dependencies]
 tokio = { workspace = true }
 reqwest = { workspace = true }
