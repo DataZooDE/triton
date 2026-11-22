@@ -173,7 +173,7 @@ pub const SURFACE: SurfaceProfile = SurfaceProfile {
 pub const MSTEAMS_TEXT_MAX_BYTES: usize = SURFACE.text_cap();
 
 /// Sentinel appended when we truncate to fit [`MSTEAMS_TEXT_MAX_BYTES`].
-const TRUNCATION_SENTINEL: &str =
+pub(crate) const TRUNCATION_SENTINEL: &str =
     "\n\n*(Content truncated for chat display. View full report for complete details.)*";
 
 /// Rendered plain-text Teams Activity body. The interactive projection
@@ -233,7 +233,7 @@ pub fn render(surface: &Surface) -> Result<RenderedMessage, RenderError> {
     for c in &surface.components {
         match c {
             // Conversation components render as native card elements
-            // (`conversation_card::elements`), never into the text body.
+            // (`conversation_card::elements_in_place`), never into the text body.
             c if c.is_conversation_block() => {}
             Component::Text { value, .. } => chunks.push(value.clone()),
             // `Report` is an optional inline chart rendered out-of-band by
@@ -450,7 +450,7 @@ const ADAPTIVE_CARD_VERSION: &str = "1.4";
 /// requires Adaptive Card 1.5. Paired with a `fallbackText` so pre-1.5 hosts
 /// degrade to readable prose, and with the chart element's own `fallback` Image
 /// so 1.5 hosts without chart support show the PNG.
-const CHART_CARD_VERSION: &str = "1.5";
+pub(crate) const CHART_CARD_VERSION: &str = "1.5";
 
 /// One form field to render as an Adaptive Card `Input.*` widget.
 #[derive(Debug, Clone)]
@@ -1112,7 +1112,8 @@ pub fn build_adaptive_card(
 }
 
 /// [`build_adaptive_card`] plus the conversation-component `elements`
-/// (`crate::conversation_card::elements`), placed after the text, chart and
+/// (`crate::conversation_card::elements_in_place`, which also carries the
+/// prose that follows the first of them), placed after the text, chart and
 /// dashboard and before the interactive inputs.
 pub fn build_adaptive_card_with(
     text: &str,

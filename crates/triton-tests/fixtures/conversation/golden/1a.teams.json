@@ -10,7 +10,7 @@
   ],
   "body": [
     {
-      "text": "**6 Agents are planned.**\n\n_Portfolio as of 18:03. Nothing was changed._",
+      "text": "**6 Agents are planned.**",
       "type": "TextBlock",
       "wrap": true
     },
@@ -169,6 +169,11 @@
       },
       "separator": true,
       "type": "Container"
+    },
+    {
+      "text": "_Portfolio as of 18:03. Nothing was changed._",
+      "type": "TextBlock",
+      "wrap": true
     }
   ],
   "msteams": {
