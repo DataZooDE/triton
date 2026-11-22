@@ -54,10 +54,12 @@ pub fn card_for_result(
     // A reply with headings or tables gets a card even with no controls:
     // the card renders them as compact native elements, where Teams' own
     // Markdown renderer would use title-size headings (md_card). Conversation
-    // components always get a card.
-    let elements = match triton_core::a2ui::extract_surface(result) {
-        Ok(surface) => elements(&surface, sign),
-        Err(_) => Vec::new(),
+    // components always get a card. Text after the first conversation
+    // component keeps its place among them (`elements_in_place`); only the
+    // text before it is the card's lead prose.
+    let (lead, elements, in_place_table) = match triton_core::a2ui::extract_surface(result) {
+        Ok(surface) => elements_in_place(&surface, sign),
+        Err(_) => (text.clone(), Vec::new(), false),
     };
     let rich = crate::md_card::is_rich_markdown(&text) || !elements.is_empty();
     if specs.is_empty() && dashboard.is_none() && image_url.is_none() && !rich {
@@ -80,7 +82,7 @@ pub fn card_for_result(
         return None;
     }
     let mut card = surface_mapper::build_adaptive_card_with(
-        &text,
+        &lead,
         dashboard.as_ref(),
         &signed,
         image_url,
@@ -88,8 +90,68 @@ pub fn card_for_result(
         chrome,
         &elements,
     );
+    // A native Table among the in-place texts needs AC 1.5 as well; a 1.5
+    // card's fallback is the whole text, not just the lead.
+    if in_place_table {
+        card["version"] = json!(surface_mapper::CHART_CARD_VERSION);
+    }
+    if card["version"] == surface_mapper::CHART_CARD_VERSION && !text.is_empty() {
+        card["fallbackText"] = json!(text);
+    }
     mark_primary(&mut card, result);
     Some(card)
+}
+
+/// The text components the card shows as prose: everything
+/// `surface_mapper::render` turns into text (Text, Narration, Sources, Diff).
+fn is_prose(c: &Component) -> bool {
+    !c.is_conversation()
+        && !matches!(
+            c,
+            Component::Report { .. } | Component::Dashboard { .. } | Component::Button { .. }
+        )
+}
+
+/// The card body in surface order: `(lead, elements, has_table)`. Prose
+/// before the first conversation component is the lead (the card's text, as
+/// before); prose after it renders in place, as `md_card` blocks, between the
+/// elements around it, so a note written under a table stays under it. A
+/// surface without conversation components keeps all its prose as the lead.
+/// In-place prose shares the text cap (`MSTEAMS_TEXT_MAX_BYTES`) with the
+/// lead; past it, further prose is left out (the fallback text still has it).
+fn elements_in_place(surface: &Surface, sign: &mut Sign<'_>) -> (String, Vec<Value>, bool) {
+    let render_text =
+        |components: Vec<Component>| match surface_mapper::render(&Surface { components }) {
+            Ok(r) => r.text,
+            Err(_) => String::new(),
+        };
+    let first = surface.components.iter().position(is_conversation);
+    let split = first.unwrap_or(surface.components.len());
+    let lead = render_text(surface.components[..split].to_vec());
+    let mut b = Builder {
+        sign,
+        n: 0,
+        forms: 0,
+    };
+    let mut out = Vec::new();
+    let mut has_table = false;
+    let mut used = lead.len();
+    for c in &surface.components[split..] {
+        if is_conversation(c) {
+            out.extend(b.component(c));
+        } else if is_prose(c) {
+            let text = render_text(vec![c.clone()]);
+            if text.trim().is_empty() || used + text.len() > surface_mapper::MSTEAMS_TEXT_MAX_BYTES
+            {
+                continue;
+            }
+            used += text.len();
+            let body = crate::md_card::markdown_to_body(&text);
+            has_table |= body.has_table;
+            out.extend(body.elements);
+        }
+    }
+    (lead, out, has_table)
 }
 
 /// One anatomy: the surface's primary button leads the card's action bar
@@ -132,23 +194,6 @@ fn mark_primary(card: &mut Value, result: &Value) {
 /// (`surface_mapper::interactive_from_result`).
 pub fn is_conversation(c: &Component) -> bool {
     c.is_conversation() && !matches!(c, Component::Button { .. })
-}
-
-/// The card body elements for every conversation component, in surface
-/// order.
-pub fn elements(surface: &Surface, sign: &mut Sign<'_>) -> Vec<Value> {
-    let mut b = Builder {
-        sign,
-        n: 0,
-        forms: 0,
-    };
-    let mut out = Vec::new();
-    for c in &surface.components {
-        if is_conversation(c) {
-            out.extend(b.component(c));
-        }
-    }
-    out
 }
 
 struct Builder<'s, 'a> {
@@ -792,4 +837,109 @@ pub fn url_task_response(title: &str, url: &str) -> Value {
             },
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card(components: Value) -> Value {
+        let result = json!({ "surface": { "components": components } });
+        let mut sign = |_: &str, _: &Value| Some("t".to_owned());
+        card_for_result(&result, None, None, &CardChrome::default(), &mut sign).expect("a card")
+    }
+
+    /// The text of each body element, in order (a header's title, a
+    /// TextBlock, `table`, `list` for the item containers).
+    fn order(card: &Value) -> Vec<String> {
+        card["body"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| match e["type"].as_str() {
+                Some("TextBlock") => e["text"].as_str().unwrap().to_owned(),
+                Some("Table") => "table".to_owned(),
+                _ => {
+                    let s = e.to_string();
+                    if s.contains("Title") {
+                        "header".to_owned()
+                    } else {
+                        "other".to_owned()
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// A note written under a table stays under it: text after the first
+    /// conversation component renders in place, not as lead prose above the
+    /// header.
+    #[test]
+    fn text_after_a_conversation_component_keeps_its_place() {
+        let c = card(json!([
+            { "kind": "header", "title": "Title" },
+            { "kind": "text", "value": "Summary A." },
+            { "kind": "table", "columns": [{ "key": "a", "label": "Col" }],
+              "rows": [{ "cells": { "a": "x" } }] },
+            { "kind": "text", "value": "Showing 1 of 2 (B)." },
+            { "kind": "list", "items": [{ "label": "Item" }] },
+            { "kind": "text", "value": "Footnote C." }
+        ]));
+        // Positions in the serialised body: the header title, the table's
+        // cell `x`, the list item, and each text.
+        let body = c["body"].to_string();
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("{needle} in {body}"))
+        };
+        let seq = [
+            at("\"Title\""),
+            at("Summary A."),
+            at("\"x\""),
+            at("(B)"),
+            at("\"Item\""),
+            at("Footnote C."),
+        ];
+        assert!(
+            seq.windows(2).all(|w| w[0] < w[1]),
+            "{seq:?} in {}",
+            order(&c).join(" | ")
+        );
+        // A conversation table is no native AC Table: the card stays 1.4.
+        assert_eq!(c["version"], "1.4");
+    }
+
+    /// A Markdown table in place needs AC 1.5 like a lead one, and the 1.5
+    /// card's fallback is the whole text, not just the lead.
+    #[test]
+    fn a_markdown_table_in_place_makes_the_card_1_5_with_the_whole_text_as_fallback() {
+        let c = card(json!([
+            { "kind": "header", "title": "Title" },
+            { "kind": "text", "value": "| a | b |\n|---|---|\n| 1 | 2 |" },
+            { "kind": "text", "value": "Footnote." }
+        ]));
+        assert_eq!(c["version"], "1.5");
+        let fallback = c["fallbackText"].as_str().unwrap();
+        assert!(
+            fallback.contains("| 1 | 2 |") && fallback.contains("Footnote."),
+            "{fallback}"
+        );
+    }
+
+    /// Prose before the first conversation component stays the lead.
+    #[test]
+    fn text_before_the_first_conversation_component_is_the_lead() {
+        let c = card(json!([
+            { "kind": "text", "value": "Lead." },
+            { "kind": "header", "title": "Title" },
+            { "kind": "text", "value": "After." }
+        ]));
+        let got = order(&c);
+        assert_eq!(got.first().map(String::as_str), Some("Lead."), "{got:?}");
+        assert!(
+            got.iter().position(|t| t == "header") < got.iter().position(|t| t == "After."),
+            "{got:?}"
+        );
+        assert_eq!(c["version"], "1.4");
+    }
 }

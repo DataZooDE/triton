@@ -2,7 +2,7 @@
   "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
   "body": [
     {
-      "text": "3 Agents match \"Agent 2\", so nothing was changed. Copy the line you mean and send it as a new message:\n\n_Replying \"Agent 20\" alone won't work: each message is read on its own._",
+      "text": "3 Agents match \"Agent 2\", so nothing was changed. Copy the line you mean and send it as a new message:",
       "type": "TextBlock",
       "wrap": true
     },
@@ -37,6 +37,11 @@
         }
       ],
       "type": "ActionSet"
+    },
+    {
+      "text": "_Replying \"Agent 20\" alone won't work: each message is read on its own._",
+      "type": "TextBlock",
+      "wrap": true
     }
   ],
   "msteams": {

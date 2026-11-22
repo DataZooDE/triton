@@ -19,11 +19,6 @@
   ],
   "body": [
     {
-      "text": "_Portfolio as of 18:03. Nothing was changed._",
-      "type": "TextBlock",
-      "wrap": true
-    },
-    {
       "text": "Agents · lifecycle: planned · 6",
       "type": "TextBlock",
       "weight": "Bolder",
@@ -315,6 +310,11 @@
         }
       ],
       "type": "ActionSet"
+    },
+    {
+      "text": "_Portfolio as of 18:03. Nothing was changed._",
+      "type": "TextBlock",
+      "wrap": true
     }
   ],
   "msteams": {
