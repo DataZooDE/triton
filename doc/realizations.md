@@ -2661,3 +2661,12 @@ one lock across get/change/put, terminal re-check inside it).
   blocking-pool thread) sheds slow renders. The test now requires an answer
   (200 or 504) for every request within a generous deadline; a hang fails it.
   Test speed and liveness separately.
+- **Removing a deprecated input means finding its side doors (#382).**
+  Dropping `_meta.vega_specs` was not enough: a `report` component's
+  `vega_spec`, the key the A2A face fills with the spec it derives from the
+  summary, was also read from raw upstream JSON, so an upstream could still
+  get its own Vega-Lite (even a remote `data.url`) drawn in Gemini
+  Enterprise. And the stored-task path (`a2a_v1`) builds GE messages without
+  the A2A expansion step. Strip Triton-owned keys once, in the dispatcher
+  (`vet_passthrough`), not in one face; and grep for the singular and
+  internal spellings of a key, not only the documented one.

@@ -11,7 +11,6 @@
 //! | `chart` | object | card hosts: the neutral chart summary |
 //! | `png_base64` | string | card hosts: the chart image |
 //! | `svgs` | array | card hosts: the painted charts |
-//! | `vega_specs` | array | card hosts: deprecated with #375, for one release |
 //!
 //! A card host is a client that renders the answer card (it declared MCP
 //! Apps and the widget is on); like the card itself (#379), chart data goes
@@ -59,7 +58,6 @@ const BUILT_IN: &[(&str, Shape, MetaAudience)] = &[
     ("chart", Shape::Object, MetaAudience::CardHost),
     ("png_base64", Shape::String, MetaAudience::CardHost),
     ("svgs", Shape::Array, MetaAudience::CardHost),
-    ("vega_specs", Shape::Array, MetaAudience::CardHost),
 ];
 
 /// The allow-list: the built-in keys and the operator's per-tool entries.
@@ -154,17 +152,8 @@ mod tests {
         let host = MetaPolicy::default().select("t", &r, true);
         let mut keys: Vec<&str> = host.keys().map(String::as_str).collect();
         keys.sort_unstable();
-        assert_eq!(
-            keys,
-            [
-                "chart",
-                "png_base64",
-                "svgs",
-                "tool_trace",
-                "ui",
-                "vega_specs"
-            ]
-        );
+        // `vega_specs` is no longer listed (#382).
+        assert_eq!(keys, ["chart", "png_base64", "svgs", "tool_trace", "ui"]);
         let plain = MetaPolicy::default().select("t", &r, false);
         let mut keys: Vec<&str> = plain.keys().map(String::as_str).collect();
         keys.sort_unstable();

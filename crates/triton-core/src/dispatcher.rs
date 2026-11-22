@@ -1564,8 +1564,19 @@ fn status_for(e: &TritonError) -> u16 {
 
 /// #370: vet the producer-built A2UI surfaces (`surface.a2ui`) of an upstream
 /// answer once, here, so every face renders only schema-valid ones. A dropped
-/// surface is one `warn` line (locations, never values) and one count.
+/// surface is one `warn` line (locations, never values) and one count. The
+/// same pass drops an upstream-set report `vega_spec` (#382).
 fn vet_passthrough(metrics: &Metrics, tool: &str, value: &mut Value) {
+    // #382: a report's `vega_spec` is Triton's own (derived from the chart
+    // summary); an upstream's is dropped before any face sees it.
+    let dropped = crate::chart_summary::strip_upstream_vega_spec(value);
+    if dropped > 0 {
+        tracing::warn!(
+            tool,
+            dropped,
+            "dropping an upstream `vega_spec`; send the `_meta.chart` summary"
+        );
+    }
     for r in crate::a2ui::passthrough::vet_result(value) {
         metrics.record_passthrough_dropped(r.reason.as_str(), r.count);
         tracing::warn!(

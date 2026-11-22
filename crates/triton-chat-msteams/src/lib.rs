@@ -2261,7 +2261,7 @@ async fn dispatch_and_refresh_card(
             let image_url =
                 image_hint.or_else(|| reply_image_url(adapter, &dispatch.result, &sender.tenant));
             let chrome = fetch_chrome(adapter, &principal_for_post).await;
-            let chart = report_vega_chart(
+            let chart = report_native_chart(
                 adapter,
                 &dispatch.result,
                 &principal_for_post,
@@ -2513,9 +2513,9 @@ async fn build_reply_body(
     // component to lift a spec from — the caller minted the URL from
     // the invoked args instead.
     let image_url = image_hint.or_else(|| reply_image_url(adapter, result, tenant));
-    // Native interactive chart (Teams) from peacock's Vega spec, falling back
-    // to the PNG image.
-    let chart = report_vega_chart(adapter, result, principal, image_url.as_deref()).await;
+    // Native interactive chart (Teams) from the upstream's chart summary,
+    // falling back to the PNG image.
+    let chart = report_native_chart(adapter, result, principal, image_url.as_deref()).await;
     if let Some(card) = render_card_content(
         adapter,
         result,
@@ -2577,11 +2577,12 @@ fn render_card_content(
 }
 
 /// Build a native Teams Adaptive Card chart element for a result's inline
-/// report: dispatch `render_report` to peacock, extract its Vega-Lite spec, and
-/// map it to a `Chart.*` element (with the PNG as `fallback`). `None` when there
+/// report: dispatch `render_report` to peacock, read its chart summary
+/// (`_meta.chart`), and map it to a `Chart.*` element (with the PNG as
+/// `fallback`). `None` when there
 /// is no report, peacock is unreachable, or the report has no chart — the card
 /// then shows the static image.
-async fn report_vega_chart(
+async fn report_native_chart(
     adapter: &MsTeamsAdapter,
     result: &Value,
     principal: &triton_core::Principal,
@@ -2607,13 +2608,8 @@ async fn report_vega_chart(
 /// draw natively (`scatter`) yields `None`, so the card shows the PNG rather
 /// than a misdrawn bar chart.
 fn chart_for_render(result: &Value, fallback_image_url: Option<&str>) -> Option<Value> {
-    use triton_core::chart_summary::{ChartSource, resolve};
-    match resolve(result, "msteams")? {
-        ChartSource::Summary(summary) => {
-            surface_mapper::chart_from_summary(&summary, fallback_image_url)
-        }
-        ChartSource::LegacyVega(spec) => surface_mapper::chart_from_vega(&spec, fallback_image_url),
-    }
+    let summary = triton_core::chart_summary::resolve(result, "msteams")?;
+    surface_mapper::chart_from_summary(&summary, fallback_image_url)
 }
 
 /// Render a non-interactive result to the plain-text [`RenderedMessage`]
@@ -4507,7 +4503,7 @@ mod tests {
     }
 
     #[test]
-    fn chart_summary_wins_over_vega_specs() {
+    fn a_chart_summary_maps_and_vega_specs_are_ignored() {
         let r = serde_json::json!({ "_meta": {
             "chart": { "kind": "pie", "x": "k", "y": "v", "rows": [ { "k": "new", "v": 2 } ] },
             "vega_specs": [ vega_bar() ] } });
@@ -4516,27 +4512,20 @@ mod tests {
         assert_eq!(c["data"][0]["legend"], "new");
     }
 
+    /// #382: `vega_specs` is no longer read, alone or behind a malformed
+    /// summary; the card shows the image.
     #[test]
-    fn malformed_summary_falls_back_to_vega_specs() {
-        let r = serde_json::json!({ "_meta": {
+    fn vega_specs_are_no_longer_read() {
+        let bad = serde_json::json!({ "_meta": {
             "chart": { "kind": "pie", "x": "k", "y": "v", "rows": [ { "k": "new", "v": "two" } ] },
             "vega_specs": [ vega_bar() ] } });
-        let c = chart_for_render(&r, None).expect("vega fallback");
-        assert_eq!(c["type"], "Chart.VerticalBar");
-        assert_eq!(c["data"][0]["x"], "old");
+        assert!(chart_for_render(&bad, None).is_none());
+        let alone = serde_json::json!({ "_meta": { "vega_specs": [ vega_bar() ] } });
+        assert!(chart_for_render(&alone, None).is_none());
     }
 
     #[test]
-    fn vega_specs_alone_still_map() {
-        let r = serde_json::json!({ "_meta": { "vega_specs": [ vega_bar() ] } });
-        assert_eq!(
-            chart_for_render(&r, None).expect("chart")["type"],
-            "Chart.VerticalBar"
-        );
-    }
-
-    #[test]
-    fn a_valid_scatter_summary_does_not_fall_back_to_vega() {
+    fn a_valid_scatter_summary_has_no_native_chart() {
         let r = serde_json::json!({ "_meta": {
             "chart": { "kind": "scatter", "x": "a", "y": "b", "rows": [ { "a": 1, "b": 2 } ] },
             "vega_specs": [ vega_bar() ] } });
