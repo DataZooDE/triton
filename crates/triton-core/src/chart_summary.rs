@@ -10,8 +10,8 @@
 //!
 //! The wire contract lives in `doc/upstream-agent-contract.md` ("Chart
 //! summary"). Parsing is strict: a summary that breaks a rule is rejected
-//! as a whole, and the caller falls back to the deprecated
-//! `_meta.vega_specs`, then to the PNG image. Unknown keys are ignored so
+//! as a whole, and the caller falls back to the PNG image (the deprecated
+//! `_meta.vega_specs` is no longer read, #382). Unknown keys are ignored so
 //! later additions stay compatible.
 
 use serde_json::{Map, Value};
@@ -391,50 +391,40 @@ pub fn find(result: &Value) -> Option<Result<ChartSummary, ChartSummaryError>> {
     })
 }
 
-/// Where a result's chart comes from.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ChartSource {
-    /// The neutral summary (`_meta.chart`).
-    Summary(ChartSummary),
-    /// A Vega-Lite spec, the first object of the deprecated
-    /// `_meta.vega_specs` or a `{kind: "vega", spec}` surface component.
-    /// Read only without a valid summary; removed one release after
-    /// upstreams emit the summary (#382).
-    LegacyVega(Value),
-}
-
-/// The chart of a tool result, the one lookup every channel uses: a valid
-/// summary wins; a malformed one is logged (with `channel`) and ignored, and
-/// the deprecated Vega-Lite spec is read instead. Both are looked for in the
-/// known places only ([`in_known_places`]).
-pub fn resolve(result: &Value, channel: &str) -> Option<ChartSource> {
-    match find(result) {
-        Some(Ok(summary)) => return Some(ChartSource::Summary(summary)),
-        Some(Err(e)) => {
-            tracing::warn!(channel, error = %e, "ignoring the upstream's chart summary")
+/// The chart summary of a tool result, the one lookup every channel uses
+/// ([`find`]): a valid summary is returned; a malformed one is logged (with
+/// `channel`) and ignored, so the channel shows the PNG image. The
+/// deprecated `_meta.vega_specs` is no longer read (#382).
+pub fn resolve(result: &Value, channel: &str) -> Option<ChartSummary> {
+    match find(result)? {
+        Ok(summary) => Some(summary),
+        Err(e) => {
+            tracing::warn!(channel, error = %e, "ignoring the upstream's chart summary");
+            None
         }
-        None => {}
     }
-    in_known_places(result, legacy_vega).map(ChartSource::LegacyVega)
 }
 
-/// The deprecated Vega-Lite spec at one place: `_meta.vega_specs[first
-/// object]`, else a `{kind: "vega", spec: {...}}` among `surface.components`.
-fn legacy_vega(v: &Value) -> Option<Value> {
-    let from_meta = v
-        .get("_meta")
-        .and_then(|m| m.get("vega_specs"))
-        .and_then(Value::as_array)
-        .and_then(|a| a.iter().find(|s| s.is_object()));
-    let from_component = || {
-        v.get("surface")?
-            .get("components")?
-            .as_array()?
-            .iter()
-            .filter(|c| c.get("kind").and_then(Value::as_str) == Some("vega"))
-            .find_map(|c| c.get("spec").filter(|s| s.is_object()))
+/// #382: drop the `vega_spec` an upstream set on a `surface.components`
+/// `report` component. That key is Triton's: the A2A face derives it from
+/// the summary ([`ChartSummary::to_vega_lite`]) after dispatch, and the GE
+/// builder draws it as a native `VegaChart`. An upstream's own spec would
+/// skip the summary's checks and caps (and could name a remote `data.url`),
+/// so the dispatcher strips it from every result. Returns how many it
+/// dropped.
+pub fn strip_upstream_vega_spec(result: &mut Value) -> usize {
+    let Some(components) = result
+        .get_mut("surface")
+        .and_then(|s| s.get_mut("components"))
+        .and_then(Value::as_array_mut)
+    else {
+        return 0;
     };
-    from_meta.or_else(from_component).cloned()
+    components
+        .iter_mut()
+        .filter(|c| c.get("kind").and_then(Value::as_str) == Some("report"))
+        .filter_map(|c| c.as_object_mut()?.remove("vega_spec"))
+        .count()
 }
 
 #[cfg(test)]
@@ -659,32 +649,36 @@ mod tests {
         }
     }
 
+    /// #382: only the summary is read; a Vega-Lite spec in
+    /// `_meta.vega_specs` or a `{kind: "vega"}` component is not a chart.
     #[test]
-    fn resolve_prefers_the_summary_then_the_legacy_spec() {
+    fn resolve_reads_the_summary_only() {
         let legacy = json!({ "mark": "bar" });
         let both = json!({ "_meta": { "chart": bar(), "vega_specs": [ legacy ] } });
-        assert!(matches!(resolve(&both, "t"), Some(ChartSource::Summary(_))));
-        let bad = json!({ "_meta": { "chart": { "kind": "radar" }, "vega_specs": [ 1, legacy ] } });
+        assert!(resolve(&both, "t").is_some());
+        let bad = json!({ "_meta": { "chart": { "kind": "radar" }, "vega_specs": [ legacy ] } });
+        assert_eq!(resolve(&bad, "t"), None);
         assert_eq!(
-            resolve(&bad, "t"),
-            Some(ChartSource::LegacyVega(legacy.clone()))
+            resolve(&json!({ "_meta": { "vega_specs": [ legacy ] } }), "t"),
+            None
         );
         let component = json!({ "surface": { "components": [
             { "kind": "text", "value": "x" }, { "kind": "vega", "spec": legacy } ] } });
-        assert_eq!(
-            resolve(&component, "t"),
-            Some(ChartSource::LegacyVega(legacy.clone()))
-        );
-        let as_text = json!({ "content": [ { "type": "text",
-            "text": json!({ "_meta": { "vega_specs": [ legacy ] } }).to_string() } ] });
-        assert_eq!(
-            resolve(&as_text, "t"),
-            Some(ChartSource::LegacyVega(legacy))
-        );
-        // Relayed data plants no legacy spec either.
-        let planted = json!({ "_meta": { "tool_trace": [ { "data":
-            json!({ "_meta": { "vega_specs": [ { "mark": "x" } ] } }).to_string() } ] } });
-        assert_eq!(resolve(&planted, "t"), None);
+        assert_eq!(resolve(&component, "t"), None);
+    }
+
+    #[test]
+    fn an_upstream_vega_spec_on_a_report_is_dropped() {
+        let mut r = json!({ "surface": { "components": [
+            { "kind": "report", "report_id": "a", "vega_spec": { "mark": "bar" } },
+            { "kind": "text", "value": "x", "vega_spec": 1 },
+            { "kind": "report", "report_id": "b" } ] } });
+        assert_eq!(strip_upstream_vega_spec(&mut r), 1);
+        let cs = r["surface"]["components"].as_array().unwrap();
+        assert!(cs[0].get("vega_spec").is_none());
+        // Only report components carry Triton's key; others are untouched.
+        assert_eq!(cs[1]["vega_spec"], 1);
+        assert_eq!(strip_upstream_vega_spec(&mut json!({ "rows": [] })), 0);
     }
 
     /// A text over the cap is not parsed at all (the cost of a lookup is

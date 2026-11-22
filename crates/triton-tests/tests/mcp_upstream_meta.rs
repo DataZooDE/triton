@@ -4,8 +4,8 @@
 //! Triton's MCP `tools/call` answer builds its own `_meta` (`trace_id`, the
 //! card's `triton/*` keys). An upstream's own `_meta` keys pass through next
 //! to them only when the allow-list names them: `ui` and `tool_trace` to
-//! every client, the chart data (`chart`, `png_base64`, `svgs`, the
-//! deprecated `vega_specs`) to a client that declared MCP Apps only, and
+//! every client, the chart data (`chart`, `png_base64`, `svgs`) to a client
+//! that declared MCP Apps only, and
 //! whatever the operator adds per tool in `adapter.yaml` (`tools.<name>.meta`).
 //! Every other key is dropped; a Triton-owned or MCP-reserved key can never
 //! be allowed, and the passed keys share a size budget.
@@ -125,8 +125,8 @@ fn full_meta() -> Value {
             "png_base64": "iVBORw0KGgo=",
             "svgs": [ "<svg/>" ],
             "chart": chart(),
+            // Not on the allow-list: dropped (`vega_specs` since #382).
             "vega_specs": [ { "mark": "bar" } ],
-            // Not on the allow-list: dropped.
             "openai/widgetAccessible": true,
             "custom": { "rows": [1, 2, 3] },
             // Protected: an upstream must not set any of these.
@@ -140,8 +140,9 @@ fn full_meta() -> Value {
     })
 }
 
-const CHART_KEYS: [&str; 4] = ["chart", "png_base64", "svgs", "vega_specs"];
-const DROPPED: [&str; 8] = [
+const CHART_KEYS: [&str; 3] = ["chart", "png_base64", "svgs"];
+const DROPPED: [&str; 9] = [
+    "vega_specs",
     "openai/widgetAccessible",
     "custom",
     "triton/a2ui",
@@ -170,7 +171,6 @@ async fn a_card_host_gets_the_allowed_keys_and_nothing_else() {
     assert_eq!(meta["png_base64"], "iVBORw0KGgo=", "{mcp}");
     assert_eq!(meta["svgs"], json!(["<svg/>"]));
     assert_eq!(meta["chart"], chart());
-    assert_eq!(meta["vega_specs"][0]["mark"], "bar");
     assert_eq!(meta["ui"]["resourceUri"], "ui://render_report/revenue");
     assert_eq!(meta["tool_trace"][0]["tool"], "query");
     assert_tritons_own(meta);
@@ -210,7 +210,7 @@ async fn the_operator_extends_the_list_per_tool() {
         &agent,
         Some(
             "  render_report:\n    meta:\n      custom: all\n      png_base64: all\n      \
-             vega_specs: \"off\"\n",
+             svgs: \"off\"\n",
         ),
     )
     .await;
@@ -221,10 +221,7 @@ async fn the_operator_extends_the_list_per_tool() {
     assert!(meta.get("chart").is_none(), "{meta}");
     let session = card_session(&proc).await;
     let host = call_as(&proc, Some(&session)).await;
-    assert!(
-        host["result"]["_meta"].get("vega_specs").is_none(),
-        "{host}"
-    );
+    assert!(host["result"]["_meta"].get("svgs").is_none(), "{host}");
     assert_eq!(host["result"]["_meta"]["chart"], chart());
 }
 

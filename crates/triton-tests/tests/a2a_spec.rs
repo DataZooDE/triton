@@ -1825,9 +1825,61 @@ async fn a_chart_summary_in_relayed_data_is_not_drawn() {
     );
 }
 
+/// #382: Gemini Enterprise draws only the Vega-Lite Triton derives from the
+/// `_meta.chart` summary. A render that carries only the deprecated
+/// `_meta.vega_specs`, or a `report` component whose upstream set its own
+/// `vega_spec` (here with a remote `data.url`), gets no native `VegaChart`;
+/// the turn still answers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn only_the_summary_draws_a_chart_for_ge() {
+    let legacy = json!({ "mark": "bar",
+        "data": { "values": [ { "legacy_field": "a", "v": 1 } ] },
+        "encoding": { "x": { "field": "legacy_field" }, "y": { "field": "v" } } });
+    let planted = json!({ "mark": "bar", "data": { "url": "https://evil.example/d.json" },
+        "encoding": { "x": { "field": "legacy_field" }, "y": { "field": "v" } } });
+    for answer in [
+        json!({
+            "surface": { "components": [
+                { "kind": "text", "value": "Sales are up." },
+                { "kind": "report", "report_id": "sales", "args": { "params": {} } }
+            ] },
+            "_meta": { "vega_specs": [ legacy ] }
+        }),
+        json!({
+            "surface": { "components": [
+                { "kind": "text", "value": "Sales are up." },
+                { "kind": "report", "report_id": "sales", "args": { "params": {} },
+                  "vega_spec": planted }
+            ] }
+        }),
+    ] {
+        let agent = triton_tests::upstream_fixture::FakeAgent::start_returning(answer).await;
+        let (iss, base) =
+            remote_spec_host(&agent, triton_core::SurfaceRegistry::with_trio_defaults()).await;
+        let token = iss.sign_jwt(claims(&iss.issuer_url()));
+        let body: Value = reqwest::Client::new()
+            .post(format!("{base}/a2a"))
+            .bearer_auth(&token)
+            .header("X-A2A-Extensions", triton_core::a2ui::ge::EXTENSION_URI)
+            .json(&send("sales please"))
+            .send()
+            .await
+            .expect("POST")
+            .json()
+            .await
+            .expect("decode");
+        let text = body.to_string();
+        assert!(text.contains("Sales are up."), "the turn answered: {body}");
+        assert!(!text.contains("VegaChart"), "upstream spec drawn: {body}");
+        assert!(
+            !text.contains("legacy_field"),
+            "upstream spec leaked: {body}"
+        );
+    }
+}
+
 /// #375: the report's chart reaches Gemini Enterprise as a native
-/// `VegaChart` derived from the upstream's neutral `_meta.chart` summary, with
-/// no `_meta.vega_specs` in the render.
+/// `VegaChart` derived from the upstream's neutral `_meta.chart` summary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_chart_summary_becomes_a_native_vega_chart_for_ge() {
     // One upstream answers both the turn and the `render_report`

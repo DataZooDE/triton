@@ -511,11 +511,11 @@ that holds the result as JSON (up to 1 MiB). A `_meta.chart` deeper inside the
 result, for example in data the tool relays, is not the summary.
 
 Triton ignores unknown keys. If a summary breaks any rule, Triton rejects all
-of it and logs a `warn` (`ignoring the upstream's chart summary`). It then
-reads the deprecated `_meta.vega_specs` (the first object in the array) and,
-failing that, uses the PNG image. A valid summary always takes precedence
-over `vega_specs`. `vega_specs` is read for one more release; after that,
-only the summary and the image are used.
+of it, logs a `warn` (`ignoring the upstream's chart summary`) and uses the
+PNG image. The deprecated `_meta.vega_specs` (and a `{kind: "vega"}` surface
+component) is no longer read (#382): a result without a valid summary shows
+the image. A `vega_spec` an upstream sets on a `report` component is dropped
+too; that key is Triton's own (the A2A face fills it from the summary).
 
 | channel | mapping |
 |---|---|
@@ -534,7 +534,6 @@ to Triton's own keys. Every other key is dropped:
 | `chart` | object | card hosts |
 | `png_base64` | string | card hosts |
 | `svgs` | array | card hosts |
-| `vega_specs` | array | card hosts (deprecated, see above) |
 
 A card host is a client that renders the answer card: it declared the MCP
 Apps extension and the deployment serves the widget. Chart data goes to card
@@ -550,7 +549,7 @@ tools:
     meta:
       openai/outputTemplate: card_host   # an added key, any JSON value
       png_base64: all                    # a listed key, widened
-      vega_specs: "off"                  # a listed key, dropped
+      svgs: "off"                        # a listed key, dropped
 ```
 
 The rules:

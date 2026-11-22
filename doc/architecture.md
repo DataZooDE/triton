@@ -532,12 +532,11 @@ requires `Clone`).
 > Each channel maps it in its own builder. Teams maps it to `Chart.*` with
 > the PNG as `fallback` (`surface_mapper::chart_from_summary`). A2A derives
 > a Vega-Lite spec for Gemini Enterprise's `VegaChart`
-> (`ChartSummary::to_vega_lite`). The deprecated `_meta.vega_specs` is read
-> only when no valid summary is present, and the PNG image is the last
-> fallback. On MCP, `answer` adds the upstream's top-level `_meta` keys to
+> (`ChartSummary::to_vega_lite`). Without a valid summary the channel shows
+> the PNG image; the deprecated `_meta.vega_specs` is no longer read (#382). On MCP, `answer` adds the upstream's top-level `_meta` keys to
 > its own by one allow-list (`mcp_meta::MetaPolicy`): each listed key has a
 > shape check and an audience (`ui`, `tool_trace`: every client; `chart`,
-> `png_base64`, `svgs`, `vega_specs`: card hosts only, like the card, #379),
+> `png_base64`, `svgs`: card hosts only, like the card, #379),
 > and the operator adds keys or changes an audience per tool
 > (`tools.<name>.meta`). Every other key is dropped. It never takes
 > `trace_id`, a `triton/*` key or an MCP-reserved key from an upstream; the

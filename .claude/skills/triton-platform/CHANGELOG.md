@@ -4,6 +4,14 @@ The skill version tracks the consumer-facing contract, not the Triton
 binary version. The Triton repo's checked-out git ref is the true
 version pin (see `SKILL.md` → "How this skill is installed").
 
+## 0.7.0 — `_meta.vega_specs` is no longer read (#382)
+
+- `01`: Teams, Gemini Enterprise and MCP no longer read or pass on
+  `_meta.vega_specs` (or a `{kind: "vega"}` component). A result without a
+  valid `_meta.chart` summary shows the PNG image. A `vega_spec` set on a
+  `report` component is dropped as well. Breaking for an upstream that still
+  sends only Vega-Lite.
+
 ## 0.6.2 — chart summary data cap
 
 - `01`: a `_meta.chart` summary carries at most 32 KiB of charted values

@@ -888,101 +888,6 @@ fn input_widget(field: &FormFieldSpec) -> Value {
     }
 }
 
-/// Build the Adaptive Card `content` object from the rendered `text`,
-/// an optional `dashboard` FactSet, and the signed interactive specs.
-///
-/// Plain `Button`s land in the card's top-level `actions` bar;
-/// `Selection`/`Form` render their inputs inline in the body followed
-/// by an `ActionSet` submit — Teams gathers every input on the card
-/// with any action, so the callback merges the (non-empty) inputs onto
-/// the token's signed base args.
-///
-/// `chrome` is peacock's resolved theme (`get_theme`); a branded one
-/// leads the body with a header band. [`CardChrome::default`] renders
-/// byte-identically to the pre-theming card.
-/// Map peacock's Vega-Lite `spec` (inline `data.values` + `encoding`) to a
-/// Teams native Adaptive Card chart element — `Chart.VerticalBar` (single
-/// series) or `Chart.VerticalBar.Grouped` (an `encoding.color` series). Carries
-/// a `fallback` Image (the rasterized PNG) so hosts without chart support still
-/// show the chart. `None` when the spec has no usable rows/encoding.
-pub fn chart_from_vega(spec: &Value, fallback_image_url: Option<&str>) -> Option<Value> {
-    let rows = spec.get("data")?.get("values")?.as_array()?;
-    if rows.is_empty() {
-        return None;
-    }
-    let enc = spec.get("encoding")?;
-    let xf = enc.get("x")?.get("field")?.as_str()?;
-    let yf = enc.get("y")?.get("field")?.as_str()?;
-    let as_label = |v: &Value| match v {
-        Value::String(s) => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        Value::Bool(b) => Some(b.to_string()),
-        _ => None,
-    };
-    let as_num = |v: &Value| v.as_f64();
-    let title = spec.get("title").and_then(Value::as_str).unwrap_or("");
-    let fallback = fallback_image_url
-        .map(|u| json!({ "type": "Image", "url": u, "altText": "chart" }))
-        .unwrap_or_else(|| json!("drop"));
-    let color_field = enc
-        .get("color")
-        .and_then(|c| c.get("field"))
-        .and_then(Value::as_str);
-
-    if let Some(cf) = color_field {
-        // Grouped: one series per distinct color value, insertion-ordered.
-        let mut series: Vec<(String, Vec<Value>)> = Vec::new();
-        for r in rows {
-            let (Some(leg), Some(x), Some(y)) = (
-                r.get(cf).and_then(&as_label),
-                r.get(xf).and_then(&as_label),
-                r.get(yf).and_then(&as_num),
-            ) else {
-                continue;
-            };
-            let entry = match series.iter_mut().find(|(k, _)| *k == leg) {
-                Some(e) => &mut e.1,
-                None => {
-                    series.push((leg, Vec::new()));
-                    &mut series.last_mut().unwrap().1
-                }
-            };
-            entry.push(json!({ "x": x, "y": y }));
-        }
-        if series.is_empty() {
-            return None;
-        }
-        let data: Vec<Value> = series
-            .into_iter()
-            .map(|(legend, values)| json!({ "legend": legend, "values": values }))
-            .collect();
-        Some(json!({
-            "type": "Chart.VerticalBar.Grouped",
-            "title": title,
-            "colorSet": "categorical",
-            "data": data,
-            "fallback": fallback,
-        }))
-    } else {
-        let data: Vec<Value> = rows
-            .iter()
-            .filter_map(|r| {
-                Some(json!({ "x": r.get(xf).and_then(&as_label)?, "y": r.get(yf).and_then(&as_num)? }))
-            })
-            .collect();
-        if data.is_empty() {
-            return None;
-        }
-        Some(json!({
-            "type": "Chart.VerticalBar",
-            "title": title,
-            "colorSet": "categorical",
-            "data": data,
-            "fallback": fallback,
-        }))
-    }
-}
-
 /// Map a neutral chart summary (`_meta.chart`, #375) to a Teams native
 /// Adaptive Card chart element, with the PNG as `fallback`. `None` for a kind
 /// Teams cannot draw natively (`scatter`): the card then shows the image.
@@ -1100,6 +1005,18 @@ pub fn build_agent_chooser(
     card
 }
 
+/// Build the Adaptive Card `content` object from the rendered `text`,
+/// an optional `dashboard` FactSet, and the signed interactive specs.
+///
+/// Plain `Button`s land in the card's top-level `actions` bar;
+/// `Selection`/`Form` render their inputs inline in the body followed
+/// by an `ActionSet` submit — Teams gathers every input on the card
+/// with any action, so the callback merges the (non-empty) inputs onto
+/// the token's signed base args.
+///
+/// `chrome` is peacock's resolved theme (`get_theme`); a branded one
+/// leads the body with a header band. [`CardChrome::default`] renders
+/// byte-identically to the pre-theming card.
 pub fn build_adaptive_card(
     text: &str,
     dashboard: Option<&DashboardData>,
@@ -1130,8 +1047,8 @@ pub fn build_adaptive_card_with(
     // stays one TextBlock (crate::md_card).
     let rich = crate::md_card::markdown_to_body(text);
     body.extend(rich.elements);
-    // Chart: a NATIVE interactive Adaptive Card chart (Teams) when we have a
-    // Vega spec to map; it carries a `fallback` Image so chart-incapable hosts
+    // Chart: a NATIVE interactive Adaptive Card chart (Teams) when the
+    // upstream sent a chart summary; it carries a `fallback` Image so chart-incapable hosts
     // still show the rasterized PNG. Otherwise the plain signed-image PNG.
     if let Some(chart) = chart {
         body.push(chart.clone());
@@ -1867,46 +1784,13 @@ mod tests {
     }
 
     #[test]
-    fn vega_maps_to_native_chart_with_image_fallback() {
-        // Single series → Chart.VerticalBar.
-        let single = json!({
-            "mark": "bar", "title": "Supplier reliability",
-            "data": { "values": [
-                { "s": "Nordwind", "pct": 88.9 },
-                { "s": "Baltic", "pct": 55.6 },
-            ] },
-            "encoding": { "x": { "field": "s" }, "y": { "field": "pct" } },
-        });
-        let c = chart_from_vega(&single, Some("https://x/img/t")).expect("chart");
-        assert_eq!(c["type"], "Chart.VerticalBar");
-        assert_eq!(c["data"][0]["x"], "Nordwind");
-        assert_eq!(c["data"][0]["y"], 88.9);
-        assert_eq!(c["fallback"]["type"], "Image"); // PNG fallback for non-chart hosts
-        assert_eq!(c["fallback"]["url"], "https://x/img/t");
-
-        // Multi-series (color) → grouped.
-        let multi = json!({
-            "mark": "bar",
-            "data": { "values": [
-                { "cust": "Initech", "cat": "widgets", "rev": 1500 },
-                { "cust": "Initech", "cat": "services", "rev": 600 },
-                { "cust": "Stark", "cat": "widgets", "rev": 1050 },
-            ] },
-            "encoding": { "x": { "field": "cust" }, "y": { "field": "rev" },
-                          "color": { "field": "cat" } },
-        });
-        let g = chart_from_vega(&multi, None).expect("grouped chart");
-        assert_eq!(g["type"], "Chart.VerticalBar.Grouped");
-        let legends: Vec<&str> = g["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|s| s["legend"].as_str().unwrap())
-            .collect();
-        assert_eq!(legends, vec!["widgets", "services"]);
-        assert_eq!(g["data"][0]["values"][0]["x"], "Initech");
-        assert_eq!(g["fallback"], "drop"); // no image → drop
-
+    fn a_chart_card_declares_adaptive_cards_1_5() {
+        let c = chart_from_summary(
+            &summary(json!({ "kind": "bar", "x": "s", "y": "pct",
+                "rows": [ { "s": "Nordwind", "pct": 88.9 } ] })),
+            Some("u"),
+        )
+        .expect("chart");
         // A card with a chart declares AC 1.5 + fallbackText; chartless stays 1.4.
         let card = build_adaptive_card(
             "prose",

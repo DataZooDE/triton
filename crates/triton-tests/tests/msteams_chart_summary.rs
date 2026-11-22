@@ -1,12 +1,12 @@
 //! Issue #375 (1): a Teams reply draws its native `Chart.*` from the
-//! upstream's neutral chart summary (`_meta.chart`), with the deprecated
-//! `_meta.vega_specs` as the fallback for one release.
+//! upstream's neutral chart summary (`_meta.chart`), with the PNG image as
+//! the fallback (`_meta.vega_specs` is no longer read, #382).
 //!
 //! Real binary, real Bot Framework JWT against `FakeBotFramework`, a real
 //! `assistant` upstream answering with an inline `report`, and a real
 //! `render_report` upstream (`FakeAgent`) returning the chart result. The
 //! unit tests in `triton-chat-msteams` cover every kind's mapping; this
-//! covers the wire: summary → card, vega fallback, malformed summary.
+//! covers the wire: summary → card, image fallback, malformed summary.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -160,45 +160,33 @@ async fn the_neutral_summary_becomes_a_native_teams_chart() {
     );
 }
 
+/// #382: the deprecated `_meta.vega_specs` is no longer read, alone or
+/// next to a malformed summary: the card shows the signed PNG image.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn without_a_summary_the_vega_specs_still_draw_the_chart() {
-    let card = reply_card(json!({
-        "content": [ { "type": "text", "text": "Revenue" } ],
-        "_meta": { "png_base64": TINY_PNG_B64, "vega_specs": vega_specs() }
-    }))
-    .await;
-    let chart = chart_element(&card).unwrap_or_else(|| panic!("no Chart.* element: {card}"));
-    assert_eq!(chart["type"], "Chart.VerticalBar");
-    assert_eq!(chart["data"][0]["x"], "from-vega");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_malformed_summary_falls_back_to_vega_then_to_the_image() {
+async fn vega_specs_no_longer_draw_the_chart() {
     let bad = json!({ "kind": "bar", "x": "month", "y": "revenue",
         "rows": [ { "month": "Jan", "revenue": "lots" } ] });
-    let card = reply_card(json!({
-        "content": [ { "type": "text", "text": "Revenue" } ],
-        "_meta": { "png_base64": TINY_PNG_B64, "chart": bad, "vega_specs": vega_specs() }
-    }))
-    .await;
-    let chart = chart_element(&card).unwrap_or_else(|| panic!("no Chart.* element: {card}"));
-    assert_eq!(chart["data"][0]["x"], "from-vega", "{chart}");
-
-    // No vega either: the card shows the signed PNG image.
-    let card = reply_card(json!({
-        "content": [ { "type": "text", "text": "Revenue" } ],
-        "_meta": { "png_base64": TINY_PNG_B64, "chart": bad }
-    }))
-    .await;
-    assert!(chart_element(&card).is_none(), "{card}");
-    assert!(
-        card["body"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|e| e["type"] == "Image"),
-        "image fallback: {card}"
-    );
+    for meta in [
+        json!({ "png_base64": TINY_PNG_B64, "vega_specs": vega_specs() }),
+        json!({ "png_base64": TINY_PNG_B64, "chart": bad, "vega_specs": vega_specs() }),
+        json!({ "png_base64": TINY_PNG_B64, "chart": bad }),
+    ] {
+        let card = reply_card(json!({
+            "content": [ { "type": "text", "text": "Revenue" } ],
+            "_meta": meta
+        }))
+        .await;
+        assert!(chart_element(&card).is_none(), "{card}");
+        assert!(!card.to_string().contains("from-vega"), "{card}");
+        assert!(
+            card["body"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["type"] == "Image"),
+            "image fallback: {card}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

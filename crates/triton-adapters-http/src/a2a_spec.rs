@@ -1873,21 +1873,18 @@ async fn message_stream(
 
 /// The Vega-Lite spec for a `render_report` result
 /// ([`triton_core::chart_summary::resolve`]): derived from the neutral
-/// `_meta.chart` summary (#375), else the deprecated legacy spec.
+/// `_meta.chart` summary (#375).
 fn report_vega_spec(result: &Value) -> Option<Value> {
-    use triton_core::chart_summary::{ChartSource, resolve};
-    match resolve(result, "a2a")? {
-        ChartSource::Summary(summary) => Some(summary.to_vega_lite()),
-        ChartSource::LegacyVega(spec) => Some(spec),
-    }
+    triton_core::chart_summary::resolve(result, "a2a").map(|s| s.to_vega_lite())
 }
 
 /// If `result`'s surface has a `report` component, dispatch `render_report` to
-/// the peacock upstream, extract its native Vega-Lite spec, and stamp it onto
-/// the report component as `vega_spec` — so the A2UI builder emits an
-/// interactive GE `VegaChart` instead of the static PNG. Best-effort: any miss
-/// (no report, peacock unreachable, no vega in the render) leaves `result`
-/// untouched and the card falls back to the image.
+/// the peacock upstream, derive a Vega-Lite spec from its `_meta.chart`
+/// summary, and stamp it onto the report component as `vega_spec`, so the
+/// A2UI builder emits an interactive GE `VegaChart` instead of the static PNG.
+/// The dispatcher already dropped any `vega_spec` the upstream set (#382).
+/// Best-effort: any miss (no report, peacock unreachable, no summary in the
+/// render) leaves `result` untouched and the card falls back to the image.
 async fn inject_report_vega(
     dispatcher: &Dispatcher,
     result: &mut Value,
@@ -2357,12 +2354,14 @@ mod report_vega_spec_tests {
         assert!(spec.get("legacy").is_none());
     }
 
+    /// #382: without a valid summary there is no spec; `vega_specs` is not
+    /// read.
     #[test]
-    fn without_a_valid_summary_the_vega_specs_are_used() {
+    fn without_a_valid_summary_there_is_no_spec() {
         let r = json!({ "_meta": { "vega_specs": [ legacy() ] } });
-        assert_eq!(report_vega_spec(&r).expect("spec")["legacy"], true);
+        assert!(report_vega_spec(&r).is_none());
         let bad = json!({ "_meta": { "vega_specs": [ legacy() ], "chart": { "kind": "radar" } } });
-        assert_eq!(report_vega_spec(&bad).expect("spec")["legacy"], true);
+        assert!(report_vega_spec(&bad).is_none());
     }
 }
 
