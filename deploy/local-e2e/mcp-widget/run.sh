@@ -213,6 +213,46 @@ check "openai: callTool to the app-only tool" "$($R js "(window.openaiCalls[0]||
 check "openai: page 2 in place" "$(has 'Page 2 of 3')" "yes"
 check "openai: the card text as widget state" "$($R js "String((window.widgetStates[0]||{}).card||'').startsWith('Planned agents (Page 2')")" "true"
 
+# ── the status of a filed item ─────────────────────────────────────────
+# A result's `triton/status` shows under the card and, while pending with a
+# token, is polled through the app-only tool (the schedule comes with the
+# status; short here) until an answer is terminal. Only the line changes.
+istatus() { $R js "$F.document.getElementById('item-status').hidden ? '(hidden)' : $F.document.getElementById('item-status').textContent"; }
+SP='poll:{after_ms:300,factor:1,max_ms:300,stop_after_ms:60000}'
+load 3e
+SLOW='poll:{after_ms:1500,factor:1,max_ms:1500,stop_after_ms:60000}'
+$R js "window.toolReply={content:[],isError:false,_meta:{'triton/status':{state:'pending',terminal:false,label:'Still waiting for review',token:'st2',$SLOW}}}" >/dev/null
+$R js "window.sendResult({content:[],structuredContent:{result:{}},_meta:{'triton/a2ui':WIDGETS['3e'],'triton/status':{state:'pending',terminal:false,label:'Waiting for review',token:'st1',$SLOW}}})" >/dev/null
+check "status: the label shows under the card" "$(istatus)" "Waiting for review"
+$R sleep 1.6 >/dev/null
+check "status: polled through the app-only tool with the status token" "$($R js "(()=>{const p=window.hostLog.find(m=>m.method==='tools/call').params; return p.name+' '+p.arguments.name+' '+p.arguments.token;})()")" "triton_ui_event triton.status st1"
+check "status: the next state shows" "$(istatus)" "Still waiting for review"
+$R js "window.toolReply={content:[],isError:false,_meta:{'triton/status':{state:'accepted',terminal:true,label:'Accepted by Jane Doe'}}}" >/dev/null
+$R sleep 2 >/dev/null
+check "status: the terminal state shows" "$(istatus)" "Accepted by Jane Doe"
+check "status: the next poll used the fresh token" "$($R js "window.hostLog.filter(m=>m.method==='tools/call').slice(-1)[0].params.arguments.token")" "st2"
+n=$(sent tools/call)
+$R sleep 1 >/dev/null
+check "status: polling stops at a terminal state" "$(sent tools/call)" "$n"
+check "status: the card stays" "$(has 'Retire Agent 20')" "yes"
+check "status: no turn, no model update" "$(sent ui/message)/$(sent ui/update-model-context)" "0/0"
+$R screenshot "$OUT/status-accepted.png" >/dev/null
+# A status without a token is shown, not polled; a new result replaces it.
+load 3e
+$R js "window.sendResult({content:[],structuredContent:{result:{}},_meta:{'triton/a2ui':WIDGETS['3e'],'triton/status':{state:'pending',terminal:false,label:'Waiting for review'}}})" >/dev/null
+$R sleep 0.8 >/dev/null
+check "status without a token: shown" "$(istatus)" "Waiting for review"
+check "status without a token: not polled" "$(sent tools/call)" "0"
+card "WIDGETS['3e']"
+check "a result without a status clears it" "$(istatus)" "(hidden)"
+# Failed polls: three in a row end the polling.
+load 3e
+$R js "window.toolReply={content:[],isError:true}" >/dev/null
+$R js "window.sendResult({content:[],structuredContent:{result:{}},_meta:{'triton/a2ui':WIDGETS['3e'],'triton/status':{state:'pending',terminal:false,label:'Waiting for review',token:'st1',$SP}}})" >/dev/null
+$R sleep 2 >/dev/null
+check "status: three failed polls end the polling" "$(sent tools/call)" "3"
+check "status: the last state stays shown" "$(istatus)" "Waiting for review"
+
 # ── hosts ──────────────────────────────────────────────────────────────
 load 3e slowinit
 $R sleep 7 >/dev/null

@@ -51,7 +51,7 @@ struct FakeAgentState {
     hits: Mutex<u32>,
     failures_remaining: Mutex<u32>,
     /// Fixed response body for `AgentMode::Returning`.
-    fixed_response: Option<Value>,
+    fixed_response: Mutex<Option<Value>>,
     /// Sleep this long before answering — a slow "thinking" agent
     /// (#164: live-LLM turns outlast Google Chat's ~30s webhook
     /// deadline; tests use ~2s to prove the ack doesn't wait).
@@ -213,7 +213,7 @@ impl FakeAgent {
             bodies_seen: Mutex::new(Vec::new()),
             hits: Mutex::new(0),
             failures_remaining: Mutex::new(fail_first),
-            fixed_response,
+            fixed_response: Mutex::new(fixed_response),
             delay,
             tools_list: Mutex::new(None),
             tools_list_probes: Mutex::new(0),
@@ -285,6 +285,12 @@ impl FakeAgent {
 
     pub fn reset_hits(&self) {
         *self.state.hits.lock().unwrap() = 0;
+    }
+
+    /// Respond with `body` from now on (a `returning` agent whose answer
+    /// changes, such as the status of a filed item).
+    pub fn set_response(&self, body: Value) {
+        *self.state.fixed_response.lock().unwrap() = Some(body);
     }
 
     /// Answer `tools/list` probes with `tools` (`{ "tools": [...] }`)
@@ -410,14 +416,24 @@ async fn handler(
         )
             .into_response(),
         AgentMode::Returning => {
-            let body = state.fixed_response.clone().unwrap_or(Value::Null);
+            let body = state
+                .fixed_response
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(Value::Null);
             Json(body).into_response()
         }
         AgentMode::Streaming => sse_response(streaming_frames(&value, true)),
         AgentMode::StreamingTruncated => sse_response(streaming_frames(&value, false)),
         AgentMode::StreamingSurface => sse_response(streaming_surface_frames()),
         AgentMode::StreamingReturning => {
-            let done = state.fixed_response.clone().unwrap_or(Value::Null);
+            let done = state
+                .fixed_response
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(Value::Null);
             sse_response(vec![
                 "event: tool\ndata: {\"step\":\"search\",\"hits\":30}\n\n".to_string(),
                 format!("event: done\ndata: {done}\n\n"),

@@ -10,9 +10,10 @@
 //! 3. the token verifies for this tenant, `sub` and issuer and has not
 //!    expired ([`crate::a2ui::in_card`]): it names the tool and its
 //!    arguments, so a client cannot pick either;
-//! 4. the event fits the token's scope (Triton's card fires [`EVENT`]; a
-//!    producer event must be one the vetted answer carried, on one of its
-//!    surfaces) and its fields fit their limits;
+//! 4. the event fits the token's scope (Triton's card fires [`EVENT`], a
+//!    status poll [`STATUS_EVENT`]; a producer event must be one the vetted
+//!    answer carried, on one of its surfaces) and its fields fit their
+//!    limits;
 //! 5. the principal may invoke the tool at all ([`Dispatcher::can_invoke`]);
 //! 6. the tool is declared in-card capable by the operator AND annotated
 //!    `readOnlyHint: true` on the `tools/list` of the endpoint that executes
@@ -33,7 +34,7 @@ use serde_json::{Value, json};
 
 use super::{Dispatch, Dispatcher};
 use crate::a2ui::ge::ActionSigner;
-use crate::a2ui::in_card::{self as card, EVENT, Holder, Scope, TOOL_NAME};
+use crate::a2ui::in_card::{self as card, EVENT, Holder, STATUS_EVENT, Scope, TOOL_NAME};
 use crate::audit::InCardAudit;
 use crate::dispatch_context::ContextOverrides;
 use crate::error::TritonError;
@@ -299,6 +300,7 @@ impl Dispatcher {
         let tool = signed.tool.clone();
         let fits = match &signed.scope {
             Scope::Rerun => ev.name == EVENT,
+            Scope::Status => ev.name == STATUS_EVENT,
             scope => scope.allows_event(&ev.surface_id, &ev.name),
         };
         let too_long = [&ev.name, &ev.surface_id, &ev.source_component_id]
@@ -332,6 +334,9 @@ impl Dispatcher {
         }
 
         let mut client = json!({ "in_card": true });
+        if signed.scope == Scope::Status {
+            client["status_poll"] = json!(true);
+        }
         if matches!(signed.scope, Scope::Event { .. }) {
             client["a2ui_events"] = json!([{
                 "version": "v0.9",
@@ -515,6 +520,57 @@ mod tests {
         assert_eq!(ic.context_keys, vec!["fallback".to_string()]);
         // Keys and sizes only: the context's values never reach the line.
         assert!(!serde_json::to_string(&ic).unwrap().contains("Show page 2"));
+    }
+
+    /// A status poll calls the token's tool with its arguments, marked as a
+    /// poll, and is audited as `status`; a status token fires nothing else,
+    /// and a rerun token is no status poll.
+    #[tokio::test]
+    async fn a_status_poll_calls_its_tool_and_only_with_the_status_event() {
+        let d = dispatcher();
+        let poll = |token: String, name: &str| InCardEvent {
+            surface_id: "triton-card".into(),
+            name: name.into(),
+            source_component_id: String::new(),
+            context: json!({}),
+            token: Some(token),
+        };
+        let t = token("pages", Scope::Status, json!({ "item": "r-1" }), "alice");
+        let out = d
+            .invoke_in_card(poll(t.clone(), STATUS_EVENT), principal("alice", "ic-st"))
+            .await
+            .unwrap();
+        assert_eq!(out.tool, "pages");
+        let r = out.dispatch.result;
+        assert_eq!(r["args"]["item"], "r-1");
+        assert_eq!(r["args"]["_triton"]["client"]["in_card"], true);
+        assert_eq!(r["args"]["_triton"]["client"]["status_poll"], true);
+        assert_eq!(line("ic-st").in_card.unwrap().kind, "status");
+
+        let wrong = d
+            .invoke_in_card(poll(t, EVENT), principal("alice", "ic-st-ev"))
+            .await;
+        assert!(
+            matches!(wrong, Err(TritonError::Validation(_))),
+            "{wrong:?}"
+        );
+        let rerun_token = token("pages", Scope::Rerun, json!({}), "alice");
+        let wrong = d
+            .invoke_in_card(
+                poll(rerun_token, STATUS_EVENT),
+                principal("alice", "ic-st-rr"),
+            )
+            .await;
+        assert!(
+            matches!(wrong, Err(TritonError::Validation(_))),
+            "{wrong:?}"
+        );
+        // A status tool that is not read-only is refused like any in-card call.
+        let w = token("file_request", Scope::Status, json!({}), "alice");
+        let wrong = d
+            .invoke_in_card(poll(w, STATUS_EVENT), principal("alice", "ic-st-w"))
+            .await;
+        assert!(matches!(wrong, Err(TritonError::Forbidden(_))), "{wrong:?}");
     }
 
     #[tokio::test]

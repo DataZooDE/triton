@@ -30,9 +30,17 @@ messages a `tools/call` result carries in `_meta["triton/a2ui"]`
   On any failure (refusal, error, a 15 s timeout, an answer the renderer
   takes none of) a Triton control's `fallback` is sent as `ui/message`; a
   producer event has no fallback.
-- **Tests.** `npm test` runs `src/fill.js` against the shared vectors
-  (`crates/triton-tests/fixtures/conversation/fill_vectors.parts.json`, pinned
-  by the Rust test). The browser flows run in
+- **Status of a filed item.** A result's `_meta["triton/status"]`
+  (`crates/triton-core/src/a2ui/item_status.rs`, contract §4c) is shown under
+  the answer (its label, else its state). While it is not terminal and carries
+  a token, the card calls `triton_ui_event` with `triton.status` on the
+  result's schedule (`src/item-status.js`: 5 s doubling to 60 s, stop after
+  30 min), only the status line changes, and it stops at a terminal state,
+  after three failed polls in a row, or when a new result arrives. A hidden
+  card waits until it is shown.
+- **Tests.** `npm test` runs `src/item-status.js`, and `src/fill.js` against
+  the shared vectors (`crates/triton-tests/fixtures/conversation/fill_vectors.parts.json`,
+  pinned by the Rust test). The browser flows run in
   `deploy/local-e2e/mcp-widget/run.sh` (rodney).
 
 ## Bumping a dependency

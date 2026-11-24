@@ -16,7 +16,7 @@
 //! admits in-card calls to read-only tools alone
 //! (`Dispatcher::invoke_in_card`); a write must stay a visible new turn.
 //!
-//! Two scopes:
+//! Three scopes:
 //!
 //! * [`Scope::Rerun`]: a control on Triton's own card ([`super::Action::Rerun`],
 //!   a chip's `rerun`). The token carries the complete arguments of the
@@ -26,6 +26,10 @@
 //!   `_meta[`[`META_KEY`]`]`, and names the original call and each
 //!   `(surface, event)` pair the answer carried. The event itself reaches
 //!   the upstream under `_triton.client.a2ui_events`, as on A2A.
+//! * [`Scope::Status`]: the status poll of a filed item
+//!   ([`super::item_status`]). The token carries the upstream's status tool
+//!   and its arguments; the card fires [`STATUS_EVENT`] with it until the
+//!   status is terminal.
 
 use serde_json::{Map, Value, json};
 
@@ -39,6 +43,8 @@ pub const EVENT: &str = "triton.in_card";
 pub const EVENT_PREFIX: &str = "triton.in_card:";
 /// Result `_meta` key: the token for the producer surfaces' in-card events.
 pub const META_KEY: &str = "triton/in_card";
+/// The event a card fires to read the status of a filed item again.
+pub const STATUS_EVENT: &str = "triton.status";
 /// Upper bound on one token (it carries the call's arguments).
 pub const TOKEN_CAP: usize = 8 * 1024;
 /// How long a card's in-card controls stay valid. Expiry is stored in whole
@@ -58,22 +64,26 @@ pub enum Scope {
     /// [`EVENT_PREFIX`]), as the vetted answer carried them. A client cannot invent another event the
     /// upstream might act on, nor fire one surface's event on another.
     Event { pairs: Vec<(String, String)> },
+    /// The status poll of a filed item: [`STATUS_EVENT`] only, no event is
+    /// handed to the tool.
+    Status,
 }
 
 impl Scope {
     /// Whether this scope admits event `name` fired on `surface_id`.
     pub fn allows_event(&self, surface_id: &str, name: &str) -> bool {
         match self {
-            Scope::Rerun => false,
+            Scope::Rerun | Scope::Status => false,
             Scope::Event { pairs } => pairs.iter().any(|(s, n)| s == surface_id && n == name),
         }
     }
 
-    /// The scope's name in the audit line: `rerun` or `event`.
+    /// The scope's name in the audit line: `rerun`, `event` or `status`.
     pub fn label(&self) -> &'static str {
         match self {
             Scope::Rerun => "rerun",
             Scope::Event { .. } => "event",
+            Scope::Status => "status",
         }
     }
 }
@@ -130,6 +140,7 @@ fn body(scope: &Scope, args: &Value) -> Option<Value> {
     }
     Some(match scope {
         Scope::Rerun => json!({ "k": "rerun", "a": args }),
+        Scope::Status => json!({ "k": "status", "a": args }),
         Scope::Event { pairs } => {
             if pairs.is_empty() || pairs.iter().any(|(_, n)| !n.starts_with(EVENT_PREFIX)) {
                 return None;
@@ -221,6 +232,7 @@ pub fn open(
     };
     let scope = match body.get("k").and_then(Value::as_str) {
         Some("rerun") => Scope::Rerun,
+        Some("status") => Scope::Status,
         Some("event") => Scope::Event {
             pairs: pairs().ok_or("malformed")?,
         },
@@ -359,6 +371,20 @@ mod tests {
     fn a_scope_names_itself_for_the_audit_line() {
         assert_eq!(Scope::Rerun.label(), "rerun");
         assert_eq!(refresh().label(), "event");
+        assert_eq!(Scope::Status.label(), "status");
+    }
+
+    #[test]
+    fn a_status_token_names_its_tool_and_admits_no_event() {
+        let s = signer();
+        let args = json!({ "proposal_id": "p-1" });
+        let t = sign(&s, "proposal_status", &Scope::Status, &args, ALICE).unwrap();
+        let opened = open(&s, &t, ALICE).unwrap();
+        assert_eq!(opened.tool, "proposal_status");
+        assert_eq!(opened.scope, Scope::Status);
+        assert_eq!(opened.args, args);
+        assert!(!Scope::Status.allows_event("triton-card", "triton.in_card:refresh"));
+        assert!(!Scope::Status.allows_event("triton-card", STATUS_EVENT));
     }
 
     #[test]
