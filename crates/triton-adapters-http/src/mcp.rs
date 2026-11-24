@@ -34,7 +34,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::{Value, json};
-use triton_core::a2ui::{build_envelope, extract_surface, in_card, mcp_app};
+use triton_core::a2ui::{build_envelope, extract_surface, in_card, item_status, mcp_app};
 use triton_core::{A2uiVersion, Dispatcher, TritonError, envelope};
 
 use crate::identity::IdentityProvider;
@@ -808,6 +808,8 @@ async fn tools_call(
     // read-only check waits for an answer that has a card to sign.
     let origin_of = (card_host && state.widget && state.dispatcher.in_card_capable(&tool_name))
         .then(|| (args.clone(), principal.clone()));
+    // A card host may poll the status of what this call filed.
+    let status_holder = card_host.then(|| principal.clone());
 
     let outcome = match &state.tasks {
         Some(runner)
@@ -832,6 +834,8 @@ async fn tools_call(
     };
     match outcome {
         Ok(d) => {
+            let status =
+                item_status_meta(&tool_name, &d.result, status_holder.as_ref(), state).await;
             let signs = origin_of.is_some()
                 && may_carry_card(&d.result)
                 && state.dispatcher.in_card_ready(&tool_name).await;
@@ -851,6 +855,7 @@ async fn tools_call(
                 requested,
                 state,
                 origin.as_ref(),
+                status,
             )
         }
         Err(e) => rpc_error(id, code_for(&e), &failure_text(&e, &tool_name, true)),
@@ -912,7 +917,24 @@ async fn in_card_call(
         .invoke_in_card(mcp_in_card::event(args), principal)
         .await
     {
+        Ok(ic) if ic.status => {
+            let status = item_status_meta(
+                &ic.tool,
+                &ic.dispatch.result,
+                card_host.then_some(&caller),
+                state,
+            )
+            .await;
+            status_answer(id, &ic.tool, &ic.dispatch, status)
+        }
         Ok(ic) => {
+            let status = item_status_meta(
+                &ic.tool,
+                &ic.dispatch.result,
+                card_host.then_some(&caller),
+                state,
+            )
+            .await;
             let origin = Origin {
                 tool: &ic.tool,
                 args: &ic.args,
@@ -931,6 +953,7 @@ async fn in_card_call(
                 requested,
                 state,
                 origin,
+                status,
             )
         }
         Err(e) => {
@@ -947,9 +970,85 @@ async fn in_card_call(
     }
 }
 
+/// The card's `_meta["triton/status"]` for the upstream's
+/// `_meta.item_status` in `tool`'s `result` (see [`item_status`]): for a
+/// card host only (`holder` is the caller then). It carries a status-poll
+/// token while the status is not terminal and its status tool may be called
+/// in place: executed by the same endpoint as `tool` (an upstream never
+/// names another endpoint's tool), callable by the caller, declared in-card
+/// capable and annotated read-only. Otherwise the card shows the state
+/// without polling. The poll is checked again when it comes.
+async fn item_status_meta(
+    tool: &str,
+    result: &Value,
+    holder: Option<&triton_core::Principal>,
+    state: &McpState,
+) -> Option<Value> {
+    let p = holder?;
+    let status = item_status::parse(result)?;
+    let pollable = !status.terminal
+        && state.dispatcher.same_upstream(tool, &status.tool)
+        && state.dispatcher.may_invoke(p, &status.tool)
+        && state.dispatcher.in_card_ready(&status.tool).await;
+    let token = if pollable {
+        in_card::sign(
+            triton_core::a2ui::ge::ActionSigner::global(),
+            &status.tool,
+            &in_card::Scope::Status,
+            &status.args,
+            Holder::of(p),
+        )
+    } else {
+        None
+    };
+    Some(item_status::meta(&status, token))
+}
+
+/// The answer to a status poll: the status only (`_meta["triton/status"]`
+/// and its line as text), never a card, controls or the upstream's own keys.
+/// A status tool that answered without `item_status` gets an answer without
+/// a status; the card counts it as a failed poll.
+fn status_answer(
+    id: Value,
+    tool: &str,
+    d: &triton_core::Dispatch,
+    status: Option<Value>,
+) -> Response {
+    let mut meta = json!({ "trace_id": d.trace_id });
+    let text = match status {
+        Some(s) => {
+            let line = s
+                .get("label")
+                .or_else(|| s.get("state"))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            meta[item_status::META_KEY] = s;
+            line
+        }
+        None => {
+            tracing::debug!(
+                tool,
+                "mcp: a status poll answered without a valid item_status"
+            );
+            String::new()
+        }
+    };
+    rpc_ok(
+        id,
+        json!({
+            "content": [{ "type": "text", "text": text }],
+            "structuredContent": { "status": meta.get(item_status::META_KEY).cloned().unwrap_or(Value::Null) },
+            "isError": false,
+            "_meta": meta
+        }),
+    )
+}
+
 /// A successful `tools/call` result: text, envelope and the card data.
 /// `origin` signs the card's in-card controls (#369); without it they are
-/// their fallback messages.
+/// their fallback messages. `status` is the card's `triton/status`.
+#[allow(clippy::too_many_arguments)]
 fn answer(
     id: Value,
     tool: &str,
@@ -958,6 +1057,7 @@ fn answer(
     requested: Option<A2uiVersion>,
     state: &McpState,
     origin: Option<&Origin<'_>>,
+    status: Option<Value>,
 ) -> Response {
     let trace_id = d.trace_id.clone();
     // The upstream's own `_meta` keys this client gets (the allow-list,
@@ -1069,6 +1169,9 @@ fn answer(
     }
     if let Some(t) = event_token {
         meta[in_card::META_KEY] = Value::String(t);
+    }
+    if let Some(s) = status {
+        meta[item_status::META_KEY] = s;
     }
     if let Some(m) = meta.as_object_mut() {
         for (k, v) in passthrough {

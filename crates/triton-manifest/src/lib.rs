@@ -186,11 +186,12 @@ pub enum MetaAudience {
 }
 
 /// Whether an upstream may never set result `_meta` key `k` on MCP: Triton
-/// owns `trace_id` and the whole `triton/` namespace; a key whose prefix
+/// owns `trace_id`, the whole `triton/` namespace and reads `item_status`
+/// itself (the status of a filed item, never passed on); a key whose prefix
 /// names `modelcontextprotocol` or `mcp` is reserved by the MCP
 /// specification (an upstream's value would mean nothing to the host).
 pub fn upstream_meta_key_reserved(k: &str) -> bool {
-    if k.is_empty() || k == "trace_id" || k.starts_with("triton/") {
+    if k.is_empty() || k == "trace_id" || k == "item_status" || k.starts_with("triton/") {
         return true;
     }
     match k.split_once('/') {

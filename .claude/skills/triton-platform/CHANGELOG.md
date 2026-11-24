@@ -4,6 +4,19 @@ The skill version tracks the consumer-facing contract, not the Triton
 binary version. The Triton repo's checked-out git ref is the true
 version pin (see `SKILL.md` → "How this skill is installed").
 
+## 0.8.0 — the status of a filed item on the card
+
+- `02` / contract §4c: a result may carry `_meta.item_status`
+  (`{tool, args, state, terminal, label?}`) naming a read-only status tool.
+  A card host gets `_meta["triton/status"]` (state, label and, while not
+  terminal, a status-poll token and schedule); Triton's card shows the label
+  and polls `triton_ui_event` (`name: "triton.status"`) until the status is
+  terminal. A producer's own MCP App may do the same. The status tool must be
+  routed to the filing tool's endpoint and needs `in_card: true` and
+  `readOnlyHint: true`; the poll reaches it with
+  `_triton.client.status_poll: true`, and its result is the status only.
+  `item_status` is a reserved `_meta` key (not listable in `meta`).
+
 ## 0.7.0 — `_meta.vega_specs` is no longer read (#382)
 
 - `01`: Teams, Gemini Enterprise and MCP no longer read or pass on

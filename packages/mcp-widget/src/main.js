@@ -8,6 +8,9 @@
 //   triton.open_url {url}                                -> ui/open-link
 //   triton.in_card {token, fallback}                     -> tools/call (#369)
 // and a producer surface's own `triton.in_card:<name>` events -> tools/call.
+// A result that filed something may carry its status (`_meta["triton/status"]`):
+// the card shows it under the answer and, while it is not terminal, asks again
+// (`triton.status` with the status token) on Triton's schedule until it is.
 // An in-card call (`triton_ui_event`, an app-only tool) re-runs the producing
 // tool; its result replaces the card in place and the widget tells the model
 // what the card now shows (ui/update-model-context). Where the host cannot
@@ -18,6 +21,7 @@ import { injectBasicCatalogStyles } from '@a2ui/web_core/v0_9/basic_catalog';
 import { basicCatalog } from '@a2ui/lit/v0_9';
 import { fill, inputs } from './fill.js';
 import { hostContext } from './host-context.js';
+import { MAX_FAILURES, STATUS_EVENT, nextDelay, readStatus, statusText } from './item-status.js';
 
 const META_KEY = 'triton/a2ui';
 const SEND_MESSAGE = 'triton.send_message';
@@ -33,6 +37,7 @@ const CARD_SURFACE = 'triton-card';
 
 const app = document.getElementById('app');
 const status = document.getElementById('status');
+const itemStatus = document.getElementById('item-status');
 injectBasicCatalogStyles();
 
 function say(text, error) {
@@ -88,6 +93,7 @@ window.addEventListener('message', (e) => {
   switch (m.method) {
     case 'ui/notifications/tool-result':
       render(m.params?._meta?.[META_KEY], m.params?._meta);
+      startStatus(m.params?._meta);
       return;
     case 'ui/notifications/host-context-changed':
       applyContext(m.params);
@@ -244,6 +250,8 @@ async function inCard(args, fallback) {
     // takes none of is a failure (the card is restored).
     if (!Array.isArray(messages) || !messages.length || applyInPlace(messages, meta)) {
       say('');
+      // Every accepted answer replaces the status (a new answer, a new item).
+      startStatus(meta);
       updateModelContext(res);
       return;
     }
@@ -351,6 +359,74 @@ async function openUrl(raw) {
   if (!ok) say('Could not open the link.', true);
 }
 
+// ── the status of a filed item ──────────────────────────────────────────
+let statusGen = 0;
+let statusTimer = null;
+let statusWake = null;
+
+function showStatus(s) {
+  const text = statusText(s);
+  itemStatus.textContent = text;
+  itemStatus.hidden = !text;
+  itemStatus.dataset.state = s ? s.state : '';
+  settled();
+}
+
+/** Show a new result's status and, while it is pending and signed, poll it.
+ * A newer result stops the polling of the one before. */
+function startStatus(meta) {
+  statusGen++;
+  clearTimeout(statusTimer);
+  statusTimer = null;
+  if (statusWake) document.removeEventListener('visibilitychange', statusWake);
+  statusWake = null;
+  const s = readStatus(meta);
+  showStatus(s);
+  if (s && s.token) schedulePoll(s, 0, Date.now(), statusGen, 0);
+}
+
+function schedulePoll(s, n, started, gen, failures) {
+  const delay = nextDelay(s.poll, n, Date.now() - started);
+  if (delay === null) return;
+  statusTimer = setTimeout(() => pollStatus(s, n, started, gen, failures), delay);
+}
+
+function canCallServer() {
+  return (bridge && serverTools) || (!bridge && !!window.openai?.callTool);
+}
+
+async function pollStatus(s, n, started, gen, failures) {
+  if (gen !== statusGen) return;
+  // Never past the schedule, also after a suspended device or a hidden card.
+  if (Date.now() - started >= s.poll.stopAfterMs) return;
+  // A hidden card does not poll; it asks once it is shown again.
+  if (document.hidden) {
+    statusWake = () => {
+      statusWake = null;
+      pollStatus(s, n, started, gen, failures);
+    };
+    document.addEventListener('visibilitychange', statusWake, { once: true });
+    return;
+  }
+  if (!canCallServer()) return;
+  let res = null;
+  try {
+    res = await callInCard({ surfaceId: CARD_SURFACE, name: STATUS_EVENT, sourceComponentId: '',
+      context: {}, token: s.token });
+  } catch {
+    res = null;
+  }
+  if (gen !== statusGen) return;
+  const next = res && !res.isError ? readStatus(res._meta ?? res.meta) : null;
+  if (!next) {
+    if (failures + 1 < MAX_FAILURES) schedulePoll(s, n + 1, started, gen, failures + 1);
+    return;
+  }
+  showStatus(next);
+  if (next.terminal || !next.token) return;
+  schedulePoll(next, n + 1, started, gen, 0);
+}
+
 // ── size ────────────────────────────────────────────────────────────────
 let lastSize = '';
 /** Report the page's size when it changed; `force` once the host bridge is
@@ -386,6 +462,7 @@ function fromOpenAi() {
   if (!m) return;
   const meta = m._meta ?? m.call_tool_result?._meta ?? m;
   render(meta?.[META_KEY], meta);
+  startStatus(meta);
 }
 window.addEventListener('openai:set_globals', fromOpenAi);
 fromOpenAi();

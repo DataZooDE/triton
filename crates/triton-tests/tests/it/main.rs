@@ -123,6 +123,8 @@ mod mcp_card_text;
 mod mcp_era;
 #[path = "../mcp_in_card.rs"]
 mod mcp_in_card;
+#[path = "../mcp_item_status.rs"]
+mod mcp_item_status;
 #[path = "../mcp_protected_resource.rs"]
 mod mcp_protected_resource;
 #[path = "../mcp_schema.rs"]

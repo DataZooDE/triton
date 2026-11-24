@@ -11,6 +11,8 @@
   html, body { margin: 0; padding: 0; background: transparent; }
   #app { display: flex; flex-direction: column; gap: 12px; padding: 2px; }
   #status { font-size: 12px; opacity: .8; min-height: 0; }
+  #item-status { font-size: 13px; padding: 2px; opacity: .9; }
+  #item-status[hidden] { display: none; }
   #status.err { color: #b3261e; opacity: 1; }
   /* A borderless button is a clickable row or cell, not a pill: its lines
      start left like the text around it (a <button> centres by default,
@@ -20,6 +22,7 @@
 </head>
 <body>
 <main id="app" aria-live="polite"></main>
+<div id="item-status" role="status" aria-live="polite" hidden></div>
 <div id="status" role="status"></div>
 <script type="module" src="/src/main.js"></script>
 </body>
