@@ -93,6 +93,7 @@ window.addEventListener('message', (e) => {
   switch (m.method) {
     case 'ui/notifications/tool-result':
       render(m.params?._meta?.[META_KEY], m.params?._meta);
+      startStatus(m.params?._meta);
       return;
     case 'ui/notifications/host-context-changed':
       applyContext(m.params);
@@ -136,7 +137,6 @@ let shown = { messages: null, meta: null };
  * never the rest. */
 function render(messages, meta) {
   generation++;
-  startStatus(meta);
   shown = { messages, meta };
   eventToken = typeof meta?.[IN_CARD_META] === 'string' ? meta[IN_CARD_META] : null;
   inflight = false;
@@ -250,6 +250,8 @@ async function inCard(args, fallback) {
     // takes none of is a failure (the card is restored).
     if (!Array.isArray(messages) || !messages.length || applyInPlace(messages, meta)) {
       say('');
+      // Every accepted answer replaces the status (a new answer, a new item).
+      startStatus(meta);
       updateModelContext(res);
       return;
     }
@@ -360,6 +362,7 @@ async function openUrl(raw) {
 // ── the status of a filed item ──────────────────────────────────────────
 let statusGen = 0;
 let statusTimer = null;
+let statusWake = null;
 
 function showStatus(s) {
   const text = statusText(s);
@@ -375,6 +378,8 @@ function startStatus(meta) {
   statusGen++;
   clearTimeout(statusTimer);
   statusTimer = null;
+  if (statusWake) document.removeEventListener('visibilitychange', statusWake);
+  statusWake = null;
   const s = readStatus(meta);
   showStatus(s);
   if (s && s.token) schedulePoll(s, 0, Date.now(), statusGen, 0);
@@ -392,10 +397,15 @@ function canCallServer() {
 
 async function pollStatus(s, n, started, gen, failures) {
   if (gen !== statusGen) return;
+  // Never past the schedule, also after a suspended device or a hidden card.
+  if (Date.now() - started >= s.poll.stopAfterMs) return;
   // A hidden card does not poll; it asks once it is shown again.
   if (document.hidden) {
-    document.addEventListener('visibilitychange', () => pollStatus(s, n, started, gen, failures),
-      { once: true });
+    statusWake = () => {
+      statusWake = null;
+      pollStatus(s, n, started, gen, failures);
+    };
+    document.addEventListener('visibilitychange', statusWake, { once: true });
     return;
   }
   if (!canCallServer()) return;
@@ -452,6 +462,7 @@ function fromOpenAi() {
   if (!m) return;
   const meta = m._meta ?? m.call_tool_result?._meta ?? m;
   render(meta?.[META_KEY], meta);
+  startStatus(meta);
 }
 window.addEventListener('openai:set_globals', fromOpenAi);
 fromOpenAi();

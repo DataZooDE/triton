@@ -50,6 +50,9 @@ pub const TOKEN_CAP: usize = 8 * 1024;
 /// How long a card's in-card controls stay valid. Expiry is stored in whole
 /// hours, rounded up, so the effective lifetime is at most 24 h.
 pub const TOKEN_TTL_SECS: u64 = 23 * 3600;
+/// How long a status-poll token stays valid: the card's schedule ends after
+/// 30 minutes; with the expiry rounded up to the hour, at most about 1.5 h.
+pub const STATUS_TOKEN_TTL_SECS: u64 = 35 * 60;
 /// Binding platform: an in-card token is never a GE or chat token.
 const PLATFORM: &str = "mcp-app";
 
@@ -151,7 +154,7 @@ fn body(scope: &Scope, args: &Value) -> Option<Value> {
 }
 
 /// Mint a token for `tool` with `args` (an object), valid for
-/// [`TOKEN_TTL_SECS`]. `None` when the args are no object, an event scope
+/// [`TOKEN_TTL_SECS`] ([`STATUS_TOKEN_TTL_SECS`] for a status poll). `None` when the args are no object, an event scope
 /// names no in-card event, or the token would exceed [`TOKEN_CAP`] (the
 /// control then degrades to a turn).
 pub fn sign(
@@ -165,14 +168,11 @@ pub fn sign(
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs();
-    sign_at(
-        signer,
-        tool,
-        scope,
-        args,
-        holder,
-        now.saturating_add(TOKEN_TTL_SECS),
-    )
+    let ttl = match scope {
+        Scope::Status => STATUS_TOKEN_TTL_SECS,
+        _ => TOKEN_TTL_SECS,
+    };
+    sign_at(signer, tool, scope, args, holder, now.saturating_add(ttl))
 }
 
 /// [`sign`] with an absolute expiry (unix seconds). Production mints with

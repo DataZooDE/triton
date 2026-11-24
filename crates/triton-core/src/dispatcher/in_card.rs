@@ -146,6 +146,8 @@ pub struct InCardEvent {
 pub struct InCardDispatch {
     pub tool: String,
     pub args: Value,
+    /// A status poll ([`Scope::Status`]): its answer is the status only.
+    pub status: bool,
     pub dispatch: Dispatch,
 }
 
@@ -363,6 +365,7 @@ impl Dispatcher {
             .await?;
         Ok(InCardDispatch {
             tool,
+            status: signed.scope == Scope::Status,
             args: signed.args,
             dispatch,
         })
@@ -545,6 +548,7 @@ mod tests {
         assert_eq!(r["args"]["item"], "r-1");
         assert_eq!(r["args"]["_triton"]["client"]["in_card"], true);
         assert_eq!(r["args"]["_triton"]["client"]["status_poll"], true);
+        assert!(out.status);
         assert_eq!(line("ic-st").in_card.unwrap().kind, "status");
 
         let wrong = d

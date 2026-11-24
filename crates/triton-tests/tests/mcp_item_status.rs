@@ -11,8 +11,11 @@
 //!   status tool with the signed arguments, marked `status_poll`, and the
 //!   answer carries the next state: a fresh token while pending, none once
 //!   terminal;
+//! * a status poll's answer is the status only (no card, no controls, no
+//!   upstream keys);
 //! * a status tool that may not be called in place (not declared in-card
-//!   capable) shows the state without a token;
+//!   capable, or executed by another endpoint than the filing tool) shows
+//!   the state without a token;
 //! * the poll token is refused for another principal and for any other
 //!   event.
 
@@ -35,11 +38,12 @@ const BOB: &str = "00000000-0000-0000-0000-0000000000bb";
 struct Rig {
     triton: TritonProcess,
     entra: TestIssuer,
-    /// `file_item` and `file_item_unpolled`: the filing tools.
-    filer: FakeAgent,
-    /// `item_status` (declared in-card capable) and `item_status_plain`
-    /// (not declared): the status tools.
-    status: FakeAgent,
+    /// One endpoint: `file_item` (files), `item_status` (its status tool,
+    /// declared in-card capable) and `item_status_plain` (not declared). Its
+    /// answer is set per step ([`FakeAgent::set_response`]).
+    agent: FakeAgent,
+    /// Another endpoint with an in-card capable read-only `foreign_status`.
+    other: FakeAgent,
 }
 
 fn filed(status_tool: &str) -> Value {
@@ -56,24 +60,25 @@ fn filed(status_tool: &str) -> Value {
 fn status_answer(state: &str, terminal: bool, label: &str) -> Value {
     json!({
         "text": label,
+        "surface": { "components": [ { "kind": "text", "value": label } ] },
         "_meta": { "item_status": {
             "tool": "item_status", "args": { "request_id": "r-1" },
             "state": state, "terminal": terminal, "label": label
-        } }
+        }, "chart": { "kind": "bar" } }
     })
 }
 
 async fn rig() -> Rig {
     let entra = TestIssuer::start().await;
-    let filer = FakeAgent::start_returning(filed("item_status")).await;
-    filer.set_tools_list(json!({ "tools": [
-        { "name": "file_item", "annotations": { "readOnlyHint": false } }
-    ] }));
-    let status =
-        FakeAgent::start_returning(status_answer("pending", false, "Waiting for review")).await;
-    status.set_tools_list(json!({ "tools": [
+    let agent = FakeAgent::start_returning(filed("item_status")).await;
+    agent.set_tools_list(json!({ "tools": [
+        { "name": "file_item", "annotations": { "readOnlyHint": false } },
         { "name": "item_status", "annotations": { "readOnlyHint": true } },
         { "name": "item_status_plain", "annotations": { "readOnlyHint": true } }
+    ] }));
+    let other = FakeAgent::start_returning(status_answer("pending", false, "Waiting")).await;
+    other.set_tools_list(json!({ "tools": [
+        { "name": "foreign_status", "annotations": { "readOnlyHint": true } }
     ] }));
     let manifest = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
         "item-status-{}.yaml",
@@ -81,7 +86,8 @@ async fn rig() -> Rig {
     ));
     std::fs::write(
         &manifest,
-        "version: \"0.2\"\nadapters: {}\ntools:\n  item_status:\n    in_card: true\n",
+        "version: \"0.2\"\nadapters: {}\ntools:\n  item_status:\n    in_card: true\n  \
+         foreign_status:\n    in_card: true\n",
     )
     .unwrap();
     let env = HashMap::from([
@@ -102,9 +108,9 @@ async fn rig() -> Rig {
         (
             "TRITON_STATIC_UPSTREAMS".to_string(),
             format!(
-                "file_item={f},file_item_unpolled={f},item_status={s},item_status_plain={s}",
-                f = filer.host_port(),
-                s = status.host_port()
+                "file_item={a},item_status={a},item_status_plain={a},foreign_status={o}",
+                a = agent.host_port(),
+                o = other.host_port()
             ),
         ),
         ("TRITON_SINGLE_PORT".to_string(), "true".to_string()),
@@ -118,8 +124,8 @@ async fn rig() -> Rig {
     Rig {
         triton,
         entra,
-        filer,
-        status,
+        agent,
+        other,
     }
 }
 
@@ -224,13 +230,13 @@ async fn a_card_host_polls_a_filed_item_until_its_status_is_terminal() {
         .to_string();
     // The upstream's own key never reaches the client.
     assert!(res["_meta"].get("item_status").is_none(), "{res}");
-    assert!(
-        !res.to_string().contains("\"item_status\":{\"args\""),
-        "{res}"
-    );
+    assert!(!res.to_string().contains("\"item_status\""), "{res}");
 
-    // Still pending: the poll answers with the state and a fresh token.
-    let mut seen_before = r.status.bodies_seen().len();
+    // Still pending: the poll answers with the state and a fresh token, and
+    // nothing else (no card, no controls, none of the upstream's keys).
+    r.agent
+        .set_response(status_answer("pending", false, "Still waiting"));
+    let mut seen_before = r.agent.bodies_seen().len();
     let res = call(
         &r,
         ALICE,
@@ -242,24 +248,28 @@ async fn a_card_host_polls_a_filed_item_until_its_status_is_terminal() {
     assert_eq!(res["isError"], false, "{res}");
     let st = &res["_meta"][item_status::META_KEY];
     assert_eq!(st["state"], "pending", "{res}");
+    assert_eq!(res["content"][0]["text"], "Still waiting");
     let token = st["token"]
         .as_str()
         .expect("still pending: a fresh token")
         .to_string();
-    let bodies = r.status.bodies_seen();
+    for key in [mcp_app::META_KEY, in_card::META_KEY, "chart", "item_status"] {
+        assert!(res["_meta"].get(key).is_none(), "{key}: {res}");
+    }
+    let bodies = r.agent.bodies_seen();
     assert_eq!(bodies.len(), seen_before + 1);
     let sent = &bodies[bodies.len() - 1];
     assert_eq!(sent["request_id"], "r-1", "{sent}");
     assert_eq!(sent["_triton"]["client"]["status_poll"], true, "{sent}");
     assert_eq!(
-        r.status.tools_seen().last().unwrap().as_deref(),
+        r.agent.tools_seen().last().unwrap().as_deref(),
         Some("item_status")
     );
 
     // Decided: the answer is terminal and carries no token.
-    r.status
+    r.agent
         .set_response(status_answer("accepted", true, "Accepted by Jane Doe"));
-    seen_before = r.status.bodies_seen().len();
+    seen_before = r.agent.bodies_seen().len();
     let res = call(
         &r,
         ALICE,
@@ -276,7 +286,7 @@ async fn a_card_host_polls_a_filed_item_until_its_status_is_terminal() {
         st.get("token").is_none() && st.get("poll").is_none(),
         "{st}"
     );
-    assert_eq!(r.status.bodies_seen().len(), seen_before + 1);
+    assert_eq!(r.agent.bodies_seen().len(), seen_before + 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -287,18 +297,21 @@ async fn a_plain_client_gets_no_status_and_an_unpollable_tool_no_token() {
     assert!(res["_meta"].get(item_status::META_KEY).is_none(), "{res}");
     assert!(res["_meta"].get("item_status").is_none(), "{res}");
 
-    // A status tool the operator did not declare in-card capable: the state
-    // is shown, without a token.
-    r.filer.set_response(filed("item_status_plain"));
     let session = card_session(&r, ALICE).await;
-    let res = call(&r, ALICE, Some(&session), "file_item_unpolled", json!({})).await;
-    let st = &res["_meta"][item_status::META_KEY];
-    assert_eq!(st["state"], "pending", "{res}");
-    assert_eq!(st["label"], "Waiting for review");
-    assert!(
-        st.get("token").is_none() && st.get("poll").is_none(),
-        "{st}"
-    );
+    // A status tool the operator did not declare in-card capable, and one
+    // of another endpoint: the state is shown, without a token.
+    for status_tool in ["item_status_plain", "foreign_status"] {
+        r.agent.set_response(filed(status_tool));
+        let res = call(&r, ALICE, Some(&session), "file_item", json!({})).await;
+        let st = &res["_meta"][item_status::META_KEY];
+        assert_eq!(st["state"], "pending", "{status_tool}: {res}");
+        assert_eq!(st["label"], "Waiting for review");
+        assert!(
+            st.get("token").is_none() && st.get("poll").is_none(),
+            "{status_tool}: {st}"
+        );
+    }
+    assert_eq!(r.other.hits(), 0, "the other endpoint was never called");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -310,7 +323,7 @@ async fn a_poll_token_is_for_its_principal_and_the_status_event_only() {
         .as_str()
         .expect("token")
         .to_string();
-    let before = r.status.bodies_seen().len();
+    let before = r.agent.bodies_seen().len();
 
     let bob = card_session(&r, BOB).await;
     let res = call(
@@ -332,7 +345,7 @@ async fn a_poll_token_is_for_its_principal_and_the_status_event_only() {
     .await;
     assert_eq!(res["isError"], true, "another event: {res}");
     assert_eq!(
-        r.status.bodies_seen().len(),
+        r.agent.bodies_seen().len(),
         before,
         "nothing reached the status tool"
     );

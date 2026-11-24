@@ -167,6 +167,16 @@ pub trait UpstreamDispatch: Send + Sync {
     async fn tool_info(&self, tool: &str) -> Option<UpstreamToolInfo> {
         self.agent_tools().await.remove(tool)
     }
+
+    /// Whether tools `a` and `b` are executed by the same endpoint: a tool
+    /// may name another one of its own endpoint for the card to call (the
+    /// status of a filed item, contract §4c), never one of another
+    /// endpoint. The default is one endpoint for every tool; an
+    /// implementation that routes tools to several endpoints overrides it.
+    fn same_endpoint(&self, a: &str, b: &str) -> bool {
+        let _ = (a, b);
+        true
+    }
 }
 
 /// What an upstream's `tools/list` answer says about one tool, as
@@ -612,6 +622,22 @@ impl Dispatcher {
     /// Is an upstream router wired?
     pub fn has_upstream(&self) -> bool {
         self.upstream.is_some()
+    }
+
+    /// Whether upstream tools `a` and `b` are executed by the same endpoint
+    /// ([`UpstreamDispatch::same_endpoint`]); `false` for an in-process tool
+    /// or without an upstream.
+    pub fn same_upstream(&self, a: &str, b: &str) -> bool {
+        match &self.upstream {
+            Some(up) if !self.is_in_process(a) && !self.is_in_process(b) => up.same_endpoint(a, b),
+            _ => false,
+        }
+    }
+
+    /// Whether `principal` may invoke `tool` (revocation, scope
+    /// restrictions), as a dispatch would decide it; nothing is audited.
+    pub fn may_invoke(&self, principal: &Principal, tool: &str) -> bool {
+        self.can_invoke(principal, tool).is_ok()
     }
 
     pub fn env(&self) -> &str {

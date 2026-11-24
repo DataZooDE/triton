@@ -819,6 +819,11 @@ impl UpstreamDispatch for StaticUpstream {
             .await
     }
 
+    /// Both tools route to the same `host:port` (an unknown tool to none).
+    fn same_endpoint(&self, a: &str, b: &str) -> bool {
+        matches!((self.map.get(a), self.map.get(b)), (Some(x), Some(y)) if x == y)
+    }
+
     async fn list_agents(&self) -> Vec<String> {
         let mut v: Vec<String> = self.map.keys().cloned().collect();
         v.sort();
@@ -1183,6 +1188,24 @@ pub fn endpoint_is_dispatchable(endpoint: &str, allowed_suffixes: &[String]) -> 
 mod tests {
     use super::{MAX_SCOPES, endpoint_is_dispatchable, parse_ui_authority, sanitise_scopes};
     use std::collections::HashSet;
+
+    #[test]
+    fn two_tools_share_an_endpoint_only_when_the_map_routes_them_there() {
+        use triton_core::UpstreamDispatch;
+        let up = super::StaticUpstream::from_spec(
+            "file=a.ts.net:1,status=a.ts.net:1,other=b.ts.net:1",
+            String::new(),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            3,
+            std::time::Duration::from_secs(1),
+        );
+        assert!(up.same_endpoint("file", "status"));
+        assert!(!up.same_endpoint("file", "other"));
+        assert!(!up.same_endpoint("file", "unknown"));
+        assert!(!up.same_endpoint("unknown", "unknown"));
+    }
 
     #[test]
     fn ui_authority_extracts_owner_and_rejects_junk() {

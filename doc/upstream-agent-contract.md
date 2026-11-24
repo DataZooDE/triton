@@ -495,9 +495,12 @@ that filed the item, and into every answer of the status tool:
 ```
 
 - `tool`: the read-only tool that reads the item's status (letters, digits,
-  `_`, `-`, `.`; at most 128 characters). It is subject to the §4a
-  conditions: the operator declares it `tools.<name>.in_card: true` and your
-  `tools/list` annotates it `readOnlyHint: true`. It may be app-only (your
+  `_`, `-`, `.`; at most 128 characters). It must be one of **your own**
+  tools: `TRITON_STATIC_UPSTREAMS` routes it to the same endpoint as the tool
+  that filed the item (a status tool of another endpoint is shown without
+  polling). It is subject to the §4a conditions: the operator declares it
+  `tools.<name>.in_card: true` and your `tools/list` annotates it
+  `readOnlyHint: true`. It may be app-only (your
   `tools/list` entry carries `_meta.ui.visibility: ["app"]`), so the model
   does not see it. The filing tool itself may be a write.
 - `args`: its complete arguments (an object; default `{}`).
@@ -508,8 +511,9 @@ that filed the item, and into every answer of the status tool:
   is cut, control characters become spaces). Without it the card shows
   `state`.
 
-A malformed `item_status` is ignored. Triton never passes the key on itself
-(it is not in the §4b allow-list), so the model never sees it.
+A malformed `item_status` is ignored. Triton never passes the key on (it is
+reserved: an operator cannot list it in §4b's `meta`), so the model never
+sees it.
 
 **What the card gets.** A client that renders the card (it declared MCP Apps
 and the widget is on) gets result `_meta["triton/status"]`:
@@ -521,10 +525,12 @@ and the widget is on) gets result `_meta["triton/status"]`:
 ```
 
 `token` and `poll` are present only while the status is not terminal and the
-status tool may be called in place (otherwise the card shows the state and
-does not poll). The token is a §4a in-card token of kind `status`: signed over
-`(tool, args)`, bound to the tenant, the principal's `sub` and issuer, valid
-for at most 24 h. Every other client gets neither key; its text is yours.
+status tool may be called in place by this caller (otherwise the card shows
+the state and does not poll). The token is a §4a in-card token of kind
+`status`: signed over `(tool, args)`, bound to the tenant, the principal's
+`sub` and issuer, and valid for 35 minutes (expiry rounded up to the hour);
+each answer that is still pending carries a fresh one. Every other client
+gets neither key; its text is yours.
 
 **The poll.** Triton's answer card shows the label under the answer and, while
 the status is not terminal, calls the app-only tool `triton_ui_event` with
@@ -537,9 +543,12 @@ A producer's own MCP App (a result with `_meta.ui`) gets the same
 `triton/status` and may poll the same way. Each poll is dispatched to your
 status tool like any in-card call (§4a: rate limit, audit line with `kind:
 "status"`), with `_triton.client.in_card: true` and
-`_triton.client.status_poll: true`. Answer with the current `item_status`
-(and anything else; the card keeps showing the original answer, only the
-status line changes). When it is terminal, the card stops.
+`_triton.client.status_poll: true`. Answer with the current `item_status`.
+The poll's result is the status only: its line as text and
+`_meta["triton/status"]`, never a card, controls or your other `_meta` keys
+(the card keeps showing the original answer; only the status line changes).
+An answer without a valid `item_status` counts as a failed poll. When the
+status is terminal, the card stops.
 
 ### 4b. Result `_meta`: the chart summary and MCP pass-through (#375)
 

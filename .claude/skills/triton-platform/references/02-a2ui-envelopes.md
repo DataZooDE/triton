@@ -54,13 +54,14 @@ contract §4a (`doc/upstream-agent-contract.md`).
 A tool that **files** something (a proposal for review, a request) can let
 the card follow its outcome without the model: put
 `_meta.item_status: {tool, args, state, terminal, label?}` on the result,
-naming a read-only status tool (declared `in_card: true`, `readOnlyHint:
-true`, may be app-only). A card host then shows `label` under the answer and
+naming a read-only status tool of your own endpoint (declared `in_card:
+true`, `readOnlyHint: true`, may be app-only). A card host then shows `label` under the answer and
 polls the status tool with backoff (5 s doubling to 60 s, stop after 30 min)
 until an answer says `terminal: true` ("Waiting for review" → "Accepted by
 …"). A producer's own MCP App gets the same `_meta["triton/status"]` (state,
 label, poll token, schedule) and may poll `triton_ui_event` with
-`name: "triton.status"`. Other channels show your text only. Contract §4c.
+`name: "triton.status"`; a poll's result is the status only. Other channels
+show your text only. Contract §4c.
 
 | `kind` | Fields |
 |---|---|

@@ -177,15 +177,20 @@ mod tests {
                 ("png_base64", MetaAudience::All),
                 ("chart", MetaAudience::Off),
                 ("trace_id", MetaAudience::All),
+                ("item_status", MetaAudience::All),
             ],
         );
-        let r =
-            json!({ "_meta": { "custom": 7, "png_base64": "AA", "chart": {}, "trace_id": "x" } });
+        let r = json!({ "_meta": { "custom": 7, "png_base64": "AA", "chart": {}, "trace_id": "x",
+                                   "item_status": { "tool": "t", "state": "pending" } } });
         let plain = p.select("t", &r, false);
         assert_eq!(plain.get("custom"), Some(&json!(7)));
         assert_eq!(plain.get("png_base64"), Some(&json!("AA")));
         assert!(plain.get("chart").is_none());
         assert!(plain.get("trace_id").is_none(), "reserved keys stay out");
+        assert!(
+            plain.get("item_status").is_none(),
+            "Triton reads it, never passes it on"
+        );
         // Another tool keeps the built-in list.
         assert!(p.select("other", &r, false).is_empty());
     }

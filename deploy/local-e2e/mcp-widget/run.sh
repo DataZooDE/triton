@@ -253,6 +253,20 @@ $R sleep 2 >/dev/null
 check "status: three failed polls end the polling" "$(sent tools/call)" "3"
 check "status: the last state stays shown" "$(istatus)" "Waiting for review"
 
+# An in-card answer replaces the status: a terminal one stops the polling.
+load in-card-1
+$R js "window.sendResult({content:[],structuredContent:{result:{}},_meta:{'triton/a2ui':WIDGETS['in-card-1'],'triton/status':{state:'pending',terminal:false,label:'Waiting for review',token:'st1',$SLOW}}})" >/dev/null
+$R js "window.toolReply={content:[{type:'text',text:'Page 2'}],isError:false,_meta:{'triton/a2ui':WIDGETS['in-card-2'],'triton/status':{state:'accepted',terminal:true,label:'Accepted by Jane Doe'}}}" >/dev/null
+$R js "window.clickText('Next')" >/dev/null; $R sleep 2.5 >/dev/null
+check "in-card answer: its status replaces the shown one" "$(istatus)" "Accepted by Jane Doe"
+check "in-card answer: the old status is no longer polled" "$($R js "window.hostLog.filter(m=>m.method==='tools/call'&&m.params.arguments.name==='triton.status').length")" "0"
+# The schedule ends: no poll past stop_after_ms.
+load 3e
+$R js "window.toolReply={content:[],isError:false,_meta:{'triton/status':{state:'pending',terminal:false,label:'Still waiting',token:'st2',poll:{after_ms:300,factor:1,max_ms:300,stop_after_ms:500}}}}" >/dev/null
+$R js "window.sendResult({content:[],structuredContent:{result:{}},_meta:{'triton/a2ui':WIDGETS['3e'],'triton/status':{state:'pending',terminal:false,label:'Waiting for review',token:'st1',poll:{after_ms:300,factor:1,max_ms:300,stop_after_ms:500}}}})" >/dev/null
+$R sleep 2 >/dev/null
+check "status: no poll past the end of the schedule" "$(sent tools/call)" "1"
+
 # ── hosts ──────────────────────────────────────────────────────────────
 load 3e slowinit
 $R sleep 7 >/dev/null
